@@ -7,7 +7,7 @@ const i18n = {
     'menu.agents': 'Agents',
     'menu.settings': 'Settings',
     'navbar.logout': 'Logout',
-    'navbar.appName': 'UI Test Platform',
+    'navbar.appName': 'VoyanTest',
     'settings.title': 'Settings',
     'settings.themeColor': 'Theme Color',
     'settings.content': 'Content Setting',
