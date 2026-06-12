@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, Button, Message, Spin } from '@arco-design/web-react';
+import { Card, Form, Input, Button, Message, Spin, Space } from '@arco-design/web-react';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 
@@ -8,6 +8,7 @@ function AiConfig() {
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -35,6 +36,24 @@ function AiConfig() {
     }
   };
 
+  const handleTest = async () => {
+    const values = form.getFields();
+    setTesting(true);
+    try {
+      const res = await axios.post('/api/config/ai/test', {
+        model: values.model || undefined,
+        api_key: values.api_key || undefined,
+        api_base: values.api_base || undefined,
+      });
+      Message.success(res.data?.message || '连接成功');
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      Message.error(err.response?.data?.detail || '连接测试失败');
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <Card style={{ width: '100%' }}>
       <Spin loading={loading} style={{ width: '100%' }}>
@@ -52,9 +71,14 @@ function AiConfig() {
             <Input type="number" step={0.1} min={0} max={2} />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit" loading={saving}>
-              {t['save.config']}
-            </Button>
+            <Space>
+              <Button type="primary" htmlType="submit" loading={saving}>
+                {t['save.config']}
+              </Button>
+              <Button onClick={handleTest} loading={testing}>
+                测试连接
+              </Button>
+            </Space>
           </Form.Item>
         </Form>
       </Spin>

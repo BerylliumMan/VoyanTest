@@ -1,15 +1,19 @@
 """API router for AI model configuration and prompt templates."""
+import logging
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel, Field
+from openai import AsyncOpenAI
 
 from ..auth import require_admin
 from ..database import get_db
 from .. import db_models
-from ..security.encryption import encrypt_value
+from ..security.encryption import encrypt_value, decrypt_value
 from app.gen.analyzer import get_default_prompts
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config", tags=["配置"])
 
 
@@ -88,6 +92,59 @@ async def update_ai_config(
         api_base=row.api_base,
         temperature=row.temperature,
     )
+
+
+class AIConfigTestRequest(BaseModel):
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+
+
+@router.post("/ai/test")
+async def test_ai_config(
+    body: AIConfigTestRequest,
+    db: Session = Depends(get_db),
+    user = Depends(require_admin),
+):
+    """测试 AI 配置是否可用 — 发送一条简单请求验证连接。"""
+    model = body.model
+    api_key = body.api_key
+    api_base = body.api_base
+
+    if not model or not api_key or not api_base:
+        row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
+        if row:
+            if not model:
+                model = row.model
+            if not api_key:
+                api_key = decrypt_value(row.api_key)
+            if not api_base:
+                api_base = row.api_base
+
+    if not model:
+        raise HTTPException(400, "缺少 model")
+    if not api_key:
+        raise HTTPException(400, "缺少 api_key")
+    if not api_base:
+        raise HTTPException(400, "缺少 api_base")
+
+    try:
+        client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Respond with only the word: OK"}],
+                max_tokens=10,
+            ),
+            timeout=30,
+        )
+        reply = resp.choices[0].message.content.strip() if resp.choices else ""
+        if "OK" in reply.upper():
+            return {"success": True, "message": f"连接成功，模型回复: {reply}"}
+        return {"success": True, "message": f"连接成功（回复: {reply}）"}
+    except Exception as exc:
+        logger.warning(f"AI config test failed: {exc}")
+        raise HTTPException(400, detail=f"连接失败: {exc}")
 
 
 # --- Prompt Template Management ---
