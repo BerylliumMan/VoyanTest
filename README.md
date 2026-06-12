@@ -7,6 +7,8 @@
   <a href="#"><img src="https://img.shields.io/badge/node-18%2B-green" alt="Node.js 18+"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT"></a>
   <a href="#"><img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows%20wsl2-lightgrey" alt="Platform"></a>
+  <a href="./README.en.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
+</p>
 </p>
 
 ---
