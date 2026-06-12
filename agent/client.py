@@ -17,7 +17,7 @@ from typing import Optional
 
 import websockets
 
-_base_dir = os.path.dirname(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__))
+_base_dir = os.path.dirname(os.path.dirname(__file__)) if not getattr(sys, 'frozen', False) else os.path.dirname(sys.executable)
 project_root = os.path.abspath(_base_dir)
 sys.path.insert(0, project_root)
 
@@ -115,24 +115,36 @@ class AgentClient:
             await self._stop_mcp()
         logger.info(f"Starting MCP subprocess: chromium headless={self._headless}")
 
-        # 优先使用本地 node_modules/.bin/ 中的 playwright-mcp（离线场景）
-        _base = os.path.dirname(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__))
-        local_bin = os.path.join(_base, 'node_modules', '.bin', 'playwright-mcp')
-        if sys.platform == 'win32':
-            local_bin += '.cmd'
-        if os.path.isfile(local_bin):
-            args = [local_bin, '--browser=chromium']
-            logger.info(f"Using local playwright-mcp: {local_bin}")
-        else:
-            args = ['npx', '-y', '@playwright/mcp@latest', '--browser=chromium']
-        # Auto-detect existing Playwright Chromium installation
-        playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
-        if not playwright_browsers.is_dir():
-            playwright_browsers = Path.home() / 'AppData' / 'Local' / 'ms-playwright'
-        chrome_dirs = sorted(playwright_browsers.glob('chromium-*/chrome-win64/chrome.exe')) if playwright_browsers.is_dir() else []
-        if chrome_dirs:
-            args.extend(['--executable-path', str(chrome_dirs[-1])])
-            logger.info(f"Using Chromium executable: {chrome_dirs[-1]}")
+        # 确定包根目录（exe 同级）
+        _pkg_root = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__))
+
+        # 查找捆绑的 node.exe
+        _node_exe = os.path.join(_pkg_root, 'node.exe')
+        if not os.path.isfile(_node_exe):
+            _node_exe = 'node'  # fallback to system PATH
+
+        # 查找捆绑的 @playwright/mcp 入口
+        _cli_js = os.path.join(_pkg_root, 'node_modules', '@playwright', 'mcp', 'cli.js')
+        if not os.path.isfile(_cli_js):
+            # fallback: try local node_modules relative to project
+            _base = os.path.dirname(os.path.dirname(__file__))
+            _cli_js = os.path.join(_base, 'node_modules', '@playwright', 'mcp', 'cli.js')
+
+        args = [_node_exe, _cli_js, '--browser=chromium']
+
+        # 查找捆绑的 Chromium
+        _chrome_exe = os.path.join(_pkg_root, 'chromium', 'chrome-win64', 'chrome.exe')
+        if not os.path.isfile(_chrome_exe):
+            playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
+            if not playwright_browsers.is_dir():
+                playwright_browsers = Path.home() / 'AppData' / 'Local' / 'ms-playwright'
+            chrome_dirs = sorted(playwright_browsers.glob('chromium-*/chrome-win64/chrome.exe')) if playwright_browsers.is_dir() else []
+            if chrome_dirs:
+                _chrome_exe = str(chrome_dirs[-1])
+
+        if os.path.isfile(_chrome_exe):
+            args.extend(['--executable-path', _chrome_exe])
+            logger.info(f"Using Chromium executable: {_chrome_exe}")
         if self._headless:
             args.append('--headless')
         else:
