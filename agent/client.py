@@ -17,7 +17,8 @@ from typing import Optional
 
 import websockets
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+_base_dir = os.path.dirname(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__))
+project_root = os.path.abspath(_base_dir)
 sys.path.insert(0, project_root)
 
 from agent.models import (
@@ -115,7 +116,8 @@ class AgentClient:
         logger.info(f"Starting MCP subprocess: chromium headless={self._headless}")
 
         # 优先使用本地 node_modules/.bin/ 中的 playwright-mcp（离线场景）
-        local_bin = os.path.join(os.path.dirname(__file__), '..', 'node_modules', '.bin', 'playwright-mcp')
+        _base = os.path.dirname(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__))
+        local_bin = os.path.join(_base, 'node_modules', '.bin', 'playwright-mcp')
         if sys.platform == 'win32':
             local_bin += '.cmd'
         if os.path.isfile(local_bin):
