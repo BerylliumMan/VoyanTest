@@ -6,9 +6,7 @@
   <a href="#"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"></a>
   <a href="#"><img src="https://img.shields.io/badge/node-18%2B-green" alt="Node.js 18+"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT"></a>
-  <a href="#"><img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows%20wsl2-lightgrey" alt="Platform"></a>
-  <a href="./README.en.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
-</p>
+  <a href="#"><img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey" alt="Platform"></a>
 </p>
 
 ---
@@ -35,7 +33,7 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 
 ## 🚀 快速开始
 
-### 安装
+### 安装依赖
 
 ```bash
 # Linux
@@ -48,21 +46,35 @@ cd frontend && npm install && npm run build && cd ..
 ```powershell
 # Windows
 python -m venv myenv && myenv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements_win.txt
 playwright install chromium
-cd frontend && npm install && npm run build && cd ..
+cd frontend && npm install --ignore-scripts && npm run build && cd ..
 ```
 
-### 启动
+### 启动服务
 
 ```bash
 source venv/bin/activate    # Linux
 # myenv\Scripts\activate     # Windows
-python3 app/main.py
-# 或 uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
 浏览器打开 `http://localhost:8002/`，默认管理员 `admin / Admin@2024`。
+
+### 分布式 Agent
+
+将测试分发到远程机器执行：
+
+```powershell
+# 方式一：Python 源码
+$env:PLAYWRIGHT_BROWSERS_PATH = "$env:USERPROFILE\AppData\Local\ms-playwright"
+python agent/client.py --server http://<服务端IP>:8002
+
+# 方式二：编译版
+.\agent\dist\VoyanTest-Agent.exe
+```
+
+按提示输入服务端地址，Agent 会自动连接并等待测试任务。
 
 ## 📖 工作流程
 
@@ -75,6 +87,9 @@ python3 app/main.py
 **两种编写方式：**
 1. **手动** — 逐条创建，每用例包含步骤（自然语言）和预期结果
 2. **AI 生成** — 上传需求文档，AI 自动生成用例，预览编辑后批量导入
+
+> [!TIP]
+> 离线环境部署：从 GitHub Releases 下载离线包，见 [DEPLOYMENT.md](DEPLOYMENT.md)
 
 执行前需在「设置 → AI 配置」填写 LLM 信息（支持 OpenAI 及兼容 API）。
 
@@ -109,18 +124,20 @@ flowchart LR
 | 浏览器自动化 | Playwright MCP |
 | AI/LLM | OpenAI SDK（兼容任意 API） |
 | 前端 | React 18 + Arco Design Pro + Vite |
-| 分布式 | WebSocket + 自定义 Agent 协议 |
+| 分布式 | WebSocket + 自定义 Agent 协议（支持编译版客户端） |
 
 ## 📦 项目结构
 
 ```
 VoyanTest/
-├── app/          # FastAPI 后端（routers / models / auth）
-├── frontend/     # React 前端源码
-├── core/         # 执行引擎（runner / llm_wrapper / step_executor）
-├── agent/        # 分布式 Agent 客户端
-├── reports/      # 测试报告与截图
-└── tests/        # 单元测试
+├── app/              # FastAPI 后端（routers / models / auth）
+├── frontend/         # React 前端源码
+├── core/             # 执行引擎（runner / llm_wrapper / step_executor）
+├── agent/            # 分布式 Agent 客户端
+│   └── dist/         # 编译版 Agent 可执行文件
+├── reports/          # 测试报告与截图
+├── docs/             # 文档
+└── tests/            # 单元测试
 ```
 
 ## 📚 文档
