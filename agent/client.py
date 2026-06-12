@@ -492,12 +492,66 @@ class AgentClient:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="UITest Agent Client (MCP)")
-    parser.add_argument("--server", required=True, help="Server URL (e.g. ws://192.168.1.100:8000)")
-    parser.add_argument("--name", help="Agent name (default: auto-generated)")
-    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+    # 检查是否为打包后的 exe 运行（无参数时进入交互模式）
+    is_frozen = getattr(sys, 'frozen', False)
 
-    args = parser.parse_args()
+    if is_frozen and len(sys.argv) == 1:
+        # 打包后无参数 → 交互模式
+        print("=" * 50)
+        print("  VoyanTest Agent Client")
+        print("=" * 50)
+        print()
+        server = input("服务端地址 (如 ws://192.168.1.100:8002): ").strip()
+        if not server:
+            server = "ws://localhost:8002"
+        if not server.startswith("ws://") and not server.startswith("wss://"):
+            server = "ws://" + server
+        name_input = input(f"Agent 名称 (留空自动生成): ").strip()
+        name = name_input or None
+        headless_input = input("使用无头模式? (y/N): ").strip().lower()
+        headless = headless_input in ("y", "yes")
+        print()
+        print(f"地址: {server}")
+        print(f"名称: {name or '(自动生成)'}")
+        print(f"无头模式: {'是' if headless else '否'}")
+        print("-" * 50)
+        print("正在连接...")
+        print()
+        args = argparse.Namespace(
+            server=server,
+            name=name,
+            headless=headless,
+        )
+    else:
+        parser = argparse.ArgumentParser(description="VoyanTest Agent Client")
+        parser.add_argument("--server", required=not is_frozen, help="Server URL (e.g. ws://192.168.1.100:8002)")
+        parser.add_argument("--name", help="Agent name (default: auto-generated)")
+        parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+        args = parser.parse_args()
+
+        # 非打包且无 server 参数时也进入交互模式
+        if not args.server:
+            print("=" * 50)
+            print("  VoyanTest Agent Client")
+            print("=" * 50)
+            print()
+            server = input("服务端地址 (如 ws://192.168.1.100:8002): ").strip()
+            if not server:
+                server = "ws://localhost:8002"
+            if not server.startswith("ws://") and not server.startswith("wss://"):
+                server = "ws://" + server
+            args.server = server
+            name_input = input(f"Agent 名称 (留空自动生成): ").strip()
+            args.name = name_input or None
+            headless_input = input("使用无头模式? (y/N): ").strip().lower()
+            args.headless = headless_input in ("y", "yes")
+            print()
+            print(f"地址: {args.server}")
+            print(f"名称: {args.name or '(自动生成)'}")
+            print(f"无头模式: {'是' if args.headless else '否'}")
+            print("-" * 50)
+            print("正在连接...")
+            print()
 
     logging.basicConfig(
         level=logging.INFO,

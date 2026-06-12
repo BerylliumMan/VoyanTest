@@ -150,7 +150,9 @@ frontend/.husky/
 alembic/README
 alembic/script.py.mako
 
-# Platform-specific
-# requirements_win.txt kept for Windows deployment
+# PyInstaller build artifacts
+dist/
+build/
+*.spec
 
 myenv/
