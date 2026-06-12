@@ -36,7 +36,7 @@ def run(cmd: str, desc: str) -> bool:
 
 
 def main():
-    print("UITest Agent — MCP 环境安装")
+    print("VoyanTest Agent — MCP 环境安装")
     print(f"Python: {sys.version}")
 
     # 检查 Node.js

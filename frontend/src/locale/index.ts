@@ -288,7 +288,7 @@ const i18n = {
     'menu.agents': 'Agent 管理',
     'menu.settings': '系统设置',
     'navbar.logout': '退出登录',
-    'navbar.appName': 'UI 测试平台',
+    'navbar.appName': 'VoyanTest',
     'settings.title': '页面配置',
     'settings.themeColor': '主题色',
     'settings.content': '内容区域',

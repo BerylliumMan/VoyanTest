@@ -20,7 +20,7 @@ const i18n = {
     'login.banner.subSlogan3': 'Real-time test reports with screenshots and insights',
   },
   'zh-CN': {
-    'login.form.title': 'UI 自动化测试平台',
+    'login.form.title': 'VoyanTest',
     'login.form.userName.errMsg': '用户名不能为空',
     'login.form.password.errMsg': '密码不能为空',
     'login.form.login.errMsg': '登录出错，请刷新重试',

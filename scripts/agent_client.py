@@ -15,7 +15,7 @@ from agent.client import ClientAgent
 async def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="UI Test Agent")
+    parser = argparse.ArgumentParser(description="VoyanTest Agent")
     parser.add_argument("--server", required=True, help="Server URL (e.g., http://localhost:8000)")
     parser.add_argument("--name", help="Agent name")
     parser.add_argument("--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR)")
