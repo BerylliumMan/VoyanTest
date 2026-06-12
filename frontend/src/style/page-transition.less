@@ -1,0 +1,35 @@
+/* 页面切换过渡动画 - 淡入 + 上移 */
+.page-transition-group {
+  position: relative;
+}
+
+.page-slide-enter {
+  opacity: 0;
+  transform: translateY(12px);
+}
+
+.page-slide-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 300ms cubic-bezier(0.34, 0.69, 0.1, 1),
+              transform 300ms cubic-bezier(0.34, 0.69, 0.1, 1);
+}
+
+.page-slide-exit {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.page-slide-exit-active {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 200ms cubic-bezier(0.34, 0.69, 0.1, 1),
+              transform 200ms cubic-bezier(0.34, 0.69, 0.1, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-slide-enter-active,
+  .page-slide-exit-active {
+    transition: none;
+  }
+}

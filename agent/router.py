@@ -1,0 +1,101 @@
+"""Agent router — HTTP API for agent listing + WebSocket for agent communication."""
+
+import json
+import logging
+from typing import List
+
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+
+from .models import AgentInfo, AgentRegistration, WSMessage, WSMessageType
+from .manager import agent_manager
+from app.tz import now as tz_now
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/agents", tags=["Agents"])
+
+
+# ---- HTTP: Agent listing ----
+
+@router.get("/", response_model=List[AgentInfo])
+async def list_agents():
+    return agent_manager.get_online_agents()
+
+
+# ---- WebSocket: Agent communication ----
+
+@router.websocket("/ws/{agent_name}")
+async def agent_websocket(ws: WebSocket, agent_name: str):
+    """WebSocket endpoint for agent clients. Each agent connects here with its name."""
+    await ws.accept()
+    agent_id = agent_name
+    session = None
+    db = None
+
+    async def _send(raw: str):
+        await ws.send_text(raw)
+
+    def _sync_to_db(name: str, ip: str, hostname: str):
+        """Create or update AgentDB record for this WebSocket agent."""
+        try:
+            from app.database import SessionLocal
+            from app.db_models import Agent as AgentDBModel
+            nonlocal db
+            if db is None:
+                db = SessionLocal()
+            existing = db.query(AgentDBModel).filter(AgentDBModel.name == name).first()
+            if existing:
+                existing.status = "online"
+                existing.last_heartbeat = tz_now()
+            else:
+                agent = AgentDBModel(
+                    name=name,
+                    endpoint=f"ws://{ip}" if ip else "",
+                    description=f"WebSocket Agent ({hostname})",
+                    status="online",
+                )
+                db.add(agent)
+            db.commit()
+        except Exception as exc:
+            logger.warning(f"Failed to sync agent to DB: {exc}")
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = WSMessage(**json.loads(raw))
+
+            if msg.type == WSMessageType.REGISTERED:
+                reg = AgentRegistration(**msg.payload)
+                agent_id = agent_name
+                agent = agent_manager.register(agent_id, reg, _send)
+                session = agent_manager.get_session(agent_id)
+                _sync_to_db(agent_name, reg.ip_address, reg.hostname)
+                ack = WSMessage(type=WSMessageType.REGISTERED, agent_id=agent_id,
+                                payload={"status": "ok", "message": f"Registered as {agent_id}"})
+                await session.send(ack) if session else None
+
+            elif msg.type == WSMessageType.HEARTBEAT:
+                agent_manager.heartbeat(agent_id)
+                _sync_to_db(agent_name, "", "")
+
+            elif msg.type in (WSMessageType.STEP_RESULT, WSMessageType.SNAPSHOT_RESULT,
+                              WSMessageType.SCREENSHOT_RESULT, WSMessageType.RUN_COMPLETE):
+                if session:
+                    session.resolve(msg)
+
+            elif msg.type == WSMessageType.ERROR:
+                logger.error(f"Agent {agent_id} error: {msg.payload.get('message')}")
+                if session:
+                    session.resolve(msg)
+
+    except WebSocketDisconnect:
+        logger.info(f"Agent {agent_id} disconnected")
+    except Exception as e:
+        logger.error(f"Agent {agent_id} error: {e}")
+    finally:
+        agent_manager.unregister(agent_id)
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass

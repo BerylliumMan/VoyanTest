@@ -1,0 +1,515 @@
+"""Agent client — connects via WebSocket, receives step-by-step tool calls, executes via local MCP subprocess."""
+
+import asyncio
+import base64
+import json
+import logging
+import os
+import platform
+import re
+import signal
+import socket
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Optional
+
+import websockets
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
+
+from agent.models import (
+    AgentRegistration, WSMessage, WSMessageType,
+    StepResultPayload, SnapshotPayload,
+)
+
+logger = logging.getLogger("agent.client")
+
+ACTION_TOOL_MAP = {
+    'goto': 'browser_navigate',
+    'click': 'browser_click',
+    'fill': 'browser_type',
+    'select': 'browser_select_option',
+    'wait': 'browser_wait_for',
+    'screenshot': 'browser_take_screenshot',
+    'snapshot': 'browser_snapshot',
+    'assert_text': 'browser_wait_for',
+}
+
+
+class AgentClient:
+    """WebSocket-based agent. Receives tool calls from server, executes via local MCP."""
+
+    def __init__(self, server_url: str, agent_name: str = None, headless: bool = False):
+        self.server_url = server_url.rstrip('/')
+        self.agent_name = agent_name or f"Agent-{uuid.uuid4().hex[:8]}"
+        self.agent_id: Optional[str] = None
+        self.hostname = platform.node()
+        self.ip_address = self._local_ip()
+        self.running = False
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._headless = headless
+
+        self._mcp_process = None
+        self._mcp_stdin = None
+        self._mcp_stdout = None
+        self._mcp_req_id = 0
+
+    @staticmethod
+    def _local_ip() -> str:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception as exc:
+            logger.warning(f"Failed to detect local IP, using 127.0.0.1: {exc}")
+            return "127.0.0.1"
+
+    # ---- lifecycle ----
+
+    async def start(self):
+        ws_url = self.server_url.replace("http://", "ws://").rstrip('/')
+        uri = f"{ws_url}/api/agents/ws/{self.agent_name}"
+
+        logger.info(f"Connecting to {uri} ...")
+        try:
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as ws:
+                self._ws = ws
+                self.running = True
+                await self._send_registration()
+                logger.info(f"Connected as {self.agent_name}")
+
+                while self.running:
+                    try:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=120)
+                        logger.debug(f"WS recv: {msg[:200]}...")
+                        await self._handle_message(json.loads(msg))
+                    except asyncio.TimeoutError:
+                        await self._send_heartbeat()
+                    except websockets.ConnectionClosed:
+                        logger.warning("Connection closed by server")
+                        break
+                    except Exception as exc:
+                        logger.error(f"Message handler error: {exc}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+        finally:
+            await self._stop_mcp()
+            self.running = False
+
+    async def stop(self):
+        self.running = False
+        if self._ws:
+            await self._ws.close()
+
+    # ---- MCP subprocess management ----
+
+    async def _start_mcp(self):
+        if self._mcp_process:
+            logger.info("Stopping previous MCP before starting new one")
+            await self._stop_mcp()
+        logger.info(f"Starting MCP subprocess: chromium headless={self._headless}")
+
+        # 优先使用本地 node_modules/.bin/ 中的 playwright-mcp（离线场景）
+        local_bin = os.path.join(os.path.dirname(__file__), '..', 'node_modules', '.bin', 'playwright-mcp')
+        if sys.platform == 'win32':
+            local_bin += '.cmd'
+        if os.path.isfile(local_bin):
+            args = [local_bin, '--browser=chromium']
+            logger.info(f"Using local playwright-mcp: {local_bin}")
+        else:
+            args = ['npx', '-y', '@playwright/mcp@latest', '--browser=chromium']
+        # Auto-detect existing Playwright Chromium installation
+        playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
+        if not playwright_browsers.is_dir():
+            playwright_browsers = Path.home() / 'AppData' / 'Local' / 'ms-playwright'
+        chrome_dirs = sorted(playwright_browsers.glob('chromium-*/chrome-win64/chrome.exe')) if playwright_browsers.is_dir() else []
+        if chrome_dirs:
+            args.extend(['--executable-path', str(chrome_dirs[-1])])
+            logger.info(f"Using Chromium executable: {chrome_dirs[-1]}")
+        if self._headless:
+            args.append('--headless')
+        else:
+            args.extend(['--viewport-size', '1920x1080'])
+        args.append('--isolated')
+        import sys as _sys
+        proc_kwargs = dict(
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if _sys.platform != 'win32':
+            proc_kwargs['preexec_fn'] = os.setsid
+        self._mcp_process = await asyncio.create_subprocess_exec(
+            *args, **proc_kwargs,
+        )
+        self._mcp_stdin = self._mcp_process.stdin
+        self._mcp_stdout = self._mcp_process.stdout
+
+        asyncio.create_task(self._pipe_stderr())
+
+        await self._mcp_send("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "agent-client", "version": "1.0"},
+        })
+        init_resp = await self._mcp_recv(timeout=60)
+        if not init_resp:
+            logger.error("MCP initialize failed — no response")
+            raise RuntimeError("MCP subprocess failed to initialize")
+        logger.info("MCP initialized")
+
+        await self._mcp_notify("notifications/initialized")
+        logger.info("MCP subprocess ready (browser started)")
+
+    async def _stop_mcp(self):
+        if self._mcp_process:
+            pid = self._mcp_process.pid
+            # 1. Close stdin → MCP 检测到 EOF 后优雅退出，Playwright 自动关闭浏览器
+            if self._mcp_stdin:
+                try:
+                    self._mcp_stdin.close()
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(self._mcp_process.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    if sys.platform == 'win32':
+                        self._mcp_process.terminate()
+                    else:
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                    await asyncio.wait_for(self._mcp_process.wait(), timeout=3)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    try:
+                        if sys.platform == 'win32':
+                            self._mcp_process.kill()
+                            import subprocess as _sp
+                            _sp.run(['taskkill', '/T', '/F', '/PID', str(pid)],
+                                    capture_output=True, timeout=5)
+                        else:
+                            pgid = os.getpgid(pid)
+                            os.killpg(pgid, signal.SIGKILL)
+                    except Exception:
+                        try:
+                            self._mcp_process.kill()
+                        except Exception:
+                            logger.debug("Process kill via .kill() also failed, giving up")
+            except Exception as exc:
+                logger.warning(f"Failed to stop MCP subprocess cleanly: {exc}")
+            self._mcp_process = None
+            self._mcp_stdin = None
+            self._mcp_stdout = None
+            logger.info("MCP subprocess stopped (browser closed)")
+
+    async def _pipe_stderr(self):
+        try:
+            while True:
+                line = await self._mcp_process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors='replace').rstrip()
+                if text:
+                    logger.debug(f"[MCP] {text}")
+        except Exception:
+            logger.debug("MCP stderr pipe closed")
+
+    async def _mcp_send(self, method: str, params: dict = None):
+        self._mcp_req_id += 1
+        req_id = self._mcp_req_id
+        req = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        if params:
+            req["params"] = params
+        self._mcp_stdin.write((json.dumps(req) + "\n").encode())
+        await self._mcp_stdin.drain()
+        return req_id
+
+    async def _mcp_notify(self, method: str):
+        msg = {"jsonrpc": "2.0", "method": method}
+        self._mcp_stdin.write((json.dumps(msg) + "\n").encode())
+        await self._mcp_stdin.drain()
+
+    async def _mcp_recv(self, timeout: float = 120) -> dict:
+        while True:
+            line = await asyncio.wait_for(self._mcp_stdout.readline(), timeout=timeout)
+            if not line:
+                code = self._mcp_process.returncode
+                logger.error(f"MCP stdout closed (returncode={code})")
+                return {}
+            text = line.decode(errors='replace').strip()
+            if not text:
+                continue
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                logger.warning(f"MCP non-JSON stdout: {text[:200]}")
+                continue
+
+    async def _mcp_call_tool(self, action: str, selector: str, value: str) -> dict:
+        mcp_tool = ACTION_TOOL_MAP.get(action)
+        if not mcp_tool:
+            return {"success": False, "error": f"Unknown action: {action}"}
+
+        args = self._build_mcp_args(action, selector, value)
+        req_id = await self._mcp_send("tools/call", {"name": mcp_tool, "arguments": args})
+
+        try:
+            resp = await self._mcp_recv()
+            result = resp.get("result", {})
+            is_error = result.get("isError", False)
+            content = result.get("content", [])
+            text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+            return {"success": not is_error, "text": text, "_content": content}
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "MCP tool call timed out"}
+
+    async def _mcp_screenshot_base64(self) -> Optional[str]:
+        """Take a screenshot via MCP and return base64-encoded PNG."""
+        try:
+            result = await self._mcp_call_tool("screenshot", "", f"_fail_{int(time.time())}.png")
+            if not result.get("success"):
+                return None
+            return self._extract_screenshot_base64(result.get("_content", []))
+        except Exception as exc:
+            logger.warning(f"MCP screenshot failed: {exc}")
+            return None
+
+    @staticmethod
+    def _extract_screenshot_base64(content: list) -> Optional[str]:
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            t = c.get("type")
+            if t == "image":
+                data = c.get("data", "")
+                if data and len(data) > 100:
+                    return data
+            if t == "resource":
+                res = c.get("resource", {})
+                for key in ("blob", "text"):
+                    data = res.get(key)
+                    if data:
+                        return data if isinstance(data, str) and len(data) > 100 else None
+            if t == "text":
+                text = c.get("text", "")
+                # 格式1: "Screenshot saved to: <path>"
+                for prefix in ("Screenshot saved to:", "Saved to:"):
+                    if prefix in text:
+                        path = text.split(prefix)[-1].strip().split("\n")[0].strip()
+                        p = Path(path)
+                        if p.exists():
+                            return base64.b64encode(p.read_bytes()).decode("utf-8")
+                # 格式2: "- [Screenshot of full page](<path>)"
+                m = re.search(r'\[Screenshot of full page\]\(([^)]+)\)', text)
+                if m:
+                    p = Path(m.group(1))
+                    if p.exists():
+                        return base64.b64encode(p.read_bytes()).decode("utf-8")
+        return None
+
+    @staticmethod
+    def _build_mcp_args(action: str, selector: str, value: str) -> dict:
+        if action == 'goto':
+            return {'url': value or 'about:blank'}
+        elif action == 'click':
+            return {'element': selector or '', 'target': selector or ''}
+        elif action == 'fill':
+            return {'element': selector or '', 'target': selector or '', 'text': value or ''}
+        elif action == 'select':
+            return {'element': selector or '', 'target': selector or '', 'values': [value] if value else []}
+        elif action == 'wait':
+            if value and value.isdigit():
+                return {'time': int(value)}
+            return {'text': value or ''}
+        elif action == 'screenshot':
+            return {'filename': value or f'screenshot_{int(time.time())}.png', 'fullPage': True, 'type': 'png'}
+        elif action == 'snapshot':
+            return {}
+        elif action == 'assert_text':
+            return {'text': value or ''}
+        return {}
+
+    # ---- messaging ----
+
+    async def _send(self, msg_type: WSMessageType, run_id: str = None, payload: dict = None):
+        if not self._ws:
+            return
+        msg = WSMessage(
+            type=msg_type,
+            agent_id=self.agent_id or "",
+            run_id=run_id,
+            payload=payload or {},
+        )
+        await self._ws.send(msg.model_dump_json())
+
+    async def _send_registration(self):
+        reg = AgentRegistration(
+            name=self.agent_name,
+            hostname=self.hostname,
+            ip_address=self.ip_address,
+            capabilities=["mcp", "playwright", "ui_testing", "local_browser"],
+        )
+        await self._send(WSMessageType.REGISTERED, payload=reg.model_dump())
+
+    async def _send_heartbeat(self):
+        await self._send(WSMessageType.HEARTBEAT)
+
+    # ---- message handler ----
+
+    async def _handle_message(self, raw: dict):
+        try:
+            msg = WSMessage(**raw)
+            logger.debug(f"Received message type={msg.type} run_id={msg.run_id}")
+        except Exception:
+            logger.warning(f"Invalid message: {raw}")
+            return
+
+        if msg.type == WSMessageType.RUN_START:
+            logger.info(f"Run {msg.run_id} started — launching browser")
+            try:
+                if not self._mcp_process:
+                    await self._start_mcp()
+                else:
+                    logger.info("Reusing existing MCP subprocess (browser stays open)")
+                    try:
+                        await asyncio.wait_for(self._mcp_call_tool("snapshot", "", ""), timeout=10)
+                    except Exception:
+                        logger.warning("Existing MCP not responding, restarting")
+                        await self._stop_mcp()
+                        await self._start_mcp()
+            except Exception as e:
+                logger.error(f"Failed to start MCP for run {msg.run_id}: {e}")
+                await self._send(
+                    WSMessageType.ERROR, msg.run_id,
+                    {"message": f"MCP start failed: {e}"},
+                )
+
+        elif msg.type == WSMessageType.RUN_END:
+            logger.info(f"Run {msg.run_id} ended — MCP stays alive for next run")
+            try:
+                await self._mcp_call_tool("snapshot", "", "")
+            except Exception as e:
+                logger.warning(f"Error during run end: {e}")
+
+        elif msg.type == WSMessageType.GET_SNAPSHOT:
+            await self._handle_get_snapshot(msg.run_id)
+
+        elif msg.type == WSMessageType.GET_SCREENSHOT:
+            await self._handle_get_screenshot(msg.run_id)
+
+        elif msg.type == WSMessageType.STEP_EXECUTE:
+            await self._handle_step_execute(msg)
+
+        elif msg.type == WSMessageType.SHUTDOWN:
+            logger.info("Shutdown signal received — closing browser")
+            try:
+                await self._stop_mcp()
+            except Exception as e:
+                logger.error(f"Error shutting down MCP: {e}")
+
+        elif msg.type == WSMessageType.HEARTBEAT:
+            pass
+
+    async def _handle_get_screenshot(self, run_id: str):
+        try:
+            ss_b64 = await self._mcp_screenshot_base64()
+            await self._send(
+                WSMessageType.SCREENSHOT_RESULT, run_id,
+                {"screenshot_base64": ss_b64 or ""},
+            )
+        except Exception as e:
+            await self._send(WSMessageType.ERROR, run_id, {"message": str(e)})
+
+    async def _handle_get_snapshot(self, run_id: str):
+        try:
+            text = "(page not available)"
+            if self._mcp_process:
+                try:
+                    result = await self._mcp_call_tool("snapshot", "", "")
+                    text = result.get("text", "(empty page)")
+                    if len(text) > 8000:
+                        text = text[:8000] + "\n\n[... TRUNCATED]"
+                except Exception:
+                    text = "(snapshot unavailable)"
+            await self._send(
+                WSMessageType.SNAPSHOT_RESULT, run_id,
+                SnapshotPayload(text=text).model_dump(),
+            )
+        except Exception as e:
+            await self._send(WSMessageType.ERROR, run_id, {"message": str(e)})
+
+    async def _handle_step_execute(self, msg: WSMessage):
+        tc = msg.payload.get("tool_call", {})
+        step_order = msg.payload.get("step_order", 1)
+        desc = msg.payload.get("description", "")
+        t_start = time.monotonic()
+
+        action = tc.get("action", "")
+        selector = tc.get("selector") or ""
+        value = tc.get("value")
+
+        result = StepResultPayload(
+            step_order=step_order,
+            success=False,
+            thinking=f"Executing: {action}",
+            action=f"{action}({selector})",
+        )
+
+        try:
+            if not self._mcp_process:
+                raise RuntimeError("MCP subprocess not started")
+
+            if action == "error":
+                result.thinking = value or "LLM reported error for this step"
+                result.action = f"error({value})"
+                result.success = False
+                result.error = value or "LLM reported error"
+                result.screenshot_base64 = await self._mcp_screenshot_base64()
+
+            else:
+                mcp_result = await self._mcp_call_tool(action, selector, value)
+                result.success = mcp_result.get("success", False)
+                if not result.success:
+                    result.error = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
+                    result.screenshot_base64 = await self._mcp_screenshot_base64()
+
+        except Exception as e:
+            result.error = str(e)
+            result.success = False
+            result.screenshot_base64 = await self._mcp_screenshot_base64()
+
+        result.duration_ms = (time.monotonic() - t_start) * 1000
+        await self._send(
+            WSMessageType.STEP_RESULT, msg.run_id, result.model_dump(),
+        )
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="UITest Agent Client (MCP)")
+    parser.add_argument("--server", required=True, help="Server URL (e.g. ws://192.168.1.100:8000)")
+    parser.add_argument("--name", help="Agent name (default: auto-generated)")
+    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    )
+
+    agent = AgentClient(args.server, args.name, headless=args.headless)
+    try:
+        asyncio.run(agent.start())
+    except KeyboardInterrupt:
+        logger.info("Agent stopped by user")
+
+
+if __name__ == "__main__":
+    main()

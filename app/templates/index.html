@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UI Test Platform</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/fonts/fonts.css">
+    <link rel="stylesheet" href="/static/css/design-system.css">
+    <link rel="stylesheet" href="/static/css/login.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <link rel="stylesheet" href="/static/css/testcases.css">
+    <link rel="stylesheet" href="/static/css/reports.css">
+    <link rel="stylesheet" href="/static/css/settings.css">
+    <link rel="stylesheet" href="/static/css/layout.css">
+    <link rel="stylesheet" href="/static/css/module-nav.css">
+    <link rel="stylesheet" href="/static/css/theme.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+    <link rel="stylesheet" href="/static/js/remixicon.css">
+    <link rel="preload" href="/static/fonts/fraunces-regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/fraunces-bold.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/nunito-regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/nunito-bold.woff2" as="font" type="font/woff2" crossorigin>
+
+</head>
+<body>
+    <!-- Noise Texture Overlay -->
+    <div class="noise-overlay"></div>
+    <!-- Organic Background Blobs -->
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+    {% raw %}
+    <div id="app">
+        <!-- Loading Bar -->
+        <Transition name="fade">
+            <div v-if="loadingBar.show" class="loading-bar"></div>
+        </Transition>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container">
+            <TransitionGroup name="fade">
+                <div v-for="(toast, index) in toastQueue" :key="toast.id"
+                     :class="['toast', toast.type === 'success' ? 'toast-success' : toast.type === 'error' ? 'toast-error' : toast.type === 'warning' ? 'toast-warning' : 'toast-info']">
+                    <i :class="toastIcon(toast.type)" class="toast-icon"></i>
+                    <div class="toast-content">
+                        <p class="toast-message">{{ toast.message }}</p>
+                    </div>
+                    <button class="toast-close" @click="dismissToast(toast.id)">&times;</button>
+                </div>
+            </TransitionGroup>
+        </div>
+
+        <!-- ==================== LOGIN PAGE ==================== -->
+        <div v-if="currentPage === 'login'" class="login-page">
+            <div class="login-card">
+                <div class="login-logo">
+                    <i class="ri-flask-line"></i>
+                    <h1>{{ t('appName') }}</h1>
+                </div>
+                <div v-if="loginError" class="login-error">
+                    <i class="ri-error-warning-line"></i> {{ loginError }}
+                </div>
+                <form @submit.prevent="handleLogin">
+                    <div class="mb-3">
+                        <label class="form-label">{{ t('username') }}</label>
+                        <input type="text" class="form-control" v-model="loginForm.username" required :placeholder="t('usernamePlaceholder')">
+                    </div>
+                    <div class="mb-4">
+                        <label class="form-label">{{ t('password') }}</label>
+                        <input type="password" class="form-control" v-model="loginForm.password" required :placeholder="t('passwordPlaceholder')">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-lg w-full" :disabled="loginLoading">
+                        <i v-if="loginLoading" class="ri-loader-line animate-spin"></i>
+                        <i v-else class="ri-login-box-line"></i>
+                        {{ loginLoading ? t('loggingIn') : t('login') }}
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- ==================== MAIN APP LAYOUT ==================== -->
+        <div v-else class="app-layout">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <a href="#/dashboard" class="sidebar-logo">
+                        <i class="ri-flask-line"></i>
+                        <span>UITest</span>
+                    </a>
+                </div>
+                <nav class="sidebar-content">
+                    <div class="sidebar-section">
+                        <div class="sidebar-section-title">{{ t('navigation') }}</div>
+                        <ul class="sidebar-menu">
+                            <li>
+                                <a href="#/dashboard" class="sidebar-menu-item" :class="{ active: currentPage === 'dashboard' }">
+                                    <i class="ri-dashboard-2-line"></i> <span class="menu-text">{{ t('dashboard') }}</span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="#/testcases" class="sidebar-menu-item" :class="{ active: currentPage === 'testcases' }">
+                                    <i class="ri-list-check-2"></i> <span class="menu-text">{{ t('testCaseManagement') }}</span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="#/reports" class="sidebar-menu-item" :class="{ active: currentPage === 'reports' }">
+                                    <i class="ri-file-list-3-line"></i> <span class="menu-text">{{ t('reports') }}</span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="#/settings" class="sidebar-menu-item" :class="{ active: currentPage === 'settings' }">
+                                    <i class="ri-settings-3-line"></i> <span class="menu-text">{{ t('settings') }}</span>
+                                </a>
+                            </li>
+                            <li v-if="currentUser && currentUser.role === 'admin'">
+                                <a href="#/modelConfig" class="sidebar-menu-item" :class="{ active: currentPage === 'modelConfig' }">
+                                    <i class="ri-brain-line"></i> <span class="menu-text">{{ t('modelConfig') }}</span>
+                                </a>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="sidebar-section" v-if="agents.length > 0">
+                        <div class="sidebar-section-title">{{ t('agents') }}</div>
+                        <ul class="sidebar-menu">
+                            <li v-for="agent in agents" :key="agent.id" class="sidebar-menu-item" style="cursor:default;flex-wrap:wrap">
+                                <i class="ri-robot-line"></i>
+                                <span class="menu-text truncate">{{ agent.name }}</span>
+                                <span :class="['badge', agent.status === 'online' ? 'badge-success' : 'badge-secondary']" style="margin-left:auto">{{ agent.status }}</span>
+                            </li>
+                        </ul>
+                    </div>
+                </nav>
+                <div class="sidebar-footer">
+                    <div class="user-info-bar mb-2" v-if="currentUser">
+                        <i class="ri-user-settings-line"></i>
+                        <span class="menu-text">{{ currentUser.username }} <span style="color:var(--color-primary-500);font-size:var(--text-xs)">({{ currentUser.role }})</span></span>
+                    </div>
+                    <div style="display:flex;gap:var(--space-2)">
+                        <button class="btn btn-secondary btn-sm w-full" @click="logout">
+                            <i class="ri-logout-box-r-line"></i> <span class="menu-text">{{ t('logout') }}</span>
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Main Wrapper -->
+            <div class="main-wrapper">
+                <!-- Top Bar -->
+                <header class="top-bar">
+                    <div class="top-bar-left">
+                        <div class="breadcrumb">
+                            <span class="breadcrumb-item"><i class="ri-home-4-line"></i></span>
+                            <span class="breadcrumb-separator">/</span>
+                            <span class="breadcrumb-active">{{ pageTitle }}</span>
+                        </div>
+                    </div>
+                    <div class="top-bar-right">
+                        <div class="language-selector">
+                            <select class="form-control" v-model="currentLanguage" @change="changeLanguage(currentLanguage)" style="width:auto;padding:4px 28px 4px 8px;font-size:var(--text-sm)">
+                                <option value="en">EN</option>
+                                <option value="zh">中文</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-icon" @click="toggleTheme" :title="t('toggleTheme')" style="width:32px;height:32px;padding:4px">
+                            <i :class="isDarkTheme ? 'ri-sun-line' : 'ri-moon-line'"></i>
+                        </button>
+                        <div class="top-bar-user" v-if="currentUser">
+                            <i class="ri-user-settings-line"></i>
+                            <span>{{ currentUser.username }}</span>
+                        </div>
+                    </div>
+                </header>
+
+                <!-- Content Area -->
+                <div class="content-area">
+
+                <!-- ==================== DASHBOARD PAGE ==================== -->
+                <div v-if="currentPage === 'dashboard'" class="page-content">
+                    <!-- Stats Cards -->
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-card-header">
+                                <div class="stat-card-icon blue"><i class="ri-flask-line"></i></div>
+                            </div>
+                            <div class="stat-card-value">{{ stats.totalCases }}</div>
+                            <div class="stat-card-label">{{ t('totalTestCases') }}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-header">
+                                <div class="stat-card-icon green"><i class="ri-play-circle-line"></i></div>
+                            </div>
+                            <div class="stat-card-value">{{ stats.todayRuns }}</div>
+                            <div class="stat-card-label">{{ t('todayExecutions') }}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-header">
+                                <div class="stat-card-icon purple"><i class="ri-checkbox-circle-line"></i></div>
+                            </div>
+                            <div class="stat-card-value">{{ stats.successRate }}%</div>
+                            <div class="stat-card-label">{{ t('successRate') }}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-header">
+                                <div class="stat-card-icon orange"><i class="ri-time-line"></i></div>
+                            </div>
+                            <div class="stat-card-value">{{ stats.avgDuration }}s</div>
+                            <div class="stat-card-label">{{ t('avgDuration') }}</div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <!-- Trend Chart -->
+                        <div class="chart-card">
+                            <div class="chart-card-title">{{ t('weeklyTrend') }}</div>
+                            <div class="trend-chart" v-if="trendData.length">
+                                <svg viewBox="0 0 500 200" preserveAspectRatio="xMidYMid meet">
+                                    <rect x="0" y="0" width="500" height="200" fill="transparent"/>
+                                    <g v-for="(d, i) in trendData" :key="i">
+                                        <rect
+                                            :x="40 + i * (420 / Math.max(trendData.length - 1, 1))"
+                                            :y="180 - (d.total / maxTrend) * 150"
+                                            :width="Math.max(20, 360 / trendData.length)"
+                                            :height="(d.total / maxTrend) * 150"
+                                            rx="4"
+                                            class="bar"
+                                        />
+                                        <text
+                                            :x="40 + i * (420 / Math.max(trendData.length - 1, 1)) + Math.max(10, 180 / trendData.length)"
+                                            y="195"
+                                            class="bar-label"
+                                        >{{ d.label || d.date.slice(5) }}</text>
+                                        <text
+                                            :x="40 + i * (420 / Math.max(trendData.length - 1, 1)) + Math.max(10, 180 / trendData.length)"
+                                            :y="175 - (d.total / maxTrend) * 150"
+                                            class="bar-value"
+                                        >{{ d.total }}</text>
+                                    </g>
+                                </svg>
+                            </div>
+                            <div v-else class="empty-state" style="padding:var(--space-8)">
+                                <p class="text-tertiary">{{ t('noTrendData') }}</p>
+                            </div>
+                        </div>
+
+                        <!-- Recent Runs -->
+                        <div class="recent-runs-card">
+                            <div class="recent-runs-header">
+                                <span class="recent-runs-title">{{ t('recentExecutions') }}</span>
+                                <a href="#/reports" class="text-sm" style="color:var(--color-primary)">{{ t('viewAll') }}</a>
+                            </div>
+                            <ul class="run-timeline" v-if="recentRuns.length">
+                                <li v-for="run in recentRuns" :key="run.batch_id" class="run-timeline-item" @click="viewBatch(run.batch_id)">
+                                    <div :class="['run-status-icon', run.status === 'passed' ? 'passed' : run.status === 'failed' ? 'failed' : 'running']">
+                                        <i :class="run.status === 'passed' ? 'ri-check-line' : run.status === 'failed' ? 'ri-close-line' : 'ri-loader-line animate-spin'"></i>
+                                    </div>
+                                    <div class="run-info">
+                                        <div class="run-case-name">{{ run.name }}</div>
+                                        <div class="run-meta">{{ formatDateTime(run.created_at) }}</div>
+                                    </div>
+                                    <div class="run-duration">{{ run.passed + '/' + run.total_cases + ' ' + t('passed') }}</div>
+                                </li>
+                            </ul>
+                            <div v-else class="empty-state" style="padding:var(--space-8)">
+                                <i class="ri-inbox-2-line" style="font-size:2rem;color:var(--color-text-tertiary);margin-bottom:var(--space-2)"></i>
+                                <p class="text-tertiary">{{ t('noRecentRuns') }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ==================== TEST CASES PAGE ==================== -->
+                <div v-if="currentPage === 'testcases'" class="page-content" style="display:flex;gap:var(--space-3)">
+                    <!-- Module Navigation Sidebar -->
+                    <div class="module-nav-sidebar" v-if="selectedProject">
+                        <div class="module-nav-header">
+                            <span>{{ t('module') }}</span>
+                            <div class="module-nav-actions">
+                                <button @click="openModuleModal()" :title="t('newModule')"><i class="ri-add-line"></i></button>
+                            </div>
+                        </div>
+                        <div :class="['module-nav-all', selectedModuleId === null ? 'active' : '']" @click="selectModuleNav(null)">
+                            <i class="ri-apps-line"></i>
+                            <span>{{ t('allModules') }}</span>
+                        </div>
+                        <div v-for="mod in moduleTree" :key="mod.id" class="module-nav-item-wrapper">
+                            <div :class="['module-nav-item', selectedModuleId === mod.id ? 'active' : '']" @click="selectModuleNav(mod.id)">
+                                <i class="ri-folder-line"></i>
+                                <span class="module-name">{{ mod.name }}</span>
+                                <button v-if="selectedModuleId === mod.id" class="expand-toggle" @click.stop="toggleModuleExpand(mod.id)">
+                                    <i :class="expandedModules[mod.id] ? 'ri-arrow-down-s-line' : 'ri-arrow-right-s-line'"></i>
+                                </button>
+                                <button v-else-if="mod.children && mod.children.length" class="expand-toggle" @click.stop="toggleModuleExpand(mod.id)">
+                                    <i :class="expandedModules[mod.id] ? 'ri-arrow-down-s-line' : 'ri-arrow-right-s-line'"></i>
+                                </button>
+                            </div>
+                            <div v-if="mod.children && mod.children.length" :class="['module-nav-children', expandedModules[mod.id] ? 'expanded' : 'collapsed']">
+                                <div v-for="child in mod.children" :key="child.id" :class="['module-nav-item', selectedModuleId === child.id ? 'active' : '']" @click="selectModuleNav(child.id)">
+                                    <i class="ri-folder-3-line"></i>
+                                    <span class="module-name">{{ child.name }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Module quick actions for selected module -->
+                        <div v-if="selectedModuleId !== null" style="margin-top:var(--space-3);padding:var(--space-2);border-top:1px solid rgba(222,216,207,0.5)">
+                            <div style="display:flex;gap:var(--space-1)">
+                                <button class="btn btn-secondary btn-sm" @click="editModuleFromNav(selectedModuleId)" :title="t('edit')"><i class="ri-pencil-line"></i></button>
+                                <button class="btn btn-danger btn-sm" @click="deleteModuleFromNav(selectedModuleId)" :title="t('delete')"><i class="ri-delete-bin-line"></i></button>
+                                <button class="btn btn-secondary btn-sm" @click="createSubModule(selectedModuleId)" :title="t('newModule')"><i class="ri-folder-add-line"></i></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Test Case Content -->
+                    <div style="flex:1;min-width:0">
+                    <!-- Filter Bar -->
+                    <div class="filter-bar">
+                        <div style="position:relative;flex:0 0 200px">
+                            <input type="text" class="form-control" :value="projectInputValue" @input="onProjectInput($event.target.value)" @focus="onProjectFocus()" @blur="hideProjectDropdown" :placeholder="t('allProjects')" autocomplete="off">
+                            <ul v-if="showProjectDropdown && filteredProjectsForSelect.length" style="position:absolute;top:100%;left:0;right:0;z-index:1000;max-height:200px;overflow-y:auto;margin:4px 0 0;padding:4px 0;background:var(--color-bg-card);border:1px solid var(--color-border);border-radius:var(--radius-small);box-shadow:var(--shadow-lg);list-style:none" @mousedown.prevent>
+                                <li v-for="p in filteredProjectsForSelect" :key="p.id" style="padding:8px 12px;font-size:var(--text-base);cursor:pointer;transition:background 150ms" @mousedown.prevent="selectProject(p.id)" :style="{background: selectedProject && selectedProject.id === p.id ? 'var(--color-primary-50)' : 'transparent'}">{{ p.name }}</li>
+                            </ul>
+                        </div>
+                        <div class="search-box">
+                            <i class="ri-search-line"></i>
+                            <input type="text" class="form-control" v-model="searchQuery" :placeholder="t('searchTestCases')" @input="debouncedSearch">
+                        </div>
+                        <button v-if="selectedModuleId" class="btn btn-secondary" @click="runModuleTests(selectedModuleId)" :disabled="batchRunning">
+                            <i :class="batchRunning ? 'ri-loader-line animate-spin' : 'ri-play-list-line'"></i> {{ t('runAllModuleTests') }}
+                        </button>
+                        <button v-if="filterProjectId" class="btn btn-secondary" @click="runProjectTests(filterProjectId)" :disabled="batchRunning">
+                            <i :class="batchRunning ? 'ri-loader-line animate-spin' : 'ri-play-list-fill'"></i> {{ t('runAllProjectTests') }}
+                        </button>
+                        <button class="btn btn-primary" @click="openTestCaseModal()" :disabled="!selectedProject">
+                            <i class="ri-add-line"></i> {{ t('newTestCase') }}
+                        </button>
+                        <button class="btn btn-secondary" @click="openProjectModal()">
+                            <i class="ri-add-box-line"></i> {{ t('newProject') }}
+                        </button>
+                    </div>
+
+                    <!-- Test Case List -->
+                    <div class="card card-bordered">
+                        <div class="card-body" style="padding:0">
+                            <div v-if="loadingTestCases" class="loading-overlay" style="position:relative;min-height:200px">
+                                <div class="loading-dots"><span></span><span></span><span></span></div>
+                            </div>
+                            <div v-else>
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th style="width:40px">#</th>
+                                            <th>{{ t('tableName') }}</th>
+                                            <th>{{ t('module') }}</th>
+                                            <th>{{ t('tableDescription') }}</th>
+                                            <th>{{ t('tableCreatedAt') }}</th>
+                                            <th style="width:200px">{{ t('tableActions') }}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="(tc, idx) in paginatedCases" :key="tc.id">
+                                            <td>{{ (pagination.page - 1) * testPageSize + idx + 1 }}</td>
+                                            <td><strong>{{ tc.name }}</strong></td>
+                                            <td><span class="badge badge-secondary">{{ (modules.find(m => m.id === tc.module_id) || {}).name || '--' }}</span></td>
+                                            <td><span class="text-tertiary text-sm">{{ tc.description || '--' }}</span></td>
+                                            <td><span class="text-tertiary text-sm">{{ formatDate(tc.created_at) }}</span></td>
+                                            <td>
+                                                <div style="display:flex;gap:var(--space-1)">
+                                                    <div class="run-dropdown" style="position:relative">
+                                                        <button class="btn btn-run btn-sm" @click="runTestCase(tc.id, 'server')" :title="t('run')">
+                                                            <i class="ri-play-circle-line"></i>
+                                                        </button>
+                                                        <button class="btn btn-run btn-sm" @click="toggleRunMenu(tc.id)" style="padding-left:2px;padding-right:4px;border-left:1px solid rgba(255,255,255,0.3)">
+                                                            <i class="ri-arrow-down-s-line" style="font-size:10px"></i>
+                                                        </button>
+                                                        <div v-if="showRunMenu === tc.id" class="run-dropdown-menu" style="position:absolute;top:100%;right:0;z-index:100;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);min-width:200px;padding:var(--space-1);margin-top:4px">
+                                                            <button class="run-dropdown-item" @click="runTestCase(tc.id, 'server')" style="display:block;width:100%;text-align:left;padding:var(--space-2) var(--space-3);border:none;background:none;color:var(--color-text);border-radius:var(--radius-md);cursor:pointer">
+                                                                <i class="ri-server-line"></i> {{ t('run') }}
+                                                            </button>
+                                                            <button class="run-dropdown-item" @click="runTestCase(tc.id, 'client')" :disabled="availableAgents.length === 0" style="display:block;width:100%;text-align:left;padding:var(--space-2) var(--space-3);border:none;background:none;color:var(--color-text);border-radius:var(--radius-md);cursor:pointer">
+                                                                <i class="ri-computer-line"></i> {{ t('runOnClient') }}<span v-if="availableAgents.length === 0" style="font-size:var(--text-xs);color:var(--color-text-tertiary)"> ({{ t('noAgentAvailable') }})</span>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <button class="btn btn-secondary btn-sm" @click="openTestCaseModal(tc)" :title="t('edit')">
+                                                        <i class="ri-pencil-line"></i>
+                                                    </button>
+                                                    <button class="btn btn-danger btn-sm" @click="deleteTestCase(tc.id)" :title="t('delete')">
+                                                        <i class="ri-delete-bin-line"></i>
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        <tr v-if="paginatedCases.length === 0">
+                                            <td colspan="6" style="text-align:center;padding:var(--space-8);color:var(--color-text-tertiary)">暂无数据</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                                <!-- Pagination -->
+                                <div class="card-footer" style="display:flex;align-items:center;justify-content:space-between">
+                                    <div class="el-pagination">
+                                        <span class="el-pagination__total">{{ t('totalItems', { count: pagination.total_items }) }}</span>
+                                        <div class="el-pagination__sizes">
+                                            <select v-model="testPageSize" @change="changeSize">
+                                                <option :value="10">10 / 页</option>
+                                                <option :value="20">20 / 页</option>
+                                                <option :value="50">50 / 页</option>
+                                                <option :value="100">100 / 页</option>
+                                                <option :value="200">200 / 页</option>
+                                            </select>
+                                        </div>
+                                        <div class="el-pagination__rightwrapper">
+                                            <button class="btn-prev" @click="changePage(pagination.page - 1)" :disabled="pagination.page <= 1"><i class="ri-arrow-left-s-line"></i></button>
+                                            <ul class="el-pager">
+                                                <li v-for="pn in pageNumbers" :key="pn" :class="['number', { active: pn === pagination.page }]" @click="typeof pn === 'number' && goToTestCasePage(pn)" :title="pn">{{ pn }}</li>
+                                            </ul>
+                                            <button class="btn-next" @click="changePage(pagination.page + 1)" :disabled="pagination.page >= totalPages"><i class="ri-arrow-right-s-line"></i></button>
+                                            <div class="el-pagination__jump">
+                                                <span>跳至</span>
+                                                <input type="number" class="el-pagination__jump-input" :min="1" :max="totalPages" @keyup.enter="jumpToPage($event.target.value)" @blur="jumpToPage($event.target.value)">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+
+                <!-- ==================== REPORTS PAGE ==================== -->
+                <div v-if="currentPage === 'reports'" class="page-content">
+                    <!-- Batch Detail View -->
+                    <div v-if="currentBatch">
+                        <button class="btn btn-ghost mb-4" @click="backToBatchList">
+                            <i class="ri-arrow-left-line"></i> {{ t('backToReports') }}
+                        </button>
+                        <div class="report-header-card">
+                            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--space-3)">
+                                <div>
+                                    <h3 style="font-size:var(--text-xl);margin-bottom:var(--space-2)">{{ currentBatch.name }}</h3>
+                                    <div style="display:flex;align-items:center;gap:var(--space-4);font-size:var(--text-sm);color:var(--color-text-secondary)">
+                                        <span><i class="ri-folder-line"></i> {{ currentBatch.project_name }}</span>
+                                        <span><i class="ri-time-line"></i> {{ formatDateTime(currentBatch.created_at) }}</span>
+                                        <span><i class="ri-timer-line"></i> {{ currentBatch.total_cases }} 用例</span>
+                                    </div>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:var(--space-3)">
+                                    <span :class="['report-status-badge', currentBatch.status === 'passed' ? 'passed' : currentBatch.status === 'failed' ? 'failed' : 'running']">
+                                        <i :class="currentBatch.status === 'passed' ? 'ri-check-line' : currentBatch.status === 'failed' ? 'ri-close-line' : 'ri-loader-line animate-spin'"></i>
+                                        {{ currentBatch.status === 'passed' ? t('passed') : currentBatch.status === 'failed' ? t('failed') : t('running') }}
+                                    </span>
+                                    <button class="btn btn-secondary btn-sm" @click="exportBatch(currentBatch.id)">
+                                        <i class="ri-download-line"></i> 导出
+                                    </button>
+                                </div>
+                            </div>
+                            <!-- Batch Summary -->
+                            <div style="display:flex;gap:var(--space-6);margin-top:var(--space-4);padding-top:var(--space-4);border-top:1px solid var(--color-border)">
+                                <div style="text-align:center">
+                                    <div style="font-size:var(--text-2xl);font-weight:var(--font-bold);color:var(--color-success)">{{ currentBatch.passed }}</div>
+                                    <div style="font-size:var(--text-xs);color:var(--color-text-tertiary)">通过</div>
+                                </div>
+                                <div style="text-align:center">
+                                    <div style="font-size:var(--text-2xl);font-weight:var(--font-bold);color:var(--color-danger)">{{ currentBatch.failed }}</div>
+                                    <div style="font-size:var(--text-xs);color:var(--color-text-tertiary)">失败</div>
+                                </div>
+                                <div style="text-align:center">
+                                    <div style="font-size:var(--text-2xl);font-weight:var(--font-bold)">{{ currentBatch.total_cases > 0 ? Math.round(currentBatch.passed / currentBatch.total_cases * 100) : 0 }}%</div>
+                                    <div style="font-size:var(--text-xs);color:var(--color-text-tertiary)">通过率</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Runs in this batch -->
+                        <div v-if="currentBatch.runs && currentBatch.runs.length">
+                            <div v-for="run in currentBatch.runs" :key="run.run_id" class="batch-run-card">
+                                <div class="batch-run-header" style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:var(--space-3) var(--space-4);cursor:pointer" @click="run._expanded = !run._expanded">
+                                    <div style="display:flex;align-items:center;gap:var(--space-3)">
+                                        <span :class="['run-status-icon', run.status === 'passed' ? 'passed' : run.status === 'failed' ? 'failed' : 'running']" style="width:24px;height:24px">
+                                            <i :class="run.status === 'passed' ? 'ri-check-line' : run.status === 'failed' ? 'ri-close-line' : 'ri-loader-line animate-spin'"></i>
+                                        </span>
+                                        <span style="font-weight:var(--font-medium)">{{ run.case_name }}</span>
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:var(--space-3);font-size:var(--text-sm);color:var(--color-text-secondary)">
+                                        <span>{{ run.duration ? run.duration.toFixed(1) + 's' : '--' }}</span>
+                                        <i :class="run._expanded ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'"></i>
+                                    </div>
+                                </div>
+                                <div v-if="run._expanded" style="padding:0 var(--space-4) var(--space-4)">
+                                    <div class="step-timeline" v-if="run.steps && run.steps.length">
+                                        <div v-for="(step, idx) in run.steps" :key="idx" class="step-timeline-item">
+                                            <div :class="['step-timeline-dot', step.success ? 'passed' : 'failed']"></div>
+                                            <div :class="['step-timeline-card', step.success ? 'passed' : 'failed']">
+                                                <div class="step-header">
+                                                    <div style="display:flex;align-items:center;gap:var(--space-2)">
+                                                        <span class="step-order-badge">{{ step.step_number || idx + 1 }}</span>
+                                                        <span class="step-description">{{ step.original_description || step.step_description }}</span>
+                                                    </div>
+                                                    <span v-if="step.duration_ms" class="text-xs text-tertiary">{{ (step.duration_ms / 1000).toFixed(1) }}s</span>
+                                                </div>
+                                                <div v-if="step.thinking" class="step-thought">{{ step.thinking }}</div>
+                                                <div v-if="step.action" class="step-action-log">> {{ step.action }}</div>
+                                                <div v-if="step.error" class="step-error">
+                                                    <i class="ri-error-warning-line"></i> {{ step.error }}
+                                                </div>
+                                                <div v-if="step.screenshot_path" class="step-screenshot">
+                                                    <img :src="'/' + step.screenshot_path" @click="openLightbox('/' + step.screenshot_path)" loading="lazy">
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div v-else style="padding:var(--space-4);text-align:center;color:var(--color-text-tertiary)">{{ t('noSteps') }}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Batch List -->
+                    <div v-else>
+                        <div class="filter-bar">
+                            <div class="status-tabs">
+                                <span :class="['status-tab', reportFilter === 'all' ? 'active' : '']" @click="reportFilter = 'all'">{{ t('all') }}</span>
+                                <span :class="['status-tab', reportFilter === 'passed' ? 'active' : '']" @click="reportFilter = 'passed'">{{ t('passed') }}</span>
+                                <span :class="['status-tab', reportFilter === 'failed' ? 'active' : '']" @click="reportFilter = 'failed'">{{ t('failed') }}</span>
+                            </div>
+                        </div>
+
+                        <div v-if="loadingReports" class="card card-bordered">
+                            <div class="card-body" style="min-height:200px;display:flex;align-items:center;justify-content:center">
+                                <div class="loading-dots"><span></span><span></span><span></span></div>
+                            </div>
+                        </div>
+                        <div v-else>
+                            <div class="recent-runs-card">
+                                <ul class="run-timeline">
+                                    <li v-for="batch in paginatedReports" :key="batch.id" class="run-timeline-item" @click="viewBatch(batch.id)">
+                                        <div :class="['run-status-icon', batch.status === 'passed' ? 'passed' : batch.status === 'failed' ? 'failed' : 'running']">
+                                            <i :class="batch.status === 'passed' ? 'ri-check-line' : batch.status === 'failed' ? 'ri-close-line' : 'ri-loader-line animate-spin'"></i>
+                                        </div>
+                                        <div class="run-info">
+                                            <div class="run-case-name">{{ batch.name }}</div>
+                                            <div class="run-meta">
+                                                <span>{{ batch.project_name }}</span>
+                                                <span style="margin-left:var(--space-2)">{{ batch.total_cases }} 用例</span>
+                                                <span style="margin-left:var(--space-2)">{{ batch.passed }}/{{ batch.total_cases }} 通过</span>
+                                            </div>
+                                        </div>
+                                        <div class="run-duration">{{ formatDateTime(batch.created_at) }}</div>
+                                    </li>
+                                    <li v-if="paginatedReports.length === 0" class="run-timeline-item" style="justify-content:center;padding:var(--space-8);color:var(--color-text-tertiary);cursor:default">
+                                        暂无数据
+                                    </li>
+                                </ul>
+                            </div>
+                            <!-- Report Pagination -->
+                            <div class="card-footer" style="display:flex;align-items:center;justify-content:space-between">
+                                <div class="el-pagination">
+                                    <span class="el-pagination__total">{{ t('totalItems', { count: reportPagination.total }) }}</span>
+                                    <div class="el-pagination__sizes">
+                                        <select v-model="reportPageSize" @change="changeReportSize">
+                                            <option :value="10">10 / 页</option>
+                                            <option :value="20">20 / 页</option>
+                                            <option :value="50">50 / 页</option>
+                                            <option :value="100">100 / 页</option>
+                                            <option :value="200">200 / 页</option>
+                                        </select>
+                                    </div>
+                                    <div class="el-pagination__rightwrapper">
+                                        <button class="btn-prev" @click="changeReportPage(reportPagination.page - 1)" :disabled="reportPagination.page <= 1"><i class="ri-arrow-left-s-line"></i></button>
+                                        <ul class="el-pager">
+                                            <li v-for="pn in reportPageNumbers" :key="pn" :class="['number', { active: pn === reportPagination.page }]" @click="typeof pn === 'number' && goToReportPage(pn)" :title="pn">{{ pn }}</li>
+                                        </ul>
+                                        <button class="btn-next" @click="changeReportPage(reportPagination.page + 1)" :disabled="reportPagination.page >= reportTotalPages"><i class="ri-arrow-right-s-line"></i></button>
+                                        <div class="el-pagination__jump">
+                                            <span>跳至</span>
+                                            <input type="number" class="el-pagination__jump-input" :min="1" :max="reportTotalPages" @keyup.enter="jumpToReportPage($event.target.value)" @blur="jumpToReportPage($event.target.value)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ==================== SETTINGS PAGE ==================== -->
+                <div v-if="currentPage === 'settings'" class="page-content">
+                    <!-- Project Management -->
+                    <div class="settings-section">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-4)">
+                            <h3 class="settings-section-title" style="margin:0">{{ t('projectManagement') }}</h3>
+                            <button class="btn btn-primary btn-sm" @click="openProjectModal()">
+                                <i class="ri-add-line"></i> {{ t('newProject') }}
+                            </button>
+                        </div>
+                        <div v-if="loadingProjects" class="flex items-center justify-center" style="padding:var(--space-8)">
+                            <div class="loading-dots"><span></span><span></span><span></span></div>
+                        </div>
+                        <div v-else class="table-container">
+                            <table class="table table-compact">
+                                <thead>
+                                    <tr>
+                                        <th>{{ t('projectName') }}</th>
+                                        <th>{{ t('description') }}</th>
+                                        <th>{{ t('baseURL') }}</th>
+                                        <th>{{ t('browser') }}</th>
+                                        <th style="width:120px">{{ t('tableActions') }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="proj in paginatedProjects" :key="proj.id">
+                                        <td><strong>{{ proj.name }}</strong></td>
+                                        <td><span class="text-tertiary text-sm">{{ proj.description || '--' }}</span></td>
+                                        <td><span class="text-tertiary text-sm">{{ proj.base_url || '--' }}</span></td>
+                                        <td><span class="badge badge-secondary">{{ proj.browser || 'chromium' }}</span></td>
+                                        <td>
+                                            <div style="display:flex;gap:var(--space-1)">
+                                                <button class="btn btn-icon btn-sm" @click="openProjectModal(proj)" :title="t('edit')">
+                                                    <i class="ri-pencil-line"></i>
+                                                </button>
+                                                <button class="btn btn-icon btn-sm btn-danger" @click="deleteProject(proj.id)" :title="t('delete')">
+                                                    <i class="ri-delete-bin-line"></i>
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <tr v-if="paginatedProjects.length === 0">
+                                        <td colspan="5" style="text-align:center;padding:var(--space-8);color:var(--color-text-tertiary)">暂无数据</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <!-- Settings Project Pagination -->
+                            <div class="card-footer" style="display:flex;align-items:center;justify-content:space-between;margin-top:var(--space-2)">
+                                <div class="el-pagination">
+                                    <span class="el-pagination__total">{{ t('totalItems', { count: settingsProjectPagination.total }) }}</span>
+                                    <div class="el-pagination__sizes">
+                                        <select v-model="settingsProjectPageSize" @change="changeSettingsProjectSize">
+                                            <option :value="10">10 / 页</option>
+                                            <option :value="20">20 / 页</option>
+                                            <option :value="50">50 / 页</option>
+                                            <option :value="100">100 / 页</option>
+                                            <option :value="200">200 / 页</option>
+                                        </select>
+                                    </div>
+                                    <div class="el-pagination__rightwrapper">
+                                        <button class="btn-prev" @click="changeSettingsProjectPage(settingsProjectPagination.page - 1)" :disabled="settingsProjectPagination.page <= 1"><i class="ri-arrow-left-s-line"></i></button>
+                                        <ul class="el-pager">
+                                            <li v-for="pn in settingsProjectPageNumbers" :key="pn" :class="['number', { active: pn === settingsProjectPagination.page }]" @click="typeof pn === 'number' && goToSettingsProjectPage(pn)" :title="pn">{{ pn }}</li>
+                                        </ul>
+                                        <button class="btn-next" @click="changeSettingsProjectPage(settingsProjectPagination.page + 1)" :disabled="settingsProjectPagination.page >= settingsProjectTotalPages"><i class="ri-arrow-right-s-line"></i></button>
+                                        <div class="el-pagination__jump">
+                                            <span>跳至</span>
+                                            <input type="number" class="el-pagination__jump-input" :min="1" :max="settingsProjectTotalPages" @keyup.enter="jumpToSettingsProjectPage($event.target.value)" @blur="jumpToSettingsProjectPage($event.target.value)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ==================== MODEL CONFIG PAGE ==================== -->
+                <div v-if="currentPage === 'modelConfig'" class="page-content">
+                    <div class="settings-section">
+                        <h3 class="settings-section-title">{{ t('modelConfig') }}</h3>
+                        <p class="text-tertiary text-sm" style="margin-bottom:var(--space-4)">{{ t('modelConfigDesc') }}</p>
+
+                        <div v-if="modelConfigLoading" class="flex items-center justify-center" style="padding:var(--space-8)">
+                            <div class="loading-dots"><span></span><span></span><span></span></div>
+                        </div>
+
+                        <div v-else class="model-config-form" style="max-width:560px">
+                            <div class="mb-3">
+                                <label class="form-label">{{ t('modelName') }}</label>
+                                <input type="text" class="form-control" v-model="modelConfig.model" :placeholder="t('modelNamePlaceholder')">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">{{ t('apiBase') }}</label>
+                                <input type="url" class="form-control" v-model="modelConfig.api_base" placeholder="https://api.example.com/v1">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">{{ t('apiKey') }}</label>
+                                <input type="password" class="form-control" v-model="modelConfig.api_key" :placeholder="getMaskedKey(modelConfig.api_key) || t('apiKeyPlaceholder')">
+                            </div>
+                            <div class="mb-4">
+                                <label class="form-label">{{ t('temperature') }}: {{ modelConfig.temperature }}</label>
+                                <input type="range" class="form-range" v-model.number="modelConfig.temperature" min="0" max="2" step="0.1" style="width:100%">
+                                <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--color-text-tertiary)">
+                                    <span>0 ({{ t('deterministic') }})</span><span>2 ({{ t('creative') }})</span>
+                                </div>
+                            </div>
+
+                            <div v-if="modelConfigError" class="alert alert-error mb-3">
+                                <i class="ri-error-warning-line"></i> {{ modelConfigError }}
+                            </div>
+
+                            <button class="btn btn-primary" @click="saveModelConfig" :disabled="modelConfigSaving">
+                                <i v-if="modelConfigSaving" class="ri-loader-line animate-spin"></i>
+                                <i v-else class="ri-save-line"></i>
+                                {{ modelConfigSaving ? t('saving') : t('saveConfig') }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== MODALS ==================== -->
+
+        <!-- Project Modal -->
+        <Transition name="fade">
+            <div v-if="showProjectModal" class="modal-overlay" @click.self="closeProjectModal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ isEditingProject ? t('editProject') : t('newProject') }}</h5>
+                        <button class="modal-close" @click="closeProjectModal">&times;</button>
+                    </div>
+                    <form @submit.prevent="isEditingProject ? updateProject() : createProject()">
+                        <div class="modal-body">
+                            <div class="row" style="display:flex;gap:var(--space-3)">
+                                <div style="flex:2">
+                                    <label class="form-label">{{ t('projectName') }} *</label>
+                                    <input type="text" class="form-control" v-model="currentProject.name" required>
+                                </div>
+                                <div style="flex:1">
+                                    <label class="form-label">{{ t('browser') }}</label>
+                                    <select class="form-control" v-model="currentProject.browser">
+                                        <option value="chromium">Chromium</option>
+                                        <option value="firefox">Firefox</option>
+                                        <option value="webkit">WebKit</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="mt-3">
+                                <label class="form-label">{{ t('baseURL') }}</label>
+                                <input type="url" class="form-control" v-model="currentProject.base_url" placeholder="https://example.com">
+                            </div>
+                            <div class="mt-3">
+                                <label class="form-label">{{ t('description') }}</label>
+                                <textarea class="form-control" v-model="currentProject.description" rows="3"></textarea>
+                            </div>
+                            <div class="form-check mt-3">
+                                <input class="form-check-input" type="checkbox" v-model="currentProject.headless" id="headlessCheck">
+                                <label class="form-check-label" for="headlessCheck">{{ t('headlessMode') }}</label>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" @click="closeProjectModal">{{ t('cancel') }}</button>
+                            <button type="submit" class="btn btn-primary"><i class="ri-save-line"></i> {{ isEditingProject ? t('saveChanges') : t('createProject') }}</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </Transition>
+
+        <!-- Module Modal -->
+        <Transition name="fade">
+            <div v-if="showModuleModal" class="modal-overlay" @click.self="closeModuleModal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ isEditingModule ? t('editModule') : t('newModule') }}</h5>
+                        <button class="modal-close" @click="closeModuleModal">&times;</button>
+                    </div>
+                    <form @submit.prevent="isEditingModule ? updateModule() : createModule()">
+                        <div class="modal-body">
+                            <div class="mb-3">
+                                <label class="form-label">{{ t('moduleName') }} *</label>
+                                <input type="text" class="form-control" v-model="currentModule.name" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">{{ t('description') }}</label>
+                                <textarea class="form-control" v-model="currentModule.description" rows="4"></textarea>
+                            </div>
+                            <div class="mb-3" v-if="!isEditingModule && currentModule.parent_id">
+                                <label class="form-label">{{ t('parentModule') }}</label>
+                                <span class="badge badge-secondary">{{ getModuleName(currentModule.parent_id) }}</span>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" @click="closeModuleModal">{{ t('cancel') }}</button>
+                            <button type="submit" class="btn btn-primary"><i class="ri-folder-add-line"></i> {{ isEditingModule ? t('saveChanges') : t('createModule') }}</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </Transition>
+
+        <!-- Test Case Modal -->
+        <Transition name="fade">
+            <div v-if="showTestCaseModal" class="modal-overlay" @click.self="closeTestCaseModal">
+                <div class="modal-content modal-content-lg">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ isEditingTestCase ? t('editTestCase') : t('newTestCase') }}</h5>
+                        <button class="modal-close" @click="closeTestCaseModal">&times;</button>
+                    </div>
+                    <form @submit.prevent="isEditingTestCase ? updateTestCase() : createTestCase()">
+                        <div class="modal-body">
+                            <div class="row" style="display:flex;gap:var(--space-3)">
+                                <div style="flex:2">
+                                    <label class="form-label">{{ t('testCaseName') }} *</label>
+                                    <input type="text" class="form-control" v-model="currentTestCase.name" required>
+                                </div>
+                                <div style="flex:1">
+                                    <label class="form-label">{{ t('module') }}</label>
+                                    <select class="form-control" v-model="currentTestCase.module_id">
+                                        <option :value="null">{{ t('noModule') }}</option>
+                                        <option v-for="mod in modules" :key="mod.id" :value="mod.id">{{ mod.name }}</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="mt-3">
+                                <label class="form-label">{{ t('description') }}</label>
+                                <textarea class="form-control" v-model="currentTestCase.description" rows="2"></textarea>
+                            </div>
+                            <h6 class="mt-4 mb-3">{{ t('testSteps') }}</h6>
+                            <div class="test-steps-container" v-if="currentTestCase.steps.length">
+                                <div v-for="(step, idx) in currentTestCase.steps"
+                                     :key="idx"
+                                     class="step-editor-row"
+                                     :class="{ 'drag-over': draggedStepIndex !== null && draggedStepIndex !== idx }"
+                                     draggable="true"
+                                     @dragstart="dragStart(idx, $event)"
+                                     @dragover.prevent="dragOver($event)"
+                                     @drop.prevent="drop(idx)"
+                                     @dragend="dragEnd()">
+                                    <i class="ri-menu-line drag-handle"></i>
+                                    <span class="step-num">{{ idx + 1 }}</span>
+                                    <input type="text" class="form-control" v-model="step.description" :placeholder="t('nlStepPlaceholder')" required>
+                                    <button type="button" class="btn btn-icon btn-sm" @click="previewAgentPlan(step, idx)" :title="t('previewPlan')">
+                                        <i class="ri-eye-line"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-icon btn-sm btn-danger" @click="removeStep(idx)" :title="t('delete')">
+                                        <i class="ri-delete-bin-line"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-secondary btn-sm mt-2" @click="addStep">
+                                <i class="ri-add-line"></i> {{ t('addStep') }}
+                            </button>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" @click="closeTestCaseModal">{{ t('cancel') }}</button>
+                            <button type="button" class="btn btn-secondary" @click="previewFullPlan" :disabled="!currentTestCase.id">
+                                <i class="ri-eye-line"></i> {{ t('previewPlan') }}
+                            </button>
+                            <button type="submit" class="btn btn-primary"><i class="ri-save-line"></i> {{ isEditingTestCase ? t('saveChanges') : t('createTestCase') }}</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </Transition>
+
+        <!-- Plan Preview Modal -->
+        <Transition name="fade">
+            <div v-if="showPlanModal" class="modal-overlay" @click.self="showPlanModal = false">
+                <div class="modal-content" style="max-width:600px">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ t('planPreview') }}</h5>
+                        <button class="modal-close" @click="showPlanModal = false">&times;</button>
+                    </div>
+                    <div class="modal-body" v-if="planResult">
+                        <div v-if="planResult.warning" class="step-error mb-3">
+                            <i class="ri-alert-line"></i> {{ planResult.warning }}
+                        </div>
+                        <div v-if="planResult.plan && planResult.plan.length">
+                            <div v-for="(item, idx) in planResult.plan" :key="idx" style="padding:var(--space-3);margin-bottom:var(--space-2);background:var(--color-bg-tertiary);border-radius:var(--radius-lg);border:1px solid var(--color-border)">
+                                <div style="display:flex;gap:var(--space-2);align-items:flex-start">
+                                    <span class="step-order-badge">{{ item.step_order }}</span>
+                                    <div style="flex:1;min-width:0">
+                                        <div style="font-weight:var(--font-semibold);font-size:var(--text-sm);margin-bottom:2px">{{ item.step_description }}</div>
+                                        <div style="font-size:var(--text-xs);color:var(--color-text-secondary)">{{ item.planned_action }}</div>
+                                        <div v-if="item.target_elements && item.target_elements.length" style="margin-top:var(--space-1)">
+                                            <code v-for="(el, ei) in item.target_elements" :key="ei" style="padding:1px 6px;background:var(--color-bg-primary);border-radius:4px;font-size:10px;border:1px solid var(--color-border-light);margin-right:4px">{{ el }}</code>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-else class="alert alert-info text-sm" style="padding:var(--space-3);background:var(--color-info-50);border-radius:var(--radius-md);color:var(--color-info-700)">
+                            <i class="ri-information-line"></i> {{ t('planEmpty') }}
+                        </div>
+                        <div v-if="planResult.total_estimated_actions" class="mt-3 text-sm text-tertiary">
+                            {{ t('estimatedActions') }}: <strong>{{ planResult.total_estimated_actions }}</strong>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" @click="showPlanModal = false">{{ t('close') }}</button>
+                    </div>
+                </div>
+            </div>
+        </Transition>
+
+        <!-- Lightbox -->
+        <Transition name="fade">
+            <div v-if="lightboxSrc" class="lightbox-overlay" @click="lightboxSrc = null">
+                <button class="lightbox-close" @click.stop="lightboxSrc = null">&times;</button>
+                <img :src="lightboxSrc" @click.stop>
+            </div>
+        </Transition>
+    </div>
+    {% endraw %}
+
+    <script src="/static/js/vue.global.prod.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

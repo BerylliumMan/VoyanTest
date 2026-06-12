@@ -1,0 +1,112 @@
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.stats-row {
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  transition: box-shadow 0.3s ease;
+
+  &:hover {
+    box-shadow: 0 4px 12px var(--color-fill-3);
+  }
+}
+
+.stat-card-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.stat-icon-container {
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  background: var(--color-fill-2);
+  flex-shrink: 0;
+}
+
+.stat-icon-primary {
+  color: var(--color-primary-6);
+}
+
+.stat-icon-success {
+  color: var(--color-success-6);
+}
+
+.stat-icon-danger {
+  color: var(--color-danger-6);
+}
+
+.stat-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--color-text-2);
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+
+.trend-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 160px;
+}
+
+.trend-bar-col {
+  flex: 1;
+  text-align: center;
+}
+
+.trend-bar-count {
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.trend-bar-fill {
+  margin: 0 auto;
+  width: 28px;
+  min-height: 2px;
+  background: var(--color-primary-light-2);
+  border-radius: 4px 4px 0 0;
+}
+
+.trend-bar-label {
+  font-size: 10px;
+  margin-top: 4px;
+  color: var(--color-text-2);
+}
+
+.empty-state {
+  text-align: center;
+  color: var(--color-text-2);
+  padding: 40px;
+}
+
+.select-project {
+  width: 200px;
+  background: var(--color-bg-2);
+}
+
+.loading-spin {
+  display: block;
+  margin: 200px auto;
+}
