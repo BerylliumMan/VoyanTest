@@ -1,9 +1,18 @@
 # app/main.py
 import asyncio
+from contextlib import asynccontextmanager
 import json as _json
 import logging
 import os
 from fastapi import FastAPI, Request
+
+from app.config import get_settings
+
+_settings = get_settings()
+logging.basicConfig(
+    level=getattr(logging, _settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 logger = logging.getLogger(__name__)
 from fastapi.staticfiles import StaticFiles
@@ -38,18 +47,21 @@ except ImportError:
     AGENT_SUPPORT = False
     logger.warning("Agent support not available")
 
-# Schema 管理：生产环境应使用 `alembic upgrade head`。
-# 此处保留 create_all 作为开发环境的幂等回退（已存在的表不会被破坏）。
-# 设置 DISABLE_CREATE_ALL=true 可在生产环境跳过，仅依赖 alembic。
-if os.getenv("DISABLE_CREATE_ALL", "false").lower() != "true":
-    Base.metadata.create_all(bind=engine)
-else:
-    logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（生产模式，请确保已执行 alembic upgrade head）")
+def _run_startup_init():
+    """Run synchronous DB initialization at startup (not at import time).
 
-# 兜底补列：environments.cookies 在旧 DB 上可能缺失（alembic 未跑 / 升级前启动）
-# 使用 PRAGMA 检查幂等地补上，避免运行时 OperationalError
-def _ensure_environment_cookies_column():
+    Called once during FastAPI lifespan startup.
+    """
+    # Schema management: create_all as dev fallback
+    if os.getenv("DISABLE_CREATE_ALL", "false").lower() != "true":
+        Base.metadata.create_all(bind=engine)
+    else:
+        logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（生产模式，请确保已执行 alembic upgrade head）")
+
+    # Fallback column migration: environments.cookies
     try:
+        import sqlalchemy as _sa
+        _sa_text = _sa.text
         with engine.connect() as conn:
             rows = conn.execute(_sa_text("PRAGMA table_info(environments)")).fetchall()
             has_cookies = any(r[1] == "cookies" for r in rows)
@@ -60,96 +72,83 @@ def _ensure_environment_cookies_column():
     except Exception as _exc:
         logger.warning(f"启动兜底迁移 environments.cookies 失败: {_exc}")
 
-try:
-    import sqlalchemy as _sa
-    _sa_text = _sa.text
-    _ensure_environment_cookies_column()
-except Exception as _exc:
-    logger.warning(f"启动兜底迁移初始化失败: {_exc}")
-
-# T012: 初始化默认管理员
-from app.database import SessionLocal as _SessionLocal
-from app.auth import hash_password
-_init_db = _SessionLocal()
-try:
-    existing = _init_db.query(db_models.User).filter(
-        db_models.User.username == settings.default_admin_username
-    ).first()
-    if not existing:
-        admin = db_models.User(
-            username=settings.default_admin_username,
-            password_hash=hash_password(settings.default_admin_password),
-            role="admin",
-            status="active",
-            must_change_password=True,
-        )
-        _init_db.add(admin)
-        _init_db.commit()
-        logger.info(f"默认管理员已创建: {settings.default_admin_username}")
-
-    # One-shot migration: seed ai_configs from config.json if DB is empty.
-    if not _init_db.query(db_models.AIConfig).first():
-        _config_json_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
-        )
-        try:
-            with open(_config_json_path) as _f:
-                _ai = _json.load(_f).get("ai", {})
-            if _ai.get("model") and _ai.get("api_key") and _ai.get("api_base"):
-                _init_db.add(db_models.AIConfig(
-                    id=1,
-                    model=_ai["model"],
-                    api_key=_ai["api_key"],
-                    api_base=_ai["api_base"],
-                    temperature=float(_ai.get("temperature", 0.1)),
-                ))
-                _init_db.commit()
-                logger.info(f"AI 配置已从 config.json 迁移到数据库: model={_ai['model']}")
-        except FileNotFoundError:
-            logger.warning("config.json 不存在且数据库无 AI 配置 — 启动后必须通过 API 配置 AI")
-        except (_json.JSONDecodeError, KeyError) as _e:
-            logger.warning(f"config.json 格式错误，AI 配置未迁移: {_e}")
-
-    # Seed default prompt templates
-    from app.gen.analyzer import get_default_prompts
-    _default_prompts = get_default_prompts()
-    for key, d in _default_prompts.items():
-        existing = _init_db.query(db_models.PromptTemplate).filter(
-            db_models.PromptTemplate.template_key == key
+    # Admin init + AI config seed + prompt templates
+    from app.database import SessionLocal as _SessionLocal
+    from app.auth import hash_password
+    _init_db = _SessionLocal()
+    try:
+        existing = _init_db.query(db_models.User).filter(
+            db_models.User.username == settings.default_admin_username
         ).first()
         if not existing:
-            _init_db.add(db_models.PromptTemplate(
-                template_key=key,
-                label=d["label"],
-                template_content=d["content"],
-                is_custom=False,
-            ))
-            logger.info(f"默认提示词模板已创建: {key}")
-        elif not existing.is_custom:
-            existing.template_content = d["content"]
-            existing.label = d["label"]
-            logger.info(f"默认提示词模板已更新: {key}")
-    _init_db.commit()
-finally:
-    _init_db.close()
+            admin = db_models.User(
+                username=settings.default_admin_username,
+                password_hash=hash_password(settings.default_admin_password),
+                role="admin",
+                status="active",
+                must_change_password=True,
+            )
+            _init_db.add(admin)
+            _init_db.commit()
+            logger.info(f"默认管理员已创建: {settings.default_admin_username}")
 
-# 启动时清理过期会话
-_cleanup_db = _SessionLocal()
-try:
-    from app.auth import cleanup_expired_sessions
-    cleanup_expired_sessions(_cleanup_db)
-    logger.info("过期会话清理完成")
-except Exception as _e:
-    logger.warning(f"过期会话清理失败: {_e}")
-finally:
-    _cleanup_db.close()
+        # One-shot migration: seed ai_configs from config.json if DB is empty.
+        if not _init_db.query(db_models.AIConfig).first():
+            _config_json_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
+            )
+            try:
+                with open(_config_json_path) as _f:
+                    _ai = _json.load(_f).get("ai", {})
+                if _ai.get("model") and _ai.get("api_key") and _ai.get("api_base"):
+                    _init_db.add(db_models.AIConfig(
+                        id=1,
+                        model=_ai["model"],
+                        api_key=_ai["api_key"],
+                        api_base=_ai["api_base"],
+                        temperature=float(_ai.get("temperature", 0.1)),
+                    ))
+                    _init_db.commit()
+                    logger.info(f"AI 配置已从 config.json 迁移到数据库: model={_ai['model']}")
+            except FileNotFoundError:
+                logger.warning("config.json 不存在且数据库无 AI 配置 — 启动后必须通过 API 配置 AI")
+            except (_json.JSONDecodeError, KeyError) as _e:
+                logger.warning(f"config.json 格式错误，AI 配置未迁移: {_e}")
 
+        # Seed default prompt templates
+        from app.gen.analyzer import get_default_prompts
+        _default_prompts = get_default_prompts()
+        for key, d in _default_prompts.items():
+            existing = _init_db.query(db_models.PromptTemplate).filter(
+                db_models.PromptTemplate.template_key == key
+            ).first()
+            if not existing:
+                _init_db.add(db_models.PromptTemplate(
+                    template_key=key,
+                    label=d["label"],
+                    template_content=d["content"],
+                    is_custom=False,
+                ))
+                logger.info(f"默认提示词模板已创建: {key}")
+            elif not existing.is_custom:
+                existing.template_content = d["content"]
+                existing.label = d["label"]
+                logger.info(f"默认提示词模板已更新: {key}")
+        _init_db.commit()
+    finally:
+        _init_db.close()
 
-app = FastAPI(
-    title="UI测试自动化平台",
-    description="用于管理和运行Playwright UI测试的Web平台。",
-    version="1.0.0"
-)
+    # Clean up expired sessions at startup
+    _cleanup_db = _SessionLocal()
+    try:
+        from app.auth import cleanup_expired_sessions
+        cleanup_expired_sessions(_cleanup_db)
+        logger.info("过期会话清理完成")
+    except Exception as _e:
+        logger.warning(f"过期会话清理失败: {_e}")
+    finally:
+        _cleanup_db.close()
+
 
 # 周期性清理过期会话（每15分钟）
 async def _periodic_session_cleanup():
@@ -168,17 +167,26 @@ async def _periodic_session_cleanup():
         except Exception as e:
             logger.warning(f"周期性过期会话清理失败: {e}")
 
-_cleanup_task: asyncio.Task | None = None
 
-@app.on_event("startup")
-async def _startup_periodic_cleanup():
-    global _cleanup_task
-    _cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan: runs DB init on startup, cleanup on shutdown."""
+    _run_startup_init()
+    cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+    yield
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
-@app.on_event("shutdown")
-async def _shutdown_cleanup():
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
+
+app = FastAPI(
+    title="UI测试自动化平台",
+    description="用于管理和运行Playwright UI测试的Web平台。",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 # Rate limiting
 from slowapi import _rate_limit_exceeded_handler
@@ -205,6 +213,9 @@ app.add_middleware(
 from app.exception_handlers import unhandled_exception_handler
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
+# WebSocket 路径前缀 — 这些路径在 WebSocket handler 内部自行处理认证
+WS_AUTH_SKIP_PREFIXES = ["/api/agents/ws/"]
+
 # T016: 全局认证中间件 — 所有 /api/ 路径需登录（白名单除外）
 PUBLIC_PATHS = {"/api/auth/login", "/api/auth/login-form", "/api/auth/logout", "/health", "/docs", "/openapi.json"}
 # 需要认证的路径前缀（生产环境建议由 nginx/reverse proxy 处理静态文件认证）
@@ -214,6 +225,9 @@ async def auth_middleware(request: Request, call_next):
     path = request.url.path
     is_protected = any(path.startswith(prefix) for prefix in PROTECTED_PREFIXES)
     if is_protected and path not in PUBLIC_PATHS:
+        # WebSocket 路径由 handler 内部自行认证，跳过 HTTP 中间件
+        if any(path.startswith(skip) for skip in WS_AUTH_SKIP_PREFIXES):
+            return await call_next(request)
         session_id = request.cookies.get("session_id")
         if not session_id:
             return JSONResponse(status_code=401, content={"detail": "未登录"})
@@ -248,6 +262,9 @@ async def enforce_password_changed(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
     if path in PASSWORD_CHANGE_WHITELIST:
+        return await call_next(request)
+    # WebSocket 路径由 handler 内部自行认证
+    if any(path.startswith(skip) for skip in WS_AUTH_SKIP_PREFIXES):
         return await call_next(request)
     session_id = request.cookies.get("session_id")
     if not session_id:

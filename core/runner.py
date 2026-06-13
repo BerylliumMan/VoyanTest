@@ -31,11 +31,6 @@ from app.database import SessionLocal
 from core.llm_wrapper import create_openai_client, _resolve_config as _resolve_llm_config
 from core.step_executor import execute_step_mcp
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()],
-)
 logger = logging.getLogger(__name__)
 
 
