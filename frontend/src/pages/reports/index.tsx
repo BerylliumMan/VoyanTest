@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space,
 } from '@arco-design/web-react';
-import { IconEye, IconDown, IconRight, IconLoading, IconDownload } from '@arco-design/web-react/icon';
+import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import RunDetail from './RunDetail';
@@ -232,6 +232,23 @@ const Reports: React.FC = () => {
     } catch { Message.error(t['export.failed']); }
   };
 
+  const handleDelete = (batchId: number, batchName: string) => {
+    Modal.confirm({
+      title: t['confirm.delete.item'],
+      content: `${t['delete']} "${batchName}"?`,
+      okText: t['delete'],
+      cancelText: t['cancel'],
+      okButtonProps: { status: 'danger' } as any,
+      onOk: async () => {
+        try {
+          await axios.delete(`/api/reports/batches/${batchId}`);
+          Message.success(t['deleted']);
+          fetchData();
+        } catch { Message.error(t['delete.failed']); }
+      },
+    });
+  };
+
   const columns = [
     { title: t['batch'], dataIndex: 'name', width: 200, ellipsis: true },
     { title: t['project'], dataIndex: 'project_name', width: 150, ellipsis: true },
@@ -252,7 +269,7 @@ const Reports: React.FC = () => {
     { title: t['exec.time'], dataIndex: 'created_at', width: 180,
       render: (v: string) => v ? new Date(v).toLocaleString() : '--' },
     {
-      title: t['actions'], width: 200,
+      title: t['actions'], width: 280,
       render: (_: unknown, r: BatchItem) => (
         <Space>
           <Button type="primary" size="small" icon={<IconEye />} onClick={() => viewBatch(r.id)}>
@@ -260,6 +277,9 @@ const Reports: React.FC = () => {
           </Button>
           <Button size="small" icon={<IconDownload />} onClick={() => handleExport(r.id, r.name)}>
             {t['export']}
+          </Button>
+          <Button size="small" status="danger" icon={<IconDelete />} onClick={() => handleDelete(r.id, r.name)}>
+            {t['delete']}
           </Button>
         </Space>
       ),

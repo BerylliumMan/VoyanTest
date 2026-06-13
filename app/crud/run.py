@@ -121,6 +121,19 @@ def update_run_batch(db: Session, batch_id: int, name: str = None) -> db_models.
     return batch
 
 
+def delete_run_batch(db: Session, batch_id: int) -> bool:
+    """删除运行批次及其关联的 TestRun 和 RunLog"""
+    batch = get_run_batch(db, batch_id)
+    if not batch:
+        return False
+    for run in batch.runs:
+        db.query(db_models.RunLog).filter(db_models.RunLog.run_id == run.id).delete()
+        db.delete(run)
+    db.delete(batch)
+    db.commit()
+    return True
+
+
 def update_batch_counters(db: Session, batch_id: int, case_status: str) -> db_models.RunBatch | None:
     """用例完成后更新批次计数和状态"""
     batch = get_run_batch(db, batch_id)

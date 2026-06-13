@@ -498,3 +498,12 @@ def export_batch(batch_id: int, db: Session = Depends(get_db)):
     response = JSONResponse(content=detail)
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: int, db: Session = Depends(get_db)):
+    """删除运行批次及其关联数据"""
+    success = crud.delete_run_batch(db, batch_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return {"message": "Batch deleted"}
