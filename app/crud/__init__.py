@@ -51,6 +51,7 @@ from app.crud.run import (
     get_run_batch,
     list_run_batches,
     update_run_batch,
+    delete_run_batch,
     update_batch_counters,
     _compute_batch_status,
 )
@@ -104,6 +105,7 @@ __all__ = [
     "get_run_batch",
     "list_run_batches",
     "update_run_batch",
+    "delete_run_batch",
     "update_batch_counters",
     "_compute_batch_status",
 ]

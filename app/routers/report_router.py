@@ -503,7 +503,11 @@ def export_batch(batch_id: int, db: Session = Depends(get_db)):
 @router.delete("/batches/{batch_id}")
 def delete_batch(batch_id: int, db: Session = Depends(get_db)):
     """删除运行批次及其关联数据"""
-    success = crud.delete_run_batch(db, batch_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Batch not found")
-    return {"message": "Batch deleted"}
+    try:
+        success = crud.delete_run_batch(db, batch_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        return {"message": "Batch deleted"}
+    except Exception as e:
+        logger.error(f"Delete batch {batch_id} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
