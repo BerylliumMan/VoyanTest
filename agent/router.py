@@ -27,6 +27,23 @@ async def list_agents():
 @router.websocket("/ws/{agent_name}")
 async def agent_websocket(ws: WebSocket, agent_name: str):
     """WebSocket endpoint for agent clients. Each agent connects here with its name."""
+
+    # Auth: require valid session_id cookie (mirrors app/websocket.py:89-106)
+    session_id = ws.cookies.get("session_id")
+    if not session_id:
+        await ws.close(code=4001, reason="missing session_id")
+        return
+    from app.database import SessionLocal
+    from app.auth import get_session
+    _auth_db = SessionLocal()
+    try:
+        _session = get_session(_auth_db, session_id)
+        if not _session:
+            await ws.close(code=4003, reason="invalid session")
+            return
+    finally:
+        _auth_db.close()
+
     await ws.accept()
     agent_id = agent_name
     session = None
