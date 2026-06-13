@@ -175,7 +175,23 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
             logger.info("Some cases failed — browser left open for debugging")
 
     _task = _asyncio.create_task(_run())
-    _task.add_done_callback(lambda t: t.exception() and logger.error(f"Client agent run task failed: {t.exception()}"))
+    def _on_run_done(t):
+        exc = t.exception()
+        if exc:
+            logger.error(f"Client agent run task failed: {exc}")
+            try:
+                from app.database import SessionLocal as _SL
+                from app import db_models as _dm
+                _db = _SL()
+                _b = _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first()
+                if _b and _b.status in ("running", "pending"):
+                    _b.status = "failed"
+                    _b.finished_at = tz_now()
+                    _db.commit()
+                _db.close()
+            except Exception as e:
+                logger.warning(f"Failed to mark batch {batch.id} as failed: {e}")
+    _task.add_done_callback(_on_run_done)
 
     return {
         "message": f"Test case {case_id} running on client agent {agent.name}",
@@ -343,7 +359,23 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                 logger.warning(f"Failed to send shutdown to agent: {exc}")
 
     _task = _asyncio.create_task(_run_batch())
-    _task.add_done_callback(lambda t: t.exception() and logger.error(f"Client agent batch-run task failed: {t.exception()}"))
+    def _on_batch_done(t):
+        exc = t.exception()
+        if exc:
+            logger.error(f"Client agent batch-run task failed: {exc}")
+            try:
+                from app.database import SessionLocal as _SL
+                from app import db_models as _dm
+                _db = _SL()
+                _b = _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first()
+                if _b and _b.status in ("running", "pending"):
+                    _b.status = "failed"
+                    _b.finished_at = tz_now()
+                    _db.commit()
+                _db.close()
+            except Exception as e:
+                logger.warning(f"Failed to mark batch {batch.id} as failed: {e}")
+    _task.add_done_callback(_on_batch_done)
 
     return {
         "message": f"{len(case_ids)} case(s) running on client agent {agent.name}",
