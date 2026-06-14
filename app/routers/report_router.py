@@ -3,11 +3,14 @@
 提供测试统计、趋势分析、报告查询等功能
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
@@ -20,6 +23,12 @@ from ..auth import require_admin
 from .. import crud, db_models
 
 logger = logging.getLogger(__name__)
+
+
+class BatchUpdate(BaseModel):
+    """Request body for updating a batch name."""
+    name: str = Field(..., min_length=1, max_length=200, description="New batch name")
+
 
 # 允许的报告根目录（路径穿越防护）
 _REPORTS_ROOT = Path(os.path.abspath("reports"))
@@ -100,7 +109,7 @@ def get_test_statistics(
     project_id: Optional[int] = None,
     days: int = 30,
     db: Session = Depends(get_db)
-):
+) -> TestStatistics:
     """获取测试统计信息（基于批次）"""
     end_date = tz_now()
     start_date = end_date - timedelta(days=days)
@@ -172,7 +181,7 @@ def get_test_trends(
     project_id: Optional[int] = None,
     days: int = 30,
     db: Session = Depends(get_db)
-):
+) -> TestTrend:
     """获取测试趋势数据（基于批次）"""
     end_date = tz_now()
     start_date = end_date - timedelta(days=days)
@@ -230,7 +239,7 @@ def get_report_summary(
     project_id: Optional[int] = None,
     days: int = 30,
     db: Session = Depends(get_db)
-):
+) -> ReportSummary:
     """
     获取报告摘要（统计 + 趋势 + 最近执行）
     """
@@ -273,7 +282,7 @@ def get_report_summary(
 
 
 @router.get("/runs/{run_id}")
-def get_run_detail(run_id: int, db: Session = Depends(get_db)):
+def get_run_detail(run_id: int, db: Session = Depends(get_db)) -> dict:
     """
     获取单次执行详情，包含步骤数据（从 report JSON 读取）。
     """
@@ -325,7 +334,7 @@ def list_runs(
     page: int = 1,
     size: int = 20,
     db: Session = Depends(get_db)
-):
+) -> dict:
     """
     获取执行记录列表
     """
@@ -378,14 +387,20 @@ def list_batches(
     page: int = 1,
     size: int = 20,
     db: Session = Depends(get_db)
-):
+) -> dict:
     """获取运行批次列表（分页）"""
     result = crud.list_run_batches(db, project_id=project_id, status=status, page=page, size=size)
 
+    # 获取项目名称
+    project_ids = {b.project_id for b in result["items"] if b.project_id}
+    projects = {}
+    if project_ids:
+        for p in db.query(db_models.Project).filter(db_models.Project.id.in_(project_ids)).all():
+            projects[p.id] = p
+
     items = []
     for batch in result["items"]:
-        # 获取项目名称
-        project = db.query(db_models.Project).filter(db_models.Project.id == batch.project_id).first()
+        project = projects.get(batch.project_id)
         project_name = project.name if project else ""
 
         items.append({
@@ -411,7 +426,7 @@ def list_batches(
 
 
 @router.get("/batches/{batch_id}")
-def get_batch_detail(batch_id: int, db: Session = Depends(get_db)):
+def get_batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     """获取批次详情，包含所有用例运行结果"""
     batch = crud.get_run_batch(db, batch_id)
     if not batch:
@@ -427,8 +442,14 @@ def get_batch_detail(batch_id: int, db: Session = Depends(get_db)):
     runs = db.query(db_models.TestRun).filter(db_models.TestRun.batch_id == batch_id).all()
 
     runs_data = []
+    case_ids = [r.case_id for r in runs]
+    cases = {}
+    if case_ids:
+        for c in db.query(db_models.TestCase).filter(db_models.TestCase.id.in_(case_ids)).all():
+            cases[c.id] = c
+
     for run in runs:
-        case = db.query(db_models.TestCase).filter(db_models.TestCase.id == run.case_id).first()
+        case = cases.get(run.case_id)
         case_name = case.name if case else ""
 
         run_info = {
@@ -450,7 +471,7 @@ def get_batch_detail(batch_id: int, db: Session = Depends(get_db)):
                     report_data = json.load(f)
                 run_info["steps"] = report_data.get("steps", [])
             except Exception:
-                logger.warning(f"无法加载批次报告 JSON 文件: {run.report_path}", exc_info=True)
+                logger.warning("无法加载批次报告 JSON 文件: %s", run.report_path, exc_info=True)
 
         runs_data.append(run_info)
 
@@ -471,9 +492,9 @@ def get_batch_detail(batch_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/batches/{batch_id}")
-def update_batch(batch_id: int, body: dict, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """更新批次名称"""
-    batch = crud.update_run_batch(db, batch_id, name=body.get("name"))
+    batch = crud.update_run_batch(db, batch_id, name=body.name)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
@@ -488,7 +509,7 @@ def update_batch(batch_id: int, body: dict, admin=Depends(require_admin), db: Se
 
 
 @router.get("/batches/{batch_id}/export")
-def export_batch(batch_id: int, db: Session = Depends(get_db)):
+def export_batch(batch_id: int, db: Session = Depends(get_db)) -> JSONResponse:
     """导出批次报告为 JSON 文件"""
     detail = get_batch_detail(batch_id, db)
 
@@ -501,7 +522,7 @@ def export_batch(batch_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/batches/{batch_id}")
-def delete_batch(batch_id: int, db: Session = Depends(get_db)):
+def delete_batch(batch_id: int, db: Session = Depends(get_db)) -> dict:
     """删除运行批次及其关联数据"""
     try:
         success = crud.delete_run_batch(db, batch_id)

@@ -100,9 +100,16 @@ def list_run_batches(db: Session, project_id: int = None, status: str = None, pa
     offset = (page - 1) * size
     items = query.order_by(db_models.RunBatch.created_at.desc()).offset(offset).limit(size).all()
 
+    # 批量预加载所有批次下的 runs，避免 N+1
+    batch_ids = [b.id for b in items]
+    all_runs = {}
+    if batch_ids:
+        for run in db.query(db_models.TestRun).filter(db_models.TestRun.batch_id.in_(batch_ids)).all():
+            all_runs.setdefault(run.batch_id, []).append(run)
+
     # 动态计算批次状态（plan.md 决策4）
     for batch in items:
-        _compute_batch_status(db, batch)
+        _compute_batch_status(db, batch, preloaded_runs=all_runs.get(batch.id))
 
     return {"total": total, "page": page, "size": size, "items": items}
 
@@ -158,12 +165,14 @@ def update_batch_counters(db: Session, batch_id: int, case_status: str) -> db_mo
     return batch
 
 
-def _compute_batch_status(db: Session, batch) -> None:
+def _compute_batch_status(db: Session, batch, preloaded_runs: list = None) -> None:
     """动态计算批次状态，自动修复卡死的 pending 记录"""
 
     now = tz_now()
 
-    runs = db.query(db_models.TestRun).filter(db_models.TestRun.batch_id == batch.id).all()
+    runs = preloaded_runs
+    if runs is None:
+        runs = db.query(db_models.TestRun).filter(db_models.TestRun.batch_id == batch.id).all()
     if not runs:
         # 超过 30 秒仍无 TestRun 记录 → 后台任务已死
         created = batch.created_at
