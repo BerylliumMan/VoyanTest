@@ -43,7 +43,8 @@ ACTION_TOOL_MAP = {
 class AgentClient:
     """WebSocket-based agent. Receives tool calls from server, executes via local MCP."""
 
-    def __init__(self, server_url: str, agent_name: str = None, headless: bool = False):
+    def __init__(self, server_url: str, agent_name: str = None, headless: bool = False,
+                 username: str = None, password: str = None):
         self.server_url = server_url.rstrip('/')
         self.agent_name = agent_name or f"Agent-{uuid.uuid4().hex[:8]}"
         self.agent_id: Optional[str] = None
@@ -52,6 +53,9 @@ class AgentClient:
         self.running = False
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._headless = headless
+        self._username = username
+        self._password = password
+        self._session_id: Optional[str] = None
 
         self._mcp_process = None
         self._mcp_stdin = None
@@ -70,15 +74,52 @@ class AgentClient:
             logger.warning(f"Failed to detect local IP, using 127.0.0.1: {exc}")
             return "127.0.0.1"
 
+    # ---- auth ----
+
+    async def _login(self):
+        """Authenticate with the server and store session_id cookie."""
+        if not self._username or not self._password:
+            logger.info("No credentials provided — connecting without authentication")
+            return
+
+        import httpx
+        http_url = self.server_url.replace("ws://", "http://").replace("wss://", "https://")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{http_url}/api/auth/login",
+                    json={"username": self._username, "password": self._password},
+                )
+                if resp.status_code != 200:
+                    logger.error(f"Login failed (HTTP {resp.status_code}): {resp.text}")
+                    return
+                for cookie in resp.cookies:
+                    if cookie.name == "session_id":
+                        self._session_id = cookie.value
+                        logger.info(f"Authenticated as {self._username}")
+                        return
+                logger.warning("Login succeeded but no session_id cookie received")
+        except Exception as e:
+            logger.warning(f"Login request failed (server may not require auth): {e}")
+
     # ---- lifecycle ----
 
     async def start(self):
+        # Step 1: authenticate
+        await self._login()
+
         ws_url = self.server_url.replace("http://", "ws://").rstrip('/')
         uri = f"{ws_url}/api/agents/ws/{self.agent_name}"
 
+        # Step 2: connect to WebSocket (with session cookie if available)
+        ws_headers = {}
+        if self._session_id:
+            ws_headers["Cookie"] = f"session_id={self._session_id}"
+
         logger.info(f"Connecting to {uri} ...")
         try:
-            async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as ws:
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=10,
+                                          additional_headers=ws_headers) as ws:
                 self._ws = ws
                 self.running = True
                 await self._send_registration()
@@ -524,10 +565,14 @@ def main():
         name = name_input or None
         headless_input = input("使用无头模式? (y/N): ").strip().lower()
         headless = headless_input in ("y", "yes")
+        username_input = input("用户名 (留空跳过认证): ").strip()
+        password_input = input("密码 (留空跳过认证): ").strip()
         print()
         print(f"地址: {server}")
         print(f"名称: {name or '(自动生成)'}")
         print(f"无头模式: {'是' if headless else '否'}")
+        if username_input:
+            print(f"用户: {username_input}")
         print("-" * 50)
         print("正在连接...")
         print()
@@ -535,12 +580,16 @@ def main():
             server=server,
             name=name,
             headless=headless,
+            username=username_input or None,
+            password=password_input or None,
         )
     else:
         parser = argparse.ArgumentParser(description="VoyanTest Agent Client")
         parser.add_argument("--server", required=not is_frozen, help="Server URL (e.g. ws://192.168.1.100:8002)")
         parser.add_argument("--name", help="Agent name (default: auto-generated)")
         parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+        parser.add_argument("--username", help="Username for server authentication")
+        parser.add_argument("--password", help="Password for server authentication")
         args = parser.parse_args()
 
         # 非打包且无 server 参数时也进入交互模式
@@ -559,10 +608,16 @@ def main():
             args.name = name_input or None
             headless_input = input("使用无头模式? (y/N): ").strip().lower()
             args.headless = headless_input in ("y", "yes")
+            username_input = input("用户名 (留空跳过认证): ").strip()
+            args.username = username_input or None
+            password_input = input("密码 (留空跳过认证): ").strip()
+            args.password = password_input or None
             print()
             print(f"地址: {args.server}")
             print(f"名称: {args.name or '(自动生成)'}")
             print(f"无头模式: {'是' if args.headless else '否'}")
+            if args.username:
+                print(f"用户: {args.username}")
             print("-" * 50)
             print("正在连接...")
             print()
@@ -572,7 +627,8 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     )
 
-    agent = AgentClient(args.server, args.name, headless=args.headless)
+    agent = AgentClient(args.server, args.name, headless=args.headless,
+                        username=args.username, password=args.password)
     try:
         asyncio.run(agent.start())
     except KeyboardInterrupt:
