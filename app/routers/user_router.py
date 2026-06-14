@@ -1,26 +1,24 @@
 """用户管理路由 — 管理员 CRUD 用户."""
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app import db_models, models
 from app.database import get_db
 from app.auth import hash_password, validate_password_strength, require_admin, log_audit
+from app.utils import client_ip
 from fastapi import Request
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-def client_ip(request: Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
-
-
 @router.get("/", response_model=list[models.UserResponse])
-def list_users(db: Session = Depends(get_db), admin=Depends(require_admin)):
+def list_users(db: Session = Depends(get_db), admin=Depends(require_admin)) -> list[models.UserResponse]:
     return db.query(db_models.User).order_by(db_models.User.created_at.desc()).all()
 
 
 @router.post("/", response_model=models.UserResponse)
-def create_user(request: Request, body: models.UserCreate, db: Session = Depends(get_db), admin=Depends(require_admin)):
+def create_user(request: Request, body: models.UserCreate, db: Session = Depends(get_db), admin=Depends(require_admin)) -> models.UserResponse:
     username = body.username.lower().strip()
     existing = db.query(db_models.User).filter(db_models.User.username == username).first()
     if existing:
@@ -42,7 +40,7 @@ def create_user(request: Request, body: models.UserCreate, db: Session = Depends
 
 
 @router.put("/{user_id}", response_model=models.UserResponse)
-def update_user(request: Request, user_id: int, body: models.UserUpdate, db: Session = Depends(get_db), admin=Depends(require_admin)):
+def update_user(request: Request, user_id: int, body: models.UserUpdate, db: Session = Depends(get_db), admin=Depends(require_admin)) -> models.UserResponse:
     user = db.query(db_models.User).filter(db_models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -63,7 +61,7 @@ def update_user(request: Request, user_id: int, body: models.UserUpdate, db: Ses
 
 
 @router.put("/{user_id}/reset-password")
-def reset_password(request: Request, user_id: int, body: models.ResetPasswordRequest, db: Session = Depends(get_db), admin=Depends(require_admin)):
+def reset_password(request: Request, user_id: int, body: models.ResetPasswordRequest, db: Session = Depends(get_db), admin=Depends(require_admin)) -> dict:
     user = db.query(db_models.User).filter(db_models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")

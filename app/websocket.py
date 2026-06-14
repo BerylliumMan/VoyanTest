@@ -121,7 +121,6 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
                         "timestamp": tz_now().isoformat()
                     }))
                 
-                # 处理其他命令...
                 
             except json.JSONDecodeError:
                 logger.warning("收到来自 WebSocket 客户端的非法 JSON 消息")

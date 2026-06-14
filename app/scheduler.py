@@ -271,22 +271,3 @@ async def start_scheduler():
 async def stop_scheduler():
     """停止全局调度器"""
     await scheduler.stop()
-
-
-# 测试代码
-if __name__ == "__main__":
-    # 测试 Cron 表达式
-    test_crons = [
-        "0 9 * * 1-5",  # 工作日早上9点
-        "*/5 * * * *",  # 每5分钟
-        "invalid",      # 无效表达式
-    ]
-    
-    logger.debug("=== Cron 表达式验证 ===")
-    for cron in test_crons:
-        is_valid = validate_cron_expression(cron)
-        logger.debug(f"{cron}: {'✅ 有效' if is_valid else '❌ 无效'}")
-        
-        if is_valid:
-            next_runs = get_next_run_times(cron, 3)
-            logger.debug(f"  接下来3次执行: {[t.strftime('%Y-%m-%d %H:%M') for t in next_runs]}")

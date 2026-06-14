@@ -1,4 +1,6 @@
 """认证路由 — login / logout / me / change-password."""
+from __future__ import annotations
+
 import os
 from datetime import timedelta
 from urllib.parse import quote
@@ -14,17 +16,13 @@ from app.auth import (
     create_session, delete_session, get_current_user, log_audit,
 )
 from app.rate_limiter import limiter
+from app.utils import client_ip
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 settings = get_settings()
 
 
-def client_ip(request: Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
-
-
-def _login_user(request: Request, username: str, password: str, db: Session):
+def _login_user(request: Request, username: str, password: str, db: Session) -> tuple[db_models.User, str]:
     """Core login logic. Returns (User, session_id). Raises HTTPException on failure."""
     username = username.lower().strip()
     user = db.query(db_models.User).filter(db_models.User.username == username).first()
@@ -61,7 +59,7 @@ def _login_user(request: Request, username: str, password: str, db: Session):
 
 @router.post("/login")
 @limiter.limit("5/minute")
-def login(request: Request, body: models.LoginRequest, db: Session = Depends(get_db)):
+def login(request: Request, body: models.LoginRequest, db: Session = Depends(get_db)) -> JSONResponse:
     """JSON 登录."""
     user, sid = _login_user(request, body.username, body.password, db)
     data = models.LoginResponse(id=user.id, username=user.username, role=user.role, must_change_password=user.must_change_password)
@@ -75,7 +73,7 @@ def login(request: Request, body: models.LoginRequest, db: Session = Depends(get
 
 @router.post("/login-form")
 @limiter.limit("5/minute")
-def login_form(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+def login_form(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)) -> RedirectResponse:
     """HTML 表单登录."""
     try:
         user, sid = _login_user(request, username, password, db)
@@ -89,7 +87,7 @@ def login_form(request: Request, username: str = Form(...), password: str = Form
 
 
 @router.post("/logout")
-def logout(request: Request, user=Depends(get_current_user), db: Session = Depends(get_db)):
+def logout(request: Request, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     sid = request.cookies.get("session_id")
     if sid:
         delete_session(db, sid)
@@ -98,12 +96,12 @@ def logout(request: Request, user=Depends(get_current_user), db: Session = Depen
 
 
 @router.get("/me")
-def me(user=Depends(get_current_user)):
+def me(user=Depends(get_current_user)) -> dict:
     return models.LoginResponse(id=user.id, username=user.username, role=user.role, must_change_password=user.must_change_password).model_dump()
 
 
 @router.post("/change-password")
-def change_password(request: Request, body: models.ChangePasswordRequest, user=Depends(get_current_user), db: Session = Depends(get_db)):
+def change_password(request: Request, body: models.ChangePasswordRequest, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     if not verify_password(body.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="旧密码错误")
     ok, msg = validate_password_strength(body.new_password)
