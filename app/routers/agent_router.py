@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List
 from sqlalchemy.orm import Session
@@ -14,7 +16,7 @@ router = APIRouter(
 
 
 @router.get("/agents", response_model=List[models.Agent])
-def list_agents(db: Session = Depends(get_db)):
+def list_agents(db: Session = Depends(get_db)) -> list[models.Agent]:
     """不直接用 DB 的 `status` 字段——它会"粘性 online"（一旦设过永远不重置）。
 
     status 按心跳时间动态算，看两个源头：DB.last_heartbeat（HTTP 路径）
@@ -61,7 +63,7 @@ def list_agents(db: Session = Depends(get_db)):
 
 
 @router.post("/agents/register", response_model=models.Agent)
-def register_agent(agent: models.AgentCreate, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def register_agent(agent: models.AgentCreate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Agent:
     existing = db.query(AgentDB).filter(AgentDB.name == agent.name).first()
     if existing:
         raise HTTPException(status_code=400, detail="Agent name already exists")
@@ -78,7 +80,7 @@ def register_agent(agent: models.AgentCreate, admin=Depends(require_admin), db: 
 
 
 @router.put("/agents/{agent_id}", response_model=models.Agent)
-def update_agent(agent_id: int, agent: models.AgentUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def update_agent(agent_id: int, agent: models.AgentUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Agent:
     db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -91,7 +93,7 @@ def update_agent(agent_id: int, agent: models.AgentUpdate, admin=Depends(require
 
 
 @router.delete("/agents/{agent_id}")
-def delete_agent(agent_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def delete_agent(agent_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -107,7 +109,7 @@ def get_agent_logs(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-):
+) -> models.AgentLogPage:
     db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -118,7 +120,7 @@ def get_agent_logs(
 
 
 @router.post("/agents/{agent_id}/heartbeat", response_model=models.Agent)
-def agent_heartbeat(agent_id: int, db: Session = Depends(get_db)):
+def agent_heartbeat(agent_id: int, db: Session = Depends(get_db)) -> models.Agent:
     db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")

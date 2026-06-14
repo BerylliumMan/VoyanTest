@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio as _asyncio
 import json as _json
 import logging
@@ -37,7 +39,7 @@ async def run_test_case_endpoint(
     background_tasks: BackgroundTasks,
     environment_id: Optional[int] = None,
     db: Session = Depends(get_db),
-):
+) -> dict:
     """运行单个测试用例 - 创建单用例批次"""
     db_case = crud.get_test_case(db, case_id)
     if db_case is None:
@@ -51,7 +53,7 @@ async def run_test_case_endpoint(
     if BrowserPool.is_active(project_id):
         from core.runner import run_test_case_in_browser
 
-        async def _run_with_existing_browser():
+        async def _run_with_existing_browser() -> None:
             mgr = BrowserPool._instances.get(project_id)
             if mgr is not None:
                 base_url_override = None
@@ -73,7 +75,7 @@ async def run_test_case_endpoint(
 
 
 @router.post("/{case_id}/run-client")
-async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None, db: Session = Depends(get_db)):
+async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None, db: Session = Depends(get_db)) -> dict:
     """Run a test case on a connected client agent via WebSocket."""
     from agent.manager import agent_manager
 
@@ -105,7 +107,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
 
     batch = crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
 
-    async def _run():
+    async def _run() -> None:
         start_time = tz_now()
         output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
         _os.makedirs(output_dir, exist_ok=True)
@@ -175,7 +177,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
             logger.info("Some cases failed — browser left open for debugging")
 
     _task = _asyncio.create_task(_run())
-    def _on_run_done(t):
+    def _on_run_done(t) -> None:
         exc = t.exception()
         if exc:
             logger.error(f"Client agent run task failed: {exc}")
@@ -201,7 +203,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
 
 
 @router.post("/batch-run")
-async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> dict:
     """批量运行选中的测试用例 - 创建批次"""
     if not req.case_ids:
         raise HTTPException(status_code=400, detail="No cases selected")
@@ -241,7 +243,7 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
 
 
 @router.post("/batch-run-client")
-async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_db)):
+async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_db)) -> dict:
     """Run multiple test cases sequentially on a connected client agent."""
     from agent.manager import agent_manager
 
@@ -280,7 +282,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
 
     batch = crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos))
 
-    async def _run_batch():
+    async def _run_batch() -> None:
         _all_success = True
         for info in case_infos:
             case_id = info["id"]
@@ -359,7 +361,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                 logger.warning(f"Failed to send shutdown to agent: {exc}")
 
     _task = _asyncio.create_task(_run_batch())
-    def _on_batch_done(t):
+    def _on_batch_done(t) -> None:
         exc = t.exception()
         if exc:
             logger.error(f"Client agent batch-run task failed: {exc}")
@@ -389,7 +391,7 @@ async def run_module_test_cases(
     background_tasks: BackgroundTasks,
     environment_id: Optional[int] = None,
     db: Session = Depends(get_db),
-):
+) -> dict:
     """运行模块下所有测试用例 - 创建批次"""
     db_module = crud.get_module(db, module_id)
     if db_module is None:
@@ -421,7 +423,7 @@ async def run_project_test_cases(
     background_tasks: BackgroundTasks,
     environment_id: Optional[int] = None,
     db: Session = Depends(get_db),
-):
+) -> dict:
     """运行项目下所有测试用例 - 创建批次"""
     db_project = crud.get_project(db, project_id)
     if db_project is None:

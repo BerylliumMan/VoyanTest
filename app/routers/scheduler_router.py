@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List
@@ -19,7 +21,7 @@ router = APIRouter(
 
 
 @router.get("/schedules", response_model=List[models.Schedule])
-def list_schedules(db: Session = Depends(get_db)):
+def list_schedules(db: Session = Depends(get_db)) -> list[models.Schedule]:
     """获取所有定时任务"""
     return db.query(ScheduledTaskDB).order_by(ScheduledTaskDB.created_at.desc()).all()
 
@@ -29,7 +31,7 @@ def create_schedule(
     schedule: models.ScheduleCreate,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> models.Schedule:
     """创建定时任务"""
     try:
         if not croniter.is_valid(schedule.cron_expression):
@@ -64,7 +66,7 @@ def update_schedule(
     schedule: models.ScheduleUpdate,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> models.Schedule:
     """更新定时任务"""
     db_schedule = db.query(ScheduledTaskDB).filter(ScheduledTaskDB.id == schedule_id).first()
     if db_schedule is None:
@@ -97,7 +99,7 @@ def delete_schedule(
     schedule_id: int,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> dict:
     """删除定时任务"""
     db_schedule = db.query(ScheduledTaskDB).filter(ScheduledTaskDB.id == schedule_id).first()
     if db_schedule is None:
@@ -117,7 +119,7 @@ def toggle_schedule(
     schedule_id: int,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> models.Schedule:
     """启用/禁用定时任务"""
     db_schedule = db.query(ScheduledTaskDB).filter(ScheduledTaskDB.id == schedule_id).first()
     if db_schedule is None:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List
@@ -15,7 +17,7 @@ router = APIRouter(
 
 
 @router.get("/projects/{project_id}/environments", response_model=List[models.Environment])
-def list_environments(project_id: int, db: Session = Depends(get_db)):
+def list_environments(project_id: int, db: Session = Depends(get_db)) -> list[models.Environment]:
     """获取项目下的所有环境，若无则自动迁移"""
     db_project = crud.get_project(db, project_id)
     if db_project is None:
@@ -32,7 +34,7 @@ def create_environment(
     env: models.EnvironmentCreate,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> models.Environment:
     """为项目创建新环境"""
     db_project = crud.get_project(db, project_id)
     if db_project is None:
@@ -51,7 +53,7 @@ def update_environment(
     env: models.EnvironmentUpdate,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> models.Environment:
     """更新环境"""
     db_env = crud.get_environment(db, env_id)
     if db_env is None:
@@ -72,7 +74,7 @@ def delete_environment(
     env_id: int,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> dict[str, str] | None:
     """删除环境"""
     db_env = crud.get_environment(db, env_id)
     if db_env is None:
@@ -91,7 +93,7 @@ def set_default_environment(
     env_id: int,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> models.Environment:
     """设为默认环境"""
     db_env = crud.get_environment(db, env_id)
     if db_env is None:

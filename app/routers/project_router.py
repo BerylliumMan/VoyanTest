@@ -1,4 +1,6 @@
 # app/routers/project_router.py
+from __future__ import annotations
+
 import logging
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from typing import List, Optional
@@ -15,7 +17,7 @@ router = APIRouter(
 )
 
 @router.post("/", response_model=models.Project)
-def create_project(project: models.ProjectCreate, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def create_project(project: models.ProjectCreate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Project:
     """
     创建新项目。
     """
@@ -26,14 +28,14 @@ def create_project(project: models.ProjectCreate, admin=Depends(require_admin), 
         raise HTTPException(status_code=400, detail="Could not create project")
 
 @router.get("/", response_model=List[models.Project])
-def get_all_projects(db: Session = Depends(get_db)):
+def get_all_projects(db: Session = Depends(get_db)) -> list[models.Project]:
     """
     检索所有项目。
     """
     return crud.get_all_projects(db)
 
 @router.get("/{project_id}", response_model=models.Project)
-def get_project(project_id: int, db: Session = Depends(get_db)):
+def get_project(project_id: int, db: Session = Depends(get_db)) -> models.Project:
     """
     通过其ID检索单个项目。
     """
@@ -43,7 +45,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     return db_project
 
 @router.put("/{project_id}", response_model=models.Project)
-def update_project(project_id: int, project: models.ProjectUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def update_project(project_id: int, project: models.ProjectUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Project:
     """
     更新项目。
     """
@@ -57,7 +59,7 @@ def update_project(project_id: int, project: models.ProjectUpdate, admin=Depends
         raise HTTPException(status_code=500, detail="Error updating project")
 
 @router.delete("/{project_id}")
-def delete_project(project_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def delete_project(project_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, str] | None:
     """
     删除项目及其所有关联的测试用例和步骤。
     """
@@ -79,7 +81,7 @@ async def run_project_test_cases(
     environment_id: Optional[int] = None,
     admin=Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> dict:
     """
     Trigger sequential batch run of all test cases in a project.
     Uses a single browser instance; cases execute one at a time.
@@ -102,7 +104,7 @@ async def run_project_test_cases(
 
 
 @router.get("/{project_id}/testcases", response_model=List[models.TestCase])
-def get_project_test_cases(project_id: int, db: Session = Depends(get_db)):
+def get_project_test_cases(project_id: int, db: Session = Depends(get_db)) -> list[models.TestCase]:
     """
     检索特定项目的所有测试用例。
     """

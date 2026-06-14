@@ -1,4 +1,6 @@
 """API router for AI model configuration and prompt templates."""
+from __future__ import annotations
+
 import logging
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,7 +48,7 @@ class AIConfigResponse(BaseModel):
 # --- Routes ---
 
 @router.get("/ai", response_model=AIConfigResponse)
-async def get_ai_config(db: Session = Depends(get_db), user = Depends(require_admin)):
+async def get_ai_config(db: Session = Depends(get_db), user = Depends(require_admin)) -> AIConfigResponse:
     row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
     if not row:
         return AIConfigResponse(
@@ -68,7 +70,7 @@ async def update_ai_config(
     body: AIConfigRequest,
     db: Session = Depends(get_db),
     user = Depends(require_admin),
-):
+) -> AIConfigResponse:
     row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
     if not row:
         row = db_models.AIConfig(id=1)
@@ -105,7 +107,7 @@ async def test_ai_config(
     body: AIConfigTestRequest,
     db: Session = Depends(get_db),
     user = Depends(require_admin),
-):
+) -> dict:
     """测试 AI 配置是否可用 — 发送一条简单请求验证连接。"""
     model = body.model
     api_key = body.api_key
@@ -163,7 +165,7 @@ class PromptTemplateUpdate(BaseModel):
 
 
 @router.get("/prompts")
-async def list_prompts(db: Session = Depends(get_db), user=Depends(require_admin)):
+async def list_prompts(db: Session = Depends(get_db), user=Depends(require_admin)) -> list[PromptTemplateResponse]:
     """列出所有提示词模板（含默认内容）。"""
     rows = db.query(db_models.PromptTemplate).all()
     defaults = get_default_prompts()
@@ -192,7 +194,7 @@ async def list_prompts(db: Session = Depends(get_db), user=Depends(require_admin
 
 
 @router.get("/prompts/{key}")
-async def get_prompt(key: str, db: Session = Depends(get_db), user=Depends(require_admin)):
+async def get_prompt(key: str, db: Session = Depends(get_db), user=Depends(require_admin)) -> PromptTemplateResponse:
     """获取单个提示词模板。"""
     defaults = get_default_prompts()
     if key not in defaults:
@@ -225,7 +227,7 @@ async def update_prompt(
     body: PromptTemplateUpdate,
     db: Session = Depends(get_db),
     user=Depends(require_admin),
-):
+) -> PromptTemplateResponse:
     """保存（覆盖）提示词模板内容。"""
     defaults = get_default_prompts()
     if key not in defaults:
@@ -261,7 +263,7 @@ async def restore_prompt(
     key: str,
     db: Session = Depends(get_db),
     user=Depends(require_admin),
-):
+) -> PromptTemplateResponse:
     """恢复提示词模板为默认内容。"""
     defaults = get_default_prompts()
     if key not in defaults:

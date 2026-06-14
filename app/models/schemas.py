@@ -1,4 +1,6 @@
-# app/models.py
+# app/models/schemas.py
+# Pydantic request/response schemas (moved verbatim from the former app/models.py
+# to allow app/models/ to exist as a package alongside the SQLAlchemy ORM models).
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime
@@ -315,4 +317,3 @@ class AuditLogPage(BaseModel):
     total: int
     page: int
     size: int
-

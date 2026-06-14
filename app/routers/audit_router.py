@@ -1,4 +1,6 @@
 """审计日志路由 — 查看审计日志."""
+from __future__ import annotations
+
 import logging
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
@@ -26,7 +28,7 @@ def list_audit_logs(
     action: str = Query(None),
     date_from: str = Query(None),
     date_to: str = Query(None),
-):
+) -> models.AuditLogPage:
     q = db.query(db_models.AuditLog)
     if user_id is not None:
         q = q.filter(db_models.AuditLog.user_id == user_id)

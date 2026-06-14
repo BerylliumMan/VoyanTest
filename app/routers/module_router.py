@@ -3,6 +3,8 @@
 提供模块的增删改查、树形结构、层级管理等功能
 """
 
+from __future__ import annotations
+
 from fastapi import APIRouter, HTTPException, Depends, Response
 from sqlalchemy.orm import Session
 from typing import List
@@ -18,7 +20,7 @@ router = APIRouter(
 
 
 @router.get("/projects/{project_id}/modules", response_model=List[models.Module])
-def list_modules(project_id: int, db: Session = Depends(get_db)):
+def list_modules(project_id: int, db: Session = Depends(get_db)) -> list[models.Module]:
     """获取项目的所有模块（扁平列表）"""
     project = db.query(db_models.Project).filter(db_models.Project.id == project_id).first()
     if not project:
@@ -28,14 +30,14 @@ def list_modules(project_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/projects/{project_id}/modules/tree")
-def get_module_tree(project_id: int, db: Session = Depends(get_db)):
+def get_module_tree(project_id: int, db: Session = Depends(get_db)) -> list:
     """获取项目的模块树形结构"""
     tree = crud.get_module_tree(db, project_id)
     return tree
 
 
 @router.get("/modules/{module_id}", response_model=models.Module)
-def get_module(module_id: int, db: Session = Depends(get_db)):
+def get_module(module_id: int, db: Session = Depends(get_db)) -> models.Module:
     """获取单个模块详情"""
     db_module = crud.get_module(db, module_id)
     if not db_module:
@@ -44,7 +46,7 @@ def get_module(module_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/modules/{module_id}/descendants")
-def get_module_descendants(module_id: int, db: Session = Depends(get_db)):
+def get_module_descendants(module_id: int, db: Session = Depends(get_db)) -> dict:
     """获取模块及所有下级模块 ID 列表（递归）"""
     module = db.query(db_models.Module).filter(db_models.Module.id == module_id).first()
     if not module:
@@ -58,7 +60,7 @@ def create_module(
     project_id: int,
     module: models.ModuleCreate,
     db: Session = Depends(get_db)
-):
+) -> models.Module:
     """创建模块"""
     # 验证项目存在
     project = db.query(db_models.Project).filter(db_models.Project.id == project_id).first()
@@ -87,7 +89,7 @@ def update_module(
     module: models.ModuleUpdate,
     admin=Depends(require_admin),
     db: Session = Depends(get_db)
-):
+) -> models.Module:
     """更新模块"""
     # 验证 parent_id 不形成循环引用
     if module.parent_id is not None:
@@ -101,7 +103,7 @@ def update_module(
 
 
 @router.delete("/modules/{module_id}", status_code=204)
-def delete_module(module_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def delete_module(module_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)) -> Response:
     """删除模块（含删除保护）"""
     try:
         result = crud.delete_module(db, module_id)

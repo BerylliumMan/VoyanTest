@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,7 +26,7 @@ class BatchCopyRequest(BaseModel):
     module_id: Optional[int] = None
 
 
-def _validate_target_project(db: Session, project_id: int, module_id: Optional[int] = None):
+def _validate_target_project(db: Session, project_id: int, module_id: Optional[int] = None) -> None:
     """验证目标项目和模块是否存在，否则抛出 404/400。"""
     project = crud.get_project(db, project_id)
     if not project:
@@ -38,7 +40,7 @@ def _validate_target_project(db: Session, project_id: int, module_id: Optional[i
 
 
 @router.post("/batch-move")
-def batch_move_cases(req: BatchMoveRequest, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def batch_move_cases(req: BatchMoveRequest, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """批量移动测试用例到指定项目/模块"""
     _validate_target_project(db, req.project_id, req.module_id)
     moved = 0
@@ -57,7 +59,7 @@ def batch_move_cases(req: BatchMoveRequest, admin=Depends(require_admin), db: Se
 
 
 @router.post("/batch-copy")
-def batch_copy_cases(req: BatchCopyRequest, admin=Depends(require_admin), db: Session = Depends(get_db)):
+def batch_copy_cases(req: BatchCopyRequest, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """批量复制测试用例到指定项目/模块"""
     _validate_target_project(db, req.project_id, req.module_id)
     copied = 0

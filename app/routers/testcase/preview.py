@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,7 +33,7 @@ class PreviewPlanResponse(BaseModel):
 
 
 @router.post("/preview-plan", response_model=PreviewPlanResponse)
-def preview_plan(req: PreviewPlanRequest, db: Session = Depends(get_db)):
+def preview_plan(req: PreviewPlanRequest, db: Session = Depends(get_db)) -> PreviewPlanResponse:
     """
     预览 AI Agent 对测试用例的执行计划。
     返回每步的描述和预计操作。
