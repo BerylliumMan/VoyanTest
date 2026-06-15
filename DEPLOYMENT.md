@@ -157,10 +157,19 @@ VoyanTest/
 │   ├── main.py                 # 入口（uvicorn 启动）
 │   ├── config.py               # 统一配置（pydantic-settings）
 │   ├── database.py             # 数据库连接与会话管理
-│   ├── db_models.py            # SQLAlchemy ORM 模型
 │   ├── auth.py                 # 认证逻辑（密码哈希、Session 管理）
-│   ├── websocket.py            # WebSocket 实时日志推送
+│   ├── models/                 # 领域模型（7 个模块，替代 db_models.py）
+│   │   ├── agent.py
+│   │   ├── auth.py
+│   │   ├── batch.py
+│   │   ├── config.py
+│   │   ├── gen.py
+│   │   ├── project.py
+│   │   ├── schemas.py
+│   │   └── testcase.py
+│   ├── gen/                    # AI 生成引擎（orchestrator / analyzer / feature_extractor 等）
 │   ├── routers/                # API 路由
+│   │   └── gen/                # AI 生成子路由（upload / history / preview / import）
 │   ├── static/                 # 前端构建产物
 │   └── templates/              # SPA 入口页面
 ├── frontend/                   # React 前端源码
@@ -169,7 +178,8 @@ VoyanTest/
 │   ├── llm_wrapper.py          # LLM 适配器
 │   ├── playwright_manager.py   # Playwright MCP 管理
 │   └── step_executor.py        # 步骤执行器
-├── agent/                      # 分布式测试 Agent
+├── agent/                      # 分布式测试 Agent（含编译版 exe）
+│   └── dist/                   # Windows 编译版可执行文件
 ├── tests/                      # 测试（unit / contract / e2e）
 ├── scripts/                    # 工具脚本
 ├── reports/                    # 测试报告和截图

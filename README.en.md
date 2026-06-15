@@ -114,11 +114,15 @@ flowchart LR
 
 ```
 VoyanTest/
-├── app/          # FastAPI backend (routers / models / auth)
+├── app/          # FastAPI backend
+│   ├── gen/      # AI generation engine (orchestrator / analyzer / feature_extractor)
+│   ├── models/   # Domain models (agent / auth / batch / config / gen / project / testcase)
+│   └── routers/  # API routes (including gen/ sub-routes)
 ├── frontend/     # React frontend source
 ├── core/         # Execution engine (runner / llm_wrapper / step_executor)
-├── agent/        # Distributed agent client
+├── agent/        # Distributed agent client (with pre-built exe)
 ├── reports/      # Test reports & screenshots
+├── docs/         # Documentation
 └── tests/        # Unit tests
 ```
 

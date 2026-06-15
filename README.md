@@ -130,7 +130,10 @@ flowchart LR
 
 ```
 VoyanTest/
-├── app/              # FastAPI 后端（routers / models / auth）
+├── app/              # FastAPI 后端
+│   ├── gen/          # AI 生成引擎（orchestrator / analyzer / feature_extractor）
+│   ├── models/       # 领域模型（agent / auth / batch / config / gen / project / testcase）
+│   └── routers/      # API 路由（含 gen/upload、gen/history 等子路由）
 ├── frontend/         # React 前端源码
 ├── core/             # 执行引擎（runner / llm_wrapper / step_executor）
 ├── agent/            # 分布式 Agent 客户端
