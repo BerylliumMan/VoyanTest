@@ -4,11 +4,31 @@
 生成备选选择器列表，按置信度降序排列。
 """
 
+import asyncio
 import json as _json
 import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+# 模块级 LLM 客户端缓存：整个进程生命周期内只创建一次
+_cached_client = None
+
+
+async def _get_cached_client():
+    """Lazy-init 缓存的 AsyncOpenAI 客户端。"""
+    global _cached_client
+    if _cached_client is not None:
+        return _cached_client
+    try:
+        from core.llm_wrapper import create_openai_client
+
+        _cached_client = create_openai_client()
+    except Exception as exc:
+        logger.warning(f"Failed to create LLM client: {exc}")
+        return None
+    return _cached_client
+
 
 _HEALING_PROMPT = """你是 Web 自动化测试专家。前一个步骤的元素定位失败了。
 请分析当前页面的 DOM 快照，找出最可能的目标元素，返回新的选择器。
@@ -76,9 +96,10 @@ async def heal_selector(
 
     # 3. 调用 LLM
     try:
-        from core.llm_wrapper import create_openai_client
-
-        client = create_openai_client()
+        client = await _get_cached_client()
+        if client is None:
+            logger.warning("LLM client unavailable for healing")
+            return []
         response = await client.chat.completions.create(
             model=os.getenv("LLM_MODEL", "qwen-plus"),
             messages=[
@@ -124,6 +145,7 @@ async def try_heal_and_retry(
     step_description: str,
     error: str = "",
     max_candidates: int = 3,
+    healing_timeout: float = 10.0,
 ) -> str | None:
     """尝试修复选择器，逐个测试候选，返回第一个成功的选择器。
 
@@ -134,35 +156,38 @@ async def try_heal_and_retry(
         step_description: 步骤的自然语言描述
         error: 原始错误消息
         max_candidates: 最多测试的候选数
+        healing_timeout: 整体自愈超时时间（秒），默认 10 秒
 
     Returns:
-        成功的选择器字符串，或 None（全部失败）
+        成功的选择器字符串，或 None（全部失败或超时）
     """
-    original_selector = step_dict.get("description", "") or step_description
 
-    # 获取候选
-    candidates = await heal_selector(
-        mcp_manager,
-        original_selector=original_selector,
-        step_description=step_description,
-        error=error,
-    )
+    async def _do_heal():
+        original_selector = step_dict.get("description", "") or step_description
 
-    if not candidates:
-        logger.info("Self-healing: LLM 未返回候选选择器")
-        return None
-
-    # 逐个尝试
-    for candidate in candidates[:max_candidates]:
-        selector = candidate["selector"]
-        logger.info(
-            f"Self-healing: 尝试候选选择器 [{candidate['confidence']:.0%}] {selector} "
-            f"(理由: {candidate['reason'][:60]})"
+        # 获取候选
+        candidates = await heal_selector(
+            mcp_manager,
+            original_selector=original_selector,
+            step_description=step_description,
+            error=error,
         )
 
-        try:
-            # 简单测试：用 browser_evaluate 检查元素是否存在
-            test_js = f"""
+        if not candidates:
+            logger.info("Self-healing: LLM 未返回候选选择器")
+            return None
+
+        # 逐个尝试
+        for candidate in candidates[:max_candidates]:
+            selector = candidate["selector"]
+            logger.info(
+                f"Self-healing: 尝试候选选择器 [{candidate['confidence']:.0%}] {selector} "
+                f"(理由: {candidate['reason'][:60]})"
+            )
+
+            try:
+                # 简单测试：用 browser_evaluate 检查元素是否存在
+                test_js = f"""
 (function() {{
     try {{
         // 对于 text= 选择器，搜索 DOM 文本
@@ -178,17 +203,23 @@ async def try_heal_and_retry(
     }}
 }})()
 """
-            eval_result = await mcp_manager.call_tool(
-                "browser_evaluate",
-                {"expression": test_js},
-            )
+                eval_result = await mcp_manager.call_tool(
+                    "browser_evaluate",
+                    {"expression": test_js},
+                )
 
-            if eval_result.get("success") and "found" in eval_result.get("text", ""):
-                logger.info(f"Self-healing: ✅ 选择器有效: {selector}")
-                return selector
-            else:
-                logger.info(f"Self-healing: ❌ 选择器无效: {selector}")
-        except Exception as exc:
-            logger.info(f"Self-healing: ❌ 选择器测试异常: {selector} — {exc}")
+                if eval_result.get("success") and "found" in eval_result.get("text", ""):
+                    logger.info(f"Self-healing: ✅ 选择器有效: {selector}")
+                    return selector
+                else:
+                    logger.info(f"Self-healing: ❌ 选择器无效: {selector}")
+            except Exception as exc:
+                logger.info(f"Self-healing: ❌ 选择器测试异常: {selector} — {exc}")
 
-    return None
+        return None
+
+    try:
+        return await asyncio.wait_for(_do_heal(), timeout=healing_timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"Self-healing timed out after {healing_timeout}s")
+        return None

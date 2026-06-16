@@ -80,6 +80,24 @@ def _validate_nav_url(url: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# 自愈错误分类 — 只有定位类错误才触发 AI 自愈选择器
+# ---------------------------------------------------------------------------
+
+_HEALABLE_ERROR_PATTERNS = [
+    "element not found", "no element", "selector", "locator",
+    "waiting for", "timeout exceeded", "could not find", "unable to find",
+]
+
+
+def _is_healable_error(error_msg: str) -> bool:
+    """判断错误是否由选择器定位失败引起，应该尝试 AI 自愈。"""
+    if not error_msg:
+        return False
+    error_lower = error_msg.lower()
+    return any(p in error_lower for p in _HEALABLE_ERROR_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
 # Auth cookie 注入
 # ---------------------------------------------------------------------------
 
@@ -488,8 +506,9 @@ async def run_test_case_in_browser(
                         f"{': ' + result.get('error', '') if result.get('error') else ''}"
                     )
 
-                # ---- 自愈选择器：仅在首次失败时尝试 ----
-                if attempt == 0 and not step_success:
+                # ---- 自愈选择器：仅在首次失败且错误为定位类时尝试 ----
+                error_msg = (result.get('error') or '').strip()
+                if attempt == 0 and not step_success and _is_healable_error(error_msg):
                     from core.self_healing import try_heal_and_retry
 
                     healed = await try_heal_and_retry(
@@ -514,6 +533,8 @@ async def run_test_case_in_browser(
                             except Exception as db_exc:
                                 logger.warning(f"保存自愈选择器失败: {db_exc}")
                         continue  # 用新选择器重试
+                    elif attempt == 0 and not step_success and error_msg:
+                        logger.debug(f"  跳过自愈（非定位错误）: {error_msg[:80]}")
 
             # ==============================================================
             # 步骤最终失败处理
