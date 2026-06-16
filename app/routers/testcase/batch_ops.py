@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import crud
+from app import models
 from app.auth import require_admin
 from app.crud.testcase import get_next_project_case_number
 from app.database import get_db
@@ -68,13 +69,13 @@ def batch_copy_cases(req: BatchCopyRequest, admin=Depends(require_admin), db: Se
         if not original:
             continue
         steps_data = [
-            crud.models.TestStepCreatePayload(
+            models.TestStepCreatePayload(
                 step_order=s.step_order,
                 description=s.description,
             )
             for s in original.steps
         ]
-        new_case = crud.models.TestCaseCreate(
+        new_case = models.TestCaseCreate(
             project_id=req.project_id,
             module_id=req.module_id,
             name=original.name + " (副本)",

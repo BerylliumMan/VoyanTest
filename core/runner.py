@@ -589,8 +589,8 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
         )
         try:
             await mcp_manager.stop()
-        except Exception as exc:
-            logger.info(f"MCP stop after start failure: {exc}")
+        except Exception as stop_exc:
+            logger.info(f"MCP stop after start failure: {stop_exc}")
         return {"case_id": case_id, "status": "failed", "error": str(exc)}
 
     try:
