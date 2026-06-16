@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { useHistory } from 'react-router-dom';
 import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox } from '@arco-design/web-react';
-import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill } from '@arco-design/web-react/icon';
+import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
-import { TestCase, Module, Project, Environment } from './types';
+import { TestCase, Module, Project, Environment, Step } from './types';
 import useTestCaseData from './hooks/useTestCaseData';
 import ModuleTree from './components/ModuleTree';
 import TestCaseTable from './components/TestCaseTable';
@@ -14,13 +15,14 @@ import EnvironmentManager from './components/EnvironmentManager';
 
 const TestCases: React.FC = () => {
   const t = useLocale();
+  const history = useHistory();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState<number | null>(null);
   const [visible, setVisible] = useState(false);
   const [editingCase, setEditingCase] = useState<TestCase | null>(null);
   const [form] = Form.useForm();
-  const [steps, setSteps] = useState<{ step_order: number; description: string; parsed_result?: string }[]>([]);
+  const [steps, setSteps] = useState<Step[]>([]);
   const [moduleVisible, setModuleVisible] = useState(false);
   const [moduleForm] = Form.useForm();
   const [editingModule, setEditingModule] = useState<Module | null>(null);
@@ -83,13 +85,14 @@ const TestCases: React.FC = () => {
   const handleEnvSubmit = async () => { const values = await envForm.validate(); try { if (editingEnv) { await axios.put(`/api/environments/${editingEnv.id}`, values); Message.success(t['environment.update_success']); } else { await axios.post(`/api/projects/${selectedProject}/environments`, values); Message.success(t['environment.create_success']); } setEnvFormVisible(false); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleDeleteEnv = async (id: number) => { try { await axios.delete(`/api/environments/${id}`); Message.success(t['environment.delete_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleSetDefaultEnv = async (id: number) => { try { await axios.put(`/api/environments/${id}/default`); Message.success(t['environment.set_default_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
-  const openCreate = () => { setEditingCase(null); form.resetFields(); if (selectedModuleId) form.setFieldsValue({ module_id: selectedModuleId }); setSteps([{ step_order: 1, description: '', parsed_result: '' }]); setVisible(true); };
-  const openEdit = (tc: TestCase) => { setEditingCase(tc); form.setFieldsValue({ name: tc.name, description: tc.description, module_id: tc.module_id }); setSteps(tc.steps && tc.steps.length ? tc.steps.map((s, i) => ({ step_order: i + 1, description: s.description, parsed_result: s.parsed_result || '' })) : [{ step_order: 1, description: '', parsed_result: '' }]); setVisible(true); };
-  const handleSubmit = async () => { try { const values = await form.validate(); const payload = { project_id: selectedProject, module_id: values.module_id || null, name: values.name, description: values.description, steps: steps.filter((s) => s.description.trim()) }; if (editingCase) { await axios.put(`/api/testcases/${editingCase.id}`, payload); Message.success(t['update.success']); } else { await axios.post('/api/testcases/', payload); Message.success(t['create.success']); } setVisible(false); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; if (err.response?.data?.detail) Message.error(err.response.data.detail); } };
+  const openCreate = () => { setEditingCase(null); form.resetFields(); if (selectedModuleId) form.setFieldsValue({ module_id: selectedModuleId }); setSteps([{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0 }]); setVisible(true); };
+  const openEdit = (tc: TestCase) => { setEditingCase(tc); form.setFieldsValue({ name: tc.name, description: tc.description, module_id: tc.module_id }); setSteps(tc.steps && tc.steps.length ? tc.steps.map((s, i) => ({ step_order: i + 1, description: s.description, parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0 })) : [{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0 }]); setVisible(true); };
+  const handleSubmit = async () => { try { const values = await form.validate(); const payload = { project_id: selectedProject, module_id: values.module_id || null, name: values.name, description: values.description, steps: steps.filter((s) => s.description.trim()).map((s) => ({ step_order: s.step_order, description: s.description, parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0 })) }; if (editingCase) { await axios.put(`/api/testcases/${editingCase.id}`, payload); Message.success(t['update.success']); } else { await axios.post('/api/testcases/', payload); Message.success(t['create.success']); } setVisible(false); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; if (err.response?.data?.detail) Message.error(err.response.data.detail); } };
   const handleDelete = async (id: number) => { try { await axios.delete(`/api/testcases/${id}`); Message.success(t['deleted']); fetchData(); } catch (err: unknown) { const e = err as { response?: { data?: { detail?: string } } }; Message.error(e?.response?.data?.detail || '操作失败'); } };
   const handleBatchDelete = async () => { if (selectedRowKeys.length === 0) return; try { await Promise.all(selectedRowKeys.map((id) => axios.delete(`/api/testcases/${id}`))); Message.success(t['delete.batch'].replace('{count}', String(selectedRowKeys.length))); setSelectedRowKeys([]); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleRun = async (id: number) => { try { const params: { environment_id?: number } = {}; if (selectedEnvironment) params.environment_id = selectedEnvironment; await axios.post(`/api/testcases/${id}/run`, null, { params }); Message.success(t['run.triggered']); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
   const handleRunClient = async (id: number) => { try { const params: { agent_name?: string } = {}; if (selectedAgent) params.agent_name = selectedAgent; const res = await axios.post(`/api/testcases/${id}/run-client`, null, { params }); Message.success(t['client.run.triggered'].replace('{agent}', res.data.agent || 'agent')); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string }; agent?: string } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
+  const handleRunDebug = async (id: number) => { try { const res = await axios.post(`/api/test-cases/${id}/run-debug`); const { run_id } = res.data; if (run_id) { Message.success('调试运行已触发'); history.push(`/run-debug?runId=${run_id}`); } else { Message.error('未获取到运行ID'); } } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || '调试运行失败'); } };
   const openBatchModal = (action: 'move' | 'copy') => { setBatchAction(action); setTargetProjectId(null); setTargetModuleId(null); setTargetModules([]); setBatchModalVisible(true); };
   const handleBatchTargetProjectChange = (val: number) => { setTargetProjectId(val); setTargetModuleId(null); axios.get(`/api/projects/${val}/modules`).then((res) => { setTargetModules(res.data || []); }).catch((err) => Message.error(err?.response?.data?.detail || '操作失败')); };
   const handleBatchAction = async () => { if (!targetProjectId) { Message.error(t['select.project']); return; } setBatchSubmitting(true); try { const url = batchAction === 'move' ? '/api/testcases/batch-move' : '/api/testcases/batch-copy'; await axios.post(url, { case_ids: selectedRowKeys, project_id: targetProjectId, module_id: targetModuleId }); Message.success(batchAction === 'move' ? t['update.success'] : t['create.success']); setBatchModalVisible(false); setSelectedRowKeys([]); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } finally { setBatchSubmitting(false); } };
@@ -165,13 +168,14 @@ const TestCases: React.FC = () => {
       title: t['description'], dataIndex: 'description', ellipsis: true,
     },
     {
-      title: t['actions'], width: 420, render: (_: unknown, record: TestCase) => (
+      title: t['actions'], width: 480, render: (_: unknown, record: TestCase) => (
         <Space>
           <Button type="primary" size="small" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
           <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} style={{ width: 95 }} size="mini">
             {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
           </Select>
           <Button type="outline" size="small" icon={<IconPlayArrow />} onClick={() => handleRunClient(record.id)}>{t['client']}</Button>
+          <Button type="outline" size="small" icon={<IconBug />} onClick={() => handleRunDebug(record.id)}>调试运行</Button>
           <Button
             type="text"
             size="small"

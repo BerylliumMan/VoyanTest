@@ -1,8 +1,9 @@
 """
 WebSocket 模块
-支持实时日志推送
+支持实时日志推送和控制消息（交互式调试暂停/恢复）
 """
 
+import asyncio
 import json
 import logging
 from typing import Dict, Set
@@ -85,6 +86,12 @@ class LogWebSocketManager:
 # 全局管理器实例
 log_manager = LogWebSocketManager()
 
+# 交互式调试：暂停/恢复机制
+# per-run_id asyncio.Event 用于阻塞 runner 等待用户决策
+_pause_events: dict[int, asyncio.Event] = {}
+# per-run_id 用户决策存储 {decision: str, new_description: str|None}
+_pause_decisions: dict[int, dict] = {}
+
 
 async def websocket_logs(websocket: WebSocket, run_id: int):
     from app.database import SessionLocal
@@ -120,6 +127,21 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
                         "type": "pong",
                         "timestamp": tz_now().isoformat()
                     }))
+                
+                # 处理交互式调试控制命令
+                elif message.get('type') == 'control':
+                    action = message.get('action', '')
+                    if action in ('retry', 'skip', 'abort'):
+                        LogBroadcaster.set_pause_decision(run_id, action)
+                        await LogBroadcaster.log_execution_resumed(
+                            run_id, step_id=None, decision=action)
+                    elif action == 'edit':
+                        new_desc = message.get('new_description', '')
+                        LogBroadcaster.set_pause_decision(
+                            run_id, 'edit', new_description=new_desc)
+                        await LogBroadcaster.log_execution_resumed(
+                            run_id, step_id=None, decision='edit',
+                            new_description=new_desc)
                 
                 
             except json.JSONDecodeError:
@@ -211,6 +233,56 @@ class LogBroadcaster:
             "total_duration": total_duration,
             "message": f"测试执行完成，状态: {status}，总耗时: {total_duration:.2f}s"
         })
+
+    @staticmethod
+    async def log_execution_paused(run_id: int, step_id: int, step_description: str,
+                                   reason: str, screenshot_path: str = None,
+                                   options: list = None):
+        """通知前端执行已暂停，等待用户决策"""
+        if options is None:
+            options = ["retry", "skip", "abort"]
+        await log_manager.send_message(run_id, {
+            "type": "execution_paused",
+            "timestamp": tz_now().isoformat(),
+            "run_id": run_id,
+            "step_id": step_id,
+            "step_description": step_description,
+            "reason": reason,
+            "screenshot_path": screenshot_path,
+            "options": options,
+            "message": f"执行暂停: {step_description}"
+        })
+
+    @staticmethod
+    async def log_execution_resumed(run_id: int, step_id: int = None,
+                                    decision: str = "", new_description: str = None):
+        """通知前端执行已恢复"""
+        await log_manager.send_message(run_id, {
+            "type": "execution_resumed",
+            "timestamp": tz_now().isoformat(),
+            "run_id": run_id,
+            "step_id": step_id,
+            "decision": decision,
+            "new_description": new_description,
+            "message": f"执行恢复，决策: {decision}"
+        })
+
+    @staticmethod
+    def get_pause_event(run_id: int) -> asyncio.Event:
+        """获取或创建 per-run_id 暂停事件"""
+        if run_id not in _pause_events:
+            _pause_events[run_id] = asyncio.Event()
+        return _pause_events[run_id]
+
+    @staticmethod
+    def set_pause_decision(run_id: int, decision: str, new_description: str = None):
+        """存储用户决策并触发暂停事件"""
+        _pause_decisions[run_id] = {
+            "decision": decision,
+            "new_description": new_description,
+        }
+        if run_id in _pause_events:
+            _pause_events[run_id].set()
 
 
 # 便捷函数

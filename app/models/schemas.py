@@ -29,11 +29,14 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=8)
     role: str = "tester"
+    project_ids: Optional[List[int]] = None
+    project_ids: Optional[List[int]] = None
 
 
 class UserUpdate(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
+    project_ids: Optional[List[int]] = None
 
 
 class UserResponse(BaseModel):
@@ -41,6 +44,7 @@ class UserResponse(BaseModel):
     username: str
     role: str
     status: str
+    project_ids: Optional[List[int]] = None
     created_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
 
@@ -73,6 +77,10 @@ class TestStepBase(BaseModel):
     step_order: int = Field(..., gt=0)
     description: str = Field(..., min_length=1, max_length=2000)
     parsed_result: Optional[str] = None
+    retry_max: int = Field(default=0, ge=0)
+    retry_delay: float = Field(default=1.0, ge=0.0)
+    assertions: list[dict] = Field(default_factory=list)
+    healed_selector: Optional[str] = None
 
 class ModuleBase(BaseModel):
     project_id: int
@@ -95,10 +103,14 @@ class ProjectUpdate(ProjectBase):
     pass
 
 class TestStepUpdate(BaseModel):
-    id: Optional[int] = None # ID is present for existing steps
+    id: Optional[int] = None
     step_order: int = Field(..., gt=0)
     description: str = Field(..., min_length=1, max_length=2000)
     parsed_result: Optional[str] = None
+    retry_max: Optional[int] = None
+    retry_delay: Optional[float] = None
+    assertions: Optional[list[dict]] = None
+    healed_selector: Optional[str] = None
 
 class TestCaseUpdate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -111,6 +123,9 @@ class TestStepCreatePayload(BaseModel):
     step_order: int = Field(..., gt=0)
     description: str = Field(..., min_length=1, max_length=2000)
     parsed_result: Optional[str] = None
+    retry_max: int = Field(default=0, ge=0)
+    retry_delay: float = Field(default=1.0, ge=0.0)
+    assertions: list[dict] = Field(default_factory=list)
 
 
 class TestCaseCreate(TestCaseBase):

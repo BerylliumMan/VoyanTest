@@ -88,23 +88,69 @@
   display: flex;
   gap: 8px;
   margin-bottom: 8px;
+  align-items: flex-start;
+}
+
+.step-fields {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .drag-handle {
   cursor: grab;
   padding: 0 4px;
   min-width: 24px;
+  margin-top: 4px;
 }
 
 .step-number-tag {
   width: 32px;
   text-align: center;
+  margin-top: 4px;
 }
 
 .step-input {
   flex: 1;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+/* retry-collapse 高级设置折叠面板 */
+.retry-collapse {
+  margin-top: 2px;
+}
+
+.retry-collapse :global(.arco-collapse-item-header) {
+  font-size: 12px;
+  color: var(--color-text-3);
+  padding: 4px 8px;
+  line-height: 1.5;
+}
+
+.retry-collapse :global(.arco-collapse-item-content) {
+  padding: 4px 8px 8px;
+}
+
+.retry-fields {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.retry-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.retry-label {
+  font-size: 12px;
+  color: var(--color-text-3);
+  white-space: nowrap;
+  min-width: 80px;
 }
 
 /* EnvironmentManager */

@@ -5,8 +5,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from .. import crud, models
-from app.auth import require_admin
+from .. import crud, models, db_models
+from app.auth import require_admin, get_current_user, get_user_project_filter
 from ..database import get_db
 
 logger = logging.getLogger(__name__)
@@ -28,17 +28,25 @@ def create_project(project: models.ProjectCreate, admin=Depends(require_admin), 
         raise HTTPException(status_code=400, detail="Could not create project")
 
 @router.get("/", response_model=List[models.Project])
-def get_all_projects(db: Session = Depends(get_db)) -> list[models.Project]:
+def get_all_projects(user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[models.Project]:
     """
-    检索所有项目。
+    检索所有项目（非管理员仅返回授权项目）。
     """
-    return crud.get_all_projects(db)
+    allowed_ids = get_user_project_filter(user)
+    query = db.query(db_models.Project)
+    if allowed_ids is not None:  # tester: 过滤
+        query = query.filter(db_models.Project.id.in_(allowed_ids))
+    return query.order_by(db_models.Project.created_at.desc()).all()
 
 @router.get("/{project_id}", response_model=models.Project)
-def get_project(project_id: int, db: Session = Depends(get_db)) -> models.Project:
+def get_project(project_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> models.Project:
     """
     通过其ID检索单个项目。
     """
+    # 验证项目访问权限
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
     db_project = crud.get_project(db, project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")

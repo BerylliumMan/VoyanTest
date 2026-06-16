@@ -28,9 +28,9 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
 }) => {
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
 
-  const addStep = () => setSteps([...steps, { step_order: steps.length + 1, description: '', parsed_result: '' }]);
+  const addStep = () => setSteps([...steps, { step_order: steps.length + 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0 }]);
   const removeStep = (idx: number) => setSteps(steps.filter((_, i) => i !== idx).map((s, i) => ({ ...s, step_order: i + 1 })));
-  const updateStep = (idx: number, field: string, value: string) => {
+  const updateStep = (idx: number, field: string, value: string | number) => {
     const newSteps = [...steps];
     newSteps[idx] = { ...newSteps[idx], [field]: value };
     setSteps(newSteps);
@@ -62,7 +62,7 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
 
   const insertStep = (idx: number) => {
     const newSteps = [...steps];
-    newSteps.splice(idx, 0, { step_order: idx + 1, description: '', parsed_result: '' });
+    newSteps.splice(idx, 0, { step_order: idx + 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0 });
     setSteps(newSteps.map((s, i) => ({ ...s, step_order: i + 1 })));
   };
   const copyStep = (idx: number) => {

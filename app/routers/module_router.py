@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from ..database import get_db
-from ..auth import require_admin
+from ..auth import require_admin, get_current_user, get_user_project_filter
 from .. import crud, db_models, models
 
 router = APIRouter(
@@ -20,8 +20,11 @@ router = APIRouter(
 
 
 @router.get("/projects/{project_id}/modules", response_model=List[models.Module])
-def list_modules(project_id: int, db: Session = Depends(get_db)) -> list[models.Module]:
+def list_modules(project_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[models.Module]:
     """获取项目的所有模块（扁平列表）"""
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
     project = db.query(db_models.Project).filter(db_models.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -30,8 +33,11 @@ def list_modules(project_id: int, db: Session = Depends(get_db)) -> list[models.
 
 
 @router.get("/projects/{project_id}/modules/tree")
-def get_module_tree(project_id: int, db: Session = Depends(get_db)) -> list:
+def get_module_tree(project_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list:
     """获取项目的模块树形结构"""
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
     tree = crud.get_module_tree(db, project_id)
     return tree
 
@@ -59,9 +65,13 @@ def get_module_descendants(module_id: int, db: Session = Depends(get_db)) -> dic
 def create_module(
     project_id: int,
     module: models.ModuleCreate,
+    user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> models.Module:
     """创建模块"""
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     # 验证项目存在
     project = db.query(db_models.Project).filter(db_models.Project.id == project_id).first()
     if not project:

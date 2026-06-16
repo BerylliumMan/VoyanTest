@@ -180,6 +180,8 @@ const i18n = {
     'user.created': 'User created',
     'user.role.admin': 'Admin',
     'user.role.tester': 'Tester',
+    'user.accessible_projects': 'Accessible Projects',
+    'user.project_hint_admin': 'Admin can access all projects',
     'status.active': 'Active',
     'status.disabled': 'Disabled',
 
@@ -460,6 +462,8 @@ const i18n = {
     'user.created': '用户已创建',
     'user.role.admin': '管理员',
     'user.role.tester': '测试员',
+    'user.accessible_projects': '可访问项目',
+    'user.project_hint_admin': '管理员可访问所有项目',
     'status.active': '启用',
     'status.disabled': '禁用',
 

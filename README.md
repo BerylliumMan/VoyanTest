@@ -21,14 +21,24 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 
 ## ✨ 特性
 
-- **🧠 AI 用例生成**：上传需求文档（docx/pdf/md/图片），AI 自动提取功能点、拆分步骤、匹配预期结果
-- **🗣️ 自然语言驱动**：直接写「点击登录按钮」「验证页面标题」等自然语言，无需掌握 Playwright API
-- **🖥️ Real Browser**：通过 `@playwright/mcp` 控制 Chromium，支持 navigate、click、fill、screenshot 等全部操作
+### 测试执行
+- **🗣️ 自然语言驱动**：用中文写「点击登录按钮」「验证页面标题」，LLM 翻译为 Playwright 操作
+- **🖥️ Real Browser**：通过 `@playwright/mcp` 控制 Chromium，支持全部浏览器操作
+- **🐛 交互式调试**：失败时暂停执行，实时查看浏览器状态，手动选择重试/跳过/编辑步骤继续
+- **🔧 自动重试**：步骤级配置重试次数和间隔，自动处理 flaky 测试
+- **✅ 步骤断言**：5 种断言类型（URL/文本/元素可见/输入值/元素数量），中文自然语言配置
+- **🧠 自愈选择器**：元素定位失败时 AI 自动分析 DOM 找到替代选择器，减少人工维护
+
+### AI 驱动
+- **📝 AI 用例生成**：上传需求文档（docx/pdf/md/图片），AI 自动提取功能点生成测试用例
 - **🔍 预期结果验证**：执行后自动截图，LLM 比对截图判断预期结果是否达成
 - **📋 执行计划预览**：执行前可视化展示 LLM 对每步的理解和计划操作
-- **📊 测试报告**：详细日志 + 步骤截图 + 统计报告
+
+### 平台能力
+- **🔐 项目级权限**：admin 全项目，tester 可限制到指定项目，多团队安全隔离
+- **📊 测试报告**：批次聚合报告、趋势分析、统计大盘、JSON 导出
 - **🌐 分布式执行**：Agent 机制将测试分发到远程机器并行执行
-- **🔐 认证与权限**：管理员/测试人员双角色，会话管理与密码安全策略
+- **🖥️ CLI 工具**：`voyan run` 命令行执行，支持 CI/CD 流水线集成，退出码标准
 - **🌗 深色主题**：亮色/暗色主题切换
 
 ## 🚀 快速开始
@@ -104,16 +114,23 @@ flowchart LR
         direction TB
         LLM[LLM 引擎]
         Runner[测试执行器]
+        Healing[自愈选择器]
+        Assert[断言引擎]
         Report[报告生成]
     end
     subgraph Agent["分布式 Agent"]
-        AC[Agent 客户端<br/>远程浏览器执行]
+        AC[Agent 客户端]
+    end
+    subgraph CLI["CLI 工具"]
+        VY[voyan CLI]
     end
 
     CH <-->|Playwright MCP| Backend
     Backend --> DB[(SQLite)]
     Backend --> UI[Web 界面<br/>React + Arco]
+    Backend <-->|WebSocket<br/>调试协议| UI
     Backend <-->|WebSocket| AC
+    CLI -->|调用| Backend
 ```
 
 ## 🧪 技术栈
@@ -124,23 +141,35 @@ flowchart LR
 | 浏览器自动化 | Playwright MCP |
 | AI/LLM | OpenAI SDK（兼容任意 API） |
 | 前端 | React 18 + Arco Design Pro + Vite |
-| 分布式 | WebSocket + 自定义 Agent 协议（支持编译版客户端） |
+| 实时通信 | WebSocket（执行日志 + 调试协议） |
+| 分布式 | WebSocket + 自定义 Agent 协议 |
+| CLI | argparse + asyncio（退出码标准） |
 
 ## 📦 项目结构
 
 ```
 VoyanTest/
 ├── app/              # FastAPI 后端
-│   ├── gen/          # AI 生成引擎（orchestrator / analyzer / feature_extractor）
-│   ├── models/       # 领域模型（agent / auth / batch / config / gen / project / testcase）
-│   └── routers/      # API 路由（含 gen/upload、gen/history 等子路由）
-├── frontend/         # React 前端源码
-├── core/             # 执行引擎（runner / llm_wrapper / step_executor）
+│   ├── gen/          # AI 生成引擎
+│   ├── models/       # 领域模型（auth / project / testcase / batch 等）
+│   └── routers/      # API 路由（含 run-debug 调试端点）
+├── core/             # 执行引擎
+│   ├── runner.py          # 测试执行器（含重试/暂停/断言/自愈）
+│   ├── assertions.py      # 步骤断言引擎（5 种类型）
+│   ├── self_healing.py    # AI 自愈选择器
+│   ├── llm_wrapper.py     # LLM 客户端封装
+│   └── step_executor.py   # MCP 步骤执行
+├── frontend/         # React 前端
+│   └── src/pages/
+│       ├── run-debug/     # 交互式调试执行页面
+│       ├── testcases/     # 用例管理（含重试配置 UI）
+│       └── settings/      # 系统设置（含用户项目权限）
 ├── agent/            # 分布式 Agent 客户端
-│   └── dist/         # 编译版 Agent 可执行文件
+├── voyan_cli.py      # CLI 命令行工具（voyan run / list / run-single）
+├── alembic/          # 数据库迁移
+├── tests/            # 单元 + 契约测试（500+ 条）
 ├── reports/          # 测试报告与截图
-├── docs/             # 文档
-└── tests/            # 单元测试
+└── docs/             # 文档
 ```
 
 ## 📚 文档

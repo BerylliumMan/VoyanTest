@@ -41,6 +41,18 @@ export const routes: IRoute[] = [
     ignore: true,
   },
   {
+    name: '运行调试',
+    key: 'run-debug',
+    path: '/run-debug/:runId',
+    ignore: true,
+  },
+  {
+    name: '调试运行',
+    key: 'run-debug',
+    path: '/run-debug',
+    ignore: true,
+  },
+  {
     name: 'menu.testcases',
     key: 'testcases',
   },

@@ -5,7 +5,7 @@ export interface TestCase {
   description: string;
   module_id: number | null;
   is_init: boolean;
-  steps: { step_order: number; description: string; parsed_result?: string }[];
+  steps: { step_order: number; description: string; parsed_result?: string; retry_max?: number; retry_delay?: number; healed_selector?: string }[];
 }
 
 export interface Module {
@@ -36,6 +36,9 @@ export interface Step {
   step_order: number;
   description: string;
   parsed_result?: string;
+  retry_max?: number;
+  retry_delay?: number;
+  healed_selector?: string;
 }
 
 export interface Project {

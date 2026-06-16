@@ -28,6 +28,8 @@ sys.path.insert(0, _project_root)
 
 from app import crud
 from app.database import SessionLocal
+from app.websocket import LogBroadcaster, _pause_events, _pause_decisions
+from core.assertions import execute_assertions as execute_step_assertions
 from core.llm_wrapper import create_openai_client, _resolve_config as _resolve_llm_config
 from core.step_executor import execute_step_mcp
 
@@ -262,6 +264,7 @@ async def run_test_case_in_browser(
     clear_cookies: bool = False,
     run_id: int | None = None,
     base_url_override: str | None = None,
+    debug_mode: bool = False,
 ) -> dict:
     """Execute a single test case using an existing PlaywrightMCPManager.
 
@@ -278,6 +281,9 @@ async def run_test_case_in_browser(
     clear_cookies : bool
         If True, clear browser cookies before execution (used once at
         batch-start, not per-case).
+    debug_mode : bool
+        If True, pauses execution on step failure for interactive
+        debugging via WebSocket (retry / skip / abort / edit).
 
     Returns
     -------
@@ -390,54 +396,352 @@ async def run_test_case_in_browser(
         screenshot_dir = os.path.join(output_dir, "screenshots")
         os.makedirs(screenshot_dir, exist_ok=True)
 
-        for idx, step in enumerate(step_list):
+        should_abort = False
+        for idx, (step_obj, step_dict) in enumerate(zip(steps_raw, step_list)):
+            if should_abort:
+                # 因 abort 决策跳过剩余步骤
+                step_results.append({
+                    'step_number': step_dict['step_order'],
+                    'original_description': step_dict['description'],
+                    'success': False,
+                    'status': 'skipped',
+                    'thinking': '',
+                    'action': '',
+                    'next_goal': '',
+                    'error': '用户中止执行',
+                    'screenshot_path': None,
+                    'duration_ms': 0,
+                })
+                continue
+
             logger.info(
-                f"--- Step {step['step_order']}: {step['description']} ---"
+                f"--- Step {step_dict['step_order']}: {step_dict['description']} ---"
             )
 
-            result = await execute_step_mcp(
-                step,
-                mcp_manager,
-                llm_client,
-                model=resolved_model,
-                step_timeout_ms=120000,
-                screenshot_dir=screenshot_dir,
+            # 获取重试配置（兼容旧字段，默认无重试）
+            retry_max = getattr(step_obj, 'retry_max', 0) or 0
+            retry_delay = getattr(step_obj, 'retry_delay', 1.0) or 1.0
+
+            step_success = False
+            last_result = None
+            step_start_time = tz_now()
+
+            # ---- 广播步骤开始 ----
+            await LogBroadcaster.log_step_start(
+                run_id,
+                step_id=step_obj.id,
+                step_description=f"[步骤{step_obj.step_order}] {step_obj.description}",
             )
 
-            log_msg = (
-                f"Step {step['step_order']} "
-                f"{'✓' if result['success'] else '✗'}"
-            )
-            if result['error']:
-                log_msg += f" — {result['error']}"
-            logger.info(log_msg)
+            # ==============================================================
+            # 重试循环
+            # ==============================================================
+            for attempt in range(retry_max + 1):
+                if attempt > 0:
+                    logger.info(f"  重试第 {attempt}/{retry_max} 次...")
+                    await asyncio.sleep(retry_delay)
+                    # 清除上次暂停事件，确保全新等待
+                    if run_id in _pause_events:
+                        _pause_events[run_id] = asyncio.Event()
 
-            run_log_entries.append({
-                'step_id': step['id'],
-                'level': 'ERROR' if not result['success'] else 'INFO',
-                'message': (
-                    result.get('error')
-                    or f"Completed: {result.get('action', '')}"
-                ),
-                'screenshot_path': result.get('screenshot_path'),
-            })
+                try:
+                    result = await execute_step_mcp(
+                        step_dict,
+                        mcp_manager,
+                        llm_client,
+                        model=resolved_model,
+                        step_timeout_ms=120000,
+                        screenshot_dir=screenshot_dir,
+                    )
+                except Exception as step_exc:
+                    # execute_step_mcp 抛出异常 → 视为失败
+                    result = {
+                        'step_number': step_dict['step_order'],
+                        'original_description': step_dict['description'],
+                        'success': False,
+                        'status': 'error',
+                        'thinking': '',
+                        'action': '',
+                        'next_goal': '',
+                        'error': str(step_exc),
+                        'screenshot_path': None,
+                        'duration_ms': 0,
+                    }
 
-            step_results.append(result)
+                step_duration = (tz_now() - step_start_time).total_seconds()
 
-            if not result['success']:
-                consecutive_failures += 1
+                if result['success']:
+                    step_success = True
+                    last_result = result
+                    # 广播步骤成功
+                    await LogBroadcaster.log_step_complete(
+                        run_id, step_id=step_obj.id,
+                        status="passed", duration=step_duration,
+                    )
+                    break  # 跳出重试循环
+
+                # ---- 本次尝试失败 ----
+                last_result = result
+                if attempt < retry_max:
+                    logger.warning(
+                        f"  步骤 {step_dict['step_order']} 尝试 {attempt+1}/{retry_max+1} 失败"
+                        f"{': ' + result.get('error', '') if result.get('error') else ''}"
+                    )
+
+                # ---- 自愈选择器：仅在首次失败时尝试 ----
+                if attempt == 0 and not step_success:
+                    from core.self_healing import try_heal_and_retry
+
+                    healed = await try_heal_and_retry(
+                        mcp_manager,
+                        step_dict=step_dict,
+                        step_obj=step_obj,
+                        step_description=step_obj.description,
+                        error=result.get('error', ''),
+                    )
+
+                    if healed:
+                        logger.info(
+                            f"  🔧 自愈选择器生效: {step_dict['description']} → {healed}"
+                        )
+                        # 更新步骤描述以使用修复后的选择器
+                        step_dict['description'] = healed
+                        # 持久化到数据库
+                        if db is not None:
+                            try:
+                                step_obj.healed_selector = healed
+                                db.commit()
+                            except Exception as db_exc:
+                                logger.warning(f"保存自愈选择器失败: {db_exc}")
+                        continue  # 用新选择器重试
+
+            # ==============================================================
+            # 步骤最终失败处理
+            # ==============================================================
+            if not step_success:
+                # 广播步骤失败
+                step_duration = (tz_now() - step_start_time).total_seconds()
+                await LogBroadcaster.log_step_complete(
+                    run_id, step_id=step_obj.id,
+                    status="failed", duration=step_duration,
+                )
+
+                # ---- 调试模式：暂停等待用户决策 ----
+                if debug_mode:
+                    await LogBroadcaster.log_execution_paused(
+                        run_id,
+                        step_id=step_obj.id,
+                        step_description=step_obj.description,
+                        reason=last_result.get('error', '未知错误') if last_result else '未知错误',
+                    )
+                    pause_ev = LogBroadcaster.get_pause_event(run_id)
+                    await pause_ev.wait()
+
+                    decision = _pause_decisions.get(run_id, {}).get("decision", "abort")
+
+                    if decision == "retry":
+                        logger.info(f"  用户选择重试步骤 {step_obj.step_order}")
+                        # 重置失败计数，重新执行整个重试循环
+                        step_success = False
+                        for retry_attempt in range(retry_max + 1):
+                            if retry_attempt > 0:
+                                await asyncio.sleep(retry_delay)
+                            try:
+                                result = await execute_step_mcp(
+                                    step_dict,
+                                    mcp_manager,
+                                    llm_client,
+                                    model=resolved_model,
+                                    step_timeout_ms=120000,
+                                    screenshot_dir=screenshot_dir,
+                                )
+                            except Exception as step_exc:
+                                result = {
+                                    'step_number': step_dict['step_order'],
+                                    'original_description': step_dict['description'],
+                                    'success': False,
+                                    'status': 'error',
+                                    'thinking': '',
+                                    'action': '',
+                                    'next_goal': '',
+                                    'error': str(step_exc),
+                                    'screenshot_path': None,
+                                    'duration_ms': 0,
+                                }
+                            if result['success']:
+                                step_success = True
+                                last_result = result
+                                break
+                        # 如果 retry 后成功，继续正常流程
+                        if step_success:
+                            await LogBroadcaster.log_step_complete(
+                                run_id, step_id=step_obj.id,
+                                status="passed",
+                                duration=(tz_now() - step_start_time).total_seconds(),
+                            )
+                    elif decision == "skip":
+                        logger.info(f"  用户选择跳过步骤 {step_obj.step_order}")
+                        # 将失败结果标记为 skipped 再继续
+                        if last_result:
+                            last_result['status'] = 'skipped'
+                            last_result['error'] = (last_result.get('error') or '') + ' (用户跳过)'
+                    elif decision == "edit":
+                        new_desc = _pause_decisions.get(run_id, {}).get("new_description", "")
+                        if new_desc:
+                            logger.info(f"  用户编辑步骤描述: {new_desc}")
+                            # 更新 DB 和本地 step_dict
+                            step_obj.description = new_desc
+                            step_dict['description'] = new_desc
+                            try:
+                                db.commit()
+                            except Exception:
+                                db.rollback()
+                            # 使用新描述重试
+                            for retry_attempt in range(retry_max + 1):
+                                if retry_attempt > 0:
+                                    await asyncio.sleep(retry_delay)
+                                try:
+                                    result = await execute_step_mcp(
+                                        step_dict,
+                                        mcp_manager,
+                                        llm_client,
+                                        model=resolved_model,
+                                        step_timeout_ms=120000,
+                                        screenshot_dir=screenshot_dir,
+                                    )
+                                except Exception as step_exc:
+                                    result = {
+                                        'step_number': step_dict['step_order'],
+                                        'original_description': step_dict['description'],
+                                        'success': False,
+                                        'status': 'error',
+                                        'thinking': '',
+                                        'action': '',
+                                        'next_goal': '',
+                                        'error': str(step_exc),
+                                        'screenshot_path': None,
+                                        'duration_ms': 0,
+                                    }
+                                if result['success']:
+                                    step_success = True
+                                    last_result = result
+                                    break
+                            if step_success:
+                                await LogBroadcaster.log_step_complete(
+                                    run_id, step_id=step_obj.id,
+                                    status="passed",
+                                    duration=(tz_now() - step_start_time).total_seconds(),
+                                )
+                    else:  # "abort" 或其他
+                        logger.info(f"  用户选择中止执行")
+                        should_abort = True
+                        # 重置暂停事件，避免后续误用
+                        if run_id in _pause_events:
+                            _pause_events[run_id] = asyncio.Event()
+
+                    # 清除本次决策，避免污染下次
+                    _pause_decisions.pop(run_id, None)
+
+                # 如果 abort 被触发，跳出主循环
+                if should_abort:
+                    break
+
+                # 记录失败（非 skip / 非 retry 成功的情况）
+                if not step_success:
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+
+            if not step_success and last_result is not None:
+                run_log_entries.append({
+                    'step_id': step_dict['id'],
+                    'level': 'ERROR' if not step_success else 'INFO',
+                    'message': (
+                        last_result.get('error')
+                        or f"Completed: {last_result.get('action', '')}"
+                    ),
+                    'screenshot_path': last_result.get('screenshot_path'),
+                })
+                step_results.append(last_result)
+            elif last_result is not None:
+                # 步骤成功
+                run_log_entries.append({
+                    'step_id': step_dict['id'],
+                    'level': 'INFO',
+                    'message': f"Completed: {last_result.get('action', '')}",
+                    'screenshot_path': last_result.get('screenshot_path'),
+                })
+                step_results.append(last_result)
+
+            # ==============================================================
+            # 步骤成功后的断言验证
+            # ==============================================================
+            if step_success:
+                step_assertions = getattr(step_obj, 'assertions', None)
+                if not step_assertions:
+                    step_assertions = []
+                if not isinstance(step_assertions, list):
+                    step_assertions = []
+
+                if step_assertions:
+                    try:
+                        assertion_results = await execute_step_assertions(
+                            mcp_manager, step_assertions
+                        )
+                        all_passed = all(
+                            r.get('passed', False) for r in assertion_results
+                        )
+                        for r in assertion_results:
+                            await LogBroadcaster.log_info(
+                                run_id,
+                                f"[断言] {r.get('type', '?')}: {'通过' if r.get('passed') else '失败'}",
+                                step_id=step_obj.id,
+                            )
+                        if not all_passed:
+                            logger.warning(
+                                f"  步骤 {step_dict['step_order']} 断言失败"
+                            )
+                            # 断言失败 → 也视为步骤失败用于连续失败计数
+                            if debug_mode:
+                                await LogBroadcaster.log_execution_paused(
+                                    run_id,
+                                    step_id=step_obj.id,
+                                    step_description=step_obj.description,
+                                    reason="断言验证失败",
+                                )
+                                pause_ev = LogBroadcaster.get_pause_event(run_id)
+                                await pause_ev.wait()
+                                decision = _pause_decisions.get(run_id, {}).get("decision", "abort")
+                                _pause_decisions.pop(run_id, None)
+                                if decision == "abort":
+                                    should_abort = True
+                                    if run_id in _pause_events:
+                                        _pause_events[run_id] = asyncio.Event()
+                                    break
+                                # skip / retry / edit 对断言失败也适用
+                                # 简化处理：skip → 继续，其他 → 继续（断言失败不致命）
+                            consecutive_failures += 1
+                    except Exception as assert_exc:
+                        logger.warning(
+                            f"  步骤 {step_dict['step_order']} 断言执行异常: {assert_exc}"
+                        )
+                else:
+                    consecutive_failures = 0
             else:
-                consecutive_failures = 0
+                consecutive_failures = min(consecutive_failures, max_failures)
 
+            # ---- 连续失败达到上限 ----
             if consecutive_failures >= max_failures:
-                failed_step_number = step['step_order']
+                failed_step_number = step_dict['step_order']
                 logger.warning(
                     f"步骤 {failed_step_number} 失败，跳过后续步骤"
                 )
-                for remaining in step_list[idx + 1:]:
+                for remaining_obj, remaining_dict in zip(
+                    steps_raw[idx + 1:], step_list[idx + 1:]
+                ):
                     step_results.append({
-                        'step_number': remaining['step_order'],
-                        'original_description': remaining['description'],
+                        'step_number': remaining_dict['step_order'],
+                        'original_description': remaining_dict['description'],
                         'success': False,
                         'status': 'skipped',
                         'thinking': '',
@@ -546,7 +850,7 @@ async def run_test_case_in_browser(
     }
 
 
-async def run_test_case(case_id: int, batch_id: int | None = None, environment_id: int | None = None):
+async def run_test_case(case_id: int, batch_id: int | None = None, environment_id: int | None = None, debug_mode: bool = False):
     """Execute a test case using LLM + Playwright MCP (npx subprocess).
 
     Backward-compatible wrapper that creates its own PlaywrightMCPManager.
@@ -594,7 +898,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
         return {"case_id": case_id, "status": "failed", "error": str(exc)}
 
     try:
-        await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override)
+        await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
     except Exception as exc:
         logger.error(f"Unhandled error in run_test_case_in_browser for case {case_id}: {exc}", exc_info=True)
     finally:
@@ -612,6 +916,7 @@ async def run_batch_test_cases(
     batch_id: int | None = None,
     environment_id: int | None = None,
     init_case_ids: list[int] | None = None,
+    debug_mode: bool = False,
 ):
     """Execute multiple test cases sequentially in a single browser.
 
@@ -768,6 +1073,7 @@ async def run_batch_test_cases(
                     case_id, mcp_manager, db=batch_db, clear_cookies=False,
                     batch_id=batch_id, run_id=_rid,
                     base_url_override=base_url_override,
+                    debug_mode=debug_mode,
                 )
                 results.append(result)
                 logger.info(f"Batch init-case {case_id} finished: {result['status']}")
@@ -796,6 +1102,7 @@ async def run_batch_test_cases(
                     case_id, mcp_manager, db=batch_db, clear_cookies=False,
                     batch_id=batch_id, run_id=_rid,
                     base_url_override=base_url_override,
+                    debug_mode=debug_mode,
                 )
                 results.append(result)
                 logger.info(

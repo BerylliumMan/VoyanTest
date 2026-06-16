@@ -33,6 +33,10 @@ class BatchCaseIdsRequest(BaseModel):
     init_case_ids: List[int] = []
 
 
+class DebugRunRequest(BaseModel):
+    environment_id: Optional[int] = None
+
+
 @router.post("/{case_id}/run")
 async def run_test_case_endpoint(
     case_id: int,
@@ -72,6 +76,63 @@ async def run_test_case_endpoint(
         background_tasks.add_task(run_test_case, case_id, batch.id, environment_id=environment_id)
 
     return {"id": batch.id, "status": "running", "batch_id": batch.id}
+
+
+@router.post("/{case_id}/run-debug")
+async def run_test_case_debug(
+    case_id: int,
+    req: DebugRunRequest = DebugRunRequest(),
+    db: Session = Depends(get_db),
+) -> dict:
+    """启动调试运行——打开 WebSocket 桥接和暂停模式。"""
+    db_case = crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+
+    batch = crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
+
+    run = crud.create_test_run(
+        db, case_id, "running",
+        start_time=tz_now(),
+        end_time=tz_now(),
+        duration=0,
+    )
+
+    db.commit()
+
+    _ = _asyncio.create_task(
+        _run_debug_mode(case_id, batch.id, run.id, req.environment_id)
+    )
+
+    return {
+        "batch_id": batch.id,
+        "run_id": run.id,
+        "case_id": case_id,
+        "status": "debug_running",
+        "message": "调试模式已启动，请通过 WebSocket 连接 /ws/logs/{} 接收实时事件".format(run.id),
+    }
+
+
+async def _run_debug_mode(case_id: int, batch_id: int, run_id: int, environment_id: Optional[int] = None):
+    """在后台运行调试模式，通过 run_id 建立 WS 桥接。"""
+    from core.runner import run_test_case
+
+    try:
+        _ = await run_test_case(
+            case_id=case_id,
+            batch_id=batch_id,
+            environment_id=environment_id,
+            debug_mode=True,
+        )
+        from app.websocket import _pause_events
+        _pause_events.pop(run_id, None)
+    except Exception as exc:
+        logger.error(f"Debug run failed: {exc}", exc_info=True)
+        try:
+            from app.websocket import LogBroadcaster
+            await LogBroadcaster.log_run_complete(run_id, status="error", error=str(exc))
+        except Exception:
+            pass
 
 
 @router.post("/{case_id}/run-client")

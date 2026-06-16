@@ -6,8 +6,8 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
-from app import crud, models
-from app.auth import require_admin
+from app import crud, models, db_models
+from app.auth import require_admin, require_project_access, get_user_project_filter, get_current_user
 from app.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -32,10 +32,13 @@ def create_test_case(case: models.TestCaseCreate, admin=Depends(require_admin), 
 
 
 @router.get("/search", response_model=models.TestCasePage)
-def search_test_cases(project_id: int, q: str = "", page: int = 1, size: int = 20, db: Session = Depends(get_db)) -> dict:
+def search_test_cases(project_id: int, q: str = "", page: int = 1, size: int = 20, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """
     搜索测试用例（按名称和描述）。
     """
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
     result = crud.search_test_cases(db, project_id, q, page, size)
     return {
         "items": result["items"],
@@ -46,18 +49,25 @@ def search_test_cases(project_id: int, q: str = "", page: int = 1, size: int = 2
 
 
 @router.get("/init-cases", response_model=List[models.TestCase])
-def list_init_test_cases(project_id: int, db: Session = Depends(get_db)) -> list[models.TestCase]:
+def list_init_test_cases(project_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[models.TestCase]:
     """获取项目下所有标记为初始化的测试用例"""
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
     return crud.get_init_test_cases(db, project_id)
 
 
 @router.get("/{case_id}", response_model=models.TestCase)
-def get_test_case(case_id: int, db: Session = Depends(get_db)) -> models.TestCase:
+def get_test_case(case_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> models.TestCase:
     """
     通过其ID检索单个测试用例，包括其步骤。
     """
     db_case = crud.get_test_case(db, case_id)
     if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    # 验证项目访问权限
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Test case not found")
     return db_case
 
@@ -95,12 +105,16 @@ def update_test_case(case_id: int, case: models.TestCaseUpdate, admin=Depends(re
 
 
 @router.get("/module/{module_id}/testcases", response_model=models.TestCasePage)
-def get_module_test_cases(module_id: int, page: int = 1, size: int = 20, db: Session = Depends(get_db)) -> dict:
+def get_module_test_cases(module_id: int, page: int = 1, size: int = 20, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """
     检索特定模块的所有测试用例，并分页。
     """
     db_module = crud.get_module(db, module_id)
     if db_module is None:
+        raise HTTPException(status_code=404, detail="Module not found")
+    # 验证项目访问权限
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_module.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Module not found")
 
     paginated_data = crud.get_all_test_cases_for_module_paginated(db, module_id, page, size)
@@ -123,10 +137,13 @@ def toggle_test_case_init(case_id: int, body: Dict[str, Any], admin=Depends(requ
 
 
 @router.get("/project/{project_id}/testcases", response_model=models.TestCasePage)
-def get_project_test_cases(project_id: int, page: int = 1, size: int = 20, db: Session = Depends(get_db)) -> dict:
+def get_project_test_cases(project_id: int, page: int = 1, size: int = 20, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """
     检索特定项目的所有测试用例，并分页。
     """
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
     db_project = crud.get_project(db, project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")

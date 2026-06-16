@@ -87,11 +87,13 @@ def get_run_batch(db: Session, batch_id: int) -> db_models.RunBatch | None:
     return db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch_id).first()
 
 
-def list_run_batches(db: Session, project_id: int = None, status: str = None, page: int = 1, size: int = 20) -> dict[str, Any]:
+def list_run_batches(db: Session, project_id: int = None, status: str = None, page: int = 1, size: int = 20, project_ids: list[int] = None) -> dict[str, Any]:
     """分页获取运行批次列表"""
     query = db.query(db_models.RunBatch)
 
-    if project_id:
+    if project_ids:
+        query = query.filter(db_models.RunBatch.project_id.in_(project_ids))
+    elif project_id:
         query = query.filter(db_models.RunBatch.project_id == project_id)
     if status:
         query = query.filter(db_models.RunBatch.status == status)

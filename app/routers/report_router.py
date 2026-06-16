@@ -19,7 +19,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from ..database import get_db
-from ..auth import require_admin
+from ..auth import require_admin, get_current_user, get_user_project_filter
 from .. import crud, db_models
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ class RunDetail(BaseModel):
 def get_test_statistics(
     project_id: Optional[int] = None,
     days: int = 30,
+    user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> TestStatistics:
     """获取测试统计信息（基于批次）"""
@@ -115,7 +116,14 @@ def get_test_statistics(
     start_date = end_date - timedelta(days=days)
     query = db.query(db_models.RunBatch)
 
-    if project_id:
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None:
+        if project_id:
+            if project_id not in allowed_ids:
+                raise HTTPException(status_code=404, detail="Project not found")
+        else:
+            query = query.filter(db_models.RunBatch.project_id.in_(allowed_ids))
+    elif project_id:
         query = query.filter(db_models.RunBatch.project_id == project_id)
 
     query = query.filter(
@@ -180,6 +188,7 @@ def get_test_statistics(
 def get_test_trends(
     project_id: Optional[int] = None,
     days: int = 30,
+    user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> TestTrend:
     """获取测试趋势数据（基于批次）"""
@@ -196,7 +205,15 @@ def get_test_trends(
         db_models.RunBatch.created_at <= end_date
     )
 
-    if project_id:
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None:
+        if project_id:
+            if project_id not in allowed_ids:
+                raise HTTPException(status_code=404, detail="Project not found")
+            query = query.filter(db_models.RunBatch.project_id == project_id)
+        else:
+            query = query.filter(db_models.RunBatch.project_id.in_(allowed_ids))
+    elif project_id:
         query = query.filter(db_models.RunBatch.project_id == project_id)
 
     results = query.all()
@@ -238,16 +255,17 @@ def get_test_trends(
 def get_report_summary(
     project_id: Optional[int] = None,
     days: int = 30,
+    user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> ReportSummary:
     """
     获取报告摘要（统计 + 趋势 + 最近执行）
     """
     # 获取统计
-    statistics = get_test_statistics(project_id, days, db)
+    statistics = get_test_statistics(project_id, days, user, db)
     
     # 获取趋势
-    trends = get_test_trends(project_id, days, db)
+    trends = get_test_trends(project_id, days, user, db)
     
     # 获取最近执行
     query = db.query(
@@ -259,8 +277,16 @@ def get_report_summary(
     ).order_by(
         db_models.TestRun.start_time.desc()
     ).limit(10)
-    
-    if project_id:
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None:
+        if project_id:
+            if project_id not in allowed_ids:
+                raise HTTPException(status_code=404, detail="Project not found")
+            query = query.filter(db_models.TestCase.project_id == project_id)
+        else:
+            query = query.filter(db_models.TestCase.project_id.in_(allowed_ids))
+    elif project_id:
         query = query.filter(db_models.TestCase.project_id == project_id)
     
     recent_runs = []
@@ -282,13 +308,14 @@ def get_report_summary(
 
 
 @router.get("/runs/{run_id}")
-def get_run_detail(run_id: int, db: Session = Depends(get_db)) -> dict:
+def get_run_detail(run_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """
     获取单次执行详情，包含步骤数据（从 report JSON 读取）。
     """
     result = db.query(
         db_models.TestRun,
-        db_models.TestCase.name
+        db_models.TestCase.name,
+        db_models.TestCase.project_id
     ).join(
         db_models.TestCase,
         db_models.TestRun.case_id == db_models.TestCase.id
@@ -299,7 +326,11 @@ def get_run_detail(run_id: int, db: Session = Depends(get_db)) -> dict:
     if not result:
         raise HTTPException(status_code=404, detail="执行记录不存在")
 
-    run, case_name = result
+    run, case_name, case_project_id = result
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and case_project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
 
     response = {
         "run_id": run.id,
@@ -333,6 +364,7 @@ def list_runs(
     status: Optional[str] = None,
     page: int = 1,
     size: int = 20,
+    user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> dict:
     """
@@ -346,7 +378,15 @@ def list_runs(
         db_models.TestRun.case_id == db_models.TestCase.id
     )
 
-    if project_id:
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None:
+        if project_id:
+            if project_id not in allowed_ids:
+                raise HTTPException(status_code=404, detail="Project not found")
+            query = query.filter(db_models.TestCase.project_id == project_id)
+        else:
+            query = query.filter(db_models.TestCase.project_id.in_(allowed_ids))
+    elif project_id:
         query = query.filter(db_models.TestCase.project_id == project_id)
 
     if status:
@@ -386,10 +426,24 @@ def list_batches(
     status: Optional[str] = None,
     page: int = 1,
     size: int = 20,
+    user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> dict:
     """获取运行批次列表（分页）"""
-    result = crud.list_run_batches(db, project_id=project_id, status=status, page=page, size=size)
+    allowed_ids = get_user_project_filter(user)
+    filter_project_id = project_id
+    if allowed_ids is not None:
+        if project_id:
+            if project_id not in allowed_ids:
+                raise HTTPException(status_code=404, detail="Project not found")
+        else:
+            filter_project_id = None  # pass list to crud instead
+
+    if allowed_ids is not None and not project_id:
+        # tester — filter to allowed project IDs
+        result = crud.list_run_batches(db, project_ids=allowed_ids, status=status, page=page, size=size)
+    else:
+        result = crud.list_run_batches(db, project_id=filter_project_id, status=status, page=page, size=size)
 
     # 获取项目名称
     project_ids = {b.project_id for b in result["items"] if b.project_id}
@@ -426,10 +480,14 @@ def list_batches(
 
 
 @router.get("/batches/{batch_id}")
-def get_batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
+def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """获取批次详情，包含所有用例运行结果"""
     batch = crud.get_run_batch(db, batch_id)
     if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and batch.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Batch not found")
 
     # 动态计算状态
@@ -522,8 +580,14 @@ def export_batch(batch_id: int, db: Session = Depends(get_db)) -> JSONResponse:
 
 
 @router.delete("/batches/{batch_id}")
-def delete_batch(batch_id: int, db: Session = Depends(get_db)) -> dict:
+def delete_batch(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """删除运行批次及其关联数据"""
+    batch = crud.get_run_batch(db, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and batch.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权操作该批次")
     try:
         success = crud.delete_run_batch(db, batch_id)
         if not success:

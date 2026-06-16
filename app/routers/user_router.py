@@ -30,7 +30,8 @@ def create_user(request: Request, body: models.UserCreate, db: Session = Depends
         raise HTTPException(status_code=400, detail="角色必须是 admin 或 tester")
     user = db_models.User(
         username=username, password_hash=hash_password(body.password),
-        role=body.role, must_change_password=True
+        role=body.role, must_change_password=True,
+        project_ids=body.project_ids
     )
     db.add(user)
     db.commit()
@@ -54,6 +55,8 @@ def update_user(request: Request, user_id: int, body: models.UserUpdate, db: Ses
         if body.status not in ("active", "disabled"):
             raise HTTPException(status_code=400, detail="状态必须是 active 或 disabled")
         user.status = body.status
+    if body.project_ids is not None:
+        user.project_ids = body.project_ids
     db.commit()
     db.refresh(user)
     log_audit(db, admin.id, "user_updated", {"target": user.username, "changes": body.model_dump(exclude_none=True)}, client_ip(request))

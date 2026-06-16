@@ -132,3 +132,23 @@ def require_admin(user=Depends(get_current_user)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+def require_project_access(project_id: int = None):
+    """依赖工厂：验证当前用户有权访问指定项目。admin 全通，tester 仅限 project_ids。"""
+    def dependency(user=Depends(get_current_user)):
+        if user.role == "admin":
+            return user
+        if project_id is not None:
+            allowed = user.project_ids or []
+            if project_id not in allowed:
+                raise HTTPException(status_code=403, detail="无权访问该项目")
+        return user
+    return dependency
+
+
+def get_user_project_filter(user) -> list[int] | None:
+    """返回当前用户可访问的项目 ID 列表。admin 返回 None（全通），tester 返回 project_ids。"""
+    if user.role == "admin":
+        return None  # 全通
+    return user.project_ids or []

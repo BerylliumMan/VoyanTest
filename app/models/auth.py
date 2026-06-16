@@ -1,6 +1,6 @@
 # app/models/auth.py
 # 认证与用户管理 ORM 模型
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON
 
 from app.database import Base
 from app.tz import now as tz_now
@@ -18,6 +18,7 @@ class User(Base):
     login_attempts = Column(Integer, default=0)
     created_at = Column(DateTime, default=tz_now)
     last_login_at = Column(DateTime, nullable=True)
+    project_ids = Column(JSON, nullable=True, default=None)
 
 
 class Session(Base):

@@ -9,6 +9,7 @@ interface UserInfo {
   username: string;
   role: string;
   status: string;
+  project_ids: number[] | null;
 }
 
 function UserManagement() {
@@ -18,6 +19,9 @@ function UserManagement() {
   const [userVisible, setUserVisible] = useState(false);
   const [editingUser, setEditingUser] = useState<UserInfo | null>(null);
   const [userForm] = Form.useForm();
+  const [projects, setProjects] = useState<{ id: number; name: string }[]>([]);
+
+  const role = Form.useWatch('role', userForm);
 
   const fetchUsers = () => {
     setUserLoading(true);
@@ -30,13 +34,24 @@ function UserManagement() {
 
   useEffect(() => {
     fetchUsers();
+    axios
+      .get('/api/projects/')
+      .then((res) => setProjects(res.data || []))
+      .catch(() => {});
   }, []);
 
   const openUserModal = (user?: UserInfo) => {
     setEditingUser(user || null);
     userForm.resetFields();
     if (user) {
-      userForm.setFieldsValue({ username: user.username, role: user.role, status: user.status });
+      userForm.setFieldsValue({
+        username: user.username,
+        role: user.role,
+        status: user.status,
+        project_ids: user.project_ids || [],
+      });
+    } else {
+      userForm.setFieldsValue({ role: 'tester', project_ids: [] });
     }
     setUserVisible(true);
   };
@@ -123,6 +138,16 @@ function UserManagement() {
               ]}
             />
           </Form.Item>
+          {role !== 'admin' && (
+            <Form.Item field="project_ids" label={t['user.accessible_projects']}>
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder={t['user.accessible_projects']}
+                options={projects.map((p) => ({ label: p.name, value: p.id }))}
+              />
+            </Form.Item>
+          )}
           {editingUser && (
             <Form.Item field="status" label={t['status']}>
               <Select

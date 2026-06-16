@@ -1,6 +1,6 @@
 # app/models/testcase.py
 # 测试用例与测试步骤 ORM 模型
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Float, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -39,3 +39,7 @@ class TestStep(Base):
     step_order = Column(Integer, nullable=False)
     description = Column(String, nullable=False)
     parsed_result = Column(Text, nullable=True)
+    retry_max = Column(Integer, default=0)
+    retry_delay = Column(Float, default=1.0)
+    assertions = Column(JSON, default=[])
+    healed_selector = Column(String(500), nullable=True, default=None)
