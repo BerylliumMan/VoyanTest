@@ -28,6 +28,13 @@ from app import crud  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.tz import now as tz_now  # noqa: E402
 
+# Re-export urlparse — tests patch core.runner.urlparse
+from urllib.parse import urlparse  # noqa: E402
+
+# Re-export LLM + step executor — _execution.py 内部依赖, tests 也直接 patch
+from core.llm_wrapper import _resolve_config as _resolve_llm_config, create_openai_client  # noqa: E402
+from core.step_executor import execute_step_mcp  # noqa: E402
+
 __all__ = [
     "run_test_case",
     "run_batch_test_cases",
@@ -41,4 +48,8 @@ __all__ = [
     "SessionLocal",
     "crud",
     "tz_now",
+    "urlparse",
+    "create_openai_client",
+    "_resolve_llm_config",
+    "execute_step_mcp",
 ]
