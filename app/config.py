@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+    log_format: str = "json"  # "text" 或 "json"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

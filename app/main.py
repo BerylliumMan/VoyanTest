@@ -4,15 +4,15 @@ from contextlib import asynccontextmanager
 import json as _json
 import logging
 import os
-from fastapi import FastAPI, Request
+import uuid
+
+from fastapi import FastAPI, Request, Response
 
 from app.config import get_settings
+from core.log_setup import setup_logging, set_request_id, get_request_id
 
 _settings = get_settings()
-logging.basicConfig(
-    level=getattr(logging, _settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level=_settings.log_level, fmt=_settings.log_format)
 
 logger = logging.getLogger(__name__)
 from fastapi.staticfiles import StaticFiles
@@ -220,6 +220,7 @@ WS_AUTH_SKIP_PREFIXES = ["/api/agents/ws/"]
 PUBLIC_PATHS = {"/api/auth/login", "/api/auth/login-form", "/api/auth/logout", "/health", "/docs", "/openapi.json"}
 # 需要认证的路径前缀（生产环境建议由 nginx/reverse proxy 处理静态文件认证）
 PROTECTED_PREFIXES = ["/api/", "/reports/"]
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
@@ -282,6 +283,16 @@ async def enforce_password_changed(request: Request, call_next):
     finally:
         db.close()
     return await call_next(request)
+
+# ── request_id 注入（最后定义 = 最外层，确保所有响应都带该头） ──
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or request.cookies.get("request_id") or uuid.uuid4().hex[:12]
+    set_request_id(rid)
+    response: Response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
 
 # Ensure runtime directories exist (relative to project root)
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
