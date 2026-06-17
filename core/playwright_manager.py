@@ -110,13 +110,13 @@ class PlaywrightMCPManager:
             try:
                 await self._session.__aexit__(None, None, None)
             except Exception as exc:
-                logger.warning(f"Error closing MCP session: {exc}")
+                logger.warning("Error closing MCP session: %s", exc, exc_info=True)
             self._session = None
         if self._context:
             try:
                 await self._context.__aexit__(None, None, None)
             except Exception as exc:
-                logger.warning(f"Error closing MCP stdio context: {exc}")
+                logger.warning("Error closing MCP stdio context: %s", exc, exc_info=True)
             self._context = None
         self._read = None
         self._write = None
@@ -217,7 +217,7 @@ class PlaywrightMCPManager:
                 text = text[:8000] + "\n\n[... TRUNCATED]"
             return text or '(empty page)'
         except Exception as exc:
-            logger.warning(f"DOM snapshot failed: {exc}")
+            logger.warning("DOM snapshot failed: %s", exc, exc_info=True)
             return '(page snapshot unavailable)'
 
     # ------------------------------------------------------------------
@@ -234,10 +234,10 @@ class PlaywrightMCPManager:
             if result['success']:
                 logger.info("Browser cookies cleared")
             else:
-                logger.warning(f"Failed to clear cookies: {result.get('text', result.get('error'))}")
+                logger.warning("Failed to clear cookies: %s", result.get('text', result.get('error')))
             return result['success']
         except Exception as exc:
-            logger.warning(f"Failed to clear cookies: {exc}", exc_info=True)
+            logger.warning("Failed to clear cookies: %s", exc, exc_info=True)
             return False
 
     # ------------------------------------------------------------------
@@ -254,7 +254,7 @@ class PlaywrightMCPManager:
             })
             if result['success'] and os.path.exists(path):
                 return path
-            logger.warning(f"Screenshot failed: success={result.get('success')}, path_exists={os.path.exists(path)}, error={result.get('error', result.get('text', 'unknown'))}")
+            logger.warning("Screenshot failed: success=%s, path_exists=%s, error=%s", result.get('success'), os.path.exists(path), result.get('error', result.get('text', 'unknown')))
         except Exception as exc:
-            logger.warning(f"Screenshot exception for {path}: {exc}")
+            logger.warning("Screenshot exception for %s: %s", path, exc, exc_info=True)
         return None

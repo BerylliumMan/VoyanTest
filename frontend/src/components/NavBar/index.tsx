@@ -80,9 +80,11 @@ function Navbar({ show }: { show: boolean }) {
               position: 'br',
             }}
             trigger="hover"
-            onChange={(value) => {
-              setLang(value);
-              const nextLang = defaultLocale[value];
+            onChange={(value: string) => {
+              if (setLang) {
+                setLang(value);
+              }
+              const nextLang = defaultLocale[value as keyof typeof defaultLocale];
               Message.info(`${nextLang['message.lang.tips']}${value}`);
             }}
           />
@@ -97,7 +99,9 @@ function Navbar({ show }: { show: boolean }) {
           >
             <IconButton
               icon={theme !== 'dark' ? <IconMoonFill /> : <IconSunFill />}
-              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+              onClick={() =>
+                setTheme && setTheme(theme === 'light' ? 'dark' : 'light')
+              }
               aria-label="切换主题"
             />
           </Tooltip>

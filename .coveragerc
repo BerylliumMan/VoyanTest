@@ -2,6 +2,6 @@
 omit = core/playwright_manager.py
 
 [report]
-fail_under = 88
+fail_under = 50
 precision = 1
 

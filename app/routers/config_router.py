@@ -145,7 +145,7 @@ async def test_ai_config(
             return {"success": True, "message": f"连接成功，模型回复: {reply}"}
         return {"success": True, "message": f"连接成功（回复: {reply}）"}
     except Exception as exc:
-        logger.warning(f"AI config test failed: {exc}")
+        logger.warning("AI config test failed: %s", exc, exc_info=True)
         raise HTTPException(400, detail=f"连接失败: {exc}")
 
 

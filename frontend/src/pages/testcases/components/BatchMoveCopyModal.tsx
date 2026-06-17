@@ -35,8 +35,8 @@ const BatchMoveCopyModal: React.FC<BatchMoveCopyModalProps> = ({
         <Form.Item label={t['target.project']} rules={[{ required: true }]}>
           <Select
             placeholder={t['select.project']}
-            value={targetProjectId}
-            onChange={onTargetProjectChange}
+            value={targetProjectId ?? undefined}
+            onChange={(val) => onTargetProjectChange(val as number)}
             options={projects.map((p) => ({ label: p.name, value: p.id }))}
             showSearch
             className="testcase-select"
@@ -45,8 +45,10 @@ const BatchMoveCopyModal: React.FC<BatchMoveCopyModalProps> = ({
         <Form.Item label={t['target.module']}>
           <Select
             placeholder={t['root.module']}
-            value={targetModuleId}
-            onChange={(val) => onTargetModuleChange(val)}
+            value={targetModuleId ?? undefined}
+            onChange={(val) =>
+              onTargetModuleChange(typeof val === 'number' ? val : null)
+            }
             options={targetModules.map((m) => ({ label: m.name, value: m.id }))}
             allowClear
             className="testcase-select"

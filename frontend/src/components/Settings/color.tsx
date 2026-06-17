@@ -8,7 +8,7 @@ import styles from './style/color-panel.module.less';
 function ColorPanel() {
   const settings = useSelector((state: GlobalState) => state.settings);
   const locale = useLocale();
-  const themeColor = settings.themeColor;
+  const themeColor = settings?.themeColor ?? '#165DFF';
 
   return (
     <div>

@@ -17,6 +17,7 @@ import {
   IconRefresh,
 } from '@arco-design/web-react/icon';
 import axios from 'axios';
+import useLocale from '@/utils/useLocale';
 
 /**
  * 录制控制页：启动/停止 CDP 录制、查看录制事件、把事件转换为测试步骤。
@@ -87,6 +88,7 @@ const pulseStyle = `
 `;
 
 const Recordings: React.FC = () => {
+  const t = useLocale();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<RecordingStatus>('idle');
   const [url, setUrl] = useState('');
@@ -120,7 +122,7 @@ const Recordings: React.FC = () => {
           setEvents(Array.isArray(res.data) ? res.data : []);
         } catch (e) {
           // 轮询中静默失败，避免淹没用户
-          console.warn('拉取录制事件失败:', extractError(e, ''));
+          console.warn('Failed to fetch recording events:', extractError(e, ''));
         }
       };
       // 立刻拉一次，再开启定时器
@@ -138,7 +140,7 @@ const Recordings: React.FC = () => {
 
   const handleStart = async () => {
     if (!url.trim()) {
-      Message.warning('请输入录制目标 URL');
+      Message.warning(t['recordings.url_required']);
       return;
     }
     setLoading(true);
@@ -151,9 +153,9 @@ const Recordings: React.FC = () => {
       setStatus('recording');
       setEvents([]);
       setSteps([]);
-      Message.success('录制已开始');
+      Message.success(t['recordings.started']);
     } catch (e) {
-      Message.error(extractError(e, '启动录制失败'));
+      Message.error(extractError(e, t['recordings.start_failed']));
     } finally {
       setLoading(false);
     }
@@ -174,9 +176,9 @@ const Recordings: React.FC = () => {
       } catch {
         // 忽略：停止接口已成功
       }
-      Message.success('录制已停止');
+      Message.success(t['recordings.stopped_msg']);
     } catch (e) {
-      Message.error(extractError(e, '停止录制失败'));
+      Message.error(extractError(e, t['recordings.stop_failed']));
     } finally {
       setLoading(false);
     }
@@ -192,7 +194,7 @@ const Recordings: React.FC = () => {
       );
       setEvents(Array.isArray(res.data) ? res.data : []);
     } catch (e) {
-      Message.error(extractError(e, '刷新事件失败'));
+      Message.error(extractError(e, t['recordings.refresh_failed']));
     } finally {
       setEventsLoading(false);
     }
@@ -212,11 +214,11 @@ const Recordings: React.FC = () => {
       setSteps(newSteps);
       Message.success(
         newSteps.length > 0
-          ? `已生成 ${newSteps.length} 个测试步骤`
-          : '录制事件为空，未生成步骤'
+          ? t['recordings.steps_generated'].replace('{count}', String(newSteps.length))
+          : t['recordings.steps_empty']
       );
     } catch (e) {
-      Message.error(extractError(e, '转换失败'));
+      Message.error(extractError(e, t['recordings.convert_failed']));
     } finally {
       setConverting(false);
     }
@@ -228,7 +230,7 @@ const Recordings: React.FC = () => {
       return (
         <Space size={6} align="center">
           <span className="recording-pulse-dot" />
-          <Tag color="red" style={{ margin: 0 }}>录制中</Tag>
+          <Tag color="red" style={{ margin: 0 }}>{t['recordings.recording']}</Tag>
         </Space>
       );
     }
@@ -236,14 +238,14 @@ const Recordings: React.FC = () => {
       return (
         <Space size={6} align="center">
           <Badge dot dotStyle={{ backgroundColor: '#86909c' }} />
-          <Tag color="gray" style={{ margin: 0 }}>已停止</Tag>
+          <Tag color="gray" style={{ margin: 0 }}>{t['recordings.stopped']}</Tag>
         </Space>
       );
     }
     return (
       <Space size={6} align="center">
         <Badge dot dotStyle={{ backgroundColor: '#165dff' }} />
-        <Tag color="blue" style={{ margin: 0 }}>空闲</Tag>
+        <Tag color="blue" style={{ margin: 0 }}>{t['recordings.idle']}</Tag>
       </Space>
     );
   };
@@ -251,19 +253,19 @@ const Recordings: React.FC = () => {
   // 事件表格列定义
   const eventColumns = [
     {
-      title: '类型',
+      title: t['recordings.col.type'],
       dataIndex: 'event_type',
       width: 120,
       render: (v: string) => <Tag>{v || '-'}</Tag>,
     },
     {
-      title: '时间',
+      title: t['recordings.col.time'],
       dataIndex: 'timestamp',
       width: 180,
       render: (v: number) => formatTimestamp(v),
     },
     {
-      title: '选择器',
+      title: t['recordings.col.selector'],
       dataIndex: 'selector',
       ellipsis: true,
       render: (v: string) => (
@@ -273,14 +275,14 @@ const Recordings: React.FC = () => {
       ),
     },
     {
-      title: '值',
+      title: t['recordings.col.value'],
       dataIndex: 'value',
       width: 200,
       ellipsis: true,
       render: (v: string) => <span title={v || ''}>{truncate(v, 40)}</span>,
     },
     {
-      title: 'URL',
+      title: t['recordings.col.url'],
       dataIndex: 'url',
       ellipsis: true,
       render: (v: string) => <span title={v || ''}>{truncate(v, 40)}</span>,
@@ -297,12 +299,12 @@ const Recordings: React.FC = () => {
       ),
     },
     {
-      title: '步骤描述',
+      title: t['recordings.col.step_desc'],
       dataIndex: 'step_description',
       render: (v: string) => v || '-',
     },
     {
-      title: '预期结果',
+      title: t['recordings.col.expected'],
       dataIndex: 'expected_result',
       render: (v: string) => v || '-',
     },
@@ -318,15 +320,15 @@ const Recordings: React.FC = () => {
 
       <div>
         {/* A. 控制区 */}
-        <Card title="录制控制" style={{ marginBottom: 16 }}>
+        <Card title={t['recordings.control']} style={{ marginBottom: 16 }}>
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Space wrap size="medium" align="center">
               <span style={{ minWidth: 72, color: 'var(--color-text-2)' }}>
-                目标 URL
+                {t['recordings.target_url']}
               </span>
               <Input
                 style={{ width: 480 }}
-                placeholder="请输入录制目标 URL"
+                placeholder={t['recordings.url_placeholder']}
                 value={url}
                 onChange={(v) => setUrl(v)}
                 disabled={status === 'recording'}
@@ -340,7 +342,7 @@ const Recordings: React.FC = () => {
                 icon={<IconRecord />}
                 onClick={handleStart}
               >
-                开始录制
+                {t['recordings.start']}
               </Button>
               {status === 'recording' && (
                 <Button
@@ -349,14 +351,14 @@ const Recordings: React.FC = () => {
                   icon={<IconStop />}
                   onClick={handleStop}
                 >
-                  停止录制
+                  {t['recordings.stop']}
                 </Button>
               )}
             </Space>
 
             <Space wrap size="medium" align="center">
               <span style={{ minWidth: 72, color: 'var(--color-text-2)' }}>
-                状态
+                {t['recordings.status']}
               </span>
               {renderStatusBadge()}
               {sessionId && (
@@ -368,7 +370,7 @@ const Recordings: React.FC = () => {
                   }}
                   title={sessionId}
                 >
-                  会话 ID: {sessionId}
+                  {t['recordings.session_id']} {sessionId}
                 </span>
               )}
             </Space>
@@ -380,7 +382,7 @@ const Recordings: React.FC = () => {
           <Card
             title={
               <Space>
-                <span>录制事件</span>
+                <span>{t['recordings.events']}</span>
                 {status === 'recording' && (
                   <Button
                     size="mini"
@@ -388,7 +390,7 @@ const Recordings: React.FC = () => {
                     onClick={refreshEvents}
                     loading={eventsLoading}
                   >
-                    刷新
+                    {t['recordings.refresh']}
                   </Button>
                 )}
               </Space>
@@ -402,8 +404,8 @@ const Recordings: React.FC = () => {
                 fontSize: 13,
               }}
             >
-              已录制 {events.length} 个事件
-              {status === 'recording' && ' · 每 2 秒自动刷新'}
+              {t['recordings.events_count'].replace('{count}', String(events.length))}
+              {status === 'recording' && ` · ${t['recordings.auto_refresh']}`}
             </div>
             <Table
               columns={eventColumns}
@@ -416,8 +418,8 @@ const Recordings: React.FC = () => {
               noDataElement={
                 <div style={{ padding: 24, color: 'var(--color-text-3)' }}>
                   {status === 'recording'
-                    ? '暂无录制事件，请在浏览器中操作目标页面…'
-                    : '暂无录制事件'}
+                    ? t['recordings.no_events_waiting']
+                    : t['recordings.no_events']}
                 </div>
               }
             />
@@ -426,7 +428,7 @@ const Recordings: React.FC = () => {
 
         {/* C. 转换区 */}
         {hasEvents && (
-          <Card title="转换为测试步骤">
+          <Card title={t['recordings.convert']}>
             <Space
               direction="vertical"
               size="medium"
@@ -440,12 +442,12 @@ const Recordings: React.FC = () => {
                   onClick={handleConvert}
                   disabled={status === 'recording'}
                 >
-                  转换为测试步骤
+                  {t['recordings.convert']}
                 </Button>
                 {converting && <Spin />}
                 {steps.length > 0 && (
                   <span style={{ color: 'var(--color-text-2)' }}>
-                    共 {steps.length} 个测试步骤
+                    {t['recordings.steps_count'].replace('{count}', String(steps.length))}
                   </span>
                 )}
               </Space>
@@ -454,7 +456,9 @@ const Recordings: React.FC = () => {
                 <Table
                   columns={stepColumns}
                   data={steps}
-                  rowKey={(_, idx) => `step-${idx}`}
+                  rowKey={(record: TestStep, idx?: number) =>
+                    `${record.step_description}-${idx ?? 0}`
+                  }
                   pagination={false}
                 />
               )}

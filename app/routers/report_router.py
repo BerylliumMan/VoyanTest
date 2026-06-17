@@ -12,7 +12,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from datetime import datetime, timedelta
 from app.tz import now as tz_now
 from typing import List, Optional
@@ -40,7 +39,7 @@ def _safe_report_path(report_path: str | None) -> Path | None:
         return None
     resolved = Path(os.path.abspath(report_path))
     if not str(resolved).startswith(str(_REPORTS_ROOT)):
-        logger.warning(f"路径穿越尝试: {report_path}")
+        logger.warning("路径穿越尝试: %s", report_path)
         return None
     return resolved if resolved.exists() else None
 
@@ -114,26 +113,20 @@ def get_test_statistics(
     """获取测试统计信息（基于批次）"""
     end_date = tz_now()
     start_date = end_date - timedelta(days=days)
-    query = db.query(db_models.RunBatch)
 
     allowed_ids = get_user_project_filter(user)
-    if allowed_ids is not None:
-        if project_id:
-            if project_id not in allowed_ids:
-                raise HTTPException(status_code=404, detail="Project not found")
-        else:
-            query = query.filter(db_models.RunBatch.project_id.in_(allowed_ids))
-    elif project_id:
-        query = query.filter(db_models.RunBatch.project_id == project_id)
+    if allowed_ids is not None and project_id and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    query = query.filter(
-        db_models.RunBatch.created_at >= start_date,
-        db_models.RunBatch.created_at <= end_date
+    stats = crud.get_run_statistics(
+        db,
+        start_date=start_date,
+        end_date=end_date,
+        project_id=project_id,
+        allowed_ids=allowed_ids,
     )
 
-    total_batches = query.count()
-
-    if total_batches == 0:
+    if stats["total_batches"] == 0:
         return TestStatistics(
             total_cases=0,
             total_runs=0,
@@ -146,37 +139,16 @@ def get_test_statistics(
             avg_duration=0.0
         )
 
-    # 汇总所有批次的用例计数
-    result = query.with_entities(
-        func.sum(db_models.RunBatch.total_cases),
-        func.sum(db_models.RunBatch.passed),
-        func.sum(db_models.RunBatch.failed),
-    ).first()
-
-    total_cases_in_batches = result[0] or 0
-    total_passed = result[1] or 0
-    total_failed = result[2] or 0
-
-    # 今日执行批次数
-    today_start = tz_now().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_batches = query.filter(db_models.RunBatch.created_at >= today_start).count()
-
-    # 总用例数（测试用例表）
-    total_cases_query = db.query(db_models.TestCase)
-    if project_id:
-        total_cases_query = total_cases_query.filter(
-            db_models.TestCase.project_id == project_id
-        )
-    total_cases = total_cases_query.count()
-
-    pass_rate = round(total_passed / total_cases_in_batches * 100, 2) if total_cases_in_batches > 0 else 0.0
+    pass_rate = round(
+        stats["total_passed"] / stats["total_cases_in_batches"] * 100, 2
+    ) if stats["total_cases_in_batches"] > 0 else 0.0
 
     return TestStatistics(
-        total_cases=total_cases,
-        total_runs=total_cases_in_batches,
-        today_runs=today_batches,
-        passed=total_passed,
-        failed=total_failed,
+        total_cases=stats["total_cases"],
+        total_runs=stats["total_cases_in_batches"],
+        today_runs=stats["today_batches"],
+        passed=stats["total_passed"],
+        failed=stats["total_failed"],
         skipped=0,
         pass_rate=pass_rate,
         success_rate=pass_rate,
@@ -195,33 +167,22 @@ def get_test_trends(
     end_date = tz_now()
     start_date = end_date - timedelta(days=days)
 
-    query = db.query(
-        func.date(db_models.RunBatch.created_at).label('date'),
-        db_models.RunBatch.passed,
-        db_models.RunBatch.failed,
-        db_models.RunBatch.total_cases,
-    ).filter(
-        db_models.RunBatch.created_at >= start_date,
-        db_models.RunBatch.created_at <= end_date
-    )
-
     allowed_ids = get_user_project_filter(user)
-    if allowed_ids is not None:
-        if project_id:
-            if project_id not in allowed_ids:
-                raise HTTPException(status_code=404, detail="Project not found")
-            query = query.filter(db_models.RunBatch.project_id == project_id)
-        else:
-            query = query.filter(db_models.RunBatch.project_id.in_(allowed_ids))
-    elif project_id:
-        query = query.filter(db_models.RunBatch.project_id == project_id)
+    if allowed_ids is not None and project_id and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    results = query.all()
+    rows = crud.get_run_trends(
+        db,
+        start_date=start_date,
+        end_date=end_date,
+        project_id=project_id,
+        allowed_ids=allowed_ids,
+    )
 
     from collections import defaultdict
     daily_data = defaultdict(lambda: {'passed': 0, 'failed': 0, 'total': 0})
 
-    for date, passed, failed, total_cases in results:
+    for date, passed, failed, total_cases in rows:
         date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
         daily_data[date_str]['passed'] += passed or 0
         daily_data[date_str]['failed'] += failed or 0
@@ -263,34 +224,24 @@ def get_report_summary(
     """
     # 获取统计
     statistics = get_test_statistics(project_id, days, user, db)
-    
+
     # 获取趋势
     trends = get_test_trends(project_id, days, user, db)
-    
-    # 获取最近执行
-    query = db.query(
-        db_models.TestRun,
-        db_models.TestCase.name
-    ).join(
-        db_models.TestCase,
-        db_models.TestRun.case_id == db_models.TestCase.id
-    ).order_by(
-        db_models.TestRun.start_time.desc()
-    ).limit(10)
 
+    # 获取最近执行
     allowed_ids = get_user_project_filter(user)
-    if allowed_ids is not None:
-        if project_id:
-            if project_id not in allowed_ids:
-                raise HTTPException(status_code=404, detail="Project not found")
-            query = query.filter(db_models.TestCase.project_id == project_id)
-        else:
-            query = query.filter(db_models.TestCase.project_id.in_(allowed_ids))
-    elif project_id:
-        query = query.filter(db_models.TestCase.project_id == project_id)
-    
+    if allowed_ids is not None and project_id and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    recent_rows = crud.list_recent_runs(
+        db,
+        limit=10,
+        project_id=project_id,
+        allowed_ids=allowed_ids,
+    )
+
     recent_runs = []
-    for run, case_name in query.all():
+    for run, case_name in recent_rows:
         recent_runs.append({
             "run_id": run.id,
             "case_id": run.case_id,
@@ -299,7 +250,7 @@ def get_report_summary(
             "start_time": run.start_time.isoformat() if run.start_time else None,
             "duration": run.duration
         })
-    
+
     return ReportSummary(
         statistics=statistics,
         trends=trends,
@@ -312,17 +263,7 @@ def get_run_detail(run_id: int, user=Depends(get_current_user), db: Session = De
     """
     获取单次执行详情，包含步骤数据（从 report JSON 读取）。
     """
-    result = db.query(
-        db_models.TestRun,
-        db_models.TestCase.name,
-        db_models.TestCase.project_id
-    ).join(
-        db_models.TestCase,
-        db_models.TestRun.case_id == db_models.TestCase.id
-    ).filter(
-        db_models.TestRun.id == run_id
-    ).first()
-
+    result = crud.get_run_detail_with_case(db, run_id)
     if not result:
         raise HTTPException(status_code=404, detail="执行记录不存在")
 
@@ -353,7 +294,7 @@ def get_run_detail(run_id: int, user=Depends(get_current_user), db: Session = De
                 report_data = json.load(f)
             response["steps"] = report_data.get("steps", [])
         except Exception:
-            logger.warning(f"无法加载报告 JSON 文件: {run.report_path}", exc_info=True)
+            logger.warning("无法加载报告 JSON 文件: %s", run.report_path, exc_info=True)
 
     return response
 
@@ -370,37 +311,21 @@ def list_runs(
     """
     获取执行记录列表
     """
-    query = db.query(
-        db_models.TestRun,
-        db_models.TestCase.name
-    ).join(
-        db_models.TestCase,
-        db_models.TestRun.case_id == db_models.TestCase.id
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = crud.list_runs_with_case(
+        db,
+        project_id=project_id,
+        status=status,
+        allowed_ids=allowed_ids,
+        page=page,
+        size=size,
     )
 
-    allowed_ids = get_user_project_filter(user)
-    if allowed_ids is not None:
-        if project_id:
-            if project_id not in allowed_ids:
-                raise HTTPException(status_code=404, detail="Project not found")
-            query = query.filter(db_models.TestCase.project_id == project_id)
-        else:
-            query = query.filter(db_models.TestCase.project_id.in_(allowed_ids))
-    elif project_id:
-        query = query.filter(db_models.TestCase.project_id == project_id)
-
-    if status:
-        query = query.filter(db_models.TestRun.status == status)
-
-    # 分页
-    total = query.count()
-    offset = (page - 1) * size
-    results = query.order_by(
-        db_models.TestRun.start_time.desc()
-    ).offset(offset).limit(size).all()
-
     items = []
-    for run, case_name in results:
+    for run, case_name in result["items"]:
         items.append({
             "run_id": run.id,
             "case_id": run.case_id,
@@ -411,7 +336,7 @@ def list_runs(
         })
 
     return {
-        "total": total,
+        "total": result["total"],
         "page": page,
         "size": size,
         "items": items
@@ -496,16 +421,11 @@ def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: Session 
     project = db.query(db_models.Project).filter(db_models.Project.id == batch.project_id).first()
     project_name = project.name if project else ""
 
-    # 获取批次下所有运行
-    runs = db.query(db_models.TestRun).filter(db_models.TestRun.batch_id == batch_id).all()
+    related = crud.get_batch_detail_with_related(db, batch_id)
+    runs = related["runs"]
+    cases = related["cases"]
 
     runs_data = []
-    case_ids = [r.case_id for r in runs]
-    cases = {}
-    if case_ids:
-        for c in db.query(db_models.TestCase).filter(db_models.TestCase.id.in_(case_ids)).all():
-            cases[c.id] = c
-
     for run in runs:
         case = cases.get(run.case_id)
         case_name = case.name if case else ""
@@ -567,9 +487,9 @@ def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin),
 
 
 @router.get("/batches/{batch_id}/export")
-def export_batch(batch_id: int, db: Session = Depends(get_db)) -> JSONResponse:
+def export_batch(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     """导出批次报告为 JSON 文件"""
-    detail = get_batch_detail(batch_id, db)
+    detail = get_batch_detail(batch_id, user=user, db=db)
 
     from fastapi.responses import JSONResponse
 
@@ -594,5 +514,5 @@ def delete_batch(batch_id: int, user=Depends(get_current_user), db: Session = De
             raise HTTPException(status_code=404, detail="Batch not found")
         return {"message": "Batch deleted"}
     except Exception as e:
-        logger.error(f"Delete batch {batch_id} failed: {e}", exc_info=True)
+        logger.exception("Delete batch %s failed", batch_id)
         raise HTTPException(status_code=500, detail=str(e))

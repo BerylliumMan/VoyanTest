@@ -70,7 +70,7 @@ def _run_startup_init():
                 conn.commit()
                 logger.info("已为 environments 表补充 cookies 列（启动兜底迁移）")
     except Exception as _exc:
-        logger.warning(f"启动兜底迁移 environments.cookies 失败: {_exc}")
+        logger.warning("启动兜底迁移 environments.cookies 失败: %s", _exc, exc_info=True)
 
     # Admin init + AI config seed + prompt templates
     from app.database import SessionLocal as _SessionLocal
@@ -113,7 +113,7 @@ def _run_startup_init():
             except FileNotFoundError:
                 logger.warning("config.json 不存在且数据库无 AI 配置 — 启动后必须通过 API 配置 AI")
             except (_json.JSONDecodeError, KeyError) as _e:
-                logger.warning(f"config.json 格式错误，AI 配置未迁移: {_e}")
+                logger.warning("config.json 格式错误，AI 配置未迁移: %s", _e, exc_info=True)
 
         # Seed default prompt templates
         from app.gen.analyzer import get_default_prompts
@@ -145,7 +145,7 @@ def _run_startup_init():
         cleanup_expired_sessions(_cleanup_db)
         logger.info("过期会话清理完成")
     except Exception as _e:
-        logger.warning(f"过期会话清理失败: {_e}")
+        logger.warning("过期会话清理失败: %s", _e, exc_info=True)
     finally:
         _cleanup_db.close()
 
@@ -165,7 +165,7 @@ async def _periodic_session_cleanup():
             finally:
                 _db.close()
         except Exception as e:
-            logger.warning(f"周期性过期会话清理失败: {e}")
+            logger.warning("周期性过期会话清理失败: %s", e, exc_info=True)
 
 
 @asynccontextmanager

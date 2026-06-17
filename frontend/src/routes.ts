@@ -1,4 +1,4 @@
-import auth, { AuthParams } from '@/utils/authentication';
+import auth, { AuthParams, UserPermission } from '@/utils/authentication';
 import { useEffect, useMemo, useState } from 'react';
 
 export type IRoute = AuthParams & {
@@ -78,20 +78,24 @@ export const routes: IRoute[] = [
   },
 ];
 
-export const getName = (path: string, routes) => {
-  return routes.find((item) => {
+export const getName = (path: string, routeList: IRoute[]): string | undefined => {
+  for (const item of routeList) {
     const itemPath = `/${item.key}`;
     if (path === itemPath) {
       return item.name;
     } else if (item.children) {
-      return getName(path, item.children);
+      const childName = getName(path, item.children);
+      if (childName) {
+        return childName;
+      }
     }
-  });
+  }
+  return undefined;
 };
 
-export const generatePermission = (role: string) => {
+export const generatePermission = (role: string): UserPermission => {
   const actions = role === 'admin' ? ['*'] : ['read'];
-  const result = {};
+  const result: UserPermission = {};
   routes.forEach((item) => {
     if (item.children) {
       item.children.forEach((child) => {
@@ -104,12 +108,12 @@ export const generatePermission = (role: string) => {
   return result;
 };
 
-const useRoute = (userPermission): [IRoute[], string] => {
-  const filterRoute = (routes: IRoute[], arr = []): IRoute[] => {
-    if (!routes.length) {
+const useRoute = (userPermission: UserPermission): [IRoute[], string] => {
+  const filterRoute = (sourceRoutes: IRoute[], arr: IRoute[] = []): IRoute[] => {
+    if (!sourceRoutes.length) {
       return [];
     }
-    for (const route of routes) {
+    for (const route of sourceRoutes) {
       const { requiredPermissions, oneOfPerm } = route;
       let visible = true;
       if (requiredPermissions) {
@@ -119,9 +123,10 @@ const useRoute = (userPermission): [IRoute[], string] => {
         continue;
       }
       if (route.children && route.children.length) {
-        const newRoute = { ...route, children: [] };
-        filterRoute(route.children, newRoute.children);
-        if (newRoute.children.length) {
+        const newChildren: IRoute[] = [];
+        const newRoute: IRoute = { ...route, children: newChildren };
+        filterRoute(route.children, newChildren);
+        if (newChildren.length) {
           arr.push(newRoute);
         }
       } else {

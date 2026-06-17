@@ -4,9 +4,9 @@
 import { useEffect, useState } from 'react';
 import { isSSR } from '@/utils/is';
 
-const getDefaultStorage = (key) => {
+const getDefaultStorage = (key: string): string | undefined => {
   if (!isSSR) {
-    return localStorage.getItem(key);
+    return localStorage.getItem(key) ?? undefined;
   } else {
     return undefined;
   }
@@ -15,8 +15,8 @@ const getDefaultStorage = (key) => {
 function useStorage(
   key: string,
   defaultValue?: string
-): [string, (string) => void, () => void] {
-  const [storedValue, setStoredValue] = useState(
+): [string | undefined, (value: string) => void, () => void] {
+  const [storedValue, setStoredValue] = useState<string | undefined>(
     getDefaultStorage(key) || defaultValue
   );
 
@@ -40,6 +40,8 @@ function useStorage(
     if (storageValue) {
       setStoredValue(storageValue);
     }
+    // 仅在挂载时读取 localStorage，key 变化由调用方重新挂载组件处理
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return [storedValue, setStorageValue, removeStorage];

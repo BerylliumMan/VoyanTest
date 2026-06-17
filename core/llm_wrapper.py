@@ -260,7 +260,7 @@ async def generate_tool_call(
                 max_tokens=4096,
             )
         except Exception as exc:
-            logger.error(f"LLM API call failed (attempt {attempt + 1}): {exc}")
+            logger.exception("LLM API call failed (attempt %s)", attempt + 1)
             if attempt >= 2:
                 raise ValueError(f"LLM API call failed after 3 attempts: {exc}") from exc
             last_error = f"API error: {exc}"
@@ -299,7 +299,7 @@ async def generate_tool_call(
                     parsed = ast.literal_eval(content)
                 except (ValueError, SyntaxError) as exc:
                     last_error = f"Invalid JSON: {exc}"
-                    logger.warning(f"LLM output not valid JSON (attempt {attempt + 1}): {content[:200]}")
+                    logger.warning("LLM output not valid JSON (attempt %s): %s", attempt + 1, content[:200])
                     continue
 
         try:
@@ -307,7 +307,7 @@ async def generate_tool_call(
             return tool_call
         except Exception as exc:
             last_error = f"Validation error: {exc}"
-            logger.warning(f"LLM output failed Pydantic validation (attempt {attempt + 1})")
+            logger.warning("LLM output failed Pydantic validation (attempt %s)", attempt + 1)
             continue
 
     raise ValueError(f"Failed to generate valid tool call after 3 attempts. Last error: {last_error}")
@@ -428,11 +428,11 @@ async def verify_expected_result(
             try:
                 parsed = _json.loads(content)
             except _json.JSONDecodeError as e:
-                logger.warning(f"Verification LLM output not valid JSON: {content[:200]}")
+                logger.warning("Verification LLM output not valid JSON: %s", content[:200])
                 return VerificationResult(passed=False, reason=f"LLM output parse error: {e}")
 
         return VerificationResult.model_validate(parsed)
 
     except Exception as exc:
-        logger.error(f"Verification LLM call failed: {exc}")
+        logger.exception("Verification LLM call failed")
         return VerificationResult(passed=False, reason=f"Verification failed: {exc}")

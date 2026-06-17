@@ -109,7 +109,7 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
                     <div style={{ marginTop: 8 }}>
                       <img
                         src={`/${step.screenshot_path}`}
-                        alt={t['screenshot'].replace('{num}', step.step_number)}
+                        alt={t['screenshot'].replace('{num}', String(step.step_number ?? ''))}
                         className={styles['step-screenshot']}
                       />
                     </div>

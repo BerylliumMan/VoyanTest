@@ -43,7 +43,7 @@ function PageLayout() {
     }
   }, [userInfo]);
 
-  const [routes, defaultRoute] = useRoute(userInfo?.permissions);
+  const [routes, defaultRoute] = useRoute(userInfo?.permissions ?? {});
   const defaultSelectedKeys = [currentComponent || defaultRoute];
   const paths = (currentComponent || defaultRoute).split('/');
   const defaultOpenKeys = paths.slice(0, paths.length - 1);
@@ -60,16 +60,19 @@ function PageLayout() {
   >(new Map());
 
   const navbarHeight = 60;
-  const menuWidth = collapsed ? 48 : settings.menuWidth;
+  const menuWidth = collapsed ? 48 : settings?.menuWidth ?? 48;
 
-  const showNavbar = settings.navbar && urlParams.navbar !== false;
-  const showMenu = settings.menu && urlParams.menu !== false;
-  const showFooter = settings.footer && urlParams.footer !== false;
+  const showNavbar = (settings?.navbar ?? true) && urlParams.navbar !== false;
+  const showMenu = (settings?.menu ?? true) && urlParams.menu !== false;
+  const showFooter = (settings?.footer ?? true) && urlParams.footer !== false;
 
   const flattenRoutes = useMemo(() => getFlattenRoutes(routes) || [], [routes]);
 
   function onClickMenuItem(key: string) {
     const currentRoute = flattenRoutes.find((r) => r.key === key);
+    if (!currentRoute?.component) {
+      return;
+    }
     const component = currentRoute.component;
     const preload = component.preload();
     NProgress.start();

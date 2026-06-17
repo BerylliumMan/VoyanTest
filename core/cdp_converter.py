@@ -283,7 +283,7 @@ async def convert_events_to_steps(
                 max_tokens=2048,
             )
         except Exception as exc:
-            logger.error(f"CDP converter LLM call failed (attempt {attempt + 1}): {exc}")
+            logger.exception("CDP converter LLM call failed (attempt %s)", attempt + 1)
             if attempt >= 2:
                 logger.error("CDP converter giving up after 3 API failures")
                 return []

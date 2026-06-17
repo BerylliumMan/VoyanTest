@@ -41,7 +41,7 @@ axios.interceptors.response.use(
       localStorage.removeItem('userStatus');
       store.dispatch({
         type: 'update-userInfo',
-        payload: { userInfo: null, userLoading: false },
+        payload: { userInfo: undefined, userLoading: false },
       });
       if (window.location.pathname.replace(/\//g, '') !== 'login') {
         window.location.pathname = '/login';
@@ -102,7 +102,7 @@ function Index() {
       .catch(() => {
         store.dispatch({
           type: 'update-userInfo',
-          payload: { userInfo: null, userLoading: false },
+          payload: { userInfo: undefined, userLoading: false },
         });
         localStorage.removeItem('userStatus');
         if (window.location.pathname.replace(/\//g, '') !== 'login') {
@@ -120,7 +120,9 @@ function Index() {
   }, []);
 
   useEffect(() => {
-    changeTheme(theme);
+    if (theme) {
+      changeTheme(theme);
+    }
   }, [theme]);
 
   const contextValue = {

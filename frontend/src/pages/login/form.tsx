@@ -11,7 +11,7 @@ import locale from './locale';
 import styles from './style/index.module.less';
 
 export default function LoginForm() {
-  const formRef = useRef<FormInstance>();
+  const formRef = useRef<FormInstance | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [loginParams, setLoginParams, removeLoginParams] =

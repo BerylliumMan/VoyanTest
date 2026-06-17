@@ -70,8 +70,8 @@ def save_run_results(
         if batch_id:
             crud.update_batch_counters(db, batch_id, status)
         return db_run.id
-    except Exception as exc:
+    except Exception:
         db.rollback()
-        logger.error(f"Failed to save run results: {exc}", exc_info=True)
+        logger.exception("Failed to save run results")
     finally:
         db.close()

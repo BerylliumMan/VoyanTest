@@ -12,7 +12,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
-from ... import db_models
+from ... import crud
 from ...auth import get_current_user
 from ...database import get_db
 from .schemas import (
@@ -36,11 +36,10 @@ async def get_history(
     user=Depends(get_current_user),
 ) -> GenHistoryListResponse:
     """Get analysis history list."""
-    query = db.query(db_models.GenSession).order_by(db_models.GenSession.created_at.desc())
-    if project_id is not None:
-        query = query.filter(db_models.GenSession.project_id == project_id)
-    total = query.count()
-    items = query.offset((page - 1) * page_size).limit(page_size).all()
+
+    result = crud.gen.list_gen_sessions(db, page=page, page_size=page_size, project_id=project_id)
+    items = result["items"]
+    total = result["total"]
 
     return GenHistoryListResponse(
         items=[
@@ -72,15 +71,14 @@ async def export_gen_test_cases_xlsx(
     user=Depends(get_current_user),
 ) -> Response:
     """Export generated test cases as xlsx file."""
-    record = db.query(db_models.GenSession).filter(db_models.GenSession.id == session_id).first()
+
+    record = crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
     if record.status != "completed":
         raise HTTPException(400, f"分析未完成，状态: {record.status}")
 
-    db_tcs = db.query(db_models.GenTestCase).filter(
-        db_models.GenTestCase.session_id == session_id
-    ).order_by(db_models.GenTestCase.id).all()
+    db_tcs = crud.gen.list_gen_test_cases(db, session_id)
 
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -150,19 +148,15 @@ async def get_history_detail(
     user=Depends(get_current_user),
 ) -> GenPreviewResponse:
     """Get analysis detail from DB."""
-    record = db.query(db_models.GenSession).filter(db_models.GenSession.id == session_id).first()
+
+    record = crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
     if record.status != "completed":
         raise HTTPException(400, f"分析未完成，状态: {record.status}")
 
-    db_fps = db.query(db_models.GenFunctionalPoint).filter(
-        db_models.GenFunctionalPoint.session_id == session_id
-    ).order_by(db_models.GenFunctionalPoint.fp_id).all()
-
-    db_tcs = db.query(db_models.GenTestCase).filter(
-        db_models.GenTestCase.session_id == session_id
-    ).order_by(db_models.GenTestCase.id).all()
+    db_fps = crud.gen.list_gen_functional_points(db, session_id)
+    db_tcs = crud.gen.list_gen_test_cases(db, session_id)
 
     fps = [
         {"id": fp.fp_id, "module": fp.module, "name": fp.name, "category": fp.category, "description": fp.description}
@@ -194,7 +188,8 @@ async def delete_history(
     user=Depends(get_current_user),
 ) -> dict:
     """Delete analysis history record."""
-    record = db.query(db_models.GenSession).filter(db_models.GenSession.id == session_id).first()
+
+    record = crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
 
@@ -202,8 +197,7 @@ async def delete_history(
     async with _lock:
         _sessions.pop(session_id, None)
 
-    db.delete(record)
-    db.commit()
+    crud.gen.delete_gen_session(db, session_id)
     return {"message": "删除成功"}
 
 
@@ -216,31 +210,16 @@ async def update_gen_test_case(
     user=Depends(get_current_user),
 ) -> dict:
     """Update a test case in the analysis session."""
-    record = db.query(db_models.GenSession).filter(db_models.GenSession.id == session_id).first()
+
+    record = crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
 
-    tc = db.query(db_models.GenTestCase).filter(
-        db_models.GenTestCase.session_id == session_id,
-        db_models.GenTestCase.test_case_id == test_case_id,
-    ).first()
+    tc = crud.gen.get_gen_test_case(db, session_id, test_case_id)
     if not tc:
         raise HTTPException(404, "用例不存在")
 
-    if body.module is not None:
-        tc.module = body.module
-    if body.title is not None:
-        tc.title = body.title
-    if body.preconditions is not None:
-        tc.preconditions = body.preconditions
-    if body.test_steps is not None:
-        tc.test_steps = body.test_steps
-    if body.expected_result is not None:
-        tc.expected_result = body.expected_result
-    if body.priority is not None:
-        tc.priority = body.priority
-
-    db.commit()
+    crud.gen.update_gen_test_case(db, session_id, test_case_id, body)
     return {"message": "更新成功"}
 
 
@@ -252,18 +231,14 @@ async def delete_gen_test_case(
     user=Depends(get_current_user),
 ) -> dict:
     """Delete a test case from the analysis session."""
-    record = db.query(db_models.GenSession).filter(db_models.GenSession.id == session_id).first()
+
+    record = crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
 
-    tc = db.query(db_models.GenTestCase).filter(
-        db_models.GenTestCase.session_id == session_id,
-        db_models.GenTestCase.test_case_id == test_case_id,
-    ).first()
+    tc = crud.gen.get_gen_test_case(db, session_id, test_case_id)
     if not tc:
         raise HTTPException(404, "用例不存在")
 
-    db.delete(tc)
-    record.test_cases_count = max(0, (record.test_cases_count or 1) - 1)
-    db.commit()
+    crud.gen.delete_gen_test_case(db, session_id, test_case_id)
     return {"message": "删除成功"}

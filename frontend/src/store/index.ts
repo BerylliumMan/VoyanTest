@@ -14,6 +14,19 @@ export interface GlobalState {
   userLoading?: boolean;
 }
 
+export type GlobalAction =
+  | {
+      type: 'update-settings';
+      payload: { settings: GlobalState['settings'] };
+    }
+  | {
+      type: 'update-userInfo';
+      payload: {
+        userInfo?: GlobalState['userInfo'];
+        userLoading?: boolean;
+      };
+    };
+
 const initialState: GlobalState = {
   settings: defaultSettings,
   userInfo: {
@@ -21,7 +34,10 @@ const initialState: GlobalState = {
   },
 };
 
-export default function store(state = initialState, action) {
+export default function store(
+  state: GlobalState = initialState,
+  action: GlobalAction
+): GlobalState {
   switch (action.type) {
     case 'update-settings': {
       const { settings } = action.payload;

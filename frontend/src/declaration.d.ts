@@ -25,3 +25,8 @@ declare module '*.png' {
   const value: string;
   export default value;
 }
+
+declare module 'lodash/groupBy' {
+  import groupBy from 'lodash/groupBy';
+  export default groupBy;
+}

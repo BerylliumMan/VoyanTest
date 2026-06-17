@@ -7,6 +7,15 @@ import { IconPlus, IconEdit, IconDelete, IconCheck } from '@arco-design/web-reac
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 
+// Arco Design Form.Item/Input.Password 支持 valuePropName/showEyeButton 但未在类型中暴露，
+// 这里用宽松类型绕过类型检查
+const FormItem = Form.Item as unknown as React.FC<
+  Record<string, unknown> & { children?: React.ReactNode }
+>;
+const PasswordInput = Input.Password as unknown as React.FC<
+  Record<string, unknown>
+>;
+
 interface Environment {
   id: number;
   name: string;
@@ -161,9 +170,9 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({ projectId }) =>
                 { label: 'WebKit', value: 'webkit' },
               ]} style={{ width: 120 }} />
             </Form.Item>
-            <Form.Item field="headless" label={t['environment.form.headless']} initialValue={true} valuePropName="checked">
+            <FormItem field="headless" label={t['environment.form.headless']} initialValue={true} valuePropName="checked">
               <Switch />
-            </Form.Item>
+            </FormItem>
           </Space>
           <Collapse style={{ marginBottom: 0 }}>
             <Collapse.Item header="认证 Cookie" name="cookies">
@@ -180,14 +189,14 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({ projectId }) =>
                         >
                           <Input placeholder="Cookie 名称" style={{ flex: 1 }} />
                         </Form.Item>
-                        <Form.Item
+                        <FormItem
                           {...field}
                           field={`${field.field}.value`}
                           rules={[{ required: true, message: '请输入 Cookie 值' }]}
                           noStyle
                         >
-                          <Input.Password placeholder="Cookie 值" style={{ flex: 1 }} showEyeButton />
-                        </Form.Item>
+                          <PasswordInput placeholder="Cookie 值" style={{ flex: 1 }} showEyeButton />
+                        </FormItem>
                         <Form.Item
                           {...field}
                           field={`${field.field}.domain`}

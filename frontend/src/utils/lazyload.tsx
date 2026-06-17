@@ -1,11 +1,22 @@
 import React from 'react';
-import loadable from '@loadable/component';
+import loadable, { LoadableComponent } from '@loadable/component';
 import { Spin } from '@arco-design/web-react';
 import styles from '../style/layout.module.less';
 
 // https://github.com/gregberge/loadable-components/pull/226
-function load(fn, options) {
-  const Component = loadable(fn, options);
+type LoadableFn = (() => Promise<unknown>) & {
+  requireAsync?: () => Promise<unknown>;
+};
+
+type LoadableReturn = React.ComponentType<unknown> & {
+  preload: () => Promise<unknown>;
+};
+
+function load(fn: LoadableFn, options: { fallback?: unknown }): LoadableReturn {
+  const Component = (loadable as unknown as <P>(
+    loadFn: () => Promise<P>,
+    opts: { fallback?: unknown }
+  ) => LoadableComponent<P>)(fn as () => Promise<unknown>, options) as unknown as LoadableReturn;
 
   Component.preload = fn.requireAsync || fn;
 
@@ -28,7 +39,7 @@ function LoadingComponent(props: {
   );
 }
 
-export default (loader) =>
+export default (loader: LoadableFn) =>
   load(loader, {
     fallback: LoadingComponent({
       pastDelay: true,

@@ -79,7 +79,7 @@ interface PromptItem {
 const GenPage: React.FC = () => {
   const t = useLocale();
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProject, setSelectedProject] = useState<number | null>(null);
+  const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
   const [description, setDescription] = useState('');
   const [fileList, setFileList] = useState<any[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -333,7 +333,9 @@ const GenPage: React.FC = () => {
                   style={{ width: 300 }}
                   placeholder="请选择项目"
                   value={selectedProject}
-                  onChange={setSelectedProject}
+                  onChange={(v) =>
+                    setSelectedProject(typeof v === 'number' ? v : undefined)
+                  }
                   options={projects.map((p) => ({ label: p.name, value: p.id }))}
                 />
               </div>

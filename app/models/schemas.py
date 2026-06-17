@@ -30,7 +30,6 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=8)
     role: str = "tester"
     project_ids: Optional[List[int]] = None
-    project_ids: Optional[List[int]] = None
 
 
 class UserUpdate(BaseModel):

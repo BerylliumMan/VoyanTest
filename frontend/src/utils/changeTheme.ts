@@ -1,4 +1,4 @@
-function changeTheme(theme) {
+function changeTheme(theme: string) {
   if (theme === 'dark') {
     document.body.setAttribute('arco-theme', 'dark');
   } else {

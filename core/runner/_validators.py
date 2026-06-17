@@ -32,19 +32,19 @@ def _validate_nav_url(url: str | None) -> str | None:
             return url
         # 阻止空主机名、localhost 变体
         if host in ("localhost", "localhost.localdomain", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
-            logger.warning(f"SSRF 防护: 拒绝 localhost URL: {url}")
+            logger.warning("SSRF 防护: 拒绝 localhost URL: %s", url)
             return None
         try:
             addr = ipaddress.ip_address(host)
             for net in _PRIVATE_NETS:
                 if addr in net:
-                    logger.warning(f"SSRF 防护: 拒绝内网地址: {url}")
+                    logger.warning("SSRF 防护: 拒绝内网地址: %s", url)
                     return None
         except ValueError:
             pass  # 域名，不做 IP 检查
         return url
     except Exception as exc:
-        logger.warning(f"URL 校验异常: {url} -> {exc}")
+        logger.warning("URL 校验异常: %s -> %s", url, exc, exc_info=True)
         return None
 
 
@@ -74,11 +74,11 @@ def _resolve_env_cookies(db, base_url_override: str | None) -> list[dict]:
         if not cookies:
             return []
         if not isinstance(cookies, list):
-            logger.warning(f"Environment {env.id} cookies 字段不是列表: {type(cookies).__name__}")
+            logger.warning("Environment %s cookies 字段不是列表: %s", env.id, type(cookies).__name__)
             return []
         return cookies
     except Exception as exc:
-        logger.warning(f"读取环境 cookies 失败 (base_url={base_url_override}): {exc}")
+        logger.warning("读取环境 cookies 失败 (base_url=%s): %s", base_url_override, exc, exc_info=True)
         return []
 
 
@@ -107,12 +107,12 @@ async def _inject_auth_cookies(
     success_count = 0
     for cookie in cookies:
         if not isinstance(cookie, dict):
-            logger.warning(f"跳过非法 cookie 项（非字典）: {cookie!r}")
+            logger.warning("跳过非法 cookie 项（非字典）: %r", cookie)
             continue
         name = cookie.get("name")
         value = cookie.get("value", "")
         if not name:
-            logger.warning(f"跳过缺少 name 的 cookie: {cookie!r}")
+            logger.warning("跳过缺少 name 的 cookie: %r", cookie)
             continue
 
         args: dict = {
@@ -140,7 +140,7 @@ async def _inject_auth_cookies(
                     f"Cookie 注入失败: {name} -> {result.get('text') or result.get('error', 'unknown')}"
                 )
         except Exception as exc:
-            logger.warning(f"Cookie 注入异常: {name} -> {exc}")
+            logger.warning("Cookie 注入异常: %s -> %s", name, exc, exc_info=True)
 
     if success_count:
         logger.info(f"已注入 {success_count}/{len(cookies)} 个 cookies")

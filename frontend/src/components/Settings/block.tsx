@@ -17,6 +17,10 @@ export default function Block(props: BlockProps) {
   const settings = useSelector((state: GlobalState) => state.settings);
   const dispatch = useDispatch();
 
+  if (!settings) {
+    return null;
+  }
+
   return (
     <div className={styles.block}>
       <h5 className={styles.title}>{title}</h5>
@@ -30,7 +34,7 @@ export default function Block(props: BlockProps) {
               {type === 'switch' && (
                 <Switch
                   size="small"
-                  checked={!!settings[option.value]}
+                  checked={!!settings[option.value as keyof typeof settings]}
                   onChange={(checked) => {
                     const newSetting = {
                       ...settings,

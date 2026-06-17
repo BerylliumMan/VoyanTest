@@ -9,6 +9,7 @@ import {
 } from '@arco-design/web-react/icon';
 import { useParams, useLocation } from 'react-router-dom';
 import axios from 'axios';
+import useLocale from '@/utils/useLocale';
 import styles from './style/index.module.less';
 
 const { Text } = Typography;
@@ -74,20 +75,23 @@ type ExecutionPhase = 'idle' | 'running' | 'paused' | 'completed';
 
 /* ========== 常量 ========== */
 
-const STATUS_LABELS: Record<StepStatus, string> = {
-  pending: '等待',
-  running: '执行中',
-  passed: '通过',
-  failed: '失败',
-  skipped: '跳过',
-};
-
 const STATUS_COLORS: Record<StepStatus, string> = {
   pending: 'gray',
   running: 'blue',
   passed: 'green',
   failed: 'red',
   skipped: 'orange',
+};
+
+const getStatusLabel = (status: StepStatus, t: Record<string, string>): string => {
+  switch (status) {
+    case 'pending': return t['step.waiting'];
+    case 'running': return t['running'];
+    case 'passed': return t['passed'];
+    case 'failed': return t['failed'];
+    case 'skipped': return t['debug.skipped'];
+    default: return status;
+  }
 };
 
 /* ========== 子组件 ========== */
@@ -129,6 +133,8 @@ const StepStatusIcon: React.FC<{ status: StepStatus }> = ({ status }) => {
 /* ========== 主页面组件 ========== */
 
 const RunDebugPage: React.FC = () => {
+  const t = useLocale();
+
   /* --- URL 参数解析（同时支持路径参数 /:runId 和查询参数 ?runId=） --- */
   const { runId: routeRunId } = useParams<{ runId: string }>();
   const location = useLocation();
@@ -187,11 +193,12 @@ const RunDebugPage: React.FC = () => {
       setSteps(initialSteps);
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
-      Message.error('加载用例数据失败: ' + (e.response?.data?.detail || '未知错误'));
+      const detail = e.response?.data?.detail || t['debug.unknown_error'];
+      Message.error(t['debug.load_case_failed'].replace('{detail}', detail));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (caseId) {
@@ -301,7 +308,7 @@ const RunDebugPage: React.FC = () => {
       }
       case 'execution_paused': {
         setPhase('paused');
-        setPauseReason(msg.reason || '执行暂停');
+        setPauseReason(msg.reason || t['debug.paused_default_reason']);
         setPauseStepId(msg.step_id);
         setPauseStepDesc(msg.step_description || '');
         break;
@@ -326,18 +333,18 @@ const RunDebugPage: React.FC = () => {
       default:
         break;
     }
-  }, []);
+  }, [t]);
 
   /* --- 控制指令：发送到 WebSocket --- */
   const sendControl = useCallback(
     (action: string, payload?: Record<string, unknown>) => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        Message.warning('WebSocket 未连接，无法发送指令');
+        Message.warning(t['debug.ws_disconnected']);
         return;
       }
       wsRef.current.send(JSON.stringify({ type: 'control', action, ...payload }));
     },
-    [],
+    [t],
   );
 
   /* --- 事件处理 --- */
@@ -376,7 +383,7 @@ const RunDebugPage: React.FC = () => {
       <div className={styles.container}>
           <Spin
             loading
-            tip="加载用例数据..."
+            tip={t['debug.load_case']}
             className={styles['spin-center']}
           />
       </div>
@@ -388,7 +395,7 @@ const RunDebugPage: React.FC = () => {
       <div className={styles.container}>
         <Empty
           icon={<IconInfoCircle className={styles['empty-icon-large']} />}
-          description="缺少 runId 参数，请通过 /run-debug/:runId 访问"
+          description={t['debug.no_runId']}
         />
       </div>
     );
@@ -400,7 +407,7 @@ const RunDebugPage: React.FC = () => {
       <div className={styles['header-bar']}>
         <div className={styles['header-left']}>
           <span className={styles['case-name']}>
-            {caseData?.name || (caseId ? '加载中...' : '实时执行监控')}
+            {caseData?.name || (caseId ? t['debug.case_loading'] : t['debug.live_monitor_title'])}
           </span>
           <span className={styles['run-id']}>run#{runId}</span>
         </div>
@@ -411,7 +418,7 @@ const RunDebugPage: React.FC = () => {
                 wsConnected ? styles.connected : styles.disconnected
               }`}
             />
-            {wsConnected ? '已连接' : '未连接'}
+            {wsConnected ? t['debug.connected'] : t['debug.disconnected']}
           </div>
           <Tag
             color={
@@ -426,12 +433,12 @@ const RunDebugPage: React.FC = () => {
           >
             {phase === 'running' && <IconLoading spin className={styles['icon-inline']} />}
             {phase === 'running'
-              ? '运行中'
+              ? t['running']
               : phase === 'paused'
-                ? '已暂停'
+                ? t['debug.paused']
                 : phase === 'completed'
-                  ? '已完成'
-                  : '等待中'}
+                  ? t['debug.completed']
+                  : t['debug.idle']}
           </Tag>
         </div>
       </div>
@@ -441,13 +448,13 @@ const RunDebugPage: React.FC = () => {
         {/* --- 左侧：步骤列表 --- */}
         <div className={styles['step-panel']}>
           <div className={styles['step-panel-header']}>
-            执行步骤 ({stats.total})
+            {t['debug.steps_count'].replace('{count}', String(stats.total))}
           </div>
           <div className={styles['step-list']}>
             {steps.length === 0 && !caseId && (
               <Empty
                 icon={<IconInfoCircle className={styles['empty-icon-medium']} />}
-                description="等待接收执行数据..."
+                description={t['debug.waiting_data']}
               />
             )}
             {steps.map((step, idx) => {
@@ -467,12 +474,12 @@ const RunDebugPage: React.FC = () => {
                   <StepStatusIcon status={step.status} />
                   <div className={styles['step-content']}>
                     <div className={styles['step-order']}>
-                      步骤 {step.step_order}
+                      {t['debug.step_label'].replace('{order}', String(step.step_order))}
                     </div>
                     <div className={styles['step-desc']}>{step.description}</div>
                     {step.healed_selector && (
                       <div className={styles['healed-hint']}>
-                        <IconTool /> 已修复: {step.healed_selector}
+                        <IconTool /> {t['debug.healed_hint'].replace('{selector}', step.healed_selector)}
                       </div>
                     )}
                   </div>
@@ -493,8 +500,8 @@ const RunDebugPage: React.FC = () => {
           {phase === 'paused' && (
             <div className={styles['control-bar']}>
               <div className={styles['pause-reason']}>
-                暂停原因: {pauseReason}
-                {pauseStepDesc && `（步骤: ${pauseStepDesc}）`}
+                {t['debug.pause_reason'].replace('{reason}', pauseReason)}
+                {pauseStepDesc && ` ${t['debug.pause_step'].replace('{desc}', pauseStepDesc)}`}
               </div>
               <Button
                 type="primary"
@@ -502,7 +509,7 @@ const RunDebugPage: React.FC = () => {
                 icon={<IconSync />}
                 onClick={handleRetry}
               >
-                重试
+                {t['debug.retry']}
               </Button>
               <Button
                 type="primary"
@@ -511,7 +518,7 @@ const RunDebugPage: React.FC = () => {
                 icon={<IconSkipNext />}
                 onClick={handleSkip}
               >
-                跳过
+                {t['debug.skip']}
               </Button>
               <Button
                 type="primary"
@@ -520,7 +527,7 @@ const RunDebugPage: React.FC = () => {
                 icon={<IconStop />}
                 onClick={handleAbort}
               >
-                中止
+                {t['debug.abort']}
               </Button>
               <Button
                 type="outline"
@@ -528,7 +535,7 @@ const RunDebugPage: React.FC = () => {
                 icon={<IconEdit />}
                 onClick={handleEditOpen}
               >
-                编辑
+                {t['edit']}
               </Button>
             </div>
           )}
@@ -538,10 +545,10 @@ const RunDebugPage: React.FC = () => {
             {selectedStep ? (
               <>
                 <StepStatusIcon status={selectedStep.status} />
-                <span>步骤 {selectedStep.step_order} 详情</span>
+                <span>{t['debug.step_detail_title'].replace('{order}', String(selectedStep.step_order))}</span>
                 {selectedStep.duration != null && (
                   <Tag size="small" color={STATUS_COLORS[selectedStep.status]}>
-                    {STATUS_LABELS[selectedStep.status]} ·{' '}
+                    {getStatusLabel(selectedStep.status, t)} ·{' '}
                     {selectedStep.duration.toFixed(1)}s
                   </Tag>
                 )}
@@ -558,12 +565,12 @@ const RunDebugPage: React.FC = () => {
                   <IconCheck className={styles['phase-icon-completed']} />
                 )}
                 {phase === 'running'
-                  ? '实时监控'
+                  ? t['debug.live_monitor']
                   : phase === 'paused'
-                    ? '执行已暂停'
+                    ? t['debug.paused_phase']
                     : phase === 'completed'
-                      ? '执行结果摘要'
-                      : '选择一个步骤查看详情'}
+                      ? t['debug.result_summary']
+                      : t['debug.select_step_prompt']}
               </Space>
             )}
           </div>
@@ -576,11 +583,12 @@ const RunDebugPage: React.FC = () => {
                 <div className={styles['running-spinner']}>
                   <IconLoading spin />
                 </div>
-                <div className={styles['running-text']}>测试执行中...</div>
+                <div className={styles['running-text']}>{t['debug.running_text']}</div>
                 {currentStepIdx >= 0 && (
                   <div className={styles['current-step-hint']}>
-                    正在执行: 步骤 {steps[currentStepIdx]?.step_order} -{' '}
-                    {steps[currentStepIdx]?.description}
+                    {t['debug.current_step_hint']
+                      .replace('{order}', String(steps[currentStepIdx]?.step_order ?? ''))
+                      .replace('{desc}', steps[currentStepIdx]?.description ?? '')}
                   </div>
                 )}
                 {steps.length > 0 && (
@@ -589,19 +597,19 @@ const RunDebugPage: React.FC = () => {
                       <div className={`${styles['stat-value']} ${styles['stat-passed']}`}>
                         {stats.passed}
                       </div>
-                      <div className={styles['stat-label']}>通过</div>
+                      <div className={styles['stat-label']}>{t['passed']}</div>
                     </div>
                     <div className={styles['stat-item']}>
                       <div className={`${styles['stat-value']} ${styles['stat-failed']}`}>
                         {stats.failed}
                       </div>
-                      <div className={styles['stat-label']}>失败</div>
+                      <div className={styles['stat-label']}>{t['failed']}</div>
                     </div>
                     <div className={styles['stat-item']}>
                       <div className={`${styles['stat-value']} ${styles['stat-pending']}`}>
                         {stats.pending}
                       </div>
-                      <div className={styles['stat-label']}>剩余</div>
+                      <div className={styles['stat-label']}>{t['debug.remaining']}</div>
                     </div>
                   </div>
                 )}
@@ -619,26 +627,26 @@ const RunDebugPage: React.FC = () => {
                   )}
                 </div>
                 <Text className={styles['completed-state-text']}>
-                  {stats.failed === 0 ? '全部通过！' : '执行完成（含失败）'}
+                  {stats.failed === 0 ? `${t['all.passed']}!` : t['debug.completed_with_failure']}
                 </Text>
                 <div className={styles['summary-stats']}>
                   <div className={styles['stat-item']}>
                     <div className={`${styles['stat-value']} ${styles['stat-passed']}`}>
                       {stats.passed}
                     </div>
-                    <div className={styles['stat-label']}>通过</div>
+                    <div className={styles['stat-label']}>{t['passed']}</div>
                   </div>
                   <div className={styles['stat-item']}>
                     <div className={`${styles['stat-value']} ${styles['stat-failed']}`}>
                       {stats.failed}
                     </div>
-                    <div className={styles['stat-label']}>失败</div>
+                    <div className={styles['stat-label']}>{t['failed']}</div>
                   </div>
                   <div className={styles['stat-item']}>
                     <div className={`${styles['stat-value']} ${styles['stat-pending']}`}>
                       {stats.total}
                     </div>
-                    <div className={styles['stat-label']}>总计</div>
+                    <div className={styles['stat-label']}>{t['debug.total']}</div>
                   </div>
                 </div>
               </div>
@@ -649,10 +657,10 @@ const RunDebugPage: React.FC = () => {
               <div className={styles['running-state']}>
                 <IconPause className={styles['running-state-icon']} />
                 <Text className={styles['pause-hint']}>
-                  执行已暂停：{pauseReason}
+                  {t['debug.paused_phase']}{pauseReason}
                 </Text>
                 <Text className={styles['pause-subhint']}>
-                  请在上方选择操作：重试 / 跳过 / 中止 / 编辑
+                  {t['debug.pause_action_hint']}
                 </Text>
               </div>
             )}
@@ -662,14 +670,14 @@ const RunDebugPage: React.FC = () => {
               <>
                 <div className={styles['detail-section']}>
                   <Text className={styles['detail-title']}>
-                    步骤 {selectedStep.step_order}
+                    {t['debug.step_label'].replace('{order}', String(selectedStep.step_order))}
                   </Text>
                   <Text className={styles['detail-desc']}>
                     {selectedStep.description}
                   </Text>
                   {selectedStep.healed_selector && (
                     <div className={styles['healed-hint']}>
-                      <IconTool /> 已修复: {selectedStep.healed_selector}
+                      <IconTool /> {t['debug.healed_hint'].replace('{selector}', selectedStep.healed_selector)}
                     </div>
                   )}
                 </div>
@@ -677,7 +685,7 @@ const RunDebugPage: React.FC = () => {
                 {selectedStep.error && (
                   <div className={styles['detail-subsection']}>
                     <Text className={styles['detail-label-danger']}>
-                      错误信息：
+                      {t['debug.error_info']}
                     </Text>
                     <div className={styles['log-error']}>{selectedStep.error}</div>
                   </div>
@@ -686,25 +694,25 @@ const RunDebugPage: React.FC = () => {
                 {selectedStep.screenshot_path ? (
                   <div className={styles['screenshot-section']}>
                     <Text className={styles['detail-label']}>
-                      步骤截图：
+                      {t['debug.screenshot_label']}
                     </Text>
                     <img
                       src={`/${selectedStep.screenshot_path}`}
-                      alt={`步骤 ${selectedStep.step_order} 截图`}
+                      alt={t['debug.screenshot_alt'].replace('{order}', String(selectedStep.step_order))}
                       className={styles['screenshot-img']}
                     />
                   </div>
                 ) : (
                   <div className={styles['screenshot-placeholder']}>
                     <IconInfoCircle />
-                    <span>暂无截图</span>
+                    <span>{t['debug.no_screenshot']}</span>
                   </div>
                 )}
 
                 {selectedStep.logs.length > 0 && (
                   <div className={styles['log-section']}>
                     <Text className={styles['detail-label']}>
-                      步骤日志：
+                      {t['debug.log_label']}
                     </Text>
                     <div className={styles['log-area']}>
                       {selectedStep.logs.map((log, i) => (
@@ -723,27 +731,27 @@ const RunDebugPage: React.FC = () => {
 
       {/* ===== 编辑步骤描述弹窗 ===== */}
       <Modal
-        title="编辑步骤描述"
+        title={t['debug.edit_step_title']}
         visible={editVisible}
         onOk={handleEditSubmit}
         onCancel={() => setEditVisible(false)}
-        okText="确认修改"
-        cancelText="取消"
+        okText={t['debug.confirm_edit']}
+        cancelText={t['cancel']}
         unmountOnExit
         className={styles['edit-modal']}
       >
         <Form form={editForm} layout="vertical">
           <div className={styles['edit-modal-text']}>
-            修改步骤描述后将重新执行该步骤：
+            {t['debug.edit_modal_hint']}
           </div>
           <Form.Item
             field="new_description"
             rules={[
-              { required: true, message: '步骤描述不能为空' },
+              { required: true, message: t['debug.step_desc_required'] },
             ]}
           >
             <Input.TextArea
-              placeholder="输入新的步骤描述..."
+              placeholder={t['debug.edit_placeholder']}
               autoSize={{ minRows: 3, maxRows: 8 }}
             />
           </Form.Item>

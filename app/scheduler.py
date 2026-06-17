@@ -35,8 +35,8 @@ class ScheduledTask:
         try:
             itr = croniter(self.cron_expression, base_time or tz_now())
             return itr.get_next(datetime)
-        except Exception as e:
-            logger.error(f"计算下次执行时间失败: {e}")
+        except Exception:
+            logger.exception("计算下次执行时间失败")
             return None
 
 
@@ -179,7 +179,7 @@ class TaskScheduler:
                 task.next_run = task.calculate_next_run()
             
             if not task.next_run:
-                logger.error(f"任务 {task.id} 无法计算下次执行时间")
+                logger.error("任务 %s 无法计算下次执行时间", task.id)
                 break
             
             # 计算等待时间
@@ -214,8 +214,8 @@ class TaskScheduler:
         
         try:
             await self._executor(task)
-        except Exception as e:
-            logger.error(f"定时任务执行失败: {e}")
+        except Exception:
+            logger.exception("定时任务执行失败")
             task.fail_count += 1
     
     async def run_task_now(self, task_id: str) -> bool:

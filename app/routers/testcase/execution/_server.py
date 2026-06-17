@@ -120,8 +120,8 @@ async def _run_debug_mode(case_id: int, batch_id: int, run_id: int, environment_
         )
         from app.websocket import _pause_events
         _pause_events.pop(run_id, None)
-    except Exception as exc:
-        logger.error(f"Debug run failed: {exc}", exc_info=True)
+    except Exception:
+        logger.exception("Debug run failed")
         try:
             from app.websocket import LogBroadcaster
             await LogBroadcaster.log_run_complete(run_id, status="error", error=str(exc))

@@ -6,6 +6,15 @@ import { IconPlus, IconEdit, IconDelete, IconCheck } from '@arco-design/web-reac
 import { Environment } from '../types';
 import styles from '../style/components.module.less';
 
+// Arco Design Form.Item/Input.Password 支持 valuePropName/showEyeButton 但未在类型中暴露，
+// 这里用宽松类型绕过类型检查
+const FormItem = Form.Item as unknown as React.FC<
+  Record<string, unknown> & { children?: React.ReactNode }
+>;
+const PasswordInput = Input.Password as unknown as React.FC<
+  Record<string, unknown>
+>;
+
 type FormInstance = ReturnType<typeof Form.useForm>[0];
 
 interface EnvironmentManagerProps {
@@ -96,9 +105,9 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({
                 { label: 'WebKit', value: 'webkit' },
               ]} className={styles['browser-select']} />
             </Form.Item>
-            <Form.Item field="headless" label={t['environment.form.headless']} initialValue={true} valuePropName="checked">
+            <FormItem field="headless" label={t['environment.form.headless']} initialValue={true} valuePropName="checked">
               <Switch />
-            </Form.Item>
+            </FormItem>
           </Space>
           <Collapse style={{ marginBottom: 0 }}>
             <Collapse.Item header="认证 Cookie" name="cookies">
@@ -121,7 +130,7 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({
                           rules={[{ required: true, message: '请输入 Cookie 值' }]}
                           noStyle
                         >
-                          <Input.Password placeholder="Cookie 值" style={{ flex: 1 }} showEyeButton />
+                          <PasswordInput placeholder="Cookie 值" style={{ flex: 1 }} showEyeButton />
                         </Form.Item>
                         <Form.Item
                           {...field}

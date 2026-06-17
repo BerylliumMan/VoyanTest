@@ -100,8 +100,8 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
                 (tz_now() - start_time).total_seconds(),
                 report_path, None, [], batch_id=batch.id,
             )
-        except Exception as e:
-            logger.error(f"Client execution failed: {e}")
+        except Exception:
+            logger.exception("Client execution failed")
             _all_success = False
             end_time = tz_now()
             save_run_results(
@@ -131,7 +131,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
                     ))
                     logger.info("All cases passed — shutdown signal sent to agent")
             except Exception as exc:
-                logger.warning(f"Failed to send shutdown to agent: {exc}")
+                logger.warning("Failed to send shutdown to agent: %s", exc, exc_info=True)
         else:
             logger.info("Some cases failed — browser left open for debugging")
 
@@ -139,7 +139,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
     def _on_run_done(t) -> None:
         exc = t.exception()
         if exc:
-            logger.error(f"Client agent run task failed: {exc}")
+            logger.error("Client agent run task failed: %s", exc)
             try:
                 from app.database import SessionLocal as _SL
                 from app import db_models as _dm
@@ -150,8 +150,8 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
                     _b.finished_at = tz_now()
                     _db.commit()
                 _db.close()
-            except Exception as e:
-                logger.warning(f"Failed to mark batch {batch.id} as failed: {e}")
+            except Exception:
+                logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
     _task.add_done_callback(_on_run_done)
 
     return {
@@ -242,8 +242,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                     report_path, None, [], batch_id=batch.id,
                     is_init=info.get("is_init", False),
                 )
-            except Exception as e:
-                logger.error(f"Agent run failed for case {case_id}: {e}")
+            except Exception:
+                logger.exception("Agent run failed for case %s", case_id)
                 _all_success = False
                 end_time = tz_now()
                 save_run_results(
@@ -276,13 +276,13 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                 else:
                     logger.info("All cases passed — browser left open for debugging")
             except Exception as exc:
-                logger.warning(f"Failed to send shutdown to agent: {exc}")
+                logger.warning("Failed to send shutdown to agent: %s", exc, exc_info=True)
 
     _task = _asyncio.create_task(_run_batch())
     def _on_batch_done(t) -> None:
         exc = t.exception()
         if exc:
-            logger.error(f"Client agent batch-run task failed: {exc}")
+            logger.error("Client agent batch-run task failed: %s", exc)
             try:
                 from app.database import SessionLocal as _SL
                 from app import db_models as _dm
@@ -293,8 +293,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                     _b.finished_at = tz_now()
                     _db.commit()
                 _db.close()
-            except Exception as e:
-                logger.warning(f"Failed to mark batch {batch.id} as failed: {e}")
+            except Exception:
+                logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
     _task.add_done_callback(_on_batch_done)
 
     return {

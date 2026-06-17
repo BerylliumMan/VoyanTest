@@ -97,7 +97,7 @@ async def run_test_case_in_browser(
             r = db.execute(_stmt)
             db.commit()
             if r.rowcount == 0:
-                logger.warning(f"TestRun {run_id} not found, will create new record")
+                logger.warning("TestRun %s not found, will create new record", run_id)
                 run_id = None
             else:
                 logger.info(f"TestRun {run_id} updated (pending -> running)")
@@ -157,7 +157,7 @@ async def run_test_case_in_browser(
         if nav_url:
             nav_result = await mcp_manager.call_tool('browser_navigate', {'url': nav_url})
             if not nav_result.get('success'):
-                logger.warning(f"Failed to navigate to {nav_url}: {nav_result.get('text')}")
+                logger.warning("Failed to navigate to %s: %s", nav_url, nav_result.get('text'))
             else:
                 logger.info(f"Navigated to {nav_url}")
 
@@ -291,7 +291,7 @@ async def run_test_case_in_browser(
                                 step_obj.healed_selector = healed
                                 db.commit()
                             except Exception as db_exc:
-                                logger.warning(f"保存自愈选择器失败: {db_exc}")
+                                logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
                         continue  # 用新选择器重试
                     elif attempt == 0 and not step_success and error_msg:
                         logger.debug(f"  跳过自愈（非定位错误）: {error_msg[:80]}")
@@ -555,9 +555,9 @@ async def run_test_case_in_browser(
             _json.dump(report, f, ensure_ascii=False, indent=2)
         logger.info(f"Report saved: {case_report_path}")
 
-    except Exception as exc:
+    except Exception:
         test_status = "failed"
-        logger.error(f"Error executing test case {case_id}: {exc}", exc_info=True)
+        logger.exception("Error executing test case %s", case_id)
         run_log_entries.append({
             "step_id": None,
             "level": "CRITICAL",
@@ -601,12 +601,12 @@ async def run_test_case_in_browser(
                 if batch_id:
                     try:
                         crud.update_batch_counters(db, batch_id, test_status)
-                    except Exception as bexc:
-                        logger.error(f"Failed to update batch counters: {bexc}")
+                    except Exception:
+                        logger.exception("Failed to update batch counters")
                         db.rollback()
                 logger.info(f"TestRun {run_id} updated -> {test_status}")
-            except Exception as exc:
-                logger.error(f"Failed to update TestRun {run_id}: {exc}")
+            except Exception:
+                logger.exception("Failed to update TestRun %s", run_id)
                 db.rollback()
         else:
             save_run_results(

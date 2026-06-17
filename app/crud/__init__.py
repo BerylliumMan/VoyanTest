@@ -54,6 +54,32 @@ from app.crud.run import (
     delete_run_batch,
     update_batch_counters,
     _compute_batch_status,
+    get_run_statistics,
+    get_run_trends,
+    list_recent_runs,
+    get_run_detail_with_case,
+    list_runs_with_case,
+    get_batch_detail_with_related,
+)
+from app.crud.agent import (
+    get_agent,
+    get_agent_by_name,
+    list_agents,
+    create_agent,
+    update_agent,
+    delete_agent,
+    list_agent_logs,
+    update_agent_heartbeat,
+)
+from app.crud.gen import (
+    list_gen_sessions,
+    get_gen_session,
+    delete_gen_session,
+    list_gen_functional_points,
+    list_gen_test_cases,
+    get_gen_test_case,
+    update_gen_test_case,
+    delete_gen_test_case,
 )
 
 __all__ = [
@@ -108,4 +134,28 @@ __all__ = [
     "delete_run_batch",
     "update_batch_counters",
     "_compute_batch_status",
-]
+    "get_run_statistics",
+    "get_run_trends",
+    "list_recent_runs",
+    "get_run_detail_with_case",
+    "list_runs_with_case",
+    "get_batch_detail_with_related",
+    # agent
+    "get_agent",
+    "get_agent_by_name",
+    "list_agents",
+    "create_agent",
+    "update_agent",
+    "delete_agent",
+    "list_agent_logs",
+    "update_agent_heartbeat",
+    # gen
+    "list_gen_sessions",
+    "get_gen_session",
+    "delete_gen_session",
+    "list_gen_functional_points",
+    "list_gen_test_cases",
+    "get_gen_test_case",
+    "update_gen_test_case",
+    "delete_gen_test_case",
+]  # noqa: E501

@@ -50,7 +50,7 @@ async def _capture_screenshot(
         if saved:
             result['screenshot_path'] = saved
     except Exception as exc:
-        logger.warning(f"Failed to capture screenshot: {exc}")
+        logger.warning("Failed to capture screenshot: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +156,13 @@ async def execute_step_mcp(
                 else:
                     result['verification'] = verification.reason
             except asyncio.TimeoutError:
-                logger.warning(f"Step {step_number} verification timed out")
+                logger.warning("Step %s verification timed out", step_number)
             except Exception as exc:
-                logger.warning(f"Step {step_number} verification failed: {exc}")
+                logger.warning("Step %s verification failed: %s", step_number, exc, exc_info=True)
 
     except Exception as exc:
         result['error'] = str(exc)
-        logger.warning(f"Step {step_number} exception: {exc}")
+        logger.warning("Step %s exception: %s", step_number, exc, exc_info=True)
 
     result['duration_ms'] = (time.monotonic() - t_start) * 1000
     return result

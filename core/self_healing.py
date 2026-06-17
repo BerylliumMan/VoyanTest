@@ -25,7 +25,7 @@ async def _get_cached_client():
 
         _cached_client = create_openai_client()
     except Exception as exc:
-        logger.warning(f"Failed to create LLM client: {exc}")
+        logger.warning("Failed to create LLM client: %s", exc, exc_info=True)
         return None
     return _cached_client
 
@@ -80,7 +80,7 @@ async def heal_selector(
         snapshot_result = await mcp_manager.call_tool("browser_snapshot", {})
         dom_snapshot = snapshot_result.get("text", "") if snapshot_result.get("success") else ""
     except Exception as exc:
-        logger.warning(f"Failed to get DOM snapshot for healing: {exc}")
+        logger.warning("Failed to get DOM snapshot for healing: %s", exc, exc_info=True)
         return []
 
     if not dom_snapshot or len(dom_snapshot) < 10:
@@ -119,7 +119,7 @@ async def heal_selector(
                 content = content[4:]
         candidates = _json.loads(content)
     except Exception as exc:
-        logger.warning(f"LLM healing failed: {exc}")
+        logger.warning("LLM healing failed: %s", exc, exc_info=True)
         return []
 
     # 4. 验证返回格式
@@ -221,5 +221,5 @@ async def try_heal_and_retry(
     try:
         return await asyncio.wait_for(_do_heal(), timeout=healing_timeout)
     except asyncio.TimeoutError:
-        logger.warning(f"Self-healing timed out after {healing_timeout}s")
+        logger.warning("Self-healing timed out after %ss", healing_timeout)
         return None

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..auth import require_admin
-from ..db_models import Agent as AgentDB, AgentLog as AgentLogDB
+from .. import crud
 from app.tz import now as tz_now
 
 router = APIRouter(
@@ -41,7 +41,7 @@ def list_agents(db: Session = Depends(get_db)) -> list[models.Agent]:
 
         return False
 
-    db_agents = db.query(AgentDB).order_by(AgentDB.created_at.desc()).all()
+    db_agents = crud.list_agents(db)
     db_names = {a.name for a in db_agents}
 
     for a in db_agents:
@@ -64,42 +64,23 @@ def list_agents(db: Session = Depends(get_db)) -> list[models.Agent]:
 
 @router.post("/agents/register", response_model=models.Agent)
 def register_agent(agent: models.AgentCreate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Agent:
-    existing = db.query(AgentDB).filter(AgentDB.name == agent.name).first()
-    if existing:
+    if crud.get_agent_by_name(db, agent.name) is not None:
         raise HTTPException(status_code=400, detail="Agent name already exists")
-    db_agent = AgentDB(
-        name=agent.name,
-        endpoint=agent.endpoint,
-        description=agent.description,
-        status="offline",
-    )
-    db.add(db_agent)
-    db.commit()
-    db.refresh(db_agent)
-    return db_agent
+    return crud.create_agent(db, agent)
 
 
 @router.put("/agents/{agent_id}", response_model=models.Agent)
 def update_agent(agent_id: int, agent: models.AgentUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Agent:
-    db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
+    db_agent = crud.update_agent(db, agent_id, agent)
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    update_data = agent.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(db_agent, key, value)
-    db.commit()
-    db.refresh(db_agent)
     return db_agent
 
 
 @router.delete("/agents/{agent_id}")
 def delete_agent(agent_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
-    if db_agent is None:
+    if crud.delete_agent(db, agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    db.query(AgentLogDB).filter(AgentLogDB.agent_id == agent_id).delete()
-    db.delete(db_agent)
-    db.commit()
     return {"message": "Agent deleted"}
 
 
@@ -110,22 +91,14 @@ def get_agent_logs(
     size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> models.AgentLogPage:
-    db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
-    if db_agent is None:
+    if crud.get_agent(db, agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    query = db.query(AgentLogDB).filter(AgentLogDB.agent_id == agent_id).order_by(AgentLogDB.created_at.desc())
-    total = query.count()
-    items = query.offset((page - 1) * size).limit(size).all()
-    return {"items": items, "total": total, "page": page, "size": size}
+    return crud.list_agent_logs(db, agent_id, page, size)
 
 
 @router.post("/agents/{agent_id}/heartbeat", response_model=models.Agent)
 def agent_heartbeat(agent_id: int, db: Session = Depends(get_db)) -> models.Agent:
-    db_agent = db.query(AgentDB).filter(AgentDB.id == agent_id).first()
+    db_agent = crud.update_agent_heartbeat(db, agent_id)
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    db_agent.last_heartbeat = tz_now()
-    db_agent.status = "online"
-    db.commit()
-    db.refresh(db_agent)
     return db_agent

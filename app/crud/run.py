@@ -2,6 +2,7 @@
 import logging
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import db_models
@@ -225,3 +226,216 @@ def _compute_batch_status(db: Session, batch, preloaded_runs: list = None) -> No
         batch.status = "passed" if counts.get("failed", 0) == 0 else "failed"
     else:
         batch.status = "partial"
+
+
+# ----------------------------
+# 报告查询（统计 / 趋势 / 详情 / 列表）
+# ----------------------------
+
+def _apply_batch_project_filter(query, project_id: int | None, allowed_ids: list[int] | None):
+    """对 RunBatch 查询应用项目权限过滤。
+
+    规则（与原 report_router 行为一致）：
+    - allowed_ids 不为空：表示该用户被限制到部分项目
+        - 若 project_id 指定：用 project_id 精确过滤（调用方需自行保证其属于 allowed_ids）
+        - 否则：用 allowed_ids IN 过滤
+    - allowed_ids 为空（None）：不受限
+        - 若 project_id 指定：用 project_id 精确过滤
+        - 否则：不过滤
+    """
+    if allowed_ids is not None:
+        if project_id:
+            return query.filter(db_models.RunBatch.project_id == project_id)
+        return query.filter(db_models.RunBatch.project_id.in_(allowed_ids))
+    if project_id:
+        return query.filter(db_models.RunBatch.project_id == project_id)
+    return query
+
+
+def _apply_case_project_filter(query, project_id: int | None, allowed_ids: list[int] | None):
+    """对 TestCase 关联查询应用项目权限过滤（规则同上，作用于 TestCase 表）。"""
+    if allowed_ids is not None:
+        if project_id:
+            return query.filter(db_models.TestCase.project_id == project_id)
+        return query.filter(db_models.TestCase.project_id.in_(allowed_ids))
+    if project_id:
+        return query.filter(db_models.TestCase.project_id == project_id)
+    return query
+
+
+def get_run_statistics(
+    db: Session,
+    start_date,
+    end_date,
+    project_id: int | None = None,
+    allowed_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    """聚合指定时间窗口内的批次统计数据。
+
+    返回字段：
+    - total_batches: 时间窗口内的批次数
+    - today_batches: 今日创建的批次数
+    - total_cases_in_batches: 所有批次的 total_cases 累计
+    - total_passed: 所有批次的 passed 累计
+    - total_failed: 所有批次的 failed 累计
+    - total_cases: TestCase 表的项目用例总数（独立计算）
+    """
+    query = _apply_batch_project_filter(db.query(db_models.RunBatch), project_id, allowed_ids)
+    query = query.filter(
+        db_models.RunBatch.created_at >= start_date,
+        db_models.RunBatch.created_at <= end_date,
+    )
+
+    total_batches = query.count()
+
+    result = query.with_entities(
+        func.sum(db_models.RunBatch.total_cases),
+        func.sum(db_models.RunBatch.passed),
+        func.sum(db_models.RunBatch.failed),
+    ).first()
+
+    total_cases_in_batches = result[0] or 0
+    total_passed = result[1] or 0
+    total_failed = result[2] or 0
+
+    today_start = tz_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_batches = query.filter(db_models.RunBatch.created_at >= today_start).count()
+
+    total_cases_query = db.query(db_models.TestCase)
+    if project_id:
+        total_cases_query = total_cases_query.filter(db_models.TestCase.project_id == project_id)
+    total_cases = total_cases_query.count()
+
+    return {
+        "total_batches": total_batches,
+        "today_batches": today_batches,
+        "total_cases_in_batches": total_cases_in_batches,
+        "total_passed": total_passed,
+        "total_failed": total_failed,
+        "total_cases": total_cases,
+    }
+
+
+def get_run_trends(
+    db: Session,
+    start_date,
+    end_date,
+    project_id: int | None = None,
+    allowed_ids: list[int] | None = None,
+) -> list[tuple]:
+    """按日期聚合批次趋势原始行。
+
+    返回 [(date, passed, failed, total_cases), ...]，调用方负责按日聚合与空白日期填充。
+    """
+    query = db.query(
+        func.date(db_models.RunBatch.created_at).label("date"),
+        db_models.RunBatch.passed,
+        db_models.RunBatch.failed,
+        db_models.RunBatch.total_cases,
+    ).filter(
+        db_models.RunBatch.created_at >= start_date,
+        db_models.RunBatch.created_at <= end_date,
+    )
+
+    query = _apply_batch_project_filter(query, project_id, allowed_ids)
+
+    return query.all()
+
+
+def list_recent_runs(
+    db: Session,
+    limit: int = 10,
+    project_id: int | None = None,
+    allowed_ids: list[int] | None = None,
+) -> list[tuple]:
+    """获取最近执行记录（含用例名）。
+
+    返回 [(TestRun, case_name), ...]，按 start_time 倒序。
+    """
+    query = db.query(
+        db_models.TestRun,
+        db_models.TestCase.name,
+    ).join(
+        db_models.TestCase,
+        db_models.TestRun.case_id == db_models.TestCase.id,
+    ).order_by(
+        db_models.TestRun.start_time.desc(),
+    ).limit(limit)
+
+    query = _apply_case_project_filter(query, project_id, allowed_ids)
+
+    return query.all()
+
+
+def get_run_detail_with_case(db: Session, run_id: int):
+    """获取单次执行详情（含所属用例名与项目ID），用于权限校验。
+
+    返回 (TestRun, case_name, case_project_id) 或 None。
+    """
+    return db.query(
+        db_models.TestRun,
+        db_models.TestCase.name,
+        db_models.TestCase.project_id,
+    ).join(
+        db_models.TestCase,
+        db_models.TestRun.case_id == db_models.TestCase.id,
+    ).filter(
+        db_models.TestRun.id == run_id,
+    ).first()
+
+
+def list_runs_with_case(
+    db: Session,
+    project_id: int | None = None,
+    status: str | None = None,
+    allowed_ids: list[int] | None = None,
+    page: int = 1,
+    size: int = 20,
+) -> dict[str, Any]:
+    """分页获取执行记录列表（含用例名），按 start_time 倒序。
+
+    返回 {"total": int, "items": [(TestRun, case_name), ...]}。
+    """
+    query = db.query(
+        db_models.TestRun,
+        db_models.TestCase.name,
+    ).join(
+        db_models.TestCase,
+        db_models.TestRun.case_id == db_models.TestCase.id,
+    )
+
+    query = _apply_case_project_filter(query, project_id, allowed_ids)
+
+    if status:
+        query = query.filter(db_models.TestRun.status == status)
+
+    total = query.count()
+    offset = (page - 1) * size
+    items = (
+        query.order_by(db_models.TestRun.start_time.desc())
+        .offset(offset)
+        .limit(size)
+        .all()
+    )
+
+    return {"total": total, "items": items}
+
+
+def get_batch_detail_with_related(db: Session, batch_id: int) -> dict[str, Any]:
+    """获取批次详情所需的所有关联数据（runs 与 cases），消除 N+1。
+
+    返回 {"runs": [TestRun, ...], "cases": {case_id: TestCase}}。
+    """
+    runs = (
+        db.query(db_models.TestRun)
+        .filter(db_models.TestRun.batch_id == batch_id)
+        .all()
+    )
+
+    case_ids = [r.case_id for r in runs]
+    cases: dict[int, db_models.TestCase] = {}
+    if case_ids:
+        for c in db.query(db_models.TestCase).filter(db_models.TestCase.id.in_(case_ids)).all():
+            cases[c.id] = c
+
+    return {"runs": runs, "cases": cases}

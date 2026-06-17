@@ -307,7 +307,11 @@ const Reports: React.FC = () => {
       {/* Batch Detail Modal */}
       <Modal
         visible={detailVisible} onCancel={handleCloseDetail}
-        title={detail ? t['batch.detail'].replace('{name}', detail.name || detail.id) : t['loading']}
+        title={
+          detail
+            ? t['batch.detail'].replace('{name}', String(detail.name || detail.id))
+            : t['loading']
+        }
         footer={<Button onClick={handleCloseDetail}>{t['close']}</Button>}
         style={{ width: 900 }}
       >
@@ -354,7 +358,7 @@ const Reports: React.FC = () => {
                         {getStatusTag(run.status, isRunning)}
                         <span className={styles['batch-time']}>
                           {run.status === 'running' ? t['step.executing'] : run.duration ? `${run.duration.toFixed(1)}s` : ''}
-                          {!isRunning && run.steps?.length ? ` · ${t['steps'].replace('{count}', run.steps.length)}` : ''}
+                          {!isRunning && run.steps?.length ? ` · ${t['steps'].replace('{count}', String(run.steps.length))}` : ''}
                         </span>
                       </div>
                       {expanded && run.steps && run.steps.length > 0 && (
@@ -393,7 +397,7 @@ const Reports: React.FC = () => {
                                 <div style={{ marginTop: 6 }}>
                                   <img
                                     src={`/${step.screenshot_path}`}
-                                    alt={t['screenshot'].replace('{num}', step.step_number)}
+                                    alt={t['screenshot'].replace('{num}', String(step.step_number ?? ''))}
                                     className={styles['step-screenshot']}
                                   />
                                 </div>

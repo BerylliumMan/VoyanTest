@@ -10,7 +10,7 @@ import { GlobalState } from '@/store';
 import styles from './style/index.module.less';
 
 const ChangePassword: React.FC = () => {
-  const formRef = useRef<FormInstance>();
+  const formRef = useRef<FormInstance | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const dispatch = useDispatch();

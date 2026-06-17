@@ -50,14 +50,19 @@ export function getFlattenRoutes(routes: IRoute[]): IRoute[] {
       );
       if (route.key && (!route.children || !visibleChildren.length)) {
         try {
-          route.component = lazyload(mod[`./pages/${route.key}/index.tsx`]);
-          res.push(route);
+          const loader = mod[`./pages/${route.key}/index.tsx`];
+          if (loader) {
+            route.component = lazyload(
+              loader as () => Promise<unknown>
+            ) as (React.ComponentType<any> & { preload(): Promise<void> });
+            res.push(route);
+          }
         } catch (e) {
           console.error(e);
         }
       }
 
-      if (isArray(route.children) && route.children.length) {
+      if (isArray(route.children) && route.children && route.children.length) {
         travel(route.children);
       }
     });

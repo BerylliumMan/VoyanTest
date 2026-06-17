@@ -36,7 +36,7 @@ const GenHistoryPage: React.FC = () => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProject, setSelectedProject] = useState<number | null>(null);
+  const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
   const [importing, setImporting] = useState<string | null>(null);
 
   const fetchData = async () => {
@@ -235,9 +235,10 @@ const GenHistoryPage: React.FC = () => {
               placeholder="全部项目"
               allowClear
               value={selectedProject}
-              onChange={setSelectedProject}
+              onChange={(v) =>
+                setSelectedProject(typeof v === 'number' ? v : undefined)
+              }
               options={[
-                { label: '全部项目', value: null },
                 ...projects.map((p) => ({ label: p.name, value: p.id })),
               ]}
             />

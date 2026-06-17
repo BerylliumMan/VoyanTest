@@ -1,10 +1,10 @@
-export function isArray(val): boolean {
+export function isArray(val: unknown): boolean {
   return Object.prototype.toString.call(val) === '[object Array]';
 }
-export function isObject(val): boolean {
+export function isObject(val: unknown): boolean {
   return Object.prototype.toString.call(val) === '[object Object]';
 }
-export function isString(val): boolean {
+export function isString(val: unknown): boolean {
   return Object.prototype.toString.call(val) === '[object String]';
 }
 

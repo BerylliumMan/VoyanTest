@@ -32,7 +32,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
                 headless = env.headless
                 base_url_override = env.base_url
         except Exception as exc:
-            logger.warning(f"Environment lookup failed for env_id={environment_id}: {exc}")
+            logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
         finally:
             _db.close()
 
@@ -41,7 +41,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
     try:
         await mcp_manager.start()
     except Exception as exc:
-        logger.error(f"Failed to start MCP manager for case {case_id}: {exc}", exc_info=True)
+        logger.exception("Failed to start MCP manager for case %s", case_id)
         save_run_results(
             case_id, "failed", start_time, tz_now(),
             (tz_now() - start_time).total_seconds(),
@@ -62,8 +62,8 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
 
     try:
         await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
-    except Exception as exc:
-        logger.error(f"Unhandled error in run_test_case_in_browser for case {case_id}: {exc}", exc_info=True)
+    except Exception:
+        logger.exception("Unhandled error in run_test_case_in_browser for case %s", case_id)
     finally:
         try:
             await mcp_manager.stop()
@@ -171,9 +171,9 @@ async def run_batch_test_cases(
                 batch_db.flush()
                 precreated_run_ids[cid] = pending_run.id
             batch_db.commit()
-        except Exception as exc:
+        except Exception:
             batch_db.rollback()
-            logger.error(f"Failed to pre-create TestRun records: {exc}")
+            logger.exception("Failed to pre-create TestRun records")
 
         # 创建或复用浏览器
         try:
@@ -188,8 +188,8 @@ async def run_batch_test_cases(
             else:
                 mcp_manager = await _factory()
                 await browser_pool.register(project_id, mcp_manager)
-        except Exception as exc:
-            logger.error(f"Failed to start browser for batch {batch_id}: {exc}")
+        except Exception:
+            logger.exception("Failed to start browser for batch %s", batch_id)
             # 浏览器启动失败，将所有 pending 记录标记为 failed
             import sqlalchemy as sa
             _now = tz_now()
@@ -215,7 +215,7 @@ async def run_batch_test_cases(
                         )
                         batch_db.add(_log)
                     except Exception as exc:
-                        logger.warning(f"Failed to save failure log for TestRun {_rid}: {exc}")
+                        logger.warning("Failed to save failure log for TestRun %s: %s", _rid, exc, exc_info=True)
             try:
                 batch_db.commit()
                 crud.update_batch_counters(batch_db, batch_id, "failed")
@@ -241,7 +241,7 @@ async def run_batch_test_cases(
                 results.append(result)
                 logger.info(f"Batch init-case {case_id} finished: {result['status']}")
             except Exception as exc:
-                logger.error(f"Batch init-case {case_id} failed: {exc}", exc_info=True)
+                logger.exception("Batch init-case %s failed", case_id)
                 _run_id = precreated_run_ids.get(case_id)
                 if _run_id:
                     try:
@@ -272,9 +272,9 @@ async def run_batch_test_cases(
                     f"Batch: case {case_id} finished: {result['status']}"
                 )
             except Exception as exc:
-                logger.error(
-                    f"Batch: case {case_id} failed with exception: {exc}",
-                    exc_info=True,
+                logger.exception(
+                    "Batch: case %s failed with exception",
+                    case_id,
                 )
                 # 用 sqlalchemy update 直接更新预创建的 pending 记录为 failed
                 _run_id = precreated_run_ids.get(case_id)

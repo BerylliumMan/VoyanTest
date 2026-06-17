@@ -122,7 +122,7 @@ function Agents() {
             }
           }}
           expandedRowRender={(r: AgentItem) => {
-            const agentLogs = logs[r.id] || [];
+            const agentLogs = r.id != null ? logs[r.id] || [] : [];
             return (
               <div className={styles['log-section']}>
                 <Typography.Text bold className={styles['log-section-title']}>{t['agent.recent_logs']}</Typography.Text>
@@ -132,7 +132,7 @@ function Agents() {
                   agentLogs.map((log: RunRecord) => (
                     <div key={log.id} className={styles['log-item']}>
                       <Tag color={log.level === 'error' ? 'red' : log.level === 'warn' ? 'orange' : 'blue'} className={styles['log-level-tag']}>{log.level}</Tag>
-                      <span>{new Date(log.created_at).toLocaleString()}</span>
+                      <span>{log.created_at ? new Date(log.created_at).toLocaleString() : ''}</span>
                       <span className={styles['log-time']}>{log.message}</span>
                     </div>
                   ))

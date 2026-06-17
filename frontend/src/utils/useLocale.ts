@@ -2,10 +2,13 @@ import { useContext } from 'react';
 import { GlobalContext } from '../context';
 import defaultLocale from '../locale';
 
-function useLocale(locale = null) {
+type LocaleRecord = Record<string, string>;
+
+function useLocale(locale: Record<string, LocaleRecord> | null = null): LocaleRecord {
   const { lang } = useContext(GlobalContext);
 
-  return (locale || defaultLocale)[lang] || {};
+  const source = locale || defaultLocale;
+  return (lang && source[lang]) || {};
 }
 
 export default useLocale;
