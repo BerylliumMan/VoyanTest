@@ -182,12 +182,12 @@ async def run_batch_test_cases(
                 await mgr.start()
                 return mgr
 
-            existing = browser_pool.get_or_create(project_id, _factory)
+            existing = await browser_pool.get_or_create(project_id, _factory)
             if existing is not None:
                 mcp_manager = existing
             else:
                 mcp_manager = await _factory()
-                browser_pool.register(project_id, mcp_manager)
+                await browser_pool.register(project_id, mcp_manager)
         except Exception as exc:
             logger.error(f"Failed to start browser for batch {batch_id}: {exc}")
             # 浏览器启动失败，将所有 pending 记录标记为 failed

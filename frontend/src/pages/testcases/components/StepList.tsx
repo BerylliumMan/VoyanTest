@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Button, Tag, Input, InputNumber, Collapse, Typography } from '@arco-design/web-react';
-import { IconMenu, IconPlus, IconCopy, IconDelete, IconSettings } from '@arco-design/web-react/icon';
+import { IconMenu, IconPlus, IconCopy, IconDelete, IconSettings, IconTool } from '@arco-design/web-react/icon';
 import { Step } from '../types';
 import styles from '../style/components.module.less';
 
@@ -52,12 +52,9 @@ const StepList: React.FC<StepListProps> = ({
               autoSize={{ minRows: 1 }}
             />
             {step.healed_selector && (
-              <Typography.Text
-                type="secondary"
-                style={{ fontSize: 12, color: 'var(--color-text-3)', display: 'block', marginTop: 2 }}
-              >
-                🔧 已修复: {step.healed_selector}
-              </Typography.Text>
+              <div className={styles['healed-hint']}>
+                <IconTool /> 已修复: {step.healed_selector}
+              </div>
             )}
             <Input.TextArea
               className={styles['step-input']}
@@ -90,7 +87,7 @@ const StepList: React.FC<StepListProps> = ({
                       precision={0}
                       placeholder="失败时最多重试次数，0表示不重试"
                       onChange={(v) => onUpdate(idx, 'retry_max', v ?? 0)}
-                      style={{ width: 180 }}
+                      className={styles['retry-input']}
                     />
                   </div>
                   <div className={styles['retry-field']}>
@@ -103,7 +100,7 @@ const StepList: React.FC<StepListProps> = ({
                       precision={1}
                       placeholder="每次重试之间的等待时间"
                       onChange={(v) => onUpdate(idx, 'retry_delay', v ?? 1.0)}
-                      style={{ width: 180 }}
+                      className={styles['retry-input']}
                     />
                   </div>
                 </div>

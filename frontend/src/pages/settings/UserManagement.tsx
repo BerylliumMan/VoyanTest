@@ -108,11 +108,11 @@ function UserManagement() {
 
   return (
     <Card>
-      <div style={{ marginBottom: 16 }}>
+      <Space style={{ marginBottom: 16 }}>
         <Button type="primary" icon={<IconPlus />} onClick={() => openUserModal()}>
           {t['new.user']}
         </Button>
-      </div>
+      </Space>
       <Table columns={userColumns} data={users} rowKey="id" loading={userLoading} pagination={false} />
 
       <Modal
