@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Card,
   Table,
@@ -16,8 +16,8 @@ import {
   IconSwap,
   IconRefresh,
 } from '@arco-design/web-react/icon';
-import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import { useRecordings, RecordedEvent, TestStep } from './hooks';
 
 /**
  * 录制控制页：启动/停止 CDP 录制、查看录制事件、把事件转换为测试步骤。
@@ -28,24 +28,6 @@ import useLocale from '@/utils/useLocale';
  *   GET  /api/recordings/{session_id}/events          -> RecordedEvent[]
  *   POST /api/recordings/{session_id}/convert         -> { steps: [{ step_description, expected_result }], ... }
  */
-
-// 录制状态：空闲 / 录制中 / 已停止
-type RecordingStatus = 'idle' | 'recording' | 'stopped';
-
-interface RecordedEvent {
-  event_type: string;
-  timestamp: number;
-  selector?: string | null;
-  value?: string | null;
-  url?: string;
-  page_title?: string;
-  screenshot?: string | null;
-}
-
-interface TestStep {
-  step_description: string;
-  expected_result: string;
-}
 
 // 把秒级时间戳格式化成本地时间字符串
 const formatTimestamp = (ts: number | string | null | undefined): string => {
@@ -89,110 +71,54 @@ const pulseStyle = `
 
 const Recordings: React.FC = () => {
   const t = useLocale();
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [status, setStatus] = useState<RecordingStatus>('idle');
-  const [url, setUrl] = useState('');
-  const [events, setEvents] = useState<RecordedEvent[]>([]);
-  const [steps, setSteps] = useState<TestStep[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [converting, setConverting] = useState(false);
+  const {
+    sessionId,
+    status,
+    url,
+    setUrl,
+    events,
+    steps,
+    loading,
+    converting,
+    startRecording,
+    stopRecording,
+    refreshEvents,
+    convertToSteps,
+  } = useRecordings();
+
+  // 仅 UI 局部状态：手动刷新按钮的 loading
   const [eventsLoading, setEventsLoading] = useState(false);
-
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // 组件卸载时清理轮询
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, []);
-
-  // 录制中：每 2 秒拉一次事件流
-  useEffect(() => {
-    if (status === 'recording' && sessionId) {
-      const sid = sessionId;
-      const tick = async () => {
-        try {
-          const res = await axios.get<RecordedEvent[]>(
-            `/api/recordings/${sid}/events`
-          );
-          setEvents(Array.isArray(res.data) ? res.data : []);
-        } catch (e) {
-          // 轮询中静默失败，避免淹没用户
-          console.warn('Failed to fetch recording events:', extractError(e, ''));
-        }
-      };
-      // 立刻拉一次，再开启定时器
-      tick();
-      pollRef.current = setInterval(tick, 2000);
-      return () => {
-        if (pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
-      };
-    }
-    return undefined;
-  }, [status, sessionId]);
 
   const handleStart = async () => {
     if (!url.trim()) {
       Message.warning(t['recordings.url_required']);
       return;
     }
-    setLoading(true);
-    try {
-      const res = await axios.post('/api/recordings/start', {
-        url: url.trim(),
-        page_title: '',
-      });
-      setSessionId(res.data.session_id);
-      setStatus('recording');
-      setEvents([]);
-      setSteps([]);
+    const ok = await startRecording(url);
+    if (ok) {
       Message.success(t['recordings.started']);
-    } catch (e) {
-      Message.error(extractError(e, t['recordings.start_failed']));
-    } finally {
-      setLoading(false);
+    } else {
+      Message.error(t['recordings.start_failed']);
     }
   };
 
   const handleStop = async () => {
-    if (!sessionId) return;
-    setLoading(true);
-    try {
-      await axios.post(`/api/recordings/${sessionId}/stop`);
-      setStatus('stopped');
-      // 停止后做一次最终拉取，确保表格显示完整事件
-      try {
-        const res = await axios.get<RecordedEvent[]>(
-          `/api/recordings/${sessionId}/events`
-        );
-        setEvents(Array.isArray(res.data) ? res.data : []);
-      } catch {
-        // 忽略：停止接口已成功
-      }
+    const ok = await stopRecording();
+    if (ok) {
       Message.success(t['recordings.stopped_msg']);
-    } catch (e) {
-      Message.error(extractError(e, t['recordings.stop_failed']));
-    } finally {
-      setLoading(false);
+    } else {
+      Message.error(t['recordings.stop_failed']);
     }
   };
 
   // 手动刷新事件（录制中也可点）
-  const refreshEvents = async () => {
-    if (!sessionId) return;
+  const handleRefresh = async () => {
     setEventsLoading(true);
     try {
-      const res = await axios.get<RecordedEvent[]>(
-        `/api/recordings/${sessionId}/events`
-      );
-      setEvents(Array.isArray(res.data) ? res.data : []);
+      const ok = await refreshEvents();
+      if (!ok) {
+        Message.error(t['recordings.refresh_failed']);
+      }
     } catch (e) {
       Message.error(extractError(e, t['recordings.refresh_failed']));
     } finally {
@@ -201,26 +127,15 @@ const Recordings: React.FC = () => {
   };
 
   const handleConvert = async () => {
-    if (!sessionId) return;
-    setConverting(true);
-    try {
-      const res = await axios.post(
-        `/api/recordings/${sessionId}/convert`,
-        { session_id: sessionId }
-      );
-      const newSteps: TestStep[] = Array.isArray(res.data?.steps)
-        ? res.data.steps
-        : [];
-      setSteps(newSteps);
+    const ok = await convertToSteps();
+    if (ok) {
       Message.success(
-        newSteps.length > 0
-          ? t['recordings.steps_generated'].replace('{count}', String(newSteps.length))
+        steps.length > 0
+          ? t['recordings.steps_generated'].replace('{count}', String(steps.length))
           : t['recordings.steps_empty']
       );
-    } catch (e) {
-      Message.error(extractError(e, t['recordings.convert_failed']));
-    } finally {
-      setConverting(false);
+    } else {
+      Message.error(t['recordings.convert_failed']);
     }
   };
 
@@ -387,7 +302,7 @@ const Recordings: React.FC = () => {
                   <Button
                     size="mini"
                     icon={<IconRefresh />}
-                    onClick={refreshEvents}
+                    onClick={handleRefresh}
                     loading={eventsLoading}
                   >
                     {t['recordings.refresh']}
