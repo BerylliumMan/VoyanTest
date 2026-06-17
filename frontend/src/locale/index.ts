@@ -247,6 +247,7 @@ const i18n = {
     'agent.recent_logs': 'Recent Logs',
 
     'menu.audit_logs': 'Audit Logs',
+    'menu.recordings': 'Recording',
     'audit.time': 'Time',
     'audit.user': 'User',
     'audit.action': 'Action',
@@ -529,6 +530,7 @@ const i18n = {
     'agent.recent_logs': '最近日志',
 
     'menu.audit_logs': '审计日志',
+    'menu.recordings': '录制回放',
     'audit.time': '时间',
     'audit.user': '用户',
     'audit.action': '操作',

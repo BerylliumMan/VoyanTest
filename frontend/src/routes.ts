@@ -69,6 +69,10 @@ export const routes: IRoute[] = [
     key: 'audit-logs',
   },
   {
+    name: 'menu.recordings',
+    key: 'recordings',
+  },
+  {
     name: 'menu.settings',
     key: 'settings',
   },

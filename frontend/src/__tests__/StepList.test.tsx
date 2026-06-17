@@ -3,18 +3,13 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import StepList from '@/pages/testcases/components/StepList';
 import { Step } from '@/pages/testcases/types';
 
-/* 模拟 CSS Module 导入 */
-vi.mock('@/pages/testcases/style/components.module.less', () => ({}));
+/* 模拟 CSS Module — vi.mock 被 hoist，工厂函数需内联值 */
+vi.mock('@/pages/testcases/style/components.module.less', () => {
+  return new Proxy({}, { get: (_, key) => String(key) });
+});
 
-/* 模拟 axios – 确保测试不触发真实 HTTP 请求 */
-vi.mock('axios', () => ({
-  default: {
-    get: vi.fn(),
-    post: vi.fn(),
-    put: vi.fn(),
-    delete: vi.fn(),
-  },
-}));
+/* 模拟 axios */
+vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
 
 const noop = (): (() => void) => () => {};
 
