@@ -40,6 +40,7 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 - **🌐 分布式执行**：Agent 机制将测试分发到远程机器并行执行
 - **🖥️ CLI 工具**：`voyan run` 命令行执行，支持 CI/CD 流水线集成，退出码标准
 - **🌗 深色主题**：亮色/暗色主题切换
+- **🎬 CDP 录制回放**：录制真实浏览器操作，一键转换为可执行的测试步骤
 
 ## 🚀 快速开始
 
@@ -109,6 +110,7 @@ python agent/client.py --server http://<服务端IP>:8002
 flowchart LR
     subgraph Browser["浏览器"]
         CH[Chromium<br/>截图 操作]
+        CDP[CDP 录制<br/>事件捕获]
     end
     subgraph Backend["后端 FastAPI"]
         direction TB
@@ -116,6 +118,7 @@ flowchart LR
         Runner[测试执行器]
         Healing[自愈选择器]
         Assert[断言引擎]
+        CDPConv[CDP 转换器]
         Report[报告生成]
     end
     subgraph Agent["分布式 Agent"]
@@ -126,6 +129,7 @@ flowchart LR
     end
 
     CH <-->|Playwright MCP| Backend
+    CDP -->|CDP Protocol| CDPConv
     Backend --> DB[(SQLite)]
     Backend --> UI[Web 界面<br/>React + Arco]
     Backend <-->|WebSocket<br/>调试协议| UI
@@ -154,20 +158,25 @@ VoyanTest/
 │   ├── models/       # 领域模型（auth / project / testcase / batch 等）
 │   └── routers/      # API 路由（含 run-debug 调试端点）
 ├── core/             # 执行引擎
-│   ├── runner.py          # 测试执行器（含重试/暂停/断言/自愈）
+│   ├── runner/            # 测试执行器（含重试/暂停/自愈）
 │   ├── assertions.py      # 步骤断言引擎（5 种类型）
 │   ├── self_healing.py    # AI 自愈选择器
 │   ├── llm_wrapper.py     # LLM 客户端封装
-│   └── step_executor.py   # MCP 步骤执行
+│   ├── step_executor.py   # MCP 步骤执行
+│   ├── cdp_session.py     # CDP 录制会话引擎
+│   └── cdp_converter.py   # CDP 事件→测试步骤转换
+
+...
 ├── frontend/         # React 前端
 │   └── src/pages/
+│       ├── recordings/    # CDP 录制回放页面
 │       ├── run-debug/     # 交互式调试执行页面
 │       ├── testcases/     # 用例管理（含重试配置 UI）
 │       └── settings/      # 系统设置（含用户项目权限）
 ├── agent/            # 分布式 Agent 客户端
 ├── voyan_cli.py      # CLI 命令行工具（voyan run / list / run-single）
 ├── alembic/          # 数据库迁移
-├── tests/            # 单元 + 契约测试（500+ 条）
+├── tests/            # 单元 + 契约 + E2E 测试（1400+ 条）
 ├── reports/          # 测试报告与截图
 └── docs/             # 文档
 ```
