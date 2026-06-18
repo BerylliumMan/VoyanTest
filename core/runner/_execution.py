@@ -12,6 +12,9 @@ import os
 import uuid
 from typing import Optional
 
+import sqlalchemy as sa
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.tz import now as tz_now
 
 from app import crud
@@ -21,9 +24,16 @@ from core.assertions import execute_assertions as execute_step_assertions
 from core.llm_wrapper import create_openai_client, _resolve_config as _resolve_llm_config
 from core.step_executor import execute_step_mcp
 
-from core.runner._state import _pause_events, _pause_decisions, _is_healable_error
+# 暂停 / 决策字典直接来自 app.websocket —— 不在 _state.py 中转，
+# 避免 core.runner 包内出现间接依赖循环。
+from app.websocket import _pause_events, _pause_decisions
+from core.runner._state import _is_healable_error
 from core.runner._validators import _validate_nav_url, _resolve_env_cookies, _inject_auth_cookies
-from core.runner._persistence import save_run_results
+from core.runner._persistence import (
+    mark_run_running,
+    save_run_results,
+    update_run_on_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,15 +98,7 @@ async def run_test_case_in_browser(
         # 预创建 TestRun 记录 (pending) 或使用已预创建的
         now = tz_now()
         if run_id is not None:
-            import sqlalchemy as sa
-            _stmt = (
-                sa.update(db_models.TestRun)
-                .where(db_models.TestRun.id == run_id)
-                .values(status="running")
-            )
-            r = db.execute(_stmt)
-            db.commit()
-            if r.rowcount == 0:
+            if not mark_run_running(db, run_id):
                 logger.warning("TestRun %s not found, will create new record", run_id)
                 run_id = None
             else:
@@ -232,7 +234,14 @@ async def run_test_case_in_browser(
                         screenshot_dir=screenshot_dir,
                     )
                 except Exception as step_exc:
-                    # execute_step_mcp 抛出异常 → 视为失败
+                    # Broad catch is necessary: execute_step_mcp touches MCP stdio,
+                    # LLM HTTP, JSON parsing, and asyncio — any failure must be
+                    # converted into a structured "step failed" result so the
+                    # outer retry/self-heal/assertion pipeline can still proceed.
+                    logger.exception(
+                        "execute_step_mcp raised for step %s (attempt %d)",
+                        step_dict['step_order'], attempt,
+                    )
                     result = {
                         'step_number': step_dict['step_order'],
                         'original_description': step_dict['description'],
@@ -290,7 +299,7 @@ async def run_test_case_in_browser(
                             try:
                                 step_obj.healed_selector = healed
                                 db.commit()
-                            except Exception as db_exc:
+                            except SQLAlchemyError as db_exc:
                                 logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
                         continue  # 用新选择器重试
                     elif attempt == 0 and not step_success and error_msg:
@@ -337,6 +346,14 @@ async def run_test_case_in_browser(
                                     screenshot_dir=screenshot_dir,
                                 )
                             except Exception as step_exc:
+                                # Broad catch is necessary: execute_step_mcp touches MCP stdio,
+                                # LLM HTTP, JSON parsing, and asyncio — any failure must be
+                                # converted into a structured "step failed" result so the
+                                # outer retry/self-heal/assertion pipeline can still proceed.
+                                logger.exception(
+                                    "execute_step_mcp raised during user-retry for step %s (attempt %d)",
+                                    step_dict['step_order'], retry_attempt,
+                                )
                                 result = {
                                     'step_number': step_dict['step_order'],
                                     'original_description': step_dict['description'],
@@ -375,7 +392,8 @@ async def run_test_case_in_browser(
                             step_dict['description'] = new_desc
                             try:
                                 db.commit()
-                            except Exception:
+                            except SQLAlchemyError:
+                                logger.exception("保存用户编辑后的步骤描述失败")
                                 db.rollback()
                             # 使用新描述重试
                             for retry_attempt in range(retry_max + 1):
@@ -391,6 +409,14 @@ async def run_test_case_in_browser(
                                         screenshot_dir=screenshot_dir,
                                     )
                                 except Exception as step_exc:
+                                    # Broad catch is necessary: execute_step_mcp touches MCP stdio,
+                                    # LLM HTTP, JSON parsing, and asyncio — any failure must be
+                                    # converted into a structured "step failed" result so the
+                                    # outer retry/self-heal/assertion pipeline can still proceed.
+                                    logger.exception(
+                                        "execute_step_mcp raised during user-edit-retry for step %s (attempt %d)",
+                                        step_dict['step_order'], retry_attempt,
+                                    )
                                     result = {
                                         'step_number': step_dict['step_order'],
                                         'original_description': step_dict['description'],
@@ -503,8 +529,13 @@ async def run_test_case_in_browser(
                                 # 简化处理：skip → 继续，其他 → 继续（断言失败不致命）
                             consecutive_failures += 1
                     except Exception as assert_exc:
-                        logger.warning(
-                            f"  步骤 {step_dict['step_order']} 断言执行异常: {assert_exc}"
+                        # Broad catch is necessary: execute_step_assertions drives
+                        # MCP tool calls + LLM calls + DOM inspection — any failure
+                        # must be recorded as a non-fatal warning so the rest of
+                        # the run can continue (assertions are advisory only).
+                        logger.exception(
+                            "步骤 %s 断言执行异常",
+                            step_dict['step_order'],
                         )
                 else:
                     consecutive_failures = 0
@@ -555,7 +586,11 @@ async def run_test_case_in_browser(
             _json.dump(report, f, ensure_ascii=False, indent=2)
         logger.info(f"Report saved: {case_report_path}")
 
-    except Exception:
+    except Exception as exc:
+        # Broad catch is necessary: this is the outer guard for the whole
+        # run_test_case_in_browser flow (DB, MCP, LLM, filesystem, assertions).
+        # Any unhandled error must be recorded as CRITICAL and propagate as a
+        # "failed" status so the finally block can still persist results.
         test_status = "failed"
         logger.exception("Error executing test case %s", case_id)
         run_log_entries.append({
@@ -569,45 +604,13 @@ async def run_test_case_in_browser(
         end_time = tz_now()
         duration = (end_time - start_time).total_seconds()
 
-        # 用 sqlalchemy update 直接更新 TestRun（避免 ORM session identity map 问题）
         if run_id is not None:
-            try:
-                import sqlalchemy as sa
-                now = tz_now()
-                stmt = (
-                    sa.update(db_models.TestRun)
-                    .where(db_models.TestRun.id == run_id)
-                    .values(
-                        status=test_status,
-                        start_time=start_time,
-                        end_time=end_time,
-                        duration=duration,
-                        report_path=case_report_path,
-                        log_path=None,
-                    )
-                )
-                db.execute(stmt)
-                for log_entry in run_log_entries:
-                    db_log = db_models.RunLog(
-                        run_id=run_id,
-                        step_id=log_entry.get('step_id'),
-                        level=log_entry['level'],
-                        message=log_entry['message'],
-                        screenshot_path=log_entry.get('screenshot_path'),
-                    )
-                    db.add(db_log)
-                db.commit()
-                # 更新批次计数器（update_batch_counters 内部已提交）
-                if batch_id:
-                    try:
-                        crud.update_batch_counters(db, batch_id, test_status)
-                    except Exception:
-                        logger.exception("Failed to update batch counters")
-                        db.rollback()
-                logger.info(f"TestRun {run_id} updated -> {test_status}")
-            except Exception:
-                logger.exception("Failed to update TestRun %s", run_id)
-                db.rollback()
+            update_run_on_completion(
+                db, run_id, test_status, start_time, end_time,
+                duration, case_report_path, run_log_entries,
+                batch_id=batch_id,
+            )
+            logger.info(f"TestRun {run_id} updated -> {test_status}")
         else:
             save_run_results(
                 case_id, test_status, start_time, end_time,

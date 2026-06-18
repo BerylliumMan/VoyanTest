@@ -1,6 +1,18 @@
 # core/runner/_orchestrator.py
-"""用例编排层 — 创建浏览器/MCP 实例，调度单用例或批量执行。"""
+"""用例编排层 — 创建浏览器/MCP 实例，调度单用例或批量执行。
+
+职责：
+    1. 单用例执行入口（run_test_case）— 创建 / 销毁浏览器
+    2. 批量执行入口（run_batch_test_cases）— 共享浏览器 + 预创建
+       pending TestRun + 统一批次跟踪
+
+DB 操作的 SQL 细节已经下沉到 core.runner._persistence（mark_run_failed
+/ precreate_pending_runs / update_run_on_completion），本模块只负责
+协调浏览器/用例循环 + 批量跟踪。
+"""
 import logging
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.tz import now as tz_now
 
@@ -8,9 +20,41 @@ from app import crud
 from app.database import SessionLocal
 
 from core.runner._execution import run_test_case_in_browser
-from core.runner._persistence import save_run_results
+from core.runner._persistence import (
+    mark_run_failed,
+    precreate_pending_runs,
+    save_run_results,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 批量跟踪 helper（只在 _orchestrator 内复用，不下沉到 _persistence，
+# 因为它依赖 precreated_run_ids 这一批处理特有的状态）
+# ---------------------------------------------------------------------------
+
+
+def _record_batch_case_failure(
+    db,
+    precreated_run_ids: dict[int, int],
+    case_id: int,
+    batch_id: int,
+    message: str,
+) -> None:
+    """批量执行中单条用例抛异常时，把预创建的 TestRun 标记为 failed。
+
+    precreated_run_ids 是 run_batch_test_cases 内维护的
+    ``{case_id: run_id}`` 映射；本函数仅在 key 命中时落库。
+    """
+    _run_id = precreated_run_ids.get(case_id)
+    if _run_id:
+        mark_run_failed(db, _run_id, message, batch_id=batch_id)
+
+
+# ---------------------------------------------------------------------------
+# 单用例入口
+# ---------------------------------------------------------------------------
 
 
 async def run_test_case(case_id: int, batch_id: int | None = None, environment_id: int | None = None, debug_mode: bool = False):
@@ -31,7 +75,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
                 browser_type = env.browser
                 headless = env.headless
                 base_url_override = env.base_url
-        except Exception as exc:
+        except SQLAlchemyError as exc:
             logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
         finally:
             _db.close()
@@ -41,6 +85,11 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
     try:
         await mcp_manager.start()
     except Exception as exc:
+        # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
+        # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
+        # Failures can surface as OSError (subprocess), ConnectionError, or
+        # asyncio.TimeoutError — any of them must be reported as a clean
+        # "browser startup failed" so the run results stay consistent.
         logger.exception("Failed to start MCP manager for case %s", case_id)
         save_run_results(
             case_id, "failed", start_time, tz_now(),
@@ -56,19 +105,27 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
         )
         try:
             await mcp_manager.stop()
-        except Exception as stop_exc:
-            logger.info(f"MCP stop after start failure: {stop_exc}")
+        except (OSError, RuntimeError) as stop_exc:
+            logger.info("MCP stop after start failure: %s", stop_exc, exc_info=True)
         return {"case_id": case_id, "status": "failed", "error": str(exc)}
 
     try:
         await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
     except Exception:
+        # Broad catch is necessary: run_test_case_in_browser touches DB, MCP
+        # stdio, LLM HTTP, JSON parsing, and assertions. Any unhandled error
+        # must be logged so the batch can still proceed to cleanup.
         logger.exception("Unhandled error in run_test_case_in_browser for case %s", case_id)
     finally:
         try:
             await mcp_manager.stop()
-        except Exception:
-            logger.warning("Failed to stop MCP manager")
+        except (OSError, RuntimeError):
+            logger.warning("Failed to stop MCP manager", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# 批量执行入口
+# ---------------------------------------------------------------------------
 
 
 async def run_batch_test_cases(
@@ -140,7 +197,8 @@ async def run_batch_test_cases(
                 project_data = crud.get_project(_db, project_id)
                 browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
                 headless = project_data.headless if project_data and project_data.headless is not None else True
-        except Exception:
+        except SQLAlchemyError:
+            logger.warning("Failed to load environment/project settings; falling back to defaults", exc_info=True)
             browser_type = 'chromium'
             headless = True
         finally:
@@ -148,32 +206,10 @@ async def run_batch_test_cases(
 
         # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
         # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
-        from app import db_models
         batch_db = SessionLocal()
-        precreated_run_ids: dict[int, int] = {}
-        try:
-            for cid in (init_case_ids or []):
-                pending_run = db_models.TestRun(
-                    case_id=cid, batch_id=batch_id, status="pending",
-                    start_time=None, end_time=None, is_init=True,
-                )
-                batch_db.add(pending_run)
-                batch_db.flush()
-                precreated_run_ids[cid] = pending_run.id
-            for cid in case_ids:
-                # start_time / end_time 留空：用 None 标记"尚未开始/结束"，
-                # 避免被 crud._compute_batch_status 的"卡死 pending 30s"检查误判
-                pending_run = db_models.TestRun(
-                    case_id=cid, batch_id=batch_id, status="pending",
-                    start_time=None, end_time=None,
-                )
-                batch_db.add(pending_run)
-                batch_db.flush()
-                precreated_run_ids[cid] = pending_run.id
-            batch_db.commit()
-        except Exception:
-            batch_db.rollback()
-            logger.exception("Failed to pre-create TestRun records")
+        precreated_run_ids = precreate_pending_runs(
+            batch_db, case_ids, batch_id, init_case_ids=init_case_ids
+        )
 
         # 创建或复用浏览器
         try:
@@ -188,40 +224,19 @@ async def run_batch_test_cases(
             else:
                 mcp_manager = await _factory()
                 await browser_pool.register(project_id, mcp_manager)
-        except Exception:
+        except Exception as exc:
+            # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
+            # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
+            # Failures can surface as OSError (subprocess), ConnectionError, or
+            # asyncio.TimeoutError — any of them must be reported as a clean
+            # "browser startup failed" so all pre-created pending TestRun
+            # records get marked as failed consistently.
             logger.exception("Failed to start browser for batch %s", batch_id)
-            # 浏览器启动失败，将所有 pending 记录标记为 failed
-            import sqlalchemy as sa
-            _now = tz_now()
             for cid in ((init_case_ids or []) + case_ids):
-                _rid = precreated_run_ids.get(cid)
-                if _rid:
-                    try:
-                        _stmt = (
-                            sa.update(db_models.TestRun)
-                            .where(db_models.TestRun.id == _rid)
-                            .values(
-                                status="failed",
-                                start_time=_now,
-                                end_time=_now,
-                                duration=0.0,
-                            )
-                        )
-                        batch_db.execute(_stmt)
-                        _log = db_models.RunLog(
-                            run_id=_rid, step_id=None, level="CRITICAL",
-                            message=f"Browser startup failed: {exc}",
-                            screenshot_path=None,
-                        )
-                        batch_db.add(_log)
-                    except Exception as exc:
-                        logger.warning("Failed to save failure log for TestRun %s: %s", _rid, exc, exc_info=True)
-            try:
-                batch_db.commit()
-                crud.update_batch_counters(batch_db, batch_id, "failed")
-                batch_db.commit()
-            except Exception:
-                batch_db.rollback()
+                _record_batch_case_failure(
+                    batch_db, precreated_run_ids, cid, batch_id,
+                    message=f"Browser startup failed: {exc}",
+                )
             return
 
         # Clear cookies once at batch start
@@ -241,20 +256,15 @@ async def run_batch_test_cases(
                 results.append(result)
                 logger.info(f"Batch init-case {case_id} finished: {result['status']}")
             except Exception as exc:
+                # Broad catch is necessary: run_test_case_in_browser touches DB,
+                # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
+                # unhandled error must be recorded on the pre-created TestRun
+                # row so the report page stays consistent.
                 logger.exception("Batch init-case %s failed", case_id)
-                _run_id = precreated_run_ids.get(case_id)
-                if _run_id:
-                    try:
-                        import sqlalchemy as sa
-                        _now = tz_now()
-                        _stmt = sa.update(db_models.TestRun).where(db_models.TestRun.id == _run_id).values(status="failed", start_time=_now, end_time=_now, duration=0.0)
-                        batch_db.execute(_stmt)
-                        _log = db_models.RunLog(run_id=_run_id, step_id=None, level="CRITICAL", message=f"Batch init-case executor exception: {exc}", screenshot_path=None)
-                        batch_db.add(_log)
-                        batch_db.commit()
-                        try: crud.update_batch_counters(batch_db, batch_id, "failed"); batch_db.commit()
-                        except Exception: batch_db.rollback()
-                    except Exception: batch_db.rollback()
+                _record_batch_case_failure(
+                    batch_db, precreated_run_ids, case_id, batch_id,
+                    message=f"Batch init-case executor exception: {exc}",
+                )
                 results.append({"case_id": case_id, "status": "failed", "error": str(exc), "batch_id": batch_id})
 
         # 运行主用例
@@ -272,41 +282,18 @@ async def run_batch_test_cases(
                     f"Batch: case {case_id} finished: {result['status']}"
                 )
             except Exception as exc:
+                # Broad catch is necessary: run_test_case_in_browser touches DB,
+                # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
+                # unhandled error must be recorded on the pre-created TestRun
+                # row so the report page stays consistent.
                 logger.exception(
                     "Batch: case %s failed with exception",
                     case_id,
                 )
-                # 用 sqlalchemy update 直接更新预创建的 pending 记录为 failed
-                _run_id = precreated_run_ids.get(case_id)
-                if _run_id:
-                    try:
-                        import sqlalchemy as sa
-                        _now = tz_now()
-                        _stmt = (
-                            sa.update(db_models.TestRun)
-                            .where(db_models.TestRun.id == _run_id)
-                            .values(
-                                status="failed",
-                                start_time=_now,
-                                end_time=_now,
-                                duration=0.0,
-                            )
-                        )
-                        batch_db.execute(_stmt)
-                        _log = db_models.RunLog(
-                            run_id=_run_id, step_id=None, level="CRITICAL",
-                            message=f"Batch executor exception: {exc}",
-                            screenshot_path=None,
-                        )
-                        batch_db.add(_log)
-                        batch_db.commit()
-                        try:
-                            crud.update_batch_counters(batch_db, batch_id, "failed")
-                            batch_db.commit()
-                        except Exception:
-                            batch_db.rollback()
-                    except Exception:
-                        batch_db.rollback()
+                _record_batch_case_failure(
+                    batch_db, precreated_run_ids, case_id, batch_id,
+                    message=f"Batch executor exception: {exc}",
+                )
                 results.append({
                     "case_id": case_id,
                     "status": "failed",
@@ -320,5 +307,5 @@ async def run_batch_test_cases(
         if 'batch_db' in locals():
             try:
                 batch_db.close()
-            except Exception as exc:
-                logger.debug(f"Error closing batch_db: {exc}")
+            except SQLAlchemyError as exc:
+                logger.debug("Error closing batch_db: %s", exc, exc_info=True)

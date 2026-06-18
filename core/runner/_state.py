@@ -1,8 +1,15 @@
 # core/runner/_state.py
-"""全局状态与错误分类辅助函数，跨 runner 模块共享。"""
-import logging
+"""共享状态与错误分类辅助函数，跨 runner 模块共享。
 
-from app.websocket import _pause_events, _pause_decisions  # noqa: F401  -- 从 app.websocket 导入，确保所有模块共享同一可变字典
+本模块只负责：
+    1. 错误分类（自愈选择器触发判断）— 纯函数，无副作用
+    2. （保留扩展点）其他模块级共享辅助
+
+刻意不在这里做：
+    - 暂停 / 决策 字典来自 app.websocket，使用方直接 import，避免循环依赖
+    - 跨模块状态（如 pause events）应在使用方模块内 import app.websocket
+"""
+import logging
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import datetime
 from app.tz import now as tz_now
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field
 from ..database import get_db
 from ..auth import require_admin, get_current_user, get_user_project_filter
 from .. import crud, db_models
+from ..services import ReportService
+from ..services.report import BatchNotFound, ProjectAccessDenied
 
 logger = logging.getLogger(__name__)
 
@@ -111,49 +113,11 @@ def get_test_statistics(
     db: Session = Depends(get_db)
 ) -> TestStatistics:
     """获取测试统计信息（基于批次）"""
-    end_date = tz_now()
-    start_date = end_date - timedelta(days=days)
-
-    allowed_ids = get_user_project_filter(user)
-    if allowed_ids is not None and project_id and project_id not in allowed_ids:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    stats = crud.get_run_statistics(
-        db,
-        start_date=start_date,
-        end_date=end_date,
-        project_id=project_id,
-        allowed_ids=allowed_ids,
-    )
-
-    if stats["total_batches"] == 0:
-        return TestStatistics(
-            total_cases=0,
-            total_runs=0,
-            today_runs=0,
-            passed=0,
-            failed=0,
-            skipped=0,
-            pass_rate=0.0,
-            success_rate=0.0,
-            avg_duration=0.0
-        )
-
-    pass_rate = round(
-        stats["total_passed"] / stats["total_cases_in_batches"] * 100, 2
-    ) if stats["total_cases_in_batches"] > 0 else 0.0
-
-    return TestStatistics(
-        total_cases=stats["total_cases"],
-        total_runs=stats["total_cases_in_batches"],
-        today_runs=stats["today_batches"],
-        passed=stats["total_passed"],
-        failed=stats["total_failed"],
-        skipped=0,
-        pass_rate=pass_rate,
-        success_rate=pass_rate,
-        avg_duration=0.0
-    )
+    try:
+        data = ReportService.get_statistics(db, project_id, days, user)
+    except ProjectAccessDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return TestStatistics(**data)
 
 
 @router.get("/trends", response_model=TestTrend)
@@ -164,51 +128,13 @@ def get_test_trends(
     db: Session = Depends(get_db)
 ) -> TestTrend:
     """获取测试趋势数据（基于批次）"""
-    end_date = tz_now()
-    start_date = end_date - timedelta(days=days)
-
-    allowed_ids = get_user_project_filter(user)
-    if allowed_ids is not None and project_id and project_id not in allowed_ids:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    rows = crud.get_run_trends(
-        db,
-        start_date=start_date,
-        end_date=end_date,
-        project_id=project_id,
-        allowed_ids=allowed_ids,
-    )
-
-    from collections import defaultdict
-    daily_data = defaultdict(lambda: {'passed': 0, 'failed': 0, 'total': 0})
-
-    for date, passed, failed, total_cases in rows:
-        date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
-        daily_data[date_str]['passed'] += passed or 0
-        daily_data[date_str]['failed'] += failed or 0
-        daily_data[date_str]['total'] += total_cases or 0
-
-    trend_data = []
-    current_date = start_date
-
-    while current_date <= end_date:
-        date_str = current_date.strftime('%Y-%m-%d')
-        data = daily_data.get(date_str, {'passed': 0, 'failed': 0, 'total': 0})
-
-        trend_data.append(TrendDataPoint(
-            date=date_str,
-            passed=data['passed'],
-            failed=data['failed'],
-            skipped=0,
-            total=data['total'],
-            pass_rate=round(data['passed'] / data['total'] * 100, 2) if data['total'] > 0 else 0.0
-        ))
-
-        current_date += timedelta(days=1)
-
+    try:
+        data = ReportService.get_trends(db, project_id, days, user)
+    except ProjectAccessDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return TestTrend(
-        period=f"{days}天",
-        data=trend_data
+        period=data["period"],
+        data=[TrendDataPoint(**point) for point in data["data"]],
     )
 
 
@@ -222,13 +148,12 @@ def get_report_summary(
     """
     获取报告摘要（统计 + 趋势 + 最近执行）
     """
-    # 获取统计
-    statistics = get_test_statistics(project_id, days, user, db)
+    try:
+        statistics_data = ReportService.get_statistics(db, project_id, days, user)
+        trends_data = ReportService.get_trends(db, project_id, days, user)
+    except ProjectAccessDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    # 获取趋势
-    trends = get_test_trends(project_id, days, user, db)
-
-    # 获取最近执行
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -252,8 +177,11 @@ def get_report_summary(
         })
 
     return ReportSummary(
-        statistics=statistics,
-        trends=trends,
+        statistics=TestStatistics(**statistics_data),
+        trends=TestTrend(
+            period=trends_data["period"],
+            data=[TrendDataPoint(**point) for point in trends_data["data"]],
+        ),
         recent_runs=recent_runs
     )
 
@@ -355,53 +283,10 @@ def list_batches(
     db: Session = Depends(get_db)
 ) -> dict:
     """获取运行批次列表（分页）"""
-    allowed_ids = get_user_project_filter(user)
-    filter_project_id = project_id
-    if allowed_ids is not None:
-        if project_id:
-            if project_id not in allowed_ids:
-                raise HTTPException(status_code=404, detail="Project not found")
-        else:
-            filter_project_id = None  # pass list to crud instead
-
-    if allowed_ids is not None and not project_id:
-        # tester — filter to allowed project IDs
-        result = crud.list_run_batches(db, project_ids=allowed_ids, status=status, page=page, size=size)
-    else:
-        result = crud.list_run_batches(db, project_id=filter_project_id, status=status, page=page, size=size)
-
-    # 获取项目名称
-    project_ids = {b.project_id for b in result["items"] if b.project_id}
-    projects = {}
-    if project_ids:
-        for p in db.query(db_models.Project).filter(db_models.Project.id.in_(project_ids)).all():
-            projects[p.id] = p
-
-    items = []
-    for batch in result["items"]:
-        project = projects.get(batch.project_id)
-        project_name = project.name if project else ""
-
-        items.append({
-            "id": batch.id,
-            "name": batch.name or batch.created_at.strftime("%Y-%m-%d %H:%M") if batch.created_at else "",
-            "project_id": batch.project_id,
-            "project_name": project_name,
-            "status": batch.status,
-            "total_cases": batch.total_cases,
-            "passed": batch.passed,
-            "failed": batch.failed,
-            "created_at": batch.created_at.isoformat() if batch.created_at else None,
-            "started_at": batch.started_at.isoformat() if batch.started_at else None,
-            "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
-        })
-
-    return {
-        "total": result["total"],
-        "page": result["page"],
-        "size": result["size"],
-        "items": items,
-    }
+    try:
+        return ReportService.get_batches(db, project_id, page, size, user, status=status)
+    except ProjectAccessDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/batches/{batch_id}")
@@ -489,9 +374,10 @@ def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin),
 @router.get("/batches/{batch_id}/export")
 def export_batch(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
     """导出批次报告为 JSON 文件"""
-    detail = get_batch_detail(batch_id, user=user, db=db)
-
-    from fastapi.responses import JSONResponse
+    try:
+        detail = ReportService.export_batch_report(db, batch_id, user)
+    except BatchNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
     filename = f"batch_{batch_id}_{tz_now().strftime('%Y%m%d_%H%M%S')}.json"
     response = JSONResponse(content=detail)

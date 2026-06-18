@@ -7,6 +7,7 @@ import os
 import uuid
 
 from fastapi import FastAPI, Request, Response
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from core.log_setup import setup_logging, set_request_id, get_request_id
@@ -69,7 +70,7 @@ def _run_startup_init():
                 conn.execute(_sa_text("ALTER TABLE environments ADD COLUMN cookies JSON"))
                 conn.commit()
                 logger.info("已为 environments 表补充 cookies 列（启动兜底迁移）")
-    except Exception as _exc:
+    except SQLAlchemyError as _exc:
         logger.warning("启动兜底迁移 environments.cookies 失败: %s", _exc, exc_info=True)
 
     # Admin init + AI config seed + prompt templates
@@ -144,7 +145,7 @@ def _run_startup_init():
         from app.auth import cleanup_expired_sessions
         cleanup_expired_sessions(_cleanup_db)
         logger.info("过期会话清理完成")
-    except Exception as _e:
+    except SQLAlchemyError as _e:
         logger.warning("过期会话清理失败: %s", _e, exc_info=True)
     finally:
         _cleanup_db.close()
@@ -164,7 +165,7 @@ async def _periodic_session_cleanup():
                 logger.info("周期性过期会话清理完成")
             finally:
                 _db.close()
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("周期性过期会话清理失败: %s", e, exc_info=True)
 
 
