@@ -105,7 +105,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 |---------|-----------|
 | ![录制](docs/images/03_recordings.png) | 输入 URL → 开始录制 → 操作浏览器 → 停止 → 转换为测试步骤 |
 
-### 4. AI 配置
+### 4. AI 用例生成
+
+上传需求文档（docx/pdf/md/图片），AI 自动提取功能点并生成测试用例。
+
+| AI 生成页面 |
+|------------|
+| ![AI生成](docs/images/07_gen.png) |
+
+### 5. AI 配置
 
 执行前需在「系统设置 → AI 模型配置」填写 LLM 信息（支持 OpenAI 及兼容 API）。
 
