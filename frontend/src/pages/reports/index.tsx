@@ -4,6 +4,7 @@ import {
 } from '@arco-design/web-react';
 import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete } from '@arco-design/web-react/icon';
 import axios from 'axios';
+import { apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
 import RunDetail from './RunDetail';
 import styles from './style/index.module.less';
@@ -92,11 +93,12 @@ const Reports: React.FC = () => {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await axios.get('/api/reports/batches', {
-        params: { page, size: pageSize },
-      });
-      setData(res.data.items || []);
-      setTotal(res.data.total || 0);
+      const data = await apiRequest<{ items?: BatchItem[]; total?: number }>(
+        { method: 'GET', url: '/api/reports/batches', params: { page, size: pageSize } },
+        { showSuccess: false, showError: false }
+      );
+      setData(data.items || []);
+      setTotal(data.total || 0);
     } catch {
       setData([]);
       setTotal(0);
@@ -111,8 +113,10 @@ const Reports: React.FC = () => {
 
   const refreshBatchDetail = async (batchId: number) => {
     try {
-      const res = await axios.get(`/api/reports/batches/${batchId}`);
-      const updated = res.data as BatchDetail;
+      const updated = await apiRequest<BatchDetail>(
+        { method: 'GET', url: `/api/reports/batches/${batchId}` },
+        { showSuccess: false, showError: false }
+      );
       setDetail(updated);
       if (updated.status !== 'running') {
         setPollingBatchId(null);

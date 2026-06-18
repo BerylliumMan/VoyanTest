@@ -3,6 +3,7 @@ import { useHistory } from 'react-router-dom';
 import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox } from '@arco-design/web-react';
 import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug } from '@arco-design/web-react/icon';
 import axios from 'axios';
+import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
 import { TestCase, Module, Project, Environment, Step } from './types';
 import useTestCaseData from './hooks/useTestCaseData';
@@ -52,8 +53,26 @@ const TestCases: React.FC = () => {
 
   const { data, total, loading, modules, moduleTree, environments, selectedEnvironment, setSelectedEnvironment, fetchData, fetchModules, fetchEnvironments } = useTestCaseData(selectedProject, selectedModuleId, page, pageSize, submittedQuery);
 
-  useEffect(() => { axios.get('/api/projects/').then((res) => setProjects(res.data || [])).catch((err) => Message.error(err?.response?.data?.detail || '操作失败')); }, []);
-  useEffect(() => { axios.get('/api/agents').then((res) => { const online = (res.data || []).filter((a: { name: string; status: string }) => a.status === 'online'); setAgents(online); if (online.length > 0) setSelectedAgent(online[0].name); }).catch((err) => { console.error('Failed to load agents:', err); }); }, []);
+  useEffect(() => {
+    apiGet<Project[]>('/api/projects/')
+      .then((data) => setProjects(data || []))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    apiRequest<{ name: string; status: string }[]>(
+      { method: 'GET', url: '/api/agents' },
+      { showSuccess: false, showError: false }
+    )
+      .then((res) => {
+        const online = (res || []).filter((a) => a.status === 'online');
+        setAgents(online);
+        if (online.length > 0) setSelectedAgent(online[0].name);
+      })
+      .catch((e) => {
+        // eslint-disable-next-line no-console
+        console.error('Failed to load agents:', e);
+      });
+  }, []);
 
   const fetchInitCases = useCallback(async (projectId: number) => {
     try {

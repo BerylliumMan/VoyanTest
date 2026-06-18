@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import axios from 'axios';
+import { apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
 
 interface RecordedEvent {
@@ -55,18 +55,15 @@ export function useRecordings() {
       const sid = sessionId;
       const tick = async () => {
         try {
-          const res = await axios.get<RecordedEvent[]>(
-            `/api/recordings/${sid}/events`
+          const data = await apiRequest<RecordedEvent[]>(
+            { method: 'GET', url: `/api/recordings/${sid}/events` },
+            { showSuccess: false, showError: false }
           );
-          setEvents(Array.isArray(res.data) ? res.data : []);
+          setEvents(Array.isArray(data) ? data : []);
         } catch (e) {
           // 轮询中静默失败
-          const err = e as { response?: { data?: { detail?: string } }; message?: string };
           // eslint-disable-next-line no-console
-          console.warn(
-            'Failed to fetch recording events:',
-            err?.response?.data?.detail || err?.message || ''
-          );
+          console.warn('Failed to fetch recording events:', (e as Error)?.message || '');
         }
       };
       // 立刻拉一次，再开启定时器
@@ -90,21 +87,22 @@ export function useRecordings() {
       }
       setLoading(true);
       try {
-        const res = await axios.post('/api/recordings/start', {
-          url: targetUrl.trim(),
-          page_title: '',
-        });
-        setSessionId(res.data.session_id);
+        const data = await apiRequest<{ session_id: string }>(
+          {
+            method: 'POST',
+            url: '/api/recordings/start',
+            data: { url: targetUrl.trim(), page_title: '' },
+          },
+          { showError: false }
+        );
+        setSessionId(data.session_id);
         setStatus('recording');
         setEvents([]);
         setSteps([]);
         return true;
       } catch (e) {
         // eslint-disable-next-line no-console
-        console.warn(
-          'startRecording failed:',
-          (e as { message?: string })?.message || ''
-        );
+        console.warn('startRecording failed:', (e as Error)?.message || '');
         return false;
       } finally {
         setLoading(false);
@@ -117,24 +115,25 @@ export function useRecordings() {
     if (!sessionId) return false;
     setLoading(true);
     try {
-      await axios.post(`/api/recordings/${sessionId}/stop`);
+      await apiRequest(
+        { method: 'POST', url: `/api/recordings/${sessionId}/stop` },
+        { showError: false }
+      );
       setStatus('stopped');
       // 停止后做一次最终拉取
       try {
-        const res = await axios.get<RecordedEvent[]>(
-          `/api/recordings/${sessionId}/events`
+        const data = await apiRequest<RecordedEvent[]>(
+          { method: 'GET', url: `/api/recordings/${sessionId}/events` },
+          { showSuccess: false, showError: false }
         );
-        setEvents(Array.isArray(res.data) ? res.data : []);
+        setEvents(Array.isArray(data) ? data : []);
       } catch {
         // 忽略：停止接口已成功
       }
       return true;
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.warn(
-        'stopRecording failed:',
-        (e as { message?: string })?.message || ''
-      );
+      console.warn('stopRecording failed:', (e as Error)?.message || '');
       return false;
     } finally {
       setLoading(false);
@@ -144,17 +143,15 @@ export function useRecordings() {
   const refreshEvents = useCallback(async (): Promise<boolean> => {
     if (!sessionId) return false;
     try {
-      const res = await axios.get<RecordedEvent[]>(
-        `/api/recordings/${sessionId}/events`
+      const data = await apiRequest<RecordedEvent[]>(
+        { method: 'GET', url: `/api/recordings/${sessionId}/events` },
+        { showSuccess: false, showError: false }
       );
-      setEvents(Array.isArray(res.data) ? res.data : []);
+      setEvents(Array.isArray(data) ? data : []);
       return true;
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.warn(
-        'refreshEvents failed:',
-        (e as { message?: string })?.message || ''
-      );
+      console.warn('refreshEvents failed:', (e as Error)?.message || '');
       return false;
     }
   }, [sessionId]);
@@ -163,20 +160,20 @@ export function useRecordings() {
     if (!sessionId) return false;
     setConverting(true);
     try {
-      const res = await axios.post(`/api/recordings/${sessionId}/convert`, {
-        session_id: sessionId,
-      });
-      const newSteps: TestStep[] = Array.isArray(res.data?.steps)
-        ? res.data.steps
-        : [];
+      const data = await apiRequest<{ steps?: TestStep[] }>(
+        {
+          method: 'POST',
+          url: `/api/recordings/${sessionId}/convert`,
+          data: { session_id: sessionId },
+        },
+        { showError: false }
+      );
+      const newSteps: TestStep[] = Array.isArray(data?.steps) ? data.steps : [];
       setSteps(newSteps);
       return true;
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.warn(
-        'convertToSteps failed:',
-        (e as { message?: string })?.message || ''
-      );
+      console.warn('convertToSteps failed:', (e as Error)?.message || '');
       return false;
     } finally {
       setConverting(false);

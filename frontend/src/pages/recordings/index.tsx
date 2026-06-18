@@ -46,12 +46,6 @@ const truncate = (s: string | null | undefined, max = 40): string => {
   return str.length > max ? `${str.slice(0, max)}…` : str;
 };
 
-// 简易 axios 错误信息提取
-const extractError = (e: unknown, fallback: string): string => {
-  const err = e as { response?: { data?: { detail?: string } }; message?: string };
-  return err?.response?.data?.detail || err?.message || fallback;
-};
-
 // 录制中状态点的脉冲动画（不需要单独的 .less 文件）
 const pulseStyle = `
 @keyframes recording-pulse {
@@ -120,7 +114,7 @@ const Recordings: React.FC = () => {
         Message.error(t['recordings.refresh_failed']);
       }
     } catch (e) {
-      Message.error(extractError(e, t['recordings.refresh_failed']));
+      Message.error((e as Error)?.message || t['recordings.refresh_failed']);
     } finally {
       setEventsLoading(false);
     }

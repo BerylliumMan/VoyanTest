@@ -1,79 +1,22 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useCallback } from 'react';
 import {
-  Button, Tag, Modal, Input, Message, Spin, Space, Typography, Empty, Form,
+  Button, Tag, Modal, Input, Spin, Space, Typography, Empty, Form,
 } from '@arco-design/web-react';
 import {
   IconPlayArrow, IconPause, IconCheck, IconClose, IconLoading,
   IconSync, IconSkipNext, IconEdit, IconStop, IconInfoCircle,
-  IconArrowRight, IconTool,
+  IconTool,
 } from '@arco-design/web-react/icon';
 import { useParams, useLocation } from 'react-router-dom';
-import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import styles from './style/index.module.less';
+import { StepStatus } from './types';
+import StepStatusIcon from './StepStatusIcon';
+import { useRunDebug } from './useRunDebug';
 
 const { Text } = Typography;
 
-/* ========== 类型定义 ========== */
-
-type StepStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
-
-interface StepInfo {
-  id?: number;
-  step_order: number;
-  description: string;
-  healed_selector?: string;
-  status: StepStatus;
-  duration?: number;
-  error?: string;
-  screenshot_path?: string;
-  logs: string[];
-}
-
-interface CaseData {
-  id: number;
-  name: string;
-  description?: string;
-  steps: { id: number; step_order: number; description: string; healed_selector?: string }[];
-}
-
-interface WsStepStart {
-  type: 'step_start';
-  timestamp: string;
-  step_id: number;
-  message: string;
-}
-
-interface WsStepComplete {
-  type: 'step_complete';
-  timestamp: string;
-  step_id: number;
-  status: string;
-  duration: number;
-}
-
-interface WsExecutionPaused {
-  type: 'execution_paused';
-  run_id: number;
-  step_id: number;
-  step_description: string;
-  reason: string;
-  options: string[];
-}
-
-interface WsExecutionResumed {
-  type: 'execution_resumed';
-  run_id: number;
-  step_id: number;
-  decision: string;
-  new_description?: string;
-}
-
-type WsMessage = WsStepStart | WsStepComplete | WsExecutionPaused | WsExecutionResumed;
-
-type ExecutionPhase = 'idle' | 'running' | 'paused' | 'completed';
-
-/* ========== 常量 ========== */
+/* ========== 常量 & 辅助函数 ========== */
 
 const STATUS_COLORS: Record<StepStatus, string> = {
   pending: 'gray',
@@ -91,42 +34,6 @@ const getStatusLabel = (status: StepStatus, t: Record<string, string>): string =
     case 'failed': return t['failed'];
     case 'skipped': return t['debug.skipped'];
     default: return status;
-  }
-};
-
-/* ========== 子组件 ========== */
-
-/** 步骤状态图标 */
-const StepStatusIcon: React.FC<{ status: StepStatus }> = ({ status }) => {
-  switch (status) {
-    case 'pending':
-      return <span className={`${styles['step-status-icon']} ${styles.pending}`} />;
-    case 'running':
-      return (
-        <span className={`${styles['step-status-icon']} ${styles.running}`}>
-          <IconLoading spin />
-        </span>
-      );
-    case 'passed':
-      return (
-        <span className={`${styles['step-status-icon']} ${styles.passed}`}>
-          <IconCheck />
-        </span>
-      );
-    case 'failed':
-      return (
-        <span className={`${styles['step-status-icon']} ${styles.failed}`}>
-          <IconClose />
-        </span>
-      );
-    case 'skipped':
-      return (
-        <span className={`${styles['step-status-icon']} ${styles.skipped}`}>
-          <IconArrowRight />
-        </span>
-      );
-    default:
-      return <span className={`${styles['step-status-icon']} ${styles.pending}`} />;
   }
 };
 
@@ -151,231 +58,16 @@ const RunDebugPage: React.FC = () => {
   const runId = getUrlParam('runId');
   const caseId = getUrlParam('caseId');
 
-  /* --- 状态 --- */
-  const [caseData, setCaseData] = useState<CaseData | null>(null);
-  const [steps, setSteps] = useState<StepInfo[]>([]);
-  const [phase, setPhase] = useState<ExecutionPhase>('idle');
-  const [wsConnected, setWsConnected] = useState(false);
-  const [selectedStepIdx, setSelectedStepIdx] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  // 暂停相关
-  const [pauseReason, setPauseReason] = useState('');
-  const [pauseStepId, setPauseStepId] = useState<number | null>(null);
-  const [pauseStepDesc, setPauseStepDesc] = useState('');
-
-  // 编辑弹窗
-  const [editVisible, setEditVisible] = useState(false);
-  const [editForm] = Form.useForm();
-
-  // WebSocket 引用
-  const wsRef = useRef<WebSocket | null>(null);
-  // 跟踪 step_id -> phase 中是否已收到该步骤的完成消息（避免重复标记 completed）
-  const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-
-  /* --- 获取测试用例数据 --- */
-  const fetchCaseData = useCallback(async (cid: number) => {
-    setLoading(true);
-    try {
-      const res = await axios.get(`/api/test-cases/${cid}`);
-      const data = res.data as CaseData;
-      setCaseData(data);
-      // 用 API 返回的步骤初始化步骤列表
-      const initialSteps: StepInfo[] = (data.steps || []).map((s) => ({
-        id: s.id,
-        step_order: s.step_order,
-        description: s.description,
-        healed_selector: s.healed_selector,
-        status: 'pending' as StepStatus,
-        logs: [],
-      }));
-      setSteps(initialSteps);
-    } catch (err: unknown) {
-      const e = err as { response?: { data?: { detail?: string } } };
-      const detail = e.response?.data?.detail || t['debug.unknown_error'];
-      Message.error(t['debug.load_case_failed'].replace('{detail}', detail));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    if (caseId) {
-      fetchCaseData(Number(caseId));
-    }
-  }, [caseId, fetchCaseData]);
-
-  /* --- WebSocket 连接 --- */
-  useEffect(() => {
-    if (!runId) return;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/logs/${runId}`;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let destroyed = false;
-
-    const connect = () => {
-      if (destroyed) return;
-      if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setWsConnected(true);
-        setPhase((prev) => (prev === 'idle' ? 'running' : prev));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg: WsMessage = JSON.parse(event.data);
-          handleWsMessage(msg);
-        } catch {
-          // 忽略解析错误
-        }
-      };
-
-      ws.onclose = () => {
-        setWsConnected(false);
-        wsRef.current = null;
-        // 完成状态不重连
-        if (!destroyed && phaseRef.current !== 'completed') {
-          reconnectTimer = setTimeout(connect, 3000);
-        }
-      };
-
-      ws.onerror = () => {
-        setWsConnected(false);
-        wsRef.current = null;
-        if (!destroyed && phaseRef.current !== 'completed') {
-          reconnectTimer = setTimeout(connect, 3000);
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      destroyed = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-    };
-  }, [runId]);
-
-  /* --- 处理 WebSocket 消息 --- */
-  const handleWsMessage = useCallback((msg: WsMessage) => {
-    switch (msg.type) {
-      case 'step_start': {
-        // 将对应步骤设为 running
-        setSteps((prev) =>
-          prev.map((s) =>
-            s.id === msg.step_id || s.step_order === msg.step_id
-              ? { ...s, status: 'running', logs: [`[${msg.timestamp}] ${msg.message}`] }
-              : s,
-          ),
-        );
-        break;
-      }
-      case 'step_complete': {
-        const newStatus: StepStatus =
-          msg.status === 'passed'
-            ? 'passed'
-            : msg.status === 'failed'
-              ? 'failed'
-              : msg.status === 'skipped'
-                ? 'skipped'
-                : 'passed';
-        setSteps((prev) => {
-          const next = prev.map((s) =>
-            s.id === msg.step_id || s.step_order === msg.step_id
-              ? { ...s, status: newStatus, duration: msg.duration }
-              : s,
-          );
-          // 检查是否所有非 pending/running 都已完成
-          const allDone = next.every(
-            (s) => s.status !== 'pending' && s.status !== 'running',
-          );
-          if (allDone && next.length > 0) {
-            setPhase('completed');
-          }
-          return next;
-        });
-        break;
-      }
-      case 'execution_paused': {
-        setPhase('paused');
-        setPauseReason(msg.reason || t['debug.paused_default_reason']);
-        setPauseStepId(msg.step_id);
-        setPauseStepDesc(msg.step_description || '');
-        break;
-      }
-      case 'execution_resumed': {
-        setPhase('running');
-        setPauseReason('');
-        setPauseStepId(null);
-        setPauseStepDesc('');
-        // 如果 back-end 返回了新的步骤描述，更新对应步骤
-        if (msg.new_description) {
-          setSteps((prev) =>
-            prev.map((s) =>
-              s.id === msg.step_id || s.step_order === msg.step_id
-                ? { ...s, description: msg.new_description! }
-                : s,
-            ),
-          );
-        }
-        break;
-      }
-      default:
-        break;
-    }
-  }, [t]);
-
-  /* --- 控制指令：发送到 WebSocket --- */
-  const sendControl = useCallback(
-    (action: string, payload?: Record<string, unknown>) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        Message.warning(t['debug.ws_disconnected']);
-        return;
-      }
-      wsRef.current.send(JSON.stringify({ type: 'control', action, ...payload }));
-    },
-    [t],
-  );
-
-  /* --- 事件处理 --- */
-  const handleRetry = () => sendControl('retry');
-  const handleSkip = () => sendControl('skip');
-  const handleAbort = () => sendControl('abort');
-  const handleEditOpen = () => {
-    editForm.setFieldsValue({ new_description: pauseStepDesc });
-    setEditVisible(true);
-  };
-  const handleEditSubmit = async () => {
-    const values = await editForm.validate();
-    sendControl('edit', { new_description: values.new_description.trim() });
-    setEditVisible(false);
-  };
-
-  /* --- 计算属性 --- */
-  const currentStepIdx = useMemo(() => {
-    return steps.findIndex((s) => s.status === 'running');
-  }, [steps]);
-
-  const stats = useMemo(() => {
-    const passed = steps.filter((s) => s.status === 'passed').length;
-    const failed = steps.filter((s) => s.status === 'failed').length;
-    const pending = steps.filter(
-      (s) => s.status === 'pending' || s.status === 'running',
-    ).length;
-    return { passed, failed, pending, total: steps.length };
-  }, [steps]);
-
-  const selectedStep = selectedStepIdx != null ? steps[selectedStepIdx] : null;
+  /* --- 业务逻辑（状态/WS/事件/计算属性）由 hook 提供 --- */
+  const {
+    caseData, steps, phase, wsConnected,
+    selectedStepIdx, setSelectedStepIdx,
+    loading, pauseReason, pauseStepDesc,
+    editVisible, setEditVisible, editForm,
+    currentStepIdx, stats, selectedStep,
+    handleRetry, handleSkip, handleAbort,
+    handleEditOpen, handleEditSubmit,
+  } = useRunDebug(runId, caseId, t);
 
   /* --- 渲染 --- */
   if (loading) {
