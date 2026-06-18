@@ -82,7 +82,7 @@ def _run_startup_init():
             db_models.User.username == settings.default_admin_username
         ).first()
         if not existing:
-            _admin_password = "Abc@12345"
+            _admin_password = "Admin@2024"
             admin = db_models.User(
                 username=settings.default_admin_username,
                 password_hash=hash_password(_admin_password),
