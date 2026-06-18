@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 from app.tz import now as tz_now
 from typing import List, Optional
@@ -221,7 +222,8 @@ def get_run_detail(run_id: int, user=Depends(get_current_user), db: Session = De
             with open(safe_path, "r", encoding="utf-8") as f:
                 report_data = json.load(f)
             response["steps"] = report_data.get("steps", [])
-        except Exception:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            # 文件 I/O / JSON 损坏 / 编码错误都降级为空 steps
             logger.warning("无法加载报告 JSON 文件: %s", run.report_path, exc_info=True)
 
     return response
@@ -333,7 +335,8 @@ def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: Session 
                 with open(safe_path, "r", encoding="utf-8") as f:
                     report_data = json.load(f)
                 run_info["steps"] = report_data.get("steps", [])
-            except Exception:
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                # 文件 I/O / JSON 损坏 / 编码错误都降级为空 steps
                 logger.warning("无法加载批次报告 JSON 文件: %s", run.report_path, exc_info=True)
 
         runs_data.append(run_info)
@@ -399,6 +402,8 @@ def delete_batch(batch_id: int, user=Depends(get_current_user), db: Session = De
         if not success:
             raise HTTPException(status_code=404, detail="Batch not found")
         return {"message": "Batch deleted"}
-    except Exception as e:
+    except HTTPException:
+        raise
+    except (ValueError, SQLAlchemyError):
         logger.exception("Delete batch %s failed", batch_id)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to delete batch")

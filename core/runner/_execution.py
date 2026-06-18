@@ -91,32 +91,36 @@ async def run_test_case_in_browser(
     from app import db_models
 
     try:
-        case_data = crud.get_test_case(db, case_id)
+        loop = asyncio.get_running_loop()
+        case_data = await loop.run_in_executor(None, lambda: crud.get_test_case(db, case_id))
         if not case_data:
             raise ValueError(f"Test case with ID {case_id} not found.")
 
         # 预创建 TestRun 记录 (pending) 或使用已预创建的
         now = tz_now()
         if run_id is not None:
-            if not mark_run_running(db, run_id):
+            if not await loop.run_in_executor(None, lambda: mark_run_running(db, run_id)):
                 logger.warning("TestRun %s not found, will create new record", run_id)
                 run_id = None
             else:
-                logger.info(f"TestRun {run_id} updated (pending -> running)")
+                logger.info("TestRun %s updated (pending -> running)", run_id)
         if run_id is None:
-            pending_run = db_models.TestRun(
-                case_id=case_id, batch_id=batch_id, status="pending",
-                start_time=now, end_time=now,
-            )
-            db.add(pending_run)
-            db.commit()
-            db.refresh(pending_run)
-            run_id = pending_run.id
-            pending_run.status = "running"
-            db.commit()
-            logger.info(f"TestRun {run_id} created + started (running)")
+            def _create_and_start_run() -> int:
+                pending_run = db_models.TestRun(
+                    case_id=case_id, batch_id=batch_id, status="pending",
+                    start_time=now, end_time=now,
+                )
+                db.add(pending_run)
+                db.commit()
+                db.refresh(pending_run)
+                new_run_id = pending_run.id
+                pending_run.status = "running"
+                db.commit()
+                return new_run_id
+            run_id = await loop.run_in_executor(None, _create_and_start_run)
+            logger.info("TestRun %s created + started (running)", run_id)
 
-        project_data = crud.get_project(db, case_data.project_id)
+        project_data = await loop.run_in_executor(None, lambda: crud.get_project(db, case_data.project_id))
         if not project_data:
             raise ValueError(f"Project with ID {case_data.project_id} not found.")
 
@@ -132,9 +136,9 @@ async def run_test_case_in_browser(
         case_logger = logging.getLogger(f"runner.case_{case_id}")
         case_logger.addHandler(file_handler)
 
-        logger.info(f"Starting MCP execution: '{case_data.name}'")
+        logger.info("Starting MCP execution: '%s'", case_data.name)
 
-        steps_raw = crud.get_steps_for_case(db, case_id)
+        steps_raw = await loop.run_in_executor(None, lambda: crud.get_steps_for_case(db, case_id))
         step_list = [
             {'id': s.id, 'step_order': s.step_order, 'description': s.description, 'expected_result': s.parsed_result}
             for s in steps_raw
@@ -152,7 +156,7 @@ async def run_test_case_in_browser(
 
         # Inject environment-defined auth cookies BEFORE navigation so the
         # browser already presents the authenticated session on the first page.
-        env_cookies = _resolve_env_cookies(db, base_url_override)
+        env_cookies = await loop.run_in_executor(None, lambda: _resolve_env_cookies(db, base_url_override))
         if env_cookies:
             await _inject_auth_cookies(mcp_manager, env_cookies, nav_url)
 
@@ -161,7 +165,7 @@ async def run_test_case_in_browser(
             if not nav_result.get('success'):
                 logger.warning("Failed to navigate to %s: %s", nav_url, nav_result.get('text'))
             else:
-                logger.info(f"Navigated to {nav_url}")
+                logger.info("Navigated to %s", nav_url)
 
         llm_client = create_openai_client()
         _, _, resolved_model = _resolve_llm_config()
@@ -218,7 +222,7 @@ async def run_test_case_in_browser(
             # ==============================================================
             for attempt in range(retry_max + 1):
                 if attempt > 0:
-                    logger.info(f"  重试第 {attempt}/{retry_max} 次...")
+                    logger.info("  重试第 %s/%s 次...", attempt, retry_max)
                     await asyncio.sleep(retry_delay)
                     # 清除上次暂停事件，确保全新等待
                     if run_id in _pause_events:
@@ -233,7 +237,7 @@ async def run_test_case_in_browser(
                         step_timeout_ms=120000,
                         screenshot_dir=screenshot_dir,
                     )
-                except Exception as step_exc:
+                except Exception as step_exc:  # noqa: BLE001 - 见下方注释
                     # Broad catch is necessary: execute_step_mcp touches MCP stdio,
                     # LLM HTTP, JSON parsing, and asyncio — any failure must be
                     # converted into a structured "step failed" result so the
@@ -298,12 +302,12 @@ async def run_test_case_in_browser(
                         if db is not None:
                             try:
                                 step_obj.healed_selector = healed
-                                db.commit()
+                                await loop.run_in_executor(None, lambda: db.commit())
                             except SQLAlchemyError as db_exc:
                                 logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
                         continue  # 用新选择器重试
                     elif attempt == 0 and not step_success and error_msg:
-                        logger.debug(f"  跳过自愈（非定位错误）: {error_msg[:80]}")
+                        logger.debug("  跳过自愈（非定位错误）: %s", error_msg[:80])
 
             # ==============================================================
             # 步骤最终失败处理
@@ -330,7 +334,7 @@ async def run_test_case_in_browser(
                     decision = _pause_decisions.get(run_id, {}).get("decision", "abort")
 
                     if decision == "retry":
-                        logger.info(f"  用户选择重试步骤 {step_obj.step_order}")
+                        logger.info("  用户选择重试步骤 %s", step_obj.step_order)
                         # 重置失败计数，重新执行整个重试循环
                         step_success = False
                         for retry_attempt in range(retry_max + 1):
@@ -345,7 +349,7 @@ async def run_test_case_in_browser(
                                     step_timeout_ms=120000,
                                     screenshot_dir=screenshot_dir,
                                 )
-                            except Exception as step_exc:
+                            except Exception as step_exc:  # noqa: BLE001 - 同上 execute_step_mcp 调用兜底
                                 # Broad catch is necessary: execute_step_mcp touches MCP stdio,
                                 # LLM HTTP, JSON parsing, and asyncio — any failure must be
                                 # converted into a structured "step failed" result so the
@@ -378,7 +382,7 @@ async def run_test_case_in_browser(
                                 duration=(tz_now() - step_start_time).total_seconds(),
                             )
                     elif decision == "skip":
-                        logger.info(f"  用户选择跳过步骤 {step_obj.step_order}")
+                        logger.info("  用户选择跳过步骤 %s", step_obj.step_order)
                         # 将失败结果标记为 skipped 再继续
                         if last_result:
                             last_result['status'] = 'skipped'
@@ -386,15 +390,15 @@ async def run_test_case_in_browser(
                     elif decision == "edit":
                         new_desc = _pause_decisions.get(run_id, {}).get("new_description", "")
                         if new_desc:
-                            logger.info(f"  用户编辑步骤描述: {new_desc}")
+                            logger.info("  用户编辑步骤描述: %s", new_desc)
                             # 更新 DB 和本地 step_dict
                             step_obj.description = new_desc
                             step_dict['description'] = new_desc
                             try:
-                                db.commit()
+                                await loop.run_in_executor(None, lambda: db.commit())
                             except SQLAlchemyError:
                                 logger.exception("保存用户编辑后的步骤描述失败")
-                                db.rollback()
+                                await loop.run_in_executor(None, lambda: db.rollback())
                             # 使用新描述重试
                             for retry_attempt in range(retry_max + 1):
                                 if retry_attempt > 0:
@@ -408,7 +412,7 @@ async def run_test_case_in_browser(
                                         step_timeout_ms=120000,
                                         screenshot_dir=screenshot_dir,
                                     )
-                                except Exception as step_exc:
+                                except Exception as step_exc:  # noqa: BLE001 - 同上 execute_step_mcp 调用兜底
                                     # Broad catch is necessary: execute_step_mcp touches MCP stdio,
                                     # LLM HTTP, JSON parsing, and asyncio — any failure must be
                                     # converted into a structured "step failed" result so the
@@ -440,7 +444,7 @@ async def run_test_case_in_browser(
                                     duration=(tz_now() - step_start_time).total_seconds(),
                                 )
                     else:  # "abort" 或其他
-                        logger.info(f"  用户选择中止执行")
+                        logger.info("  用户选择中止执行")
                         should_abort = True
                         # 重置暂停事件，避免后续误用
                         if run_id in _pause_events:
@@ -528,7 +532,7 @@ async def run_test_case_in_browser(
                                 # skip / retry / edit 对断言失败也适用
                                 # 简化处理：skip → 继续，其他 → 继续（断言失败不致命）
                             consecutive_failures += 1
-                    except Exception as assert_exc:
+                    except Exception as assert_exc:  # noqa: BLE001 - 见下方注释
                         # Broad catch is necessary: execute_step_assertions drives
                         # MCP tool calls + LLM calls + DOM inspection — any failure
                         # must be recorded as a non-fatal warning so the rest of
@@ -584,9 +588,9 @@ async def run_test_case_in_browser(
         case_report_path = os.path.join(output_dir, "report.json")
         with open(case_report_path, "w", encoding="utf-8") as f:
             _json.dump(report, f, ensure_ascii=False, indent=2)
-        logger.info(f"Report saved: {case_report_path}")
+        logger.info("Report saved: %s", case_report_path)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 见下方注释
         # Broad catch is necessary: this is the outer guard for the whole
         # run_test_case_in_browser flow (DB, MCP, LLM, filesystem, assertions).
         # Any unhandled error must be recorded as CRITICAL and propagate as a
@@ -604,18 +608,23 @@ async def run_test_case_in_browser(
         end_time = tz_now()
         duration = (end_time - start_time).total_seconds()
 
+        _loop = asyncio.get_running_loop()
         if run_id is not None:
-            update_run_on_completion(
-                db, run_id, test_status, start_time, end_time,
-                duration, case_report_path, run_log_entries,
-                batch_id=batch_id,
+            await _loop.run_in_executor(
+                None, lambda: update_run_on_completion(
+                    db, run_id, test_status, start_time, end_time,
+                    duration, case_report_path, run_log_entries,
+                    batch_id=batch_id,
+                )
             )
             logger.info(f"TestRun {run_id} updated -> {test_status}")
         else:
-            save_run_results(
-                case_id, test_status, start_time, end_time,
-                duration, case_report_path, None, run_log_entries,
-                batch_id=batch_id,
+            await _loop.run_in_executor(
+                None, lambda: save_run_results(
+                    case_id, test_status, start_time, end_time,
+                    duration, case_report_path, None, run_log_entries,
+                    batch_id=batch_id,
+                )
             )
 
         if file_handler:

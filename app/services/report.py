@@ -67,7 +67,7 @@ def _load_report_steps(report_path: str | None) -> list[Any]:
         with open(safe_path, "r", encoding="utf-8") as f:
             report_data = json.load(f)
         return report_data.get("steps", []) or []
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         logger.warning("无法加载报告 JSON 文件: %s", report_path, exc_info=True)
         return []
 

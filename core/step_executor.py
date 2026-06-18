@@ -49,7 +49,8 @@ async def _capture_screenshot(
         saved = await mcp_manager.take_screenshot(ss_path)
         if saved:
             result['screenshot_path'] = saved
-    except Exception as exc:
+    except (OSError, RuntimeError) as exc:
+        # OSError: 写文件失败；RuntimeError: MCP / Playwright 截图调用失败
         logger.warning("Failed to capture screenshot: %s", exc, exc_info=True)
 
 
@@ -157,10 +158,10 @@ async def execute_step_mcp(
                     result['verification'] = verification.reason
             except asyncio.TimeoutError:
                 logger.warning("Step %s verification timed out", step_number)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 断言失败只记录 warning，不中断步骤流程
                 logger.warning("Step %s verification failed: %s", step_number, exc, exc_info=True)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 步骤执行涉及 MCP / LLM / asyncio / DOM，需统一兜底
         result['error'] = str(exc)
         logger.warning("Step %s exception: %s", step_number, exc, exc_info=True)
 

@@ -38,11 +38,12 @@ async def run_test_case_endpoint(
     db: Session = Depends(get_db),
 ) -> dict:
     """运行单个测试用例 - 创建单用例批次"""
-    db_case = crud.get_test_case(db, case_id)
+    loop = _asyncio.get_running_loop()
+    db_case = await loop.run_in_executor(None, lambda: crud.get_test_case(db, case_id))
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    batch = crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1))
 
     from core.browser_pool import BrowserPool
 
@@ -57,7 +58,8 @@ async def run_test_case_endpoint(
                 if environment_id:
                     _env_db = SessionLocal()
                     try:
-                        env = crud.get_environment(_env_db, environment_id)
+                        _loop = _asyncio.get_running_loop()
+                        env = await _loop.run_in_executor(None, lambda: crud.get_environment(_env_db, environment_id))
                         if env:
                             base_url_override = env.base_url
                     finally:
@@ -79,20 +81,23 @@ async def run_test_case_debug(
     db: Session = Depends(get_db),
 ) -> dict:
     """启动调试运行——打开 WebSocket 桥接和暂停模式。"""
-    db_case = crud.get_test_case(db, case_id)
+    loop = _asyncio.get_running_loop()
+    db_case = await loop.run_in_executor(None, lambda: crud.get_test_case(db, case_id))
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    batch = crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1))
 
-    run = crud.create_test_run(
-        db, case_id, "running",
-        start_time=tz_now(),
-        end_time=tz_now(),
-        duration=0,
+    run = await loop.run_in_executor(
+        None, lambda: crud.create_test_run(
+            db, case_id, "running",
+            start_time=tz_now(),
+            end_time=tz_now(),
+            duration=0,
+        )
     )
 
-    db.commit()
+    await loop.run_in_executor(None, lambda: db.commit())
 
     _ = _asyncio.create_task(
         _run_debug_mode(case_id, batch.id, run.id, req.environment_id)
@@ -135,11 +140,12 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     if not req.case_ids:
         raise HTTPException(status_code=400, detail="No cases selected")
 
-    test_cases = []
-    for cid in req.case_ids:
-        tc = crud.get_test_case(db, cid)
-        if tc:
-            test_cases.append(tc)
+    loop = _asyncio.get_running_loop()
+
+    async def _load_test_cases(cids: list[int]) -> list:
+        return await loop.run_in_executor(None, lambda: [tc for cid in cids if (tc := crud.get_test_case(db, cid))])
+
+    test_cases = await _load_test_cases(req.case_ids)
 
     if not test_cases:
         raise HTTPException(status_code=404, detail="No valid test cases found")
@@ -149,13 +155,13 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     init_case_ids = req.init_case_ids or []
 
     if init_case_ids:
-        for cid in init_case_ids:
-            tc = crud.get_test_case(db, cid)
-            if not tc or tc.project_id != project_id:
-                raise HTTPException(status_code=400, detail=f"Init case {cid} is not in the same project")
+        init_tcs = await _load_test_cases(init_case_ids)
+        for tc in init_tcs:
+            if tc.project_id != project_id:
+                raise HTTPException(status_code=400, detail=f"Init case {tc.id} is not in the same project")
 
     total = len(case_ids) + len(init_case_ids)
-    batch = crud.create_run_batch(db, project_id=project_id, total_cases=total)
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=project_id, total_cases=total))
     from app.routers.testcase import execution as _exec
     background_tasks.add_task(
         _exec.run_batch_test_cases,
@@ -177,18 +183,19 @@ async def run_module_test_cases(
     db: Session = Depends(get_db),
 ) -> dict:
     """运行模块下所有测试用例 - 创建批次"""
-    db_module = crud.get_module(db, module_id)
+    loop = _asyncio.get_running_loop()
+    db_module = await loop.run_in_executor(None, lambda: crud.get_module(db, module_id))
     if db_module is None:
         raise HTTPException(status_code=404, detail="Module not found")
 
-    test_cases = crud.get_all_test_cases_for_module(db, module_id)
+    test_cases = await loop.run_in_executor(None, lambda: crud.get_all_test_cases_for_module(db, module_id))
     if not test_cases:
         return {"message": f"No test cases found for module {module_id} to run."}
 
     case_ids = [c.id for c in test_cases]
     project_id = db_module.project_id
 
-    batch = crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids))
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids)))
 
     from app.routers.testcase import execution as _exec
     background_tasks.add_task(
@@ -210,17 +217,18 @@ async def run_project_test_cases(
     db: Session = Depends(get_db),
 ) -> dict:
     """运行项目下所有测试用例 - 创建批次"""
-    db_project = crud.get_project(db, project_id)
+    loop = _asyncio.get_running_loop()
+    db_project = await loop.run_in_executor(None, lambda: crud.get_project(db, project_id))
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    test_cases = crud.get_all_test_cases_for_project(db, project_id)
+    test_cases = await loop.run_in_executor(None, lambda: crud.get_all_test_cases_for_project(db, project_id))
     if not test_cases:
         return {"message": f"No test cases found for project {project_id} to run."}
 
     case_ids = [c.id for c in test_cases]
 
-    batch = crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids))
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids)))
 
     from app.routers.testcase import execution as _exec
     background_tasks.add_task(

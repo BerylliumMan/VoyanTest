@@ -9,15 +9,18 @@ Architecture:
   NL step + DOM snapshot ──→ LLM (DashScope/Qwen) ──→ PlaywrightMCPToolCall (JSON)
 """
 
+import asyncio
 import json as _json
 import logging
 import os
 import re
 from typing import Any, Optional
 
+import openai
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionContentPartTextParam
 from pydantic import BaseModel, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from app.security.encryption import decrypt_value
 
@@ -259,7 +262,7 @@ async def generate_tool_call(
                 temperature=temperature,
                 max_tokens=4096,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - LLM 调用可能抛任意异常，retry 逻辑需吞掉所有
             logger.exception("LLM API call failed (attempt %s)", attempt + 1)
             if attempt >= 2:
                 raise ValueError(f"LLM API call failed after 3 attempts: {exc}") from exc
@@ -305,7 +308,7 @@ async def generate_tool_call(
         try:
             tool_call = PlaywrightMCPToolCall.model_validate(parsed)
             return tool_call
-        except Exception as exc:
+        except PydanticValidationError as exc:
             last_error = f"Validation error: {exc}"
             logger.warning("LLM output failed Pydantic validation (attempt %s)", attempt + 1)
             continue
@@ -433,6 +436,6 @@ async def verify_expected_result(
 
         return VerificationResult.model_validate(parsed)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 验证 LLM 调用：吞掉所有异常并返回 passed=False
         logger.exception("Verification LLM call failed")
         return VerificationResult(passed=False, reason=f"Verification failed: {exc}")

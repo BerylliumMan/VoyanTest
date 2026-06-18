@@ -9,6 +9,8 @@ import json as _json
 import logging
 import os
 
+import openai
+
 logger = logging.getLogger(__name__)
 
 # 模块级 LLM 客户端缓存：整个进程生命周期内只创建一次
@@ -24,7 +26,8 @@ async def _get_cached_client():
         from core.llm_wrapper import create_openai_client
 
         _cached_client = create_openai_client()
-    except Exception as exc:
+    except (ValueError, RuntimeError) as exc:
+        # ValueError: AI 配置缺失；RuntimeError: 配置加载异常
         logger.warning("Failed to create LLM client: %s", exc, exc_info=True)
         return None
     return _cached_client
@@ -79,7 +82,7 @@ async def heal_selector(
     try:
         snapshot_result = await mcp_manager.call_tool("browser_snapshot", {})
         dom_snapshot = snapshot_result.get("text", "") if snapshot_result.get("success") else ""
-    except Exception as exc:
+    except (RuntimeError, ConnectionError, OSError) as exc:
         logger.warning("Failed to get DOM snapshot for healing: %s", exc, exc_info=True)
         return []
 
@@ -118,7 +121,7 @@ async def heal_selector(
             if content.startswith("json"):
                 content = content[4:]
         candidates = _json.loads(content)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 自愈 LLM 调用：吞掉所有异常返回空候选
         logger.warning("LLM healing failed: %s", exc, exc_info=True)
         return []
 
@@ -209,12 +212,12 @@ async def try_heal_and_retry(
                 )
 
                 if eval_result.get("success") and "found" in eval_result.get("text", ""):
-                    logger.info(f"Self-healing: ✅ 选择器有效: {selector}")
+                    logger.info("Self-healing: ✅ 选择器有效: %s", selector)
                     return selector
                 else:
-                    logger.info(f"Self-healing: ❌ 选择器无效: {selector}")
-            except Exception as exc:
-                logger.info(f"Self-healing: ❌ 选择器测试异常: {selector} — {exc}")
+                    logger.info("Self-healing: ❌ 选择器无效: %s", selector)
+            except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+                logger.info("Self-healing: ❌ 选择器测试异常: %s — %s", selector, exc, exc_info=True)
 
         return None
 

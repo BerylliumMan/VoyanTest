@@ -4,6 +4,8 @@ import ipaddress
 import logging
 from urllib.parse import urlparse
 
+from sqlalchemy.exc import SQLAlchemyError
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -43,7 +45,7 @@ def _validate_nav_url(url: str | None) -> str | None:
         except ValueError:
             pass  # 域名，不做 IP 检查
         return url
-    except Exception as exc:
+    except (ValueError, TypeError, AttributeError) as exc:
         logger.warning("URL 校验异常: %s -> %s", url, exc, exc_info=True)
         return None
 
@@ -77,7 +79,8 @@ def _resolve_env_cookies(db, base_url_override: str | None) -> list[dict]:
             logger.warning("Environment %s cookies 字段不是列表: %s", env.id, type(cookies).__name__)
             return []
         return cookies
-    except Exception as exc:
+    except (SQLAlchemyError, ValueError, TypeError) as exc:
+        # SQLAlchemyError: DB 查询失败；ValueError/TypeError: cookies 字段反序列化错误
         logger.warning("读取环境 cookies 失败 (base_url=%s): %s", base_url_override, exc, exc_info=True)
         return []
 
@@ -101,7 +104,7 @@ async def _inject_auth_cookies(
     if nav_url:
         try:
             default_domain = urlparse(nav_url).hostname
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             default_domain = None
 
     success_count = 0
@@ -134,14 +137,15 @@ async def _inject_auth_cookies(
             result = await mcp_manager.call_tool("browser_set_cookie", args)
             if result.get("success"):
                 success_count += 1
-                logger.info(f"Cookie 注入成功: {name} @ {args.get('domain', '<no-domain>')}")
+                logger.info("Cookie 注入成功: %s @ %s", name, args.get('domain', '<no-domain>'))
             else:
                 logger.warning(
                     f"Cookie 注入失败: {name} -> {result.get('text') or result.get('error', 'unknown')}"
                 )
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError, ValueError, TypeError) as exc:
+            # 单 cookie 注入失败不中断整批；只记录 warning
             logger.warning("Cookie 注入异常: %s -> %s", name, exc, exc_info=True)
 
     if success_count:
-        logger.info(f"已注入 {success_count}/{len(cookies)} 个 cookies")
+        logger.info("已注入 %s/%s 个 cookies", success_count, len(cookies))
     return success_count

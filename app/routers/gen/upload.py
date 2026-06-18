@@ -5,6 +5,7 @@ so the preview/import endpoints can read it back without re-running analysis.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -98,7 +99,8 @@ async def upload_and_analyze(
         status="analyzing",
     )
     db.add(db_record)
-    db.commit()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: db.commit())
 
     def _run_full_analysis() -> None:
         try:
@@ -144,7 +146,7 @@ async def upload_and_analyze(
                     functional_points=result["functional_points"],
                     test_cases=result["test_cases"],
                 )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - daemon thread outermost guard; must catch any error to persist failed status
             logger.exception("Analysis failed")
             session.status = "failed"
             session.error_message = str(e)

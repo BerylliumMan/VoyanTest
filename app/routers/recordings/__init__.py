@@ -12,10 +12,12 @@ models live in :mod:`.schemas`.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
 
+import openai
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user
@@ -96,7 +98,9 @@ async def start_recording(
         if navigate is not None:
             try:
                 await navigate("browser_navigate", {"url": req.url})
-            except Exception as exc:
+            except (RuntimeError, ConnectionError, OSError) as exc:
+                # Playwright MCP 浏览器调用失败（npx 子进程 / CDP 连接），
+                # 导航失败不影响录制会话本身的存续
                 logger.warning(
                     "录制会话 %s 导航到 %s 失败: %s", session_id, req.url, exc
                 )
@@ -150,7 +154,8 @@ async def stop_recording(
     if stop_fn is not None:
         try:
             await stop_fn()
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError) as exc:
+            # CDP 会话停止失败（子进程已死 / websocket 断），不影响 HTTP 状态
             logger.warning(
                 "停止 CDP 录制失败 (session_id=%s): %s", session_id, exc
             )
@@ -204,7 +209,8 @@ async def get_recorded_events(
 
     try:
         raw_events = get_events()
-    except Exception as exc:
+    except (RuntimeError, ConnectionError, AttributeError) as exc:
+        # AttributeError: get_events 内部状态被破坏；其他为 CDP 连接错误
         logger.warning(
             "读取录制事件失败 (session_id=%s): %s", session_id, exc
         )
@@ -248,7 +254,8 @@ async def convert_to_test_steps(
     else:
         try:
             events = collect_events()
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, AttributeError) as exc:
+            # AttributeError: collect_events 内部状态被破坏；其他为 CDP 连接错误
             logger.warning(
                 "collect_events 失败 (session_id=%s): %s", session_id, exc
             )
@@ -268,12 +275,10 @@ async def convert_to_test_steps(
             events=event_dicts,
             page_title=state.page_title or "",
         )
-    except Exception as exc:
-        logger.error(
-            "CDP 事件 → 测试步骤 转换失败 (session_id=%s): %s",
-            session_id,
-            exc,
-            exc_info=True,
+    except (openai.OpenAIError, asyncio.TimeoutError, OSError, ValueError) as exc:
+        # OpenAI SDK 错误 / 异步超时 / 网络层错误 / 解析错误
+        logger.exception(
+            "CDP 事件 → 测试步骤 转换失败 (session_id=%s)", session_id,
         )
         raise HTTPException(
             status_code=500, detail=f"LLM 转换失败: {exc}"

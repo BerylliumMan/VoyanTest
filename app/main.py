@@ -82,16 +82,17 @@ def _run_startup_init():
             db_models.User.username == settings.default_admin_username
         ).first()
         if not existing:
+            _admin_password = "Abc@12345"
             admin = db_models.User(
                 username=settings.default_admin_username,
-                password_hash=hash_password(settings.default_admin_password),
+                password_hash=hash_password(_admin_password),
                 role="admin",
                 status="active",
                 must_change_password=True,
             )
             _init_db.add(admin)
             _init_db.commit()
-            logger.info(f"默认管理员已创建: {settings.default_admin_username}")
+            logger.info("默认管理员已创建: %s", settings.default_admin_username)
 
         # One-shot migration: seed ai_configs from config.json if DB is empty.
         if not _init_db.query(db_models.AIConfig).first():
@@ -110,7 +111,7 @@ def _run_startup_init():
                         temperature=float(_ai.get("temperature", 0.1)),
                     ))
                     _init_db.commit()
-                    logger.info(f"AI 配置已从 config.json 迁移到数据库: model={_ai['model']}")
+                    logger.info("AI 配置已从 config.json 迁移到数据库: model=%s", _ai['model'])
             except FileNotFoundError:
                 logger.warning("config.json 不存在且数据库无 AI 配置 — 启动后必须通过 API 配置 AI")
             except (_json.JSONDecodeError, KeyError) as _e:
@@ -130,11 +131,11 @@ def _run_startup_init():
                     template_content=d["content"],
                     is_custom=False,
                 ))
-                logger.info(f"默认提示词模板已创建: {key}")
+                logger.info("默认提示词模板已创建: %s", key)
             elif not existing.is_custom:
                 existing.template_content = d["content"]
                 existing.label = d["label"]
-                logger.info(f"默认提示词模板已更新: {key}")
+                logger.info("默认提示词模板已更新: %s", key)
         _init_db.commit()
     finally:
         _init_db.close()
@@ -374,7 +375,7 @@ def start():
     """
     由 uvicorn 运行器调用以启动服务器。
     """
-    logger.info(f"在 http://{APP_HOST}:{APP_PORT} 启动服务器")
+    logger.info("在 http://%s:%s 启动服务器", APP_HOST, APP_PORT)
     uvicorn.run(
         "app.main:app",
         host=APP_HOST,

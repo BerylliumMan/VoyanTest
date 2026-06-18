@@ -6,8 +6,12 @@ two-phase pipeline (``two_phase_analyze``) or the image-based one
 FP extraction and TC generation steps together with progress reporting.
 """
 
+import asyncio
+import json as _json
 import logging
 import os
+
+import openai
 
 from app.gen.feature_extractor import (
     extract_functional_points,
@@ -74,8 +78,9 @@ def two_phase_analyze(
         if not fps:
             warnings.append("No functional points extracted from document")
         logger.info("Phase 1: extracted %d functional points", len(fps))
-    except Exception as e:
-        logger.error("Phase 1 (FP extraction) failed: %s", e)
+    except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError, ValueError, RuntimeError) as e:
+        # OpenAI SDK 错误 / 异步超时 / JSON 解析错误 / Pydantic 校验错误 / MCP 运行时错误
+        logger.exception("Phase 1 (FP extraction) failed")
         return {"functional_points": [], "test_cases": [], "warnings": [f"FP extraction failed: {e}"], "error": True}
 
     # Phase 2: Generate test cases per FP batch
@@ -113,8 +118,9 @@ def _analyze_image_two_phase(file, progress_callback, project_description) -> di
         if not fps:
             warnings.append("No functional points extracted from image")
         logger.info("Phase 1 (image): extracted %d functional points", len(fps))
-    except Exception as e:
-        logger.error("Phase 1 (image FP extraction) failed: %s", e)
+    except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError, ValueError, RuntimeError) as e:
+        # OpenAI SDK 错误 / 异步超时 / JSON 解析错误 / Pydantic 校验错误 / MCP 运行时错误
+        logger.exception("Phase 1 (image FP extraction) failed")
         return {"functional_points": [], "test_cases": [], "warnings": [f"Image FP extraction failed: {e}"], "error": True}
 
     # Phase 2: Generate test cases per FP batch
@@ -181,7 +187,8 @@ def _analyze_pdf_two_phase(file, progress_callback, project_description) -> dict
                         fp.id = len(all_fps) + 1
                         fp.session_id = ""
                     all_fps.extend(fps)
-            except Exception as e:
+            except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError, ValueError, RuntimeError) as e:
+                # 单页失败不影响整体 PDF 流程，仅作为 warning
                 logger.warning("PDF page %d FP extraction failed: %s", idx + 1, e)
                 warnings.append(f"第 {idx + 1} 页功能点提取失败: {e}")
 

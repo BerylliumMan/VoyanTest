@@ -49,7 +49,7 @@ class BrowserPool:
                 )
                 return mgr
 
-            logger.info(f"Creating new browser for project {project_id}")
+            logger.info("Creating new browser for project %s", project_id)
             mgr = await factory()
             cls._instances[project_id] = mgr
             return mgr
@@ -75,8 +75,8 @@ class BrowserPool:
             return
         try:
             await mgr.stop()
-            logger.info(f"Browser for project {project_id} stopped")
-        except Exception:
+            logger.info("Browser for project %s stopped", project_id)
+        except Exception:  # noqa: BLE001 - 浏览器关闭属清理阶段，需吞掉所有错误
             logger.warning(
                 f"Browser for project {project_id} failed to stop cleanly",
                 exc_info=True,

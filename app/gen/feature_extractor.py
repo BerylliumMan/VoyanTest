@@ -5,9 +5,12 @@ each batch of functional points into test cases. Both phases go through
 ``call_model`` from :mod:`app.gen.model_client`.
 """
 
+import asyncio
+import json as _json
 import logging
 import time
 
+import openai
 from markupsafe import escape
 
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
@@ -152,7 +155,8 @@ def generate_test_cases_for_fps(
                     logger.warning("Batch %d raw model output (first 500 chars): %s", idx + 1, content[:500])
                     if attempt < MAX_RETRIES - 1:
                         time.sleep(RETRY_DELAY * (attempt + 1))
-            except Exception as e:
+            except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError, ValueError, RuntimeError) as e:
+                # 单次重试：覆盖 OpenAI 错误 / 异步超时 / JSON 解析 / Pydantic 校验 / MCP 运行时错误
                 logger.warning("Batch %d attempt %d failed: %s", idx + 1, attempt + 1, e)
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY * (attempt + 1))

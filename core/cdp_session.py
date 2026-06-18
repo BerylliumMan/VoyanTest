@@ -236,7 +236,7 @@ class CDPRecordingSession:
                 f"CDPRecordingSession[{self._session_id}]: recording started."
             )
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 录制启动涉及 Playwright/CDP/asyncio，任一失败都需清理
             logger.error(
                 f"CDPRecordingSession[{self._session_id}]: start_recording failed: {exc}",
                 exc_info=True,
@@ -257,7 +257,7 @@ class CDPRecordingSession:
 
         try:
             await self._disable_domains()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 停止录制时关闭域是 best-effort
             logger.warning(
                 f"CDPRecordingSession[{self._session_id}]: disable domains failed: {exc}"
             )
@@ -366,7 +366,7 @@ class CDPRecordingSession:
                 self._cdp_url = cdp_url
                 await self._open_websocket(cdp_url)
                 return True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - PlaywrightMCP tool call 可能抛任何 MCP 错误
                 logger.error(
                     f"Failed to obtain CDP URL from PlaywrightMCPManager: {exc}",
                     exc_info=True,
@@ -379,7 +379,7 @@ class CDPRecordingSession:
             try:
                 await self._open_websocket(target)
                 return True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - WebSocket connect 失败可能为 ConnectionError / OSError / InvalidHandshake
                 logger.error(
                     f"Failed to connect to CDP WebSocket {target}: {exc}",
                     exc_info=True,
@@ -401,10 +401,10 @@ class CDPRecordingSession:
                 try:
                     self._last_page_url = target.url or ""
                     self._last_page_title = await target.title() or ""
-                except Exception:
+                except Exception:  # noqa: BLE001 - 首次 URL/title 抓取失败时静默回退
                     pass
                 return True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Playwright Page CDP 会话创建可能抛任何错误
                 logger.error(
                     f"Failed to create CDP session from Playwright Page: {exc}",
                     exc_info=True,
@@ -444,7 +444,7 @@ class CDPRecordingSession:
                 await self._dispatch_cdp_message(payload)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - WS reader 循环结束后的清理异常
             logger.warning(
                 f"CDPRecordingSession[{self._session_id}]: ws reader loop ended: {exc}"
             )
@@ -485,7 +485,7 @@ class CDPRecordingSession:
         for domain in ("Page", "Runtime", "Network"):
             try:
                 await self._send_cdp(f"{domain}.enable", {})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 单个域启用失败不阻塞其他域
                 logger.warning(
                     f"CDPRecordingSession[{self._session_id}]: failed to enable "
                     f"{domain}: {exc}"
@@ -496,7 +496,7 @@ class CDPRecordingSession:
         for domain in ("Page", "Runtime", "Network"):
             try:
                 await self._send_cdp(f"{domain}.disable", {})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 关闭域的 best-effort
                 logger.debug(
                     f"CDPRecordingSession[{self._session_id}]: disable {domain} "
                     f"failed (ignored): {exc}"
@@ -509,7 +509,7 @@ class CDPRecordingSession:
                 "Page.addScriptToEvaluateOnNewDocument",
                 {"source": _INJECT_RECORDER_SCRIPT},
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 注入 recorder 脚本失败时 recording 仍可继续
             logger.warning(
                 f"CDPRecordingSession[{self._session_id}]: failed to install "
                 f"page recorder script: {exc}"
@@ -541,7 +541,7 @@ class CDPRecordingSession:
             try:
                 self._reader_task.cancel()
                 await asyncio.gather(self._reader_task, return_exceptions=True)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 资源清理路径：task 取消本身可能抛 CancelledError
                 logger.debug(
                     f"CDPRecordingSession[{self._session_id}]: reader task "
                     f"cancel error (ignored): {exc}"
@@ -551,7 +551,7 @@ class CDPRecordingSession:
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - WebSocket close 失败属于清理阶段
                 logger.debug(
                     f"CDPRecordingSession[{self._session_id}]: ws close "
                     f"error (ignored): {exc}"
@@ -565,7 +565,7 @@ class CDPRecordingSession:
                     result = detach()
                     if asyncio.iscoroutine(result):
                         await result
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Playwright detach 失败属于清理阶段
                 logger.debug(
                     f"CDPRecordingSession[{self._session_id}]: cdp detach "
                     f"error (ignored): {exc}"
@@ -585,7 +585,7 @@ class CDPRecordingSession:
             frame = params.get("frame") or {}
             url = frame.get("url") or self._last_page_url
             self._last_page_url = url or ""
-        except Exception:
+        except (AttributeError, TypeError):  # 防御：参数结构可能与预期不一致
             url = self._last_page_url
         self.record_event({
             "event_type": "navigation",
@@ -623,7 +623,7 @@ class CDPRecordingSession:
                 payload.setdefault("page_title", self._last_page_title)
                 payload["event_type"] = rec_type
                 self.record_event(payload)
-        except Exception as exc:
+        except (_json.JSONDecodeError, TypeError, AttributeError) as exc:
             logger.debug(
                 f"CDPRecordingSession[{self._session_id}]: failed to parse "
                 f"recorder console payload: {exc}"

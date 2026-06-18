@@ -109,13 +109,13 @@ class PlaywrightMCPManager:
         if self._session:
             try:
                 await self._session.__aexit__(None, None, None)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 会话关闭属清理阶段
                 logger.warning("Error closing MCP session: %s", exc, exc_info=True)
             self._session = None
         if self._context:
             try:
                 await self._context.__aexit__(None, None, None)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - stdio context 关闭属清理阶段
                 logger.warning("Error closing MCP stdio context: %s", exc, exc_info=True)
             self._context = None
         self._read = None
@@ -149,7 +149,8 @@ class PlaywrightMCPManager:
                 if hasattr(c, 'text'):
                     text += c.text
             return {'success': not result.isError, 'text': text}
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError, AttributeError, TypeError) as exc:
+            # MCP 客户端/服务端错误 + 结果结构不符合预期时，统一返回失败 dict
             return {'success': False, 'text': str(exc), 'error': str(exc)}
 
     async def execute_tool_call(self, tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -178,7 +179,8 @@ class PlaywrightMCPManager:
                     'error': result.get('text') or result.get('error', 'MCP call failed'),
                 }
             return {'success': True, 'error': None}
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError, ValueError, TypeError, KeyError) as exc:
+            # 参数构建 / MCP 调用 / 字段缺失等失败统一返回结构化错误
             return {'success': False, 'error': str(exc)}
 
     @staticmethod
@@ -216,7 +218,7 @@ class PlaywrightMCPManager:
             if len(text) > 8000:
                 text = text[:8000] + "\n\n[... TRUNCATED]"
             return text or '(empty page)'
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError) as exc:
             logger.warning("DOM snapshot failed: %s", exc, exc_info=True)
             return '(page snapshot unavailable)'
 
@@ -236,7 +238,7 @@ class PlaywrightMCPManager:
             else:
                 logger.warning("Failed to clear cookies: %s", result.get('text', result.get('error')))
             return result['success']
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError) as exc:
             logger.warning("Failed to clear cookies: %s", exc, exc_info=True)
             return False
 
@@ -255,6 +257,6 @@ class PlaywrightMCPManager:
             if result['success'] and os.path.exists(path):
                 return path
             logger.warning("Screenshot failed: success=%s, path_exists=%s, error=%s", result.get('success'), os.path.exists(path), result.get('error', result.get('text', 'unknown')))
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError) as exc:
             logger.warning("Screenshot exception for %s: %s", path, exc, exc_info=True)
         return None

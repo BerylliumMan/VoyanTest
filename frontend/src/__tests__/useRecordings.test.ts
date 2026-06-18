@@ -6,15 +6,23 @@ import { useRecordings } from '@/pages/recordings/hooks';
 
 /* --- Mocks ---------------------------------------------------------------- */
 
-/* 模拟 axios（与 StepList.test.tsx 一致的工厂写法） */
-vi.mock('axios', () => ({
-  default: {
-    get: vi.fn(),
-    post: vi.fn(),
-    put: vi.fn(),
-    delete: vi.fn(),
-  },
-}));
+/* 模拟 axios（与 StepList.test.tsx 一致的工厂写法）。
+ * useRecordings 经 apiRequest 走的是 axios(config) 而非 axios.get/post，
+ * 因此 mock 既要可调用，又要保留 get/post/put/delete 四个具名方法。 */
+vi.mock('axios', () => {
+  const axiosGet = vi.fn();
+  const axiosPost = vi.fn();
+  const axiosPut = vi.fn();
+  const axiosDelete = vi.fn();
+  const axiosDefault = vi.fn();
+  const callable: any = (config: any) => axiosDefault(config);
+  callable.get = axiosGet;
+  callable.post = axiosPost;
+  callable.put = axiosPut;
+  callable.delete = axiosDelete;
+  callable.__mocks = { axiosGet, axiosPost, axiosPut, axiosDelete, axiosDefault };
+  return { default: callable };
+});
 
 /* 模拟 useLocale，避免引入 GlobalContext 等运行时依赖 */
 vi.mock('@/utils/useLocale', () => ({
@@ -36,6 +44,18 @@ const mockedAxios = axios as unknown as {
   get: ReturnType<typeof vi.fn>;
   post: ReturnType<typeof vi.fn>;
 };
+const mocks = (axios as any).__mocks as {
+  axiosGet: ReturnType<typeof vi.fn>;
+  axiosPost: ReturnType<typeof vi.fn>;
+  axiosPut: ReturnType<typeof vi.fn>;
+  axiosDelete: ReturnType<typeof vi.fn>;
+  axiosDefault: ReturnType<typeof vi.fn>;
+};
+
+/* 让 axios.get / axios.post 复用 axiosDefault 的 mock 队列，
+ * 这样测试中 mockResolvedValueOnce 设置的响应可以同时拦截具名调用和 axios(config) 调用。 */
+mockedAxios.get = mocks.axiosDefault as any;
+mockedAxios.post = mocks.axiosDefault as any;
 
 /* --- Test wrapper --------------------------------------------------------- */
 
@@ -125,10 +145,13 @@ describe('useRecordings', () => {
     });
 
     expect(ok).toBe(true);
-    expect(mockedAxios.post).toHaveBeenCalledWith('/api/recordings/start', {
-      url: 'https://example.com/login',
-      page_title: '',
-    });
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        url: '/api/recordings/start',
+        data: { url: 'https://example.com/login', page_title: '' },
+      })
+    );
     expect(get().sessionId).toBe('sess-abc-123');
     expect(get().status).toBe('recording');
     expect(get().loading).toBe(false);
@@ -181,7 +204,12 @@ describe('useRecordings', () => {
     });
 
     expect(ok).toBe(true);
-    expect(mockedAxios.post).toHaveBeenCalledWith('/api/recordings/sess-1/stop');
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        url: '/api/recordings/sess-1/stop',
+      })
+    );
     expect(get().status).toBe('stopped');
     expect(get().loading).toBe(false);
   });
@@ -228,8 +256,11 @@ describe('useRecordings', () => {
 
     expect(ok).toBe(true);
     expect(mockedAxios.post).toHaveBeenCalledWith(
-      '/api/recordings/sess-3/convert',
-      { session_id: 'sess-3' }
+      expect.objectContaining({
+        method: 'POST',
+        url: '/api/recordings/sess-3/convert',
+        data: { session_id: 'sess-3' },
+      })
     );
     expect(get().steps).toEqual(fakeSteps);
     expect(get().converting).toBe(false);
@@ -288,7 +319,12 @@ describe('useRecordings', () => {
     });
 
     expect(ok).toBe(true);
-    expect(mockedAxios.get).toHaveBeenCalledWith('/api/recordings/sess-5/events');
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        url: '/api/recordings/sess-5/events',
+      })
+    );
     expect(get().events).toHaveLength(1);
     expect(get().events[0].event_type).toBe('click');
   });

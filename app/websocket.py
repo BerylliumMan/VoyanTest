@@ -58,7 +58,7 @@ class LogWebSocketManager:
         for connection in self.active_connections[run_id]:
             try:
                 await connection.send_text(message_json)
-            except Exception:
+            except (RuntimeError, ConnectionError):
                 logger.warning("WebSocket 发送失败，标记连接为已断开", exc_info=True)
                 disconnected.add(connection)
         
@@ -149,8 +149,8 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
             
     except WebSocketDisconnect:
         log_manager.disconnect(websocket, run_id)
-    except Exception as e:
-        logger.exception(f"WebSocket 错误: {e}")
+    except (RuntimeError, ConnectionError) as e:
+        logger.exception("WebSocket 错误: %s", e)
         log_manager.disconnect(websocket, run_id)
 
 

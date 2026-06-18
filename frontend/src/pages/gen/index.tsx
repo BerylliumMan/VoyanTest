@@ -3,6 +3,7 @@ import {
   Card, Upload, Button, Message, Typography, Space, Select,
   Table, Tag, Progress, Divider, Collapse, Input, Spin, List,
 } from '@arco-design/web-react';
+import type { UploadItem } from '@arco-design/web-react/es/Upload/interface';
 import {
   IconUpload, IconCheck, IconClose, IconLoading,
   IconThunderbolt, IconSave, IconHistory, IconFile, IconCode,
@@ -81,7 +82,7 @@ const GenPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
   const [description, setDescription] = useState('');
-  const [fileList, setFileList] = useState<any[]>([]);
+  const [fileList, setFileList] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus | null>(null);
@@ -136,7 +137,9 @@ const GenPage: React.FC = () => {
       formData.append('project_description', description);
     }
     fileList.forEach((file) => {
-      formData.append('files', file.originFile);
+      if (file.originFile) {
+        formData.append('files', file.originFile);
+      }
     });
 
     try {
@@ -147,7 +150,8 @@ const GenPage: React.FC = () => {
       setSessionId(res.data.session_id);
       Message.success('上传成功，开始分析');
       startPolling(res.data.session_id);
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { code?: string; response?: { data?: { detail?: string } } };
       if (err.code === 'ECONNABORTED') {
         Message.error('上传超时，请检查网络连接或减小文件大小');
       } else {
@@ -190,7 +194,8 @@ const GenPage: React.FC = () => {
       const res = await axios.get(`/api/gen/preview/${sid}`);
       setFunctionalPoints(res.data.functional_points || []);
       setTestCases(res.data.test_cases || []);
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
       Message.error(err?.response?.data?.detail || '加载预览失败');
     }
   };
@@ -216,7 +221,8 @@ const GenPage: React.FC = () => {
       Message.success(`成功导入 ${idsToImport.length} 个用例`);
       setSelectedRowKeys([]);
       // 导入成功后保留列表，不清空数据
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
       Message.error(err?.response?.data?.detail || '导入失败');
     } finally {
       setImporting(false);

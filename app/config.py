@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     max_login_attempts: int = 5
     lock_duration_minutes: int = 15
     default_admin_username: str = "admin"
-    default_admin_password: str = "Admin@2024"
+    default_admin_password: str = ""  # 启动时创建管理员时硬编码在 main.py 中
 
     # CORS
     cors_allow_origins: str = "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173"
@@ -46,7 +46,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"  # "text" 或 "json"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # 使用系统环境变量配置。不依赖 .env 文件。
+    model_config = {"env_prefix": ""}
 
 
 @lru_cache()

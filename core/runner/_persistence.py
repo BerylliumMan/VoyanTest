@@ -19,6 +19,8 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app import crud
 from app.database import SessionLocal
 
@@ -85,12 +87,12 @@ def save_run_results(
             )
             db.add(db_log)
         db.commit()
-        logger.info(f"Test run results saved, run ID = {db_run.id}, batch_id = {batch_id}")
+        logger.info("Test run results saved, run ID = %s, batch_id = %s", db_run.id, batch_id)
 
         if batch_id:
             crud.update_batch_counters(db, batch_id, status)
         return db_run.id
-    except Exception:
+    except SQLAlchemyError:
         db.rollback()
         logger.exception("Failed to save run results")
     finally:
@@ -161,14 +163,14 @@ def mark_run_failed(
             try:
                 crud.update_batch_counters(db, batch_id, "failed")
                 db.commit()
-            except Exception:
+            except SQLAlchemyError:
                 logger.exception("Failed to update batch counters")
                 db.rollback()
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("Failed to mark run %s as failed", run_id)
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
             pass
 
 
@@ -209,14 +211,14 @@ def update_run_on_completion(
         if batch_id:
             try:
                 crud.update_batch_counters(db, batch_id, status)
-            except Exception:
+            except SQLAlchemyError:
                 logger.exception("Failed to update batch counters")
                 db.rollback()
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("Failed to update TestRun %s", run_id)
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
             pass
 
 
@@ -235,11 +237,11 @@ def append_run_logs(db, run_id: int, log_entries: list[dict]) -> None:
             )
             db.add(db_log)
         db.commit()
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("Failed to append run logs for run %s", run_id)
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
             pass
 
 
@@ -276,10 +278,10 @@ def precreate_pending_runs(
             db.flush()
             precreated[cid] = pending_run.id
         db.commit()
-    except Exception:
+    except SQLAlchemyError:
         logger.exception("Failed to pre-create TestRun records")
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
             pass
     return precreated

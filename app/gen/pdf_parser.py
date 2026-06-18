@@ -59,5 +59,5 @@ def validate_pdf(file) -> tuple[bool, str | None]:
         return True, None
     except fitz.FileDataError:
         return False, "PDF文件损坏"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 兜底所有 PyMuPDF / I/O 错误，对外统一返回解析失败
         return False, f"PDF文件解析失败: {e}"

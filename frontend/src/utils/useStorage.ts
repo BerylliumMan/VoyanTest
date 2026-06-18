@@ -40,7 +40,7 @@ function useStorage(
     if (storageValue) {
       setStoredValue(storageValue);
     }
-    // 仅在挂载时读取 localStorage，key 变化由调用方重新挂载组件处理
+    // 仅在挂载时读取 localStorage 初始值，key 变化由调用方通过组件 key/挂载处理
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

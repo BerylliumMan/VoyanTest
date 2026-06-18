@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from .. import models
 from app.auth import require_admin, get_current_user, get_user_project_filter
 from ..database import get_db
@@ -78,8 +79,9 @@ def create_schedule(
         return db_schedule
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("创建定时任务失败: %s", e)
+    except (ValueError, SQLAlchemyError):
+        # ValueError: croniter.CroniterBadCronError；SQLAlchemyError: 数据库写入失败
+        logger.exception("创建定时任务失败")
         raise HTTPException(status_code=400, detail="Could not create schedule")
 
 
@@ -112,8 +114,9 @@ def update_schedule(
         return db_schedule
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("更新定时任务失败 (id=%d): %s", schedule_id, e)
+    except (ValueError, SQLAlchemyError):
+        # ValueError: croniter.CroniterBadCronError；SQLAlchemyError: 数据库写入失败
+        logger.exception("更新定时任务失败 (id=%d)", schedule_id)
         raise HTTPException(status_code=400, detail="Could not update schedule")
 
 
@@ -132,8 +135,8 @@ def delete_schedule(
         db.delete(db_schedule)
         db.commit()
         return {"detail": "Schedule deleted"}
-    except Exception as e:
-        logger.error("删除定时任务失败 (id=%d): %s", schedule_id, e)
+    except SQLAlchemyError:
+        logger.exception("删除定时任务失败 (id=%d)", schedule_id)
         raise HTTPException(status_code=400, detail="Could not delete schedule")
 
 
@@ -157,6 +160,7 @@ def toggle_schedule(
         db.commit()
         db.refresh(db_schedule)
         return db_schedule
-    except Exception as e:
-        logger.error("切换定时任务状态失败 (id=%d): %s", schedule_id, e)
+    except (ValueError, SQLAlchemyError):
+        # ValueError: croniter.CroniterBadCronError；SQLAlchemyError: 数据库写入失败
+        logger.exception("切换定时任务状态失败 (id=%d)", schedule_id)
         raise HTTPException(status_code=400, detail="Could not toggle schedule")

@@ -42,14 +42,15 @@ const GenHistoryPage: React.FC = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const params: any = { page, page_size: pageSize };
+      const params: Record<string, string | number> = { page, page_size: pageSize };
       if (selectedProject) {
         params.project_id = selectedProject;
       }
       const res = await axios.get('/api/gen/history', { params });
       setData(res.data.items || []);
       setTotal(res.data.total || 0);
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
       Message.error(err?.response?.data?.detail || '加载失败');
     } finally {
       setLoading(false);
@@ -76,7 +77,8 @@ const GenHistoryPage: React.FC = () => {
           await axios.delete(`/api/gen/history/${id}`);
           Message.success('删除成功');
           fetchData();
-        } catch (err: any) {
+        } catch (e: unknown) {
+          const err = e as { response?: { data?: { detail?: string } } };
           Message.error(err?.response?.data?.detail || '删除失败');
         }
       },
@@ -97,7 +99,8 @@ const GenHistoryPage: React.FC = () => {
       });
       Message.success(`成功导入 ${res.data.imported_count} 个用例`);
       fetchData();
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string }; status?: number } };
       const detail = err?.response?.data?.detail || '导入失败';
       if (err?.response?.status === 404) {
         Message.error('会话已过期，无法导入。请重新进行分析。');
@@ -179,7 +182,7 @@ const GenHistoryPage: React.FC = () => {
       title: '操作',
       dataIndex: 'actions',
       width: 200,
-      render: (_: any, record: GenHistoryItem) => (
+      render: (_: unknown, record: GenHistoryItem) => (
         <Space>
           <Button
             type="text"

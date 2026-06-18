@@ -67,7 +67,7 @@ async def _assert_url_contains(mcp_manager: Any, value: str) -> dict[str, Any]:
             'expected': value,
             'actual': current_url,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
         logger.warning("_assert_url_contains 异常: %s", exc)
         return {
             'passed': False,
@@ -102,7 +102,7 @@ async def _assert_text_exists(mcp_manager: Any, value: str) -> dict[str, Any]:
             'expected': value,
             'actual': actual,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
         logger.warning("_assert_text_exists 异常: %s", exc)
         return {
             'passed': False,
@@ -151,11 +151,11 @@ async def _assert_element_visible(mcp_manager: Any, value: str) -> dict[str, Any
             'expected': f"element '{selector}' visible",
             'actual': f"element '{selector}' {state}",
         }
-    except Exception as exc:
-        logger.warning("_assert_element_visible 异常: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
+        logger.warning("_assert_url_contains 异常: %s", exc)
         return {
             'passed': False,
-            'type': 'element_visible',
+            'type': 'url_contains',
             'expected': value,
             'actual': None,
             'error': str(exc),
@@ -180,7 +180,7 @@ async def _assert_input_value(mcp_manager: Any, value: str) -> dict[str, Any]:
                 'error': f"无效的 input_value 格式: '{value}'，期望 'selector=expected'",
             }
         selector, expected_val = parts[0].strip(), parts[1].strip()
-    except Exception as exc:
+    except (ValueError, TypeError) as exc:
         return {
             'passed': False,
             'type': 'input_value',
@@ -226,7 +226,7 @@ async def _assert_input_value(mcp_manager: Any, value: str) -> dict[str, Any]:
             'expected': expected_val,
             'actual': actual_val,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
         logger.warning("_assert_input_value 异常: %s", exc)
         return {
             'passed': False,
@@ -263,7 +263,7 @@ async def _assert_element_count(mcp_manager: Any, value: str) -> dict[str, Any]:
             'actual': None,
             'error': f"无效的计数值: '{parts[1].strip()}'",
         }
-    except Exception as exc:
+    except (ValueError, TypeError) as exc:
         return {
             'passed': False,
             'type': 'element_count',
@@ -296,12 +296,12 @@ async def _assert_element_count(mcp_manager: Any, value: str) -> dict[str, Any]:
             'expected': str(expected_count),
             'actual': str(actual_count),
         }
-    except Exception as exc:
-        logger.warning("_assert_element_count 异常: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
+        logger.warning("_assert_element_visible 异常: %s", exc)
         return {
             'passed': False,
-            'type': 'element_count',
-            'expected': str(expected_count),
+            'type': 'element_visible',
+            'expected': value,
             'actual': None,
             'error': str(exc),
         }
@@ -355,7 +355,7 @@ async def execute_assertions(
         try:
             result = await handler(mcp_manager, value)
             results.append(result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 调度层兜底：handler 抛任何异常都记录为单条失败
             logger.exception("断言 #%d (%s) 执行异常", idx, assert_type)
             results.append({
                 'passed': False,

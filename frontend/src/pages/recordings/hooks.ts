@@ -60,10 +60,8 @@ export function useRecordings() {
             { showSuccess: false, showError: false }
           );
           setEvents(Array.isArray(data) ? data : []);
-        } catch (e) {
+        } catch {
           // 轮询中静默失败
-          // eslint-disable-next-line no-console
-          console.warn('Failed to fetch recording events:', (e as Error)?.message || '');
         }
       };
       // 立刻拉一次，再开启定时器
@@ -100,9 +98,7 @@ export function useRecordings() {
         setEvents([]);
         setSteps([]);
         return true;
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn('startRecording failed:', (e as Error)?.message || '');
+      } catch {
         return false;
       } finally {
         setLoading(false);
@@ -131,9 +127,7 @@ export function useRecordings() {
         // 忽略：停止接口已成功
       }
       return true;
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('stopRecording failed:', (e as Error)?.message || '');
+    } catch {
       return false;
     } finally {
       setLoading(false);
@@ -149,9 +143,7 @@ export function useRecordings() {
       );
       setEvents(Array.isArray(data) ? data : []);
       return true;
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('refreshEvents failed:', (e as Error)?.message || '');
+    } catch {
       return false;
     }
   }, [sessionId]);
@@ -171,9 +163,7 @@ export function useRecordings() {
       const newSteps: TestStep[] = Array.isArray(data?.steps) ? data.steps : [];
       setSteps(newSteps);
       return true;
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('convertToSteps failed:', (e as Error)?.message || '');
+    } catch {
       return false;
     } finally {
       setConverting(false);

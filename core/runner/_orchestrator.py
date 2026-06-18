@@ -10,6 +10,7 @@ DB 操作的 SQL 细节已经下沉到 core.runner._persistence（mark_run_faile
 / precreate_pending_runs / update_run_on_completion），本模块只负责
 协调浏览器/用例循环 + 批量跟踪。
 """
+import asyncio
 import logging
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _record_batch_case_failure(
+async def _record_batch_case_failure(
     db,
     precreated_run_ids: dict[int, int],
     case_id: int,
@@ -49,7 +50,8 @@ def _record_batch_case_failure(
     """
     _run_id = precreated_run_ids.get(case_id)
     if _run_id:
-        mark_run_failed(db, _run_id, message, batch_id=batch_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: mark_run_failed(db, _run_id, message, batch_id=batch_id))
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +72,8 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
     if environment_id:
         _db = SessionLocal()
         try:
-            env = crud.get_environment(_db, environment_id)
+            loop = asyncio.get_running_loop()
+            env = await loop.run_in_executor(None, lambda: crud.get_environment(_db, environment_id))
             if env:
                 browser_type = env.browser
                 headless = env.headless
@@ -84,7 +87,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
     start_time = tz_now()
     try:
         await mcp_manager.start()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 见下方注释
         # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
         # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
         # Failures can surface as OSError (subprocess), ConnectionError, or
@@ -111,7 +114,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
 
     try:
         await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 见下方注释
         # Broad catch is necessary: run_test_case_in_browser touches DB, MCP
         # stdio, LLM HTTP, JSON parsing, and assertions. Any unhandled error
         # must be logged so the batch can still proceed to cleanup.
@@ -171,7 +174,8 @@ async def run_batch_test_cases(
     if batch_id is None:
         _db = SessionLocal()
         try:
-            batch = crud.create_run_batch(_db, project_id, total_cases=total_cases)
+            loop = asyncio.get_running_loop()
+            batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(_db, project_id, total_cases=total_cases))
             batch_id = batch.id
         finally:
             _db.close()
@@ -183,18 +187,19 @@ async def run_batch_test_cases(
         # Get project/environment browser settings
         _db = SessionLocal()
         try:
+            loop = asyncio.get_running_loop()
             if environment_id:
-                env = crud.get_environment(_db, environment_id)
+                env = await loop.run_in_executor(None, lambda: crud.get_environment(_db, environment_id))
                 if env:
                     browser_type = env.browser
                     headless = env.headless
                     base_url_override = env.base_url
                 else:
-                    project_data = crud.get_project(_db, project_id)
+                    project_data = await loop.run_in_executor(None, lambda: crud.get_project(_db, project_id))
                     browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
                     headless = project_data.headless if project_data and project_data.headless is not None else True
             else:
-                project_data = crud.get_project(_db, project_id)
+                project_data = await loop.run_in_executor(None, lambda: crud.get_project(_db, project_id))
                 browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
                 headless = project_data.headless if project_data and project_data.headless is not None else True
         except SQLAlchemyError:
@@ -207,8 +212,11 @@ async def run_batch_test_cases(
         # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
         # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
         batch_db = SessionLocal()
-        precreated_run_ids = precreate_pending_runs(
-            batch_db, case_ids, batch_id, init_case_ids=init_case_ids
+        loop = asyncio.get_running_loop()
+        precreated_run_ids = await loop.run_in_executor(
+            None, lambda: precreate_pending_runs(
+                batch_db, case_ids, batch_id, init_case_ids=init_case_ids
+            )
         )
 
         # 创建或复用浏览器
@@ -224,7 +232,7 @@ async def run_batch_test_cases(
             else:
                 mcp_manager = await _factory()
                 await browser_pool.register(project_id, mcp_manager)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 见下方注释
             # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
             # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
             # Failures can surface as OSError (subprocess), ConnectionError, or
@@ -233,7 +241,7 @@ async def run_batch_test_cases(
             # records get marked as failed consistently.
             logger.exception("Failed to start browser for batch %s", batch_id)
             for cid in ((init_case_ids or []) + case_ids):
-                _record_batch_case_failure(
+                await _record_batch_case_failure(
                     batch_db, precreated_run_ids, cid, batch_id,
                     message=f"Browser startup failed: {exc}",
                 )
@@ -254,14 +262,14 @@ async def run_batch_test_cases(
                     debug_mode=debug_mode,
                 )
                 results.append(result)
-                logger.info(f"Batch init-case {case_id} finished: {result['status']}")
-            except Exception as exc:
+                logger.info("Batch init-case %s finished: %s", case_id, result['status'])
+            except Exception as exc:  # noqa: BLE001 - 见下方注释
                 # Broad catch is necessary: run_test_case_in_browser touches DB,
                 # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
                 # unhandled error must be recorded on the pre-created TestRun
                 # row so the report page stays consistent.
                 logger.exception("Batch init-case %s failed", case_id)
-                _record_batch_case_failure(
+                await _record_batch_case_failure(
                     batch_db, precreated_run_ids, case_id, batch_id,
                     message=f"Batch init-case executor exception: {exc}",
                 )
@@ -281,7 +289,7 @@ async def run_batch_test_cases(
                 logger.info(
                     f"Batch: case {case_id} finished: {result['status']}"
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 见下方注释
                 # Broad catch is necessary: run_test_case_in_browser touches DB,
                 # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
                 # unhandled error must be recorded on the pre-created TestRun
@@ -290,7 +298,7 @@ async def run_batch_test_cases(
                     "Batch: case %s failed with exception",
                     case_id,
                 )
-                _record_batch_case_failure(
+                await _record_batch_case_failure(
                     batch_db, precreated_run_ids, case_id, batch_id,
                     message=f"Batch executor exception: {exc}",
                 )

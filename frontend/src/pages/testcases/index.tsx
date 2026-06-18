@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useHistory } from 'react-router-dom';
 import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox } from '@arco-design/web-react';
 import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug } from '@arco-design/web-react/icon';
@@ -50,13 +50,16 @@ const TestCases: React.FC = () => {
   const [batchRunIncludeInit, setBatchRunIncludeInit] = useState(true);
   const [batchRunInitCaseIds, setBatchRunInitCaseIds] = useState<number[]>([]);
   const [batchRunLoading, setBatchRunLoading] = useState(false);
+  const batchRunModeRef = useRef<'server' | 'client'>('server');
 
   const { data, total, loading, modules, moduleTree, environments, selectedEnvironment, setSelectedEnvironment, fetchData, fetchModules, fetchEnvironments } = useTestCaseData(selectedProject, selectedModuleId, page, pageSize, submittedQuery);
 
   useEffect(() => {
     apiGet<Project[]>('/api/projects/')
       .then((data) => setProjects(data || []))
-      .catch(() => {});
+      .catch((e) => {
+        console.error('Failed to load agents:', e);
+      });
   }, []);
   useEffect(() => {
     apiRequest<{ name: string; status: string }[]>(
@@ -69,7 +72,6 @@ const TestCases: React.FC = () => {
         if (online.length > 0) setSelectedAgent(online[0].name);
       })
       .catch((e) => {
-        // eslint-disable-next-line no-console
         console.error('Failed to load agents:', e);
       });
   }, []);
@@ -157,14 +159,14 @@ const TestCases: React.FC = () => {
     setBatchRunInitCaseIds(initCases.map((c) => c.id));
     setBatchRunLoading(false);
     setBatchRunVisible(true);
-    // store mode for use in dialog submit
-    (window as unknown as { __batchRunMode?: string }).__batchRunMode = mode;
+    // 通过 ref 暂存运行模式，避免污染 window 全局命名空间
+    batchRunModeRef.current = mode;
   };
 
   const handleBatchRunSubmit = async () => {
     setBatchRunLoading(true);
     try {
-      const mode = (window as unknown as { __batchRunMode?: string }).__batchRunMode;
+      const mode = batchRunModeRef.current;
       if (mode === 'client') await doBatchRunClient(batchRunInitCaseIds);
       else await doBatchRun(batchRunInitCaseIds);
     } finally {

@@ -5,8 +5,10 @@ import logging
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from typing import Optional
 from pydantic import BaseModel, Field
+import openai
 from openai import AsyncOpenAI
 
 from ..auth import require_admin
@@ -49,7 +51,8 @@ class AIConfigResponse(BaseModel):
 
 @router.get("/ai", response_model=AIConfigResponse)
 async def get_ai_config(db: Session = Depends(get_db), user = Depends(require_admin)) -> AIConfigResponse:
-    row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
+    loop = asyncio.get_running_loop()
+    row = await loop.run_in_executor(None, lambda: db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first())
     if not row:
         return AIConfigResponse(
             model="",
@@ -71,7 +74,8 @@ async def update_ai_config(
     db: Session = Depends(get_db),
     user = Depends(require_admin),
 ) -> AIConfigResponse:
-    row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
+    loop = asyncio.get_running_loop()
+    row = await loop.run_in_executor(None, lambda: db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first())
     if not row:
         row = db_models.AIConfig(id=1)
         db.add(row)
@@ -83,9 +87,10 @@ async def update_ai_config(
     row.temperature = body.temperature
 
     try:
-        db.commit()
-    except Exception as exc:
+        await loop.run_in_executor(None, lambda: db.commit())
+    except SQLAlchemyError as exc:
         db.rollback()
+        logger.exception("AI 配置保存失败")
         raise HTTPException(status_code=500, detail=f"AI 配置保存失败: {exc}")
 
     return AIConfigResponse(
@@ -114,7 +119,8 @@ async def test_ai_config(
     api_base = body.api_base
 
     if not model or not api_key or not api_base:
-        row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
+        loop = asyncio.get_running_loop()
+        row = await loop.run_in_executor(None, lambda: db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first())
         if row:
             if not model:
                 model = row.model
@@ -144,7 +150,9 @@ async def test_ai_config(
         if "OK" in reply.upper():
             return {"success": True, "message": f"连接成功，模型回复: {reply}"}
         return {"success": True, "message": f"连接成功（回复: {reply}）"}
-    except Exception as exc:
+    except (openai.OpenAIError, asyncio.TimeoutError, OSError) as exc:
+        # OpenAI SDK 抛出的所有错误（APIError / APIConnectionError / RateLimitError 等）
+        # 加上网络层 OSError 与 asyncio.TimeoutError
         logger.warning("AI config test failed: %s", exc, exc_info=True)
         raise HTTPException(400, detail=f"连接失败: {exc}")
 
@@ -167,7 +175,8 @@ class PromptTemplateUpdate(BaseModel):
 @router.get("/prompts")
 async def list_prompts(db: Session = Depends(get_db), user=Depends(require_admin)) -> list[PromptTemplateResponse]:
     """列出所有提示词模板（含默认内容）。"""
-    rows = db.query(db_models.PromptTemplate).all()
+    loop = asyncio.get_running_loop()
+    rows = await loop.run_in_executor(None, lambda: db.query(db_models.PromptTemplate).all())
     defaults = get_default_prompts()
     result = []
     for row in rows:
@@ -196,13 +205,14 @@ async def list_prompts(db: Session = Depends(get_db), user=Depends(require_admin
 @router.get("/prompts/{key}")
 async def get_prompt(key: str, db: Session = Depends(get_db), user=Depends(require_admin)) -> PromptTemplateResponse:
     """获取单个提示词模板。"""
+    loop = asyncio.get_running_loop()
     defaults = get_default_prompts()
     if key not in defaults:
         raise HTTPException(404, f"未知的提示词模板: {key}")
     default = defaults[key]["content"]
-    row = db.query(db_models.PromptTemplate).filter(
+    row = await loop.run_in_executor(None, lambda: db.query(db_models.PromptTemplate).filter(
         db_models.PromptTemplate.template_key == key
-    ).first()
+    ).first())
     if row:
         return PromptTemplateResponse(
             template_key=row.template_key,
@@ -229,12 +239,13 @@ async def update_prompt(
     user=Depends(require_admin),
 ) -> PromptTemplateResponse:
     """保存（覆盖）提示词模板内容。"""
+    loop = asyncio.get_running_loop()
     defaults = get_default_prompts()
     if key not in defaults:
         raise HTTPException(404, f"未知的提示词模板: {key}")
-    row = db.query(db_models.PromptTemplate).filter(
+    row = await loop.run_in_executor(None, lambda: db.query(db_models.PromptTemplate).filter(
         db_models.PromptTemplate.template_key == key
-    ).first()
+    ).first())
     if not row:
         row = db_models.PromptTemplate(
             template_key=key,
@@ -246,8 +257,8 @@ async def update_prompt(
     else:
         row.template_content = body.template_content
         row.is_custom = True
-    db.commit()
-    db.refresh(row)
+    await loop.run_in_executor(None, lambda: db.commit())
+    await loop.run_in_executor(None, lambda: db.refresh(row))
     return PromptTemplateResponse(
         template_key=row.template_key,
         label=row.label,
@@ -265,17 +276,18 @@ async def restore_prompt(
     user=Depends(require_admin),
 ) -> PromptTemplateResponse:
     """恢复提示词模板为默认内容。"""
+    loop = asyncio.get_running_loop()
     defaults = get_default_prompts()
     if key not in defaults:
         raise HTTPException(404, f"未知的提示词模板: {key}")
-    row = db.query(db_models.PromptTemplate).filter(
+    row = await loop.run_in_executor(None, lambda: db.query(db_models.PromptTemplate).filter(
         db_models.PromptTemplate.template_key == key
-    ).first()
+    ).first())
     if row:
         row.template_content = defaults[key]["content"]
         row.is_custom = False
-        db.commit()
-        db.refresh(row)
+        await loop.run_in_executor(None, lambda: db.commit())
+        await loop.run_in_executor(None, lambda: db.refresh(row))
         return PromptTemplateResponse(
             template_key=row.template_key,
             label=row.label,

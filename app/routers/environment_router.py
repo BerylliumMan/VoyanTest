@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from .. import crud, models
 from app.auth import require_admin
 from ..database import get_db
@@ -42,8 +43,10 @@ def create_environment(
 
     try:
         return crud.create_environment(db, project_id, env)
-    except Exception as e:
-        logger.error("创建环境失败 (project_id=%d): %s", project_id, e)
+    except HTTPException:
+        raise
+    except (ValueError, SQLAlchemyError):
+        logger.exception("创建环境失败 (project_id=%d)", project_id)
         raise HTTPException(status_code=400, detail="Could not create environment")
 
 
@@ -64,8 +67,10 @@ def update_environment(
         if result is None:
             raise HTTPException(status_code=404, detail="Environment not found")
         return result
-    except Exception as e:
-        logger.error("更新环境失败 (env_id=%d): %s", env_id, e)
+    except HTTPException:
+        raise
+    except (ValueError, SQLAlchemyError):
+        logger.exception("更新环境失败 (env_id=%d)", env_id)
         raise HTTPException(status_code=400, detail="Could not update environment")
 
 
@@ -83,8 +88,10 @@ def delete_environment(
     try:
         result = crud.delete_environment(db, env_id)
         return result
-    except Exception as e:
-        logger.error("删除环境失败 (env_id=%d): %s", env_id, e)
+    except HTTPException:
+        raise
+    except (ValueError, SQLAlchemyError):
+        logger.exception("删除环境失败 (env_id=%d)", env_id)
         raise HTTPException(status_code=400, detail="Could not delete environment")
 
 
@@ -104,6 +111,8 @@ def set_default_environment(
         if result is None:
             raise HTTPException(status_code=404, detail="Environment not found")
         return result
-    except Exception as e:
-        logger.error("设置默认环境失败 (env_id=%d): %s", env_id, e)
+    except HTTPException:
+        raise
+    except (ValueError, SQLAlchemyError):
+        logger.exception("设置默认环境失败 (env_id=%d)", env_id)
         raise HTTPException(status_code=400, detail="Could not set default environment")

@@ -1,4 +1,4 @@
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import base64
 import io
 
@@ -15,5 +15,7 @@ def validate_image(file) -> bool:
         img = Image.open(file)
         img.verify()
         return True
-    except Exception:
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        # UnidentifiedImageError: 无法识别格式；OSError: 文件 I/O 损坏；
+        # SyntaxError: 图像结构损坏；ValueError: 解码参数错误
         return False

@@ -7,9 +7,13 @@ and scanned PDFs contribute per-page functional-point summaries produced by
 ready to feed into :func:`app.gen.orchestrator.two_phase_analyze`.
 """
 
+import asyncio
+import json as _json
 import logging
 import os
 import time
+
+import openai
 
 from app.gen.constants import ALLOWED_EXTENSIONS, MAX_FILES, MAX_RETRIES, MAX_TOTAL_SIZE, RETRY_DELAY
 from app.gen.docx_parser import extract_text
@@ -138,7 +142,7 @@ def extract_multi_file_content(files, filenames, progress_callback=None) -> tupl
                             progress_callback=progress_callback,
                         )
                         break
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - 重试判定依赖 str(e)，需吞掉所有异常
                         if "timed out" in str(e).lower() and attempt < MAX_RETRIES - 1:
                             logger.warning("图片 %s 分析超时，第 %d 次重试...", filename, attempt + 1)
                             time.sleep(RETRY_DELAY * (attempt + 1))
@@ -152,7 +156,7 @@ def extract_multi_file_content(files, filenames, progress_callback=None) -> tupl
                     f"===== 图片功能点提取: {filename} =====\n{fp_text}"
                 )
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 文件级兜底：单个文件解析失败不影响其他文件
             logger.warning("文件 %s 提取失败: %s", filename, e)
             warnings.append(f"文件 {filename} 提取失败: {e}")
 

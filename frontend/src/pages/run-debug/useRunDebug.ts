@@ -133,6 +133,8 @@ export function useRunDebug(
         wsRef.current = null;
       }
     };
+    // effect 内 connect 闭包使用最新 props（ref 持有）；仅在 runId 变化时重连即可，
+    // 显式列出内部引用反而会因 ref/reconnectTimer 等导致循环重连
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 

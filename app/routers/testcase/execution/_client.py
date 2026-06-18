@@ -39,7 +39,8 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
     """Run a test case on a connected client agent via WebSocket."""
     from agent.manager import agent_manager
 
-    db_case = crud.get_test_case(db, case_id)
+    loop = _asyncio.get_running_loop()
+    db_case = await loop.run_in_executor(None, lambda: crud.get_test_case(db, case_id))
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
@@ -56,7 +57,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
         agent = agents[0]
     run_id = uuid.uuid4().hex[:12]
 
-    steps_raw = crud.get_steps_for_case(db, case_id)
+    steps_raw = await loop.run_in_executor(None, lambda: crud.get_steps_for_case(db, case_id))
     steps = [
         {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
         for s in sorted(steps_raw, key=lambda x: x.step_order)
@@ -65,7 +66,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
     if not steps:
         raise HTTPException(status_code=400, detail="Test case has no steps")
 
-    batch = crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1))
 
     async def _run() -> None:
         start_time = tz_now()
@@ -114,10 +115,11 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
 
         _db = SessionLocal()
         try:
-            _batch = _db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch.id).first()
+            _loop = _asyncio.get_running_loop()
+            _batch = await _loop.run_in_executor(None, lambda: _db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch.id).first())
             if _batch:
-                crud._compute_batch_status(_db, _batch)
-                _db.commit()
+                await _loop.run_in_executor(None, lambda: crud._compute_batch_status(_db, _batch))
+                await _loop.run_in_executor(None, lambda: _db.commit())
         finally:
             _db.close()
 
@@ -136,23 +138,24 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
             logger.info("Some cases failed — browser left open for debugging")
 
     _task = _asyncio.create_task(_run())
-    def _on_run_done(t) -> None:
+    async def _on_run_done(t: _asyncio.Task) -> None:
         exc = t.exception()
         if exc:
             logger.error("Client agent run task failed: %s", exc)
             try:
+                _loop = _asyncio.get_running_loop()
                 from app.database import SessionLocal as _SL
                 from app import db_models as _dm
                 _db = _SL()
-                _b = _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first()
+                _b = await _loop.run_in_executor(None, lambda: _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first())
                 if _b and _b.status in ("running", "pending"):
                     _b.status = "failed"
                     _b.finished_at = tz_now()
-                    _db.commit()
+                    await _loop.run_in_executor(None, lambda: _db.commit())
                 _db.close()
             except Exception:
                 logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
-    _task.add_done_callback(_on_run_done)
+    _task.add_done_callback(lambda t: _asyncio.ensure_future(_on_run_done(t)))
 
     return {
         "message": f"Test case {case_id} running on client agent {agent.name}",
@@ -166,6 +169,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
     """Run multiple test cases sequentially on a connected client agent."""
     from agent.manager import agent_manager
 
+    loop = _asyncio.get_running_loop()  # noqa: F841 - used in nested _load_case_info
     agents = agent_manager.get_online_agents()
     if not agents:
         raise HTTPException(status_code=400, detail="No client agents available")
@@ -182,11 +186,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
     if not case_ids:
         raise HTTPException(status_code=400, detail="No test case IDs provided")
 
-    def _load_case_info(cid: int) -> Optional[dict]:
-        tc = crud.get_test_case(db, cid)
+    async def _load_case_info(cid: int) -> Optional[dict]:
+        tc = await loop.run_in_executor(None, lambda: crud.get_test_case(db, cid))
         if not tc:
             return None
-        steps_raw = crud.get_steps_for_case(db, cid)
+        steps_raw = await loop.run_in_executor(None, lambda: crud.get_steps_for_case(db, cid))
         steps = [
             {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
             for s in sorted(steps_raw, key=lambda x: x.step_order)
@@ -194,12 +198,12 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
         return {"id": tc.id, "name": tc.name, "project_id": tc.project_id, "steps": steps, "is_init": cid in init_case_ids}
 
     all_case_ids = init_case_ids + case_ids
-    case_infos = [_load_case_info(cid) for cid in all_case_ids]
+    case_infos = [await _load_case_info(cid) for cid in all_case_ids]
     case_infos = [c for c in case_infos if c]
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
 
-    batch = crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos))
+    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos)))
 
     async def _run_batch() -> None:
         _all_success = True
@@ -257,10 +261,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
 
         _db = SessionLocal()
         try:
-            _b = _db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch.id).first()
+            _loop = _asyncio.get_running_loop()
+            _b = await _loop.run_in_executor(None, lambda: _db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch.id).first())
             if _b:
-                crud._compute_batch_status(_db, _b)
-                _db.commit()
+                await _loop.run_in_executor(None, lambda: crud._compute_batch_status(_db, _b))
+                await _loop.run_in_executor(None, lambda: _db.commit())
         finally:
             _db.close()
 
@@ -279,23 +284,24 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                 logger.warning("Failed to send shutdown to agent: %s", exc, exc_info=True)
 
     _task = _asyncio.create_task(_run_batch())
-    def _on_batch_done(t) -> None:
+    async def _on_batch_done(t: _asyncio.Task) -> None:
         exc = t.exception()
         if exc:
             logger.error("Client agent batch-run task failed: %s", exc)
             try:
+                _loop = _asyncio.get_running_loop()
                 from app.database import SessionLocal as _SL
                 from app import db_models as _dm
                 _db = _SL()
-                _b = _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first()
+                _b = await _loop.run_in_executor(None, lambda: _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first())
                 if _b and _b.status in ("running", "pending"):
                     _b.status = "failed"
                     _b.finished_at = tz_now()
-                    _db.commit()
+                    await _loop.run_in_executor(None, lambda: _db.commit())
                 _db.close()
             except Exception:
                 logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
-    _task.add_done_callback(_on_batch_done)
+    _task.add_done_callback(lambda t: _asyncio.ensure_future(_on_batch_done(t)))
 
     return {
         "message": f"{len(case_ids)} case(s) running on client agent {agent.name}",

@@ -242,7 +242,7 @@ const Reports: React.FC = () => {
       content: `${t['delete']} "${batchName}"?`,
       okText: t['delete'],
       cancelText: t['cancel'],
-      okButtonProps: { status: 'danger' } as any,
+      okButtonProps: { status: 'danger' },
       onOk: async () => {
         try {
           await axios.delete(`/api/reports/batches/${batchId}`);

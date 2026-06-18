@@ -35,7 +35,7 @@ class ScheduledTask:
         try:
             itr = croniter(self.cron_expression, base_time or tz_now())
             return itr.get_next(datetime)
-        except Exception:
+        except ValueError:
             logger.exception("计算下次执行时间失败")
             return None
 
@@ -83,7 +83,7 @@ class TaskScheduler:
         task.next_run = task.calculate_next_run()
         
         self.tasks[task_id] = task
-        logger.info(f"添加定时任务: {name} ({cron_expression}), 下次执行: {task.next_run}")
+        logger.info("添加定时任务: %s (%s), 下次执行: %s", name, cron_expression, task.next_run)
         
         return task
     
@@ -96,7 +96,7 @@ class TaskScheduler:
                 del self._task_handles[task_id]
             
             del self.tasks[task_id]
-            logger.info(f"移除定时任务: {task_id}")
+            logger.info("移除定时任务: %s", task_id)
             return True
         return False
     
@@ -106,7 +106,7 @@ class TaskScheduler:
             self.tasks[task_id].enabled = True
             # 重新计算下次执行时间
             self.tasks[task_id].next_run = self.tasks[task_id].calculate_next_run()
-            logger.info(f"启用定时任务: {task_id}")
+            logger.info("启用定时任务: %s", task_id)
             return True
         return False
     
@@ -118,7 +118,7 @@ class TaskScheduler:
             if task_id in self._task_handles:
                 self._task_handles[task_id].cancel()
                 del self._task_handles[task_id]
-            logger.info(f"禁用定时任务: {task_id}")
+            logger.info("禁用定时任务: %s", task_id)
             return True
         return False
     
@@ -128,7 +128,7 @@ class TaskScheduler:
             task = self.tasks[task_id]
             task.cron_expression = cron_expression
             task.next_run = task.calculate_next_run()
-            logger.info(f"更新任务 {task_id} 的 Cron 表达式: {cron_expression}, 下次执行: {task.next_run}")
+            logger.info("更新任务 %s 的 Cron 表达式: %s, 下次执行: %s", task_id, cron_expression, task.next_run)
             return True
         return False
     
@@ -187,7 +187,7 @@ class TaskScheduler:
             wait_seconds = (task.next_run - now).total_seconds()
             
             if wait_seconds > 0:
-                logger.debug(f"任务 {task.id} 将在 {wait_seconds:.0f} 秒后执行")
+                logger.debug("任务 %s 将在 %.0f 秒后执行", task.id, wait_seconds)
                 try:
                     await asyncio.sleep(wait_seconds)
                 except asyncio.CancelledError:
@@ -206,7 +206,7 @@ class TaskScheduler:
     
     async def _execute_task(self, task: ScheduledTask):
         """执行定时任务"""
-        logger.info(f"执行定时任务: {task.name} ({task.task_type}:{task.target_id})")
+        logger.info("执行定时任务: %s (%s:%s)", task.name, task.task_type, task.target_id)
         
         if not self._executor:
             logger.error("未设置任务执行器")
@@ -214,7 +214,7 @@ class TaskScheduler:
         
         try:
             await self._executor(task)
-        except Exception:
+        except Exception:  # noqa: BLE001 - executor 为任意 callable，必须吞掉所有异常以保持调度循环健壮
             logger.exception("定时任务执行失败")
             task.fail_count += 1
     
@@ -246,7 +246,7 @@ def validate_cron_expression(expression: str) -> bool:
     try:
         croniter(expression)
         return True
-    except Exception:
+    except ValueError:
         return False
 
 
@@ -255,7 +255,7 @@ def get_next_run_times(expression: str, count: int = 5) -> List[datetime]:
     try:
         itr = croniter(expression, tz_now())
         return [itr.get_next(datetime) for _ in range(count)]
-    except Exception:
+    except ValueError:
         return []
 
 

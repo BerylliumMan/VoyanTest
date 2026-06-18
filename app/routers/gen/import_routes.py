@@ -4,6 +4,8 @@ project via :mod:`app.gen.adapter`.
 """
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -25,6 +27,7 @@ async def import_test_cases(
     """Import selected test cases into a project."""
     from app.gen.models import TestCase as GenTestCaseModel
 
+    loop = asyncio.get_running_loop()
     test_cases_data = None
 
     async with _lock:
@@ -32,14 +35,14 @@ async def import_test_cases(
     if session and session.status == "completed":
         test_cases_data = session.test_cases
     else:
-        record = db.query(db_models.GenSession).filter(db_models.GenSession.id == body.session_id).first()
+        record = await loop.run_in_executor(None, lambda: db.query(db_models.GenSession).filter(db_models.GenSession.id == body.session_id).first())
         if not record:
             raise HTTPException(404, "记录不存在")
         if record.status != "completed":
             raise HTTPException(400, "分析尚未完成")
-        db_tcs = db.query(db_models.GenTestCase).filter(
+        db_tcs = await loop.run_in_executor(None, lambda: db.query(db_models.GenTestCase).filter(
             db_models.GenTestCase.session_id == body.session_id
-        ).all()
+        ).all())
         test_cases_data = [
             GenTestCaseModel(
                 test_case_id=tc.test_case_id,
@@ -54,19 +57,19 @@ async def import_test_cases(
             for tc in db_tcs
         ]
 
-    project = db.query(db_models.Project).filter(db_models.Project.id == body.project_id).first()
+    project = await loop.run_in_executor(None, lambda: db.query(db_models.Project).filter(db_models.Project.id == body.project_id).first())
     if not project:
         raise HTTPException(404, "项目不存在")
 
     from app.gen.adapter import import_test_cases as do_import
-    created = do_import(db, body.project_id, test_cases_data, body.selected_ids)
+    created = await loop.run_in_executor(None, lambda: do_import(db, body.project_id, test_cases_data, body.selected_ids))
 
-    record = db.query(db_models.GenSession).filter(db_models.GenSession.id == body.session_id).first()
+    record = await loop.run_in_executor(None, lambda: db.query(db_models.GenSession).filter(db_models.GenSession.id == body.session_id).first())
     if record:
         record.imported_count = (record.imported_count or 0) + len(created)
         if record.project_id is None:
             record.project_id = body.project_id
-        db.commit()
+        await loop.run_in_executor(None, lambda: db.commit())
 
     return GenImportResponse(
         imported_count=len(created),

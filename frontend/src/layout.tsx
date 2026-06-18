@@ -160,6 +160,8 @@ function PageLayout() {
     const routeConfig = routeMap.current.get(pathname);
     setBreadCrumb(routeConfig || []);
     updateMenuStatus();
+    // updateMenuStatus 内部已用 ref 持有 menuMap/openKeys，避免依赖陈旧闭包；
+    // 将其列入依赖数组会导致 pathname 未变时仍频繁触发
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 

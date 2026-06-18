@@ -12,11 +12,13 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import logging
 import re
 from typing import Any, Optional
 
+import openai
 from openai import AsyncOpenAI
 
 from core.llm_wrapper import _resolve_config, create_openai_client
@@ -282,7 +284,7 @@ async def convert_events_to_steps(
                 temperature=temperature,
                 max_tokens=2048,
             )
-        except Exception as exc:
+        except (openai.OpenAIError, asyncio.TimeoutError, OSError) as exc:
             logger.exception("CDP converter LLM call failed (attempt %s)", attempt + 1)
             if attempt >= 2:
                 logger.error("CDP converter giving up after 3 API failures")
