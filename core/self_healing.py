@@ -25,7 +25,7 @@ async def _get_cached_client():
     try:
         from core.llm_wrapper import create_openai_client
 
-        _cached_client = create_openai_client()
+        _cached_client = await create_openai_client()
     except (ValueError, RuntimeError) as exc:
         # ValueError: AI 配置缺失；RuntimeError: 配置加载异常
         logger.warning("Failed to create LLM client: %s", exc, exc_info=True)

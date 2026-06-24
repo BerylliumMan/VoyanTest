@@ -107,7 +107,35 @@ def client(db):
 
 
 @pytest.fixture
-def admin_cookies(client):
+def ensure_admin_user(db):
+    """确保 admin 用户存在于测试数据库（用于需要认证的测试）。"""
+    from app.auth import hash_password
+
+    async def _create():
+        from sqlalchemy import select
+        from app import db_models
+        result = await db.execute(
+            select(db_models.User).where(db_models.User.username == "admin")
+        )
+        if result.scalar_one_or_none():
+            return
+        admin = db_models.User(
+            username="admin",
+            password_hash=hash_password("Admin@2024"),
+            role="admin",
+            status="active",
+            must_change_password=False,
+        )
+        db.add(admin)
+        await db.commit()
+
+    import asyncio
+    asyncio.run(_create())
+    yield
+
+
+@pytest.fixture
+def admin_cookies(client, ensure_admin_user):
     """登录管理员，返回 session cookie。"""
     resp = client.post("/api/auth/login", json={
         "username": "admin", "password": "Admin@2024",
