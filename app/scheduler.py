@@ -59,9 +59,7 @@ class TaskScheduler:
                  task_type: str, target_id: int, enabled: bool = True) -> ScheduledTask:
         """
         添加定时任务
-        """
-        添加定时任务
-        
+
         Args:
             task_id: 任务唯一标识
             name: 任务名称
