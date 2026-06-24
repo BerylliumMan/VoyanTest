@@ -1,5 +1,6 @@
 """Tests for assertion parsing logic in core/assertions.py (no MCP needed)."""
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 from core.assertions import (
     _parse_single_assertion,
     _looks_like_selector,
@@ -94,3 +95,43 @@ class TestParseSingleAssertion:
     def test_display_text_without_quotes(self):
         result = _parse_single_assertion("显示 操作成功")
         assert result == {"type": "text_exists", "value": "操作成功"}
+
+
+class TestExecuteAssertions:
+    """Tests for execute_assertions dispatch logic (MCP mocked)."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_returns_failed(self):
+        from core.assertions import execute_assertions
+        mcp = MagicMock()
+        results = await execute_assertions(mcp, [{"type": "nonexistent", "value": ""}])
+        assert len(results) == 1
+        assert results[0]["passed"] is False
+        assert "Unknown" in results[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_handler_exception_caught(self):
+        from core.assertions import execute_assertions
+        mcp = MagicMock()
+        results = await execute_assertions(mcp, [{"type": "url_contains", "value": "/"}])
+        assert len(results) == 1
+        assert results[0]["passed"] is False
+        assert "error" in results[0]
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returns_empty(self):
+        from core.assertions import execute_assertions
+        mcp = MagicMock()
+        results = await execute_assertions(mcp, [])
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_assertions_all_work(self):
+        from core.assertions import execute_assertions
+        mcp = MagicMock()
+        mcp.call_tool = AsyncMock(return_value={"success": True, "text": "https://example.com/dashboard"})
+        results = await execute_assertions(mcp, [
+            {"type": "url_contains", "value": "/dashboard"},
+            {"type": "text_exists", "value": "hello"},
+        ])
+        assert len(results) == 2
