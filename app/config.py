@@ -4,7 +4,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     # Database
-    database_url: str = "sqlite:///./uitest.db"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:15435/uitest"
 
     # Application
     app_host: str = "0.0.0.0"
@@ -38,8 +38,9 @@ class Settings(BaseSettings):
     cors_allow_methods: str = "GET,POST,PUT,DELETE,PATCH,OPTIONS"
     cors_allow_headers: str = "Content-Type,Authorization,X-Requested-With,Accept"
 
-    # CSRF 保护（基于 Origin/Referer 校验，无需前端改动）
-    csrf_enabled: bool = True
+    # CSRF 保护 — 当前依赖 SameSite=Lax Cookie 的浏览器自动保护机制。
+    # 未实现 CSRF token 中间件。如需额外保护，请实现 Origin/Referer 校验。
+    csrf_enabled: bool = False
     csrf_exclude_paths: str = "/api/auth/login,/api/auth/login-form,/api/auth/logout"
 
     # Logging

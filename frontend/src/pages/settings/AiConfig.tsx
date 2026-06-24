@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Card, Form, Input, Button, Message, Spin, Space } from '@arco-design/web-react';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import styles from './style/index.module.less';
 
 function AiConfig() {
   const t = useLocale();
@@ -55,9 +56,9 @@ function AiConfig() {
   };
 
   return (
-    <Card style={{ width: '100%' }}>
-      <Spin loading={loading} style={{ width: '100%' }}>
-        <Form form={form} onSubmit={handleSubmit} layout="vertical" style={{ width: '100%' }}>
+    <Card className={styles.fullWidth}>
+      <Spin loading={loading} className={styles.fullWidth}>
+        <Form form={form} onSubmit={handleSubmit} layout="vertical" className={styles.fullWidth}>
           <Form.Item field="model" label={t['model.name']} rules={[{ required: true }]}>
             <Input placeholder={t['model.name.placeholder']} />
           </Form.Item>

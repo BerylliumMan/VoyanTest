@@ -5,6 +5,7 @@ import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug } 
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
+import logger from '@/utils/logger';
 import { TestCase, Module, Project, Environment, Step } from './types';
 import useTestCaseData from './hooks/useTestCaseData';
 import ModuleTree from './components/ModuleTree';
@@ -13,6 +14,7 @@ import TestCaseEditor from './components/TestCaseEditor';
 import ModuleEditor from './components/ModuleEditor';
 import BatchMoveCopyModal from './components/BatchMoveCopyModal';
 import EnvironmentManager from './components/EnvironmentManager';
+import styles from './index.module.less';
 
 const TestCases: React.FC = () => {
   const t = useLocale();
@@ -58,7 +60,7 @@ const TestCases: React.FC = () => {
     apiGet<Project[]>('/api/projects/')
       .then((data) => setProjects(data || []))
       .catch((e) => {
-        console.error('Failed to load agents:', e);
+        logger.error('Failed to load agents:', e);
       });
   }, []);
   useEffect(() => {
@@ -67,12 +69,12 @@ const TestCases: React.FC = () => {
       { showSuccess: false, showError: false }
     )
       .then((res) => {
-        const online = (res || []).filter((a) => a.status === 'online');
+        const online = (Array.isArray(res) ? res : []).filter((a) => a.status === 'online');
         setAgents(online);
         if (online.length > 0) setSelectedAgent(online[0].name);
       })
       .catch((e) => {
-        console.error('Failed to load agents:', e);
+        logger.error('Failed to load agents:', e);
       });
   }, []);
 
@@ -192,7 +194,7 @@ const TestCases: React.FC = () => {
       title: t['actions'], width: 480, render: (_: unknown, record: TestCase) => (
         <Space>
           <Button type="primary" size="small" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
-          <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} style={{ width: 95 }} size="mini">
+          <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} className={styles.agentSelect} size="mini">
             {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
           </Select>
           <Button type="outline" size="small" icon={<IconPlayArrow />} onClick={() => handleRunClient(record.id)}>{t['client']}</Button>
@@ -200,7 +202,7 @@ const TestCases: React.FC = () => {
           <Button
             type="text"
             size="small"
-            icon={record.is_init ? <IconStarFill style={{ color: 'var(--color-warning-6)' }} /> : <IconStar />}
+            icon={record.is_init ? <IconStarFill className={styles.initIcon} /> : <IconStar />}
             onClick={() => handleToggleInit(record.id, !record.is_init)}
             aria-label={record.is_init ? '取消初始化' : '标记为初始化'}
           />
@@ -225,8 +227,8 @@ const TestCases: React.FC = () => {
     <Button type="outline" onClick={() => openBatchModal('move')}>{t['batch.move']}</Button>
     <Button type="outline" onClick={() => openBatchModal('copy')}>{t['batch.copy']}</Button>
     <Button type="primary" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('server')}>{t['batch.run.server']}</Button>
-    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <Select value={selectedAgent} onChange={setSelectedAgent} style={{ width: 110 }} placeholder={t['select.agent']}>
+    <div className={styles.inlineFlex}>
+      <Select value={selectedAgent} onChange={setSelectedAgent} className={styles.agentSelectWide} placeholder={t['select.agent']}>
         {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
       </Select>
       <Button type="outline" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('client')}>{t['batch.run.client']}</Button>
@@ -238,7 +240,7 @@ const TestCases: React.FC = () => {
       <Select
         value={initCaseFilter}
         onChange={(val: 'all' | 'init' | 'normal') => { setInitCaseFilter(val); setPage(1); }}
-        style={{ width: 130 }}
+        className={styles.filterSelect}
         size="small"
       >
         <Select.Option value="all">全部用例</Select.Option>
@@ -251,7 +253,7 @@ const TestCases: React.FC = () => {
   return (
     <>
       <style>{`.testcase-select .arco-select-view { background-color: var(--color-fill-2) !important; } .arco-tree-node { position: relative; } .arco-tree-node-title { width: 100%; padding-right: 0 !important; } .arco-tree-node-title .module-node-title { display: flex; align-items: center; justify-content: space-between; flex: 1; min-width: 0; } .step-row.drag-over { background: var(--color-primary-light-1); border-radius: 4px; } .step-row { cursor: default; }`}</style>
-      <div style={{ display: 'flex', gap: 16, height: 'calc(100vh - 180px)' }}>
+      <div className={styles.layout}>
         <ModuleTree projects={projects} selectedProject={selectedProject} onProjectChange={handleProjectChange} selectedEnvironment={selectedEnvironment} environments={environments} onEnvironmentChange={handleEnvironmentChange} modules={modules} moduleTree={moduleTree} selectedModuleId={selectedModuleId} onSelectModule={handleSelectModule} onCreateModule={() => openModuleModal()} onEditModule={openModuleModal} onDeleteModule={(id, name) => Modal.confirm({ title: t['confirm.delete'], content: t['confirm.delete.module'].replace('{name}', name), onOk: () => handleModuleDelete(id) })} onRunModule={handleRunModule} onRunAll={handleRunAll} t={t} openCreateEnv={openCreateEnv} openEnvManage={openEnvManage} />
         <TestCaseTable data={filteredData} loading={loading} total={total} page={page} pageSize={pageSize} columns={columns} selectedRowKeys={selectedRowKeys} onSelectionChange={setSelectedRowKeys} onPageChange={(p, ps) => { setPage(p); setPageSize(ps); }} searchQuery={searchQuery} onSearchChange={setSearchQuery} onSearch={(v) => { setPage(1); setSubmittedQuery(v); }} onClearSearch={() => { setSearchQuery(''); setSubmittedQuery(''); }} batchActions={batchActions} onCreate={openCreate} canCreate={!!selectedProject} filterExtra={filterExtra} t={t} />
         <TestCaseEditor visible={visible} editingCase={editingCase} onCancel={() => setVisible(false)} onSubmit={handleSubmit} modules={modules} projectId={selectedProject} t={t} form={form} steps={steps} setSteps={setSteps} />
@@ -268,24 +270,24 @@ const TestCases: React.FC = () => {
           confirmLoading={batchRunLoading}
           okText={t['run']}
         >
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ marginBottom: 8, fontWeight: 500 }}>{t['case.count'].replace('{count}', String(selectedRowKeys.length))}:
+          <div className={styles.modalCount}>
+            <div className={styles.modalTitle}>{t['case.count'].replace('{count}', String(selectedRowKeys.length))}:
               {' '}{(data || []).filter((c: TestCase) => selectedRowKeys.includes(c.id)).map((c: TestCase) => c.name).join(', ')}
             </div>
           </div>
 
           {initCases.length > 0 && (
-            <div style={{ marginBottom: 16, padding: 12, background: 'var(--color-fill-2)', borderRadius: 4 }}>
-              <div style={{ marginBottom: 8 }}>
+            <div className={styles.initCaseBox}>
+              <div className={styles.initSwitchRow}>
                 <Switch
                   checked={batchRunIncludeInit}
                   onChange={(v) => setBatchRunIncludeInit(v)}
                 />
-                <span style={{ marginLeft: 8 }}>{t['init.case.run_before']}</span>
+                <span className={styles.switchLabel}>{t['init.case.run_before']}</span>
               </div>
               {batchRunIncludeInit && (
                 <div>
-                  <div style={{ marginBottom: 4, color: 'var(--color-text-2)', fontSize: 13 }}>{t['init.case.select']}:</div>
+                  <div className={styles.initSelectHint}>{t['init.case.select']}:</div>
                   <Checkbox.Group
                     value={batchRunInitCaseIds}
                     onChange={(values) => setBatchRunInitCaseIds(values as number[])}
@@ -300,7 +302,7 @@ const TestCases: React.FC = () => {
             </div>
           )}
           {initCases.length === 0 && (
-            <div style={{ color: 'var(--color-text-3)', fontSize: 13 }}>{t['init.case.none']}</div>
+            <div className={styles.initNoneText}>{t['init.case.none']}</div>
           )}
         </Modal>
       </div>

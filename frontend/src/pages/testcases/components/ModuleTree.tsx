@@ -53,8 +53,8 @@ const ModuleTree: React.FC<ModuleTreeProps> = ({
       <div className={styles['icon-row']}>
         <IconFolder className={styles['row-icon']} />
         <Select
-          placeholder={t['select.project']} className="testcase-select"
-          style={{ flex: 1 }}
+          placeholder={t['select.project']}
+          className={`testcase-select ${styles['flex-select']}`}
           value={selectedProject ?? undefined}
           onChange={onProjectChange}
           options={projects.map((p) => ({ label: p.name, value: p.id }))}
@@ -65,8 +65,8 @@ const ModuleTree: React.FC<ModuleTreeProps> = ({
         <div className={styles['icon-row']}>
           <IconSettings className={styles['row-icon']} />
           <Select
-            placeholder={t['environment.select_placeholder']} className="testcase-select"
-            style={{ flex: 1 }}
+            placeholder={t['environment.select_placeholder']}
+            className={`testcase-select ${styles['flex-select']}`}
             value={selectedEnvironment ?? undefined}
             onChange={onEnvironmentChange}
             options={environments.map((e: Environment) => ({ label: e.name, value: e.id }))}

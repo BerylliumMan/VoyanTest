@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import axios from 'axios';
+import logger from '@/utils/logger';
 import { TestCase, Module, Environment } from '../types';
 
 export default function useTestCaseData(
@@ -23,7 +24,7 @@ export default function useTestCaseData(
     if (submittedQuery) {
       axios.get(`/api/testcases/search?project_id=${selectedProject}&q=${encodeURIComponent(submittedQuery)}&page=${page}&size=${pageSize}`)
         .then((res) => { setData(res.data.items || []); setTotal(res.data.total_items || 0); })
-        .catch(console.error)
+        .catch(logger.error)
         .finally(() => setLoading(false));
       return;
     }
@@ -32,7 +33,7 @@ export default function useTestCaseData(
       : `/api/testcases/project/${selectedProject}/testcases?page=${page}&size=${pageSize}`;
     axios.get(url)
       .then((res) => { setData(res.data.items || []); setTotal(res.data.total_items || 0); })
-      .catch(console.error)
+      .catch(logger.error)
       .finally(() => setLoading(false));
   }, [selectedProject, selectedModuleId, page, pageSize, submittedQuery]);
 
@@ -40,10 +41,10 @@ export default function useTestCaseData(
     if (!selectedProject) return;
     axios.get(`/api/projects/${selectedProject}/modules`).then((res) => {
       setModules(res.data || []);
-    }).catch(console.error);
+    }).catch(logger.error);
     axios.get(`/api/projects/${selectedProject}/modules/tree`).then((res) => {
       setModuleTree(res.data || []);
-    }).catch(console.error);
+    }).catch(logger.error);
   }, [selectedProject]);
 
   const fetchEnvironments = useCallback(() => {
@@ -57,7 +58,7 @@ export default function useTestCaseData(
       setEnvironments(envs);
       const defaultEnv = envs.find((e: Environment) => e.is_default);
       setSelectedEnvironment(defaultEnv ? defaultEnv.id : (envs[0]?.id || null));
-    }).catch(console.error);
+    }).catch(logger.error);
   }, [selectedProject]);
 
   useEffect(() => { fetchData(); fetchModules(); fetchEnvironments(); }, [fetchData, fetchModules, fetchEnvironments]);

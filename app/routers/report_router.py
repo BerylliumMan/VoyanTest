@@ -11,16 +11,16 @@ import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 from app.tz import now as tz_now
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-from ..database import get_db
+from ..database import get_async_db
 from ..auth import require_admin, get_current_user, get_user_project_filter
-from .. import crud, db_models
+from .. import crud
 from ..services import ReportService
 from ..services.report import BatchNotFound, ProjectAccessDenied
 
@@ -107,30 +107,30 @@ class RunDetail(BaseModel):
 # ==================== API 路由 ====================
 
 @router.get("/statistics", response_model=TestStatistics)
-def get_test_statistics(
+async def get_test_statistics(
     project_id: Optional[int] = None,
     days: int = 30,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> TestStatistics:
     """获取测试统计信息（基于批次）"""
     try:
-        data = ReportService.get_statistics(db, project_id, days, user)
+        data = await ReportService.get_statistics(db, project_id, days, user)
     except ProjectAccessDenied as e:
         raise HTTPException(status_code=404, detail=str(e))
     return TestStatistics(**data)
 
 
 @router.get("/trends", response_model=TestTrend)
-def get_test_trends(
+async def get_test_trends(
     project_id: Optional[int] = None,
     days: int = 30,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> TestTrend:
     """获取测试趋势数据（基于批次）"""
     try:
-        data = ReportService.get_trends(db, project_id, days, user)
+        data = await ReportService.get_trends(db, project_id, days, user)
     except ProjectAccessDenied as e:
         raise HTTPException(status_code=404, detail=str(e))
     return TestTrend(
@@ -140,18 +140,18 @@ def get_test_trends(
 
 
 @router.get("/summary", response_model=ReportSummary)
-def get_report_summary(
+async def get_report_summary(
     project_id: Optional[int] = None,
     days: int = 30,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> ReportSummary:
     """
     获取报告摘要（统计 + 趋势 + 最近执行）
     """
     try:
-        statistics_data = ReportService.get_statistics(db, project_id, days, user)
-        trends_data = ReportService.get_trends(db, project_id, days, user)
+        statistics_data = await ReportService.get_statistics(db, project_id, days, user)
+        trends_data = await ReportService.get_trends(db, project_id, days, user)
     except ProjectAccessDenied as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -159,7 +159,7 @@ def get_report_summary(
     if allowed_ids is not None and project_id and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    recent_rows = crud.list_recent_runs(
+    recent_rows = await crud.list_recent_runs(
         db,
         limit=10,
         project_id=project_id,
@@ -188,11 +188,11 @@ def get_report_summary(
 
 
 @router.get("/runs/{run_id}")
-def get_run_detail(run_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+async def get_run_detail(run_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """
     获取单次执行详情，包含步骤数据（从 report JSON 读取）。
     """
-    result = crud.get_run_detail_with_case(db, run_id)
+    result = await crud.get_run_detail_with_case(db, run_id)
     if not result:
         raise HTTPException(status_code=404, detail="执行记录不存在")
 
@@ -230,13 +230,13 @@ def get_run_detail(run_id: int, user=Depends(get_current_user), db: Session = De
 
 
 @router.get("/runs")
-def list_runs(
+async def list_runs(
     project_id: Optional[int] = None,
     status: Optional[str] = None,
     page: int = 1,
     size: int = 20,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> dict:
     """
     获取执行记录列表
@@ -245,7 +245,7 @@ def list_runs(
     if allowed_ids is not None and project_id and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    result = crud.list_runs_with_case(
+    result = await crud.list_runs_with_case(
         db,
         project_id=project_id,
         status=status,
@@ -276,25 +276,25 @@ def list_runs(
 # ==================== 批次报告 API ====================
 
 @router.get("/batches")
-def list_batches(
+async def list_batches(
     project_id: Optional[int] = None,
     status: Optional[str] = None,
     page: int = 1,
     size: int = 20,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> dict:
     """获取运行批次列表（分页）"""
     try:
-        return ReportService.get_batches(db, project_id, page, size, user, status=status)
+        return await ReportService.get_batches(db, project_id, page, size, user, status=status)
     except ProjectAccessDenied as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/batches/{batch_id}")
-def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """获取批次详情，包含所有用例运行结果"""
-    batch = crud.get_run_batch(db, batch_id)
+    batch = await crud.get_run_batch(db, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
@@ -303,12 +303,12 @@ def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: Session 
         raise HTTPException(status_code=404, detail="Batch not found")
 
     # 动态计算状态
-    crud._compute_batch_status(db, batch)
+    await crud._compute_batch_status(db, batch)
 
-    project = db.query(db_models.Project).filter(db_models.Project.id == batch.project_id).first()
+    project = await crud.get_project(db, batch.project_id)
     project_name = project.name if project else ""
 
-    related = crud.get_batch_detail_with_related(db, batch_id)
+    related = await crud.get_batch_detail_with_related(db, batch_id)
     runs = related["runs"]
     cases = related["cases"]
 
@@ -358,9 +358,9 @@ def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: Session 
 
 
 @router.put("/batches/{batch_id}")
-def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+async def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> dict:
     """更新批次名称"""
-    batch = crud.update_run_batch(db, batch_id, name=body.name)
+    batch = await crud.update_run_batch(db, batch_id, name=body.name)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
@@ -375,10 +375,10 @@ def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin),
 
 
 @router.get("/batches/{batch_id}/export")
-def export_batch(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> JSONResponse:
+async def export_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> JSONResponse:
     """导出批次报告为 JSON 文件"""
     try:
-        detail = ReportService.export_batch_report(db, batch_id, user)
+        detail = await ReportService.export_batch_report(db, batch_id, user)
     except BatchNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -389,21 +389,21 @@ def export_batch(batch_id: int, user=Depends(get_current_user), db: Session = De
 
 
 @router.delete("/batches/{batch_id}")
-def delete_batch(batch_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+async def delete_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """删除运行批次及其关联数据"""
-    batch = crud.get_run_batch(db, batch_id)
+    batch = await crud.get_run_batch(db, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and batch.project_id not in allowed_ids:
         raise HTTPException(status_code=403, detail="无权操作该批次")
     try:
-        success = crud.delete_run_batch(db, batch_id)
+        success = await crud.delete_run_batch(db, batch_id)
         if not success:
             raise HTTPException(status_code=404, detail="Batch not found")
         return {"message": "Batch deleted"}
     except HTTPException:
         raise
-    except (ValueError, SQLAlchemyError):
+    except Exception as e:
         logger.exception("Delete batch %s failed", batch_id)
-        raise HTTPException(status_code=500, detail="Failed to delete batch")
+        raise HTTPException(status_code=500, detail=f"Failed to delete batch: {e}")

@@ -115,7 +115,7 @@ const Projects: React.FC = () => {
 
       {/* Project Edit Modal */}
       <Modal visible={visible} onCancel={() => setVisible(false)}
-        title={editing ? t['edit.project'] : t['new.project']} onOk={handleSubmit} style={{ width: 700 }}
+        title={editing ? t['edit.project'] : t['new.project']} onOk={handleSubmit} className={styles.projectFormModal}
       >
         <Form form={form} layout="vertical">
           <Form.Item field="name" label={t['project.name']} rules={[{ required: true, message: t['project.name.placeholder'] }]}>
@@ -133,7 +133,7 @@ const Projects: React.FC = () => {
                 { label: 'Chromium', value: 'chromium' },
                 { label: 'Firefox', value: 'firefox' },
                 { label: 'WebKit', value: 'webkit' },
-              ]} style={{ width: 120 }} />
+              ]} className={styles.browserSelect} />
             </Form.Item>
             <Form.Item field="headless" label={t['headless']}>
               <Switch checked={headless} onChange={setHeadless} />

@@ -20,10 +20,11 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
-from app.database import SessionLocal, get_db
+from app.database import AsyncSessionLocal, get_async_db
 from app.tz import now as tz_now
 from core.runner import save_run_results
 
@@ -35,12 +36,11 @@ router = APIRouter()
 
 
 @router.post("/{case_id}/run-client")
-async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None, db: Session = Depends(get_db)) -> dict:
+async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
     """Run a test case on a connected client agent via WebSocket."""
     from agent.manager import agent_manager
 
-    loop = _asyncio.get_running_loop()
-    db_case = await loop.run_in_executor(None, lambda: crud.get_test_case(db, case_id))
+    db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
@@ -57,7 +57,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
         agent = agents[0]
     run_id = uuid.uuid4().hex[:12]
 
-    steps_raw = await loop.run_in_executor(None, lambda: crud.get_steps_for_case(db, case_id))
+    steps_raw = await crud.get_steps_for_case(db, case_id)
     steps = [
         {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
         for s in sorted(steps_raw, key=lambda x: x.step_order)
@@ -66,7 +66,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
     if not steps:
         raise HTTPException(status_code=400, detail="Test case has no steps")
 
-    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1))
+    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
 
     async def _run() -> None:
         start_time = tz_now()
@@ -113,15 +113,14 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
                 batch_id=batch.id,
             )
 
-        _db = SessionLocal()
-        try:
-            _loop = _asyncio.get_running_loop()
-            _batch = await _loop.run_in_executor(None, lambda: _db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch.id).first())
+        async with AsyncSessionLocal() as _db:
+            _result = await _db.execute(
+                select(db_models.RunBatch).where(db_models.RunBatch.id == batch.id)
+            )
+            _batch = _result.scalar_one_or_none()
             if _batch:
-                await _loop.run_in_executor(None, lambda: crud._compute_batch_status(_db, _batch))
-                await _loop.run_in_executor(None, lambda: _db.commit())
-        finally:
-            _db.close()
+                await crud._compute_batch_status(_db, _batch)
+                await _db.commit()
 
         if _all_success:
             try:
@@ -143,16 +142,17 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
         if exc:
             logger.error("Client agent run task failed: %s", exc)
             try:
-                _loop = _asyncio.get_running_loop()
-                from app.database import SessionLocal as _SL
+                from app.database import AsyncSessionLocal as _ASL
                 from app import db_models as _dm
-                _db = _SL()
-                _b = await _loop.run_in_executor(None, lambda: _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first())
-                if _b and _b.status in ("running", "pending"):
-                    _b.status = "failed"
-                    _b.finished_at = tz_now()
-                    await _loop.run_in_executor(None, lambda: _db.commit())
-                _db.close()
+                async with _ASL() as _db:
+                    _result = await _db.execute(
+                        select(_dm.RunBatch).where(_dm.RunBatch.id == batch.id)
+                    )
+                    _b = _result.scalar_one_or_none()
+                    if _b and _b.status in ("running", "pending"):
+                        _b.status = "failed"
+                        _b.finished_at = tz_now()
+                        await _db.commit()
             except Exception:
                 logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
     _task.add_done_callback(lambda t: _asyncio.ensure_future(_on_run_done(t)))
@@ -165,11 +165,10 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
 
 
 @router.post("/batch-run-client")
-async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_db)) -> dict:
+async def batch_run_client(body: BatchCaseIdsRequest, db: AsyncSession = Depends(get_async_db)) -> dict:
     """Run multiple test cases sequentially on a connected client agent."""
     from agent.manager import agent_manager
 
-    loop = _asyncio.get_running_loop()  # noqa: F841 - used in nested _load_case_info
     agents = agent_manager.get_online_agents()
     if not agents:
         raise HTTPException(status_code=400, detail="No client agents available")
@@ -187,10 +186,10 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="No test case IDs provided")
 
     async def _load_case_info(cid: int) -> Optional[dict]:
-        tc = await loop.run_in_executor(None, lambda: crud.get_test_case(db, cid))
+        tc = await crud.get_test_case(db, cid)
         if not tc:
             return None
-        steps_raw = await loop.run_in_executor(None, lambda: crud.get_steps_for_case(db, cid))
+        steps_raw = await crud.get_steps_for_case(db, cid)
         steps = [
             {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
             for s in sorted(steps_raw, key=lambda x: x.step_order)
@@ -203,7 +202,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
 
-    batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos)))
+    batch = await crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos))
 
     async def _run_batch() -> None:
         _all_success = True
@@ -259,15 +258,14 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
                     is_init=info.get("is_init", False),
                 )
 
-        _db = SessionLocal()
-        try:
-            _loop = _asyncio.get_running_loop()
-            _b = await _loop.run_in_executor(None, lambda: _db.query(db_models.RunBatch).filter(db_models.RunBatch.id == batch.id).first())
+        async with AsyncSessionLocal() as _db:
+            _result = await _db.execute(
+                select(db_models.RunBatch).where(db_models.RunBatch.id == batch.id)
+            )
+            _b = _result.scalar_one_or_none()
             if _b:
-                await _loop.run_in_executor(None, lambda: crud._compute_batch_status(_db, _b))
-                await _loop.run_in_executor(None, lambda: _db.commit())
-        finally:
-            _db.close()
+                await crud._compute_batch_status(_db, _b)
+                await _db.commit()
 
         if _all_success:
             try:
@@ -289,16 +287,17 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: Session = Depends(get_
         if exc:
             logger.error("Client agent batch-run task failed: %s", exc)
             try:
-                _loop = _asyncio.get_running_loop()
-                from app.database import SessionLocal as _SL
+                from app.database import AsyncSessionLocal as _ASL
                 from app import db_models as _dm
-                _db = _SL()
-                _b = await _loop.run_in_executor(None, lambda: _db.query(_dm.RunBatch).filter(_dm.RunBatch.id == batch.id).first())
-                if _b and _b.status in ("running", "pending"):
-                    _b.status = "failed"
-                    _b.finished_at = tz_now()
-                    await _loop.run_in_executor(None, lambda: _db.commit())
-                _db.close()
+                async with _ASL() as _db:
+                    _result = await _db.execute(
+                        select(_dm.RunBatch).where(_dm.RunBatch.id == batch.id)
+                    )
+                    _b = _result.scalar_one_or_none()
+                    if _b and _b.status in ("running", "pending"):
+                        _b.status = "failed"
+                        _b.finished_at = tz_now()
+                        await _db.commit()
             except Exception:
                 logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
     _task.add_done_callback(lambda t: _asyncio.ensure_future(_on_batch_done(t)))

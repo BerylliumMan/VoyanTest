@@ -14,11 +14,12 @@ from typing import Optional
 
 import sqlalchemy as sa
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tz import now as tz_now
 
 from app import crud
-from app.database import SessionLocal
+from app.database import AsyncSessionLocal
 from app.websocket import LogBroadcaster
 from core.assertions import execute_assertions as execute_step_assertions
 from core.llm_wrapper import create_openai_client, _resolve_config as _resolve_llm_config
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 async def run_test_case_in_browser(
     case_id: int,
     mcp_manager,
-    db=None,
+    db: AsyncSession | None = None,
     *,
     batch_id: int | None = None,
     clear_cookies: bool = False,
@@ -62,8 +63,9 @@ async def run_test_case_in_browser(
         The test case to execute.
     mcp_manager : PlaywrightMCPManager
         An already-started manager (shared across batch runs).
-    db : Session, optional
-        Database session.  Created internally when *None*.
+    db : AsyncSession, optional
+        Database session.  Created internally when *None* via
+        ``AsyncSessionLocal`` async context manager.
     batch_id : int, optional
         RunBatch ID to associate this run with.
     clear_cookies : bool
@@ -77,10 +79,48 @@ async def run_test_case_in_browser(
     -------
     dict with keys: case_id, status, report_path, step_results, batch_id
     """
-    own_db = db is None
-    if own_db:
-        db = SessionLocal()
+    if db is None:
+        async with AsyncSessionLocal() as db:
+            return await _run_test_case_in_browser_impl(
+                case_id,
+                mcp_manager,
+                db,
+                batch_id=batch_id,
+                clear_cookies=clear_cookies,
+                run_id=run_id,
+                base_url_override=base_url_override,
+                debug_mode=debug_mode,
+            )
+    return await _run_test_case_in_browser_impl(
+        case_id,
+        mcp_manager,
+        db,
+        batch_id=batch_id,
+        clear_cookies=clear_cookies,
+        run_id=run_id,
+        base_url_override=base_url_override,
+        debug_mode=debug_mode,
+    )
 
+
+async def _run_test_case_in_browser_impl(
+    case_id: int,
+    mcp_manager,
+    db: AsyncSession,
+    *,
+    batch_id: int | None = None,
+    clear_cookies: bool = False,
+    run_id: int | None = None,
+    base_url_override: str | None = None,
+    debug_mode: bool = False,
+) -> dict:
+    """Inner implementation of :func:`run_test_case_in_browser`.
+
+    The caller is responsible for providing an :class:`AsyncSession` and
+    for committing/rolling back/closing it. The outer wrapper handles
+    session lifecycle via ``async with AsyncSessionLocal() as db:`` when
+    no session is supplied.
+    """
     case_logger = logging.getLogger(f"runner.case_{case_id}")
 
     start_time = tz_now()
@@ -91,36 +131,32 @@ async def run_test_case_in_browser(
     from app import db_models
 
     try:
-        loop = asyncio.get_running_loop()
-        case_data = await loop.run_in_executor(None, lambda: crud.get_test_case(db, case_id))
+        case_data = await crud.get_test_case(db, case_id)
         if not case_data:
             raise ValueError(f"Test case with ID {case_id} not found.")
 
         # 预创建 TestRun 记录 (pending) 或使用已预创建的
         now = tz_now()
         if run_id is not None:
-            if not await loop.run_in_executor(None, lambda: mark_run_running(db, run_id)):
+            if not await mark_run_running(db, run_id):
                 logger.warning("TestRun %s not found, will create new record", run_id)
                 run_id = None
             else:
                 logger.info("TestRun %s updated (pending -> running)", run_id)
         if run_id is None:
-            def _create_and_start_run() -> int:
-                pending_run = db_models.TestRun(
-                    case_id=case_id, batch_id=batch_id, status="pending",
-                    start_time=now, end_time=now,
-                )
-                db.add(pending_run)
-                db.commit()
-                db.refresh(pending_run)
-                new_run_id = pending_run.id
-                pending_run.status = "running"
-                db.commit()
-                return new_run_id
-            run_id = await loop.run_in_executor(None, _create_and_start_run)
+            pending_run = db_models.TestRun(
+                case_id=case_id, batch_id=batch_id, status="pending",
+                start_time=now, end_time=now,
+            )
+            db.add(pending_run)
+            await db.commit()
+            await db.refresh(pending_run)
+            run_id = pending_run.id
+            pending_run.status = "running"
+            await db.commit()
             logger.info("TestRun %s created + started (running)", run_id)
 
-        project_data = await loop.run_in_executor(None, lambda: crud.get_project(db, case_data.project_id))
+        project_data = await crud.get_project(db, case_data.project_id)
         if not project_data:
             raise ValueError(f"Project with ID {case_data.project_id} not found.")
 
@@ -138,7 +174,7 @@ async def run_test_case_in_browser(
 
         logger.info("Starting MCP execution: '%s'", case_data.name)
 
-        steps_raw = await loop.run_in_executor(None, lambda: crud.get_steps_for_case(db, case_id))
+        steps_raw = await crud.get_steps_for_case(db, case_id)
         step_list = [
             {'id': s.id, 'step_order': s.step_order, 'description': s.description, 'expected_result': s.parsed_result}
             for s in steps_raw
@@ -156,7 +192,7 @@ async def run_test_case_in_browser(
 
         # Inject environment-defined auth cookies BEFORE navigation so the
         # browser already presents the authenticated session on the first page.
-        env_cookies = await loop.run_in_executor(None, lambda: _resolve_env_cookies(db, base_url_override))
+        env_cookies = await _resolve_env_cookies(db, base_url_override)
         if env_cookies:
             await _inject_auth_cookies(mcp_manager, env_cookies, nav_url)
 
@@ -167,8 +203,8 @@ async def run_test_case_in_browser(
             else:
                 logger.info("Navigated to %s", nav_url)
 
-        llm_client = create_openai_client()
-        _, _, resolved_model = _resolve_llm_config()
+        llm_client = await create_openai_client()
+        resolved_model = await _resolve_llm_config()
 
         # ------------------------------------------------------------------
         # Execute steps
@@ -299,12 +335,11 @@ async def run_test_case_in_browser(
                         # 更新步骤描述以使用修复后的选择器
                         step_dict['description'] = healed
                         # 持久化到数据库
-                        if db is not None:
-                            try:
-                                step_obj.healed_selector = healed
-                                await loop.run_in_executor(None, lambda: db.commit())
-                            except SQLAlchemyError as db_exc:
-                                logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
+                        try:
+                            step_obj.healed_selector = healed
+                            await db.commit()
+                        except SQLAlchemyError as db_exc:
+                            logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
                         continue  # 用新选择器重试
                     elif attempt == 0 and not step_success and error_msg:
                         logger.debug("  跳过自愈（非定位错误）: %s", error_msg[:80])
@@ -395,10 +430,10 @@ async def run_test_case_in_browser(
                             step_obj.description = new_desc
                             step_dict['description'] = new_desc
                             try:
-                                await loop.run_in_executor(None, lambda: db.commit())
+                                await db.commit()
                             except SQLAlchemyError:
                                 logger.exception("保存用户编辑后的步骤描述失败")
-                                await loop.run_in_executor(None, lambda: db.rollback())
+                                await db.rollback()
                             # 使用新描述重试
                             for retry_attempt in range(retry_max + 1):
                                 if retry_attempt > 0:
@@ -608,31 +643,23 @@ async def run_test_case_in_browser(
         end_time = tz_now()
         duration = (end_time - start_time).total_seconds()
 
-        _loop = asyncio.get_running_loop()
         if run_id is not None:
-            await _loop.run_in_executor(
-                None, lambda: update_run_on_completion(
-                    db, run_id, test_status, start_time, end_time,
-                    duration, case_report_path, run_log_entries,
-                    batch_id=batch_id,
-                )
+            await update_run_on_completion(
+                db, run_id, test_status, start_time, end_time,
+                duration, case_report_path, run_log_entries,
+                batch_id=batch_id,
             )
             logger.info(f"TestRun {run_id} updated -> {test_status}")
         else:
-            await _loop.run_in_executor(
-                None, lambda: save_run_results(
-                    case_id, test_status, start_time, end_time,
-                    duration, case_report_path, None, run_log_entries,
-                    batch_id=batch_id,
-                )
+            await save_run_results(
+                case_id, test_status, start_time, end_time,
+                duration, case_report_path, None, run_log_entries,
+                batch_id=batch_id,
             )
 
         if file_handler:
             case_logger.removeHandler(file_handler)
             file_handler.close()
-
-        if own_db:
-            db.close()
 
     return {
         "case_id": case_id,

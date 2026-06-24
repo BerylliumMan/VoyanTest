@@ -40,7 +40,10 @@ function useStorage(
     if (storageValue) {
       setStoredValue(storageValue);
     }
-    // 仅在挂载时读取 localStorage 初始值，key 变化由调用方通过组件 key/挂载处理
+    // 仅在挂载时读取 localStorage 初始值；故意不把 key 加入 deps：
+    //  - 调用方约定通过组件 key / 显式 remount 切换 key，因此本 effect 没必要随 key 变化重跑。
+    //  - 若把 key 加入 deps，key 变化时会用 localStorage 的旧值覆盖 setStorageValue 已写入的最新值，
+    //    导致同 key 下的后续写丢失。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

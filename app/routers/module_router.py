@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Depends, Response
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
-from ..database import get_db
+from ..database import get_async_db
 from ..auth import require_admin, get_current_user, get_user_project_filter
-from .. import crud, db_models, models
+from .. import crud, models
 
 router = APIRouter(
     prefix="/api",
@@ -20,60 +20,60 @@ router = APIRouter(
 
 
 @router.get("/projects/{project_id}/modules", response_model=List[models.Module])
-def list_modules(project_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[models.Module]:
+async def list_modules(project_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> list[models.Module]:
     """获取项目的所有模块（扁平列表）"""
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
-    project = db.query(db_models.Project).filter(db_models.Project.id == project_id).first()
+    project = await crud.get_project(db, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    modules = crud.get_modules_for_project(db, project_id)
+    modules = await crud.get_modules_for_project(db, project_id)
     return modules
 
 
 @router.get("/projects/{project_id}/modules/tree")
-def get_module_tree(project_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list:
+async def get_module_tree(project_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> list:
     """获取项目的模块树形结构"""
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
-    tree = crud.get_module_tree(db, project_id)
+    tree = await crud.get_module_tree(db, project_id)
     return tree
 
 
 @router.get("/modules/{module_id}", response_model=models.Module)
-def get_module(module_id: int, db: Session = Depends(get_db)) -> models.Module:
+async def get_module(module_id: int, db: AsyncSession = Depends(get_async_db)) -> models.Module:
     """获取单个模块详情"""
-    db_module = crud.get_module(db, module_id)
+    db_module = await crud.get_module(db, module_id)
     if not db_module:
         raise HTTPException(status_code=404, detail="Module not found")
     return db_module
 
 
 @router.get("/modules/{module_id}/descendants")
-def get_module_descendants(module_id: int, db: Session = Depends(get_db)) -> dict:
+async def get_module_descendants(module_id: int, db: AsyncSession = Depends(get_async_db)) -> dict:
     """获取模块及所有下级模块 ID 列表（递归）"""
-    module = db.query(db_models.Module).filter(db_models.Module.id == module_id).first()
+    module = await crud.get_module(db, module_id)
     if not module:
         raise HTTPException(status_code=404, detail="Module not found")
-    module_ids = crud.get_module_descendants(db, module_id)
+    module_ids = await crud.get_module_descendants(db, module_id)
     return {"module_ids": module_ids}
 
 
 @router.post("/projects/{project_id}/modules", response_model=models.Module)
-def create_module(
+async def create_module(
     project_id: int,
     module: models.ModuleCreate,
     user=Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> models.Module:
     """创建模块"""
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=403, detail="无权访问该项目")
     # 验证项目存在
-    project = db.query(db_models.Project).filter(db_models.Project.id == project_id).first()
+    project = await crud.get_project(db, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -83,40 +83,40 @@ def create_module(
 
     # 验证 parent_id 不形成循环引用
     if module.parent_id is not None:
-        parent = db.query(db_models.Module).filter(db_models.Module.id == module.parent_id).first()
+        parent = await crud.get_module(db, module.parent_id)
         if not parent:
             raise HTTPException(status_code=400, detail="父模块不存在")
         if parent.project_id != project_id:
             raise HTTPException(status_code=400, detail="父模块不属于该项目")
 
-    db_module = crud.create_module(db, project_id, module)
+    db_module = await crud.create_module(db, project_id, module)
     return db_module
 
 
 @router.put("/modules/{module_id}", response_model=models.Module)
-def update_module(
+async def update_module(
     module_id: int,
     module: models.ModuleUpdate,
     admin=Depends(require_admin),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ) -> models.Module:
     """更新模块"""
     # 验证 parent_id 不形成循环引用
     if module.parent_id is not None:
-        if not crud.validate_module_parent(db, module_id, module.parent_id):
+        if not await crud.validate_module_parent(db, module_id, module.parent_id):
             raise HTTPException(status_code=400, detail="不能形成循环引用")
 
-    db_module = crud.update_module(db, module_id, module)
+    db_module = await crud.update_module(db, module_id, module)
     if not db_module:
         raise HTTPException(status_code=404, detail="Module not found")
     return db_module
 
 
 @router.delete("/modules/{module_id}", status_code=204)
-def delete_module(module_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)) -> Response:
+async def delete_module(module_id: int, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> Response:
     """删除模块（含删除保护）"""
     try:
-        result = crud.delete_module(db, module_id)
+        result = await crud.delete_module(db, module_id)
     except ValueError:
         raise HTTPException(status_code=409, detail="模块删除失败：存在冲突或约束限制")
     if result is None:

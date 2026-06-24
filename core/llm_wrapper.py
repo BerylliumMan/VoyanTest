@@ -121,17 +121,21 @@ OUTPUT SCHEMA (exact JSON):
 # ------------------------------------------------------------------
 
 
-def _load_db_config() -> dict:
+async def _load_db_config() -> dict:
     """Load the single AIConfig row from the database. Raises if absent or empty.
 
     The DB is seeded from config.json on first startup (see app/main.py).
+    Uses async SQLAlchemy via AsyncSessionLocal.
     """
-    from app.database import SessionLocal
+    from app.database import AsyncSessionLocal
+    from sqlalchemy import select
     from app import db_models
 
-    db = SessionLocal()
-    try:
-        row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(db_models.AIConfig).where(db_models.AIConfig.id == 1)
+        )
+        row = result.scalar_one_or_none()
         if not row:
             raise RuntimeError(
                 "ai_configs table has no row (id=1). "
@@ -143,11 +147,9 @@ def _load_db_config() -> dict:
             'api_base': row.api_base,
             'temperature': row.temperature,
         }
-    finally:
-        db.close()
 
 
-def _resolve_config(
+async def _resolve_config(
     explicit_key: str | None = None,
     explicit_base: str | None = None,
     explicit_model: str | None = None,
@@ -157,7 +159,7 @@ def _resolve_config(
     Explicit params override DB values. No environment, no Claude settings,
     no hardcoded defaults. Raises if DB row is missing — fail fast.
     """
-    cfg = _load_db_config()
+    cfg = await _load_db_config()
 
     missing = [k for k in ('api_key', 'api_base', 'model') if not cfg.get(k)]
     if missing and not any((explicit_key, explicit_base, explicit_model)):
@@ -178,12 +180,12 @@ def _resolve_config(
 # ------------------------------------------------------------------
 
 
-def create_openai_client(
+async def create_openai_client(
     api_key: str | None = None,
     api_base: str | None = None,
 ) -> AsyncOpenAI:
     """Create an OpenAI-compatible async client with resolved configuration."""
-    key, base, _ = _resolve_config(
+    key, base, _ = await _resolve_config(
         explicit_key=api_key,
         explicit_base=api_base,
     )
@@ -221,9 +223,9 @@ async def generate_tool_call(
         ValueError: If the LLM output cannot be parsed or validated
     """
     if client is None:
-        client = create_openai_client()
+        client = await create_openai_client()
 
-    _, _, resolved_model = _resolve_config(explicit_model=model)
+    _, _, resolved_model = await _resolve_config(explicit_model=model)
 
     user_message = (
         f"STEP DESCRIPTION:\n"
@@ -320,7 +322,7 @@ async def generate_tool_call(
 # Convenience: create LLM directly for test/debug
 # ------------------------------------------------------------------
 
-def create_wrapped_llm(
+async def create_wrapped_llm(
     model: str | None = None,
     api_key: str | None = None,
     api_base: str | None = None,
@@ -331,7 +333,7 @@ def create_wrapped_llm(
     Keeps the old function name for backwards compatibility while
     returning an AsyncOpenAI client instead of a browser-use subclass.
     """
-    return create_openai_client(api_key=api_key, api_base=api_base)
+    return await create_openai_client(api_key=api_key, api_base=api_base)
 
 
 # ------------------------------------------------------------------
@@ -383,9 +385,9 @@ async def verify_expected_result(
         VerificationResult with passed=True/False and reason
     """
     if client is None:
-        client = create_openai_client()
+        client = await create_openai_client()
 
-    _, _, resolved_model = _resolve_config(explicit_model=model)
+    _, _, resolved_model = await _resolve_config(explicit_model=model)
 
     context = f"STEP EXECUTED:\n{step_description}\n\n" if step_description else ""
     user_message = (

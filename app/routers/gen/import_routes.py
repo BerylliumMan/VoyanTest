@@ -7,11 +7,11 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ... import db_models
+from ... import crud
 from ...auth import get_current_user
-from ...database import get_db
+from ...database import get_async_db
 from .schemas import GenImportRequest, GenImportResponse
 from .state import _lock, _sessions
 
@@ -21,7 +21,7 @@ router = APIRouter()
 @router.post("/import", response_model=GenImportResponse)
 async def import_test_cases(
     body: GenImportRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> GenImportResponse:
     """Import selected test cases into a project."""
@@ -35,14 +35,12 @@ async def import_test_cases(
     if session and session.status == "completed":
         test_cases_data = session.test_cases
     else:
-        record = await loop.run_in_executor(None, lambda: db.query(db_models.GenSession).filter(db_models.GenSession.id == body.session_id).first())
+        record = await crud.get_gen_session(db, body.session_id)
         if not record:
             raise HTTPException(404, "记录不存在")
         if record.status != "completed":
             raise HTTPException(400, "分析尚未完成")
-        db_tcs = await loop.run_in_executor(None, lambda: db.query(db_models.GenTestCase).filter(
-            db_models.GenTestCase.session_id == body.session_id
-        ).all())
+        db_tcs = await crud.list_gen_test_cases(db, body.session_id)
         test_cases_data = [
             GenTestCaseModel(
                 test_case_id=tc.test_case_id,
@@ -57,19 +55,14 @@ async def import_test_cases(
             for tc in db_tcs
         ]
 
-    project = await loop.run_in_executor(None, lambda: db.query(db_models.Project).filter(db_models.Project.id == body.project_id).first())
+    project = await crud.get_project(db, body.project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
 
     from app.gen.adapter import import_test_cases as do_import
     created = await loop.run_in_executor(None, lambda: do_import(db, body.project_id, test_cases_data, body.selected_ids))
 
-    record = await loop.run_in_executor(None, lambda: db.query(db_models.GenSession).filter(db_models.GenSession.id == body.session_id).first())
-    if record:
-        record.imported_count = (record.imported_count or 0) + len(created)
-        if record.project_id is None:
-            record.project_id = body.project_id
-        await loop.run_in_executor(None, lambda: db.commit())
+    await crud.increment_imported_count(db, body.session_id, body.project_id, len(created))
 
     return GenImportResponse(
         imported_count=len(created),

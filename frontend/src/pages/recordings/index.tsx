@@ -18,6 +18,7 @@ import {
 } from '@arco-design/web-react/icon';
 import useLocale from '@/utils/useLocale';
 import { useRecordings, RecordedEvent, TestStep } from './hooks';
+import styles from './index.module.less';
 
 /**
  * 录制控制页：启动/停止 CDP 录制、查看录制事件、把事件转换为测试步骤。
@@ -139,7 +140,7 @@ const Recordings: React.FC = () => {
       return (
         <Space size={6} align="center">
           <span className="recording-pulse-dot" />
-          <Tag color="red" style={{ margin: 0 }}>{t['recordings.recording']}</Tag>
+          <Tag color="red" className={styles.tagNoMargin}>{t['recordings.recording']}</Tag>
         </Space>
       );
     }
@@ -147,14 +148,14 @@ const Recordings: React.FC = () => {
       return (
         <Space size={6} align="center">
           <Badge dot dotStyle={{ backgroundColor: '#86909c' }} />
-          <Tag color="gray" style={{ margin: 0 }}>{t['recordings.stopped']}</Tag>
+          <Tag color="gray" className={styles.tagNoMargin}>{t['recordings.stopped']}</Tag>
         </Space>
       );
     }
     return (
       <Space size={6} align="center">
         <Badge dot dotStyle={{ backgroundColor: '#165dff' }} />
-        <Tag color="blue" style={{ margin: 0 }}>{t['recordings.idle']}</Tag>
+        <Tag color="blue" className={styles.tagNoMargin}>{t['recordings.idle']}</Tag>
       </Space>
     );
   };
@@ -178,7 +179,7 @@ const Recordings: React.FC = () => {
       dataIndex: 'selector',
       ellipsis: true,
       render: (v: string) => (
-        <span title={v || ''} style={{ fontFamily: 'monospace' }}>
+        <span title={v || ''} className={styles.codeText}>
           {truncate(v, 40)}
         </span>
       ),
@@ -204,7 +205,7 @@ const Recordings: React.FC = () => {
       title: '#',
       width: 56,
       render: (_: unknown, _r: TestStep, idx: number) => (
-        <Tag style={{ minWidth: 28, textAlign: 'center' }}>{idx + 1}</Tag>
+        <Tag className={styles.stepIndexTag}>{idx + 1}</Tag>
       ),
     },
     {
@@ -229,14 +230,14 @@ const Recordings: React.FC = () => {
 
       <div>
         {/* A. 控制区 */}
-        <Card title={t['recordings.control']} style={{ marginBottom: 16 }}>
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+        <Card title={t['recordings.control']} className={styles.cardMargin}>
+          <Space direction="vertical" size="large" className={styles.fullWidth}>
             <Space wrap size="medium" align="center">
-              <span style={{ minWidth: 72, color: 'var(--color-text-2)' }}>
+              <span className={styles.label}>
                 {t['recordings.target_url']}
               </span>
               <Input
-                style={{ width: 480 }}
+                className={styles.urlInput}
                 placeholder={t['recordings.url_placeholder']}
                 value={url}
                 onChange={(v) => setUrl(v)}
@@ -266,17 +267,13 @@ const Recordings: React.FC = () => {
             </Space>
 
             <Space wrap size="medium" align="center">
-              <span style={{ minWidth: 72, color: 'var(--color-text-2)' }}>
+              <span className={styles.label}>
                 {t['recordings.status']}
               </span>
               {renderStatusBadge()}
               {sessionId && (
                 <span
-                  style={{
-                    color: 'var(--color-text-3)',
-                    fontSize: 13,
-                    fontFamily: 'monospace',
-                  }}
+                  className={styles.sessionId}
                   title={sessionId}
                 >
                   {t['recordings.session_id']} {sessionId}
@@ -304,14 +301,10 @@ const Recordings: React.FC = () => {
                 )}
               </Space>
             }
-            style={{ marginBottom: 16 }}
+            className={styles.cardMargin}
           >
             <div
-              style={{
-                marginBottom: 12,
-                color: 'var(--color-text-2)',
-                fontSize: 13,
-              }}
+              className={styles.eventsCount}
             >
               {t['recordings.events_count'].replace('{count}', String(events.length))}
               {status === 'recording' && ` · ${t['recordings.auto_refresh']}`}
@@ -325,7 +318,7 @@ const Recordings: React.FC = () => {
               pagination={{ pageSize: 20, showTotal: true }}
               scroll={{ x: 900 }}
               noDataElement={
-                <div style={{ padding: 24, color: 'var(--color-text-3)' }}>
+                <div className={styles.emptyState}>
                   {status === 'recording'
                     ? t['recordings.no_events_waiting']
                     : t['recordings.no_events']}
@@ -341,7 +334,7 @@ const Recordings: React.FC = () => {
             <Space
               direction="vertical"
               size="medium"
-              style={{ width: '100%' }}
+              className={styles.fullWidth}
             >
               <Space wrap size="medium" align="center">
                 <Button
@@ -355,7 +348,7 @@ const Recordings: React.FC = () => {
                 </Button>
                 {converting && <Spin />}
                 {steps.length > 0 && (
-                  <span style={{ color: 'var(--color-text-2)' }}>
+                  <span className={styles.mutedText}>
                     {t['recordings.steps_count'].replace('{count}', String(steps.length))}
                   </span>
                 )}

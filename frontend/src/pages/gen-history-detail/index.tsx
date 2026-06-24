@@ -96,7 +96,16 @@ const TruncateText: React.FC<{ text: string; maxWidth?: number }> = ({
   text,
   maxWidth = 200,
 }) => (
-  <span title={text} style={{ display: 'inline-block', maxWidth, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+  <span
+    title={text}
+    style={{
+      display: 'inline-block',
+      maxWidth,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    }}
+  >
     {text || '-'}
   </span>
 );
@@ -111,9 +120,9 @@ const NumberedList: React.FC<{ text: string }> = ({ text }) => {
   const items = splitNumberedItems(text);
   if (items.length === 0) return <span>-</span>;
   return (
-    <ol style={{ margin: 0, paddingLeft: 20 }}>
+    <ol className={styles.numberedList}>
       {items.map((item, idx) => (
-        <li key={idx} style={{ marginBottom: 4 }}>{item}</li>
+        <li key={idx} className={styles.numberedListItem}>{item}</li>
       ))}
     </ol>
   );
@@ -394,7 +403,7 @@ const GenHistoryDetailPage: React.FC = () => {
       dataIndex: 'test_case_id',
       width: 120,
       render: (val: string) => (
-        <Text copyable={{ text: val }} style={{ fontSize: 12 }}>
+        <Text copyable={{ text: val }} className={styles.copyableText}>
           {val.length > 12 ? `${val.slice(0, 12)}...` : val}
         </Text>
       ),
@@ -464,7 +473,7 @@ const GenHistoryDetailPage: React.FC = () => {
   if (loading) {
     return (
       <div className={styles.container}>
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 400 }}>
+        <div className={styles.loadingContainer}>
           <Spin size={40} tip="加载中…" />
         </div>
       </div>
@@ -487,7 +496,7 @@ const GenHistoryDetailPage: React.FC = () => {
               <Title heading={5}>分析详情</Title>
             </div>
           </div>
-          <div style={{ textAlign: 'center', padding: 40 }}>
+          <div className={styles.errorState}>
             <Text type="secondary">{error}</Text>
           </div>
         </Card>
@@ -507,7 +516,7 @@ const GenHistoryDetailPage: React.FC = () => {
             >
               返回
             </Button>
-            <Title heading={5} style={{ margin: 0 }}>
+            <Title heading={5} className={styles.titleNoMargin}>
               {historyItem?.filename || '分析详情'}
             </Title>
             {historyItem && getStatusTag(historyItem.status)}
@@ -529,7 +538,7 @@ const GenHistoryDetailPage: React.FC = () => {
             <div className={styles.importActions}>
               <Select
                 placeholder="选择目标项目"
-                style={{ width: 200 }}
+                className={styles.projectSelect}
                 value={selectedProjectId}
                 onChange={(val) => setSelectedProjectId(val as number)}
                 allowClear
@@ -583,17 +592,17 @@ const GenHistoryDetailPage: React.FC = () => {
                     name={String(fp.id)}
                     header={
                       <span>
-                        <Tag color="arcoblue" size="small" style={{ marginRight: 8 }}>
+                        <Tag color="arcoblue" size="small" className={styles.tagMarginRight}>
                           {fp.module || '通用'}
                         </Tag>
-                        <Tag size="small" style={{ marginRight: 8 }}>
+                        <Tag size="small" className={styles.tagMarginRight}>
                           {fp.category || ''}
                         </Tag>
                         {fp.name}
                       </span>
                     }
                   >
-                    <div style={{ whiteSpace: 'pre-wrap', color: 'var(--color-text-2)', fontSize: 13, lineHeight: 1.7 }}>
+                    <div className={styles.description}>
                       {fp.description || '暂无描述'}
                     </div>
                   </Collapse.Item>
@@ -639,7 +648,7 @@ const GenHistoryDetailPage: React.FC = () => {
         onOk={handleEditSubmit}
         confirmLoading={editSubmitting}
         unmountOnExit
-        style={{ width: 640 }}
+        className={styles.modalWide}
       >
         <Form form={editForm} layout="vertical">
           <FormItem label="模块" field="module" rules={[{ required: true, message: '请输入模块名称' }]}>
@@ -678,7 +687,6 @@ const GenHistoryDetailPage: React.FC = () => {
                     value={step.parsed_result || ''}
                     onChange={(v) => updateStep(idx, 'parsed_result', v)}
                     autoSize={{ minRows: 1, maxRows: 6 }}
-                    style={{ flex: 1 }}
                   />
                   <Button type="text" icon={<IconPlus />} onClick={() => insertStep(idx)} title="在上方插入" />
                   <Button type="text" icon={<IconCopy />} onClick={() => copyStep(idx)} title="复制" />

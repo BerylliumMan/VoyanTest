@@ -16,8 +16,8 @@ class TestCase(Base):
     project_case_number = Column(Integer, nullable=False, default=0, index=True)  # 项目内自增编号
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=tz_now)
-    updated_at = Column(DateTime, default=tz_now, onupdate=tz_now)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
+    updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 
     # 版本控制字段
     version = Column(Integer, default=1, nullable=False)

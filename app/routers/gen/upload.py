@@ -16,11 +16,12 @@ from io import BytesIO
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ... import db_models
+from ... import crud
 from ...auth import get_current_user
-from ...database import get_db
+from ...database import get_async_db
 from app.gen.constants import ALLOWED_EXTENSIONS
 from .state import _lock, _sessions
 
@@ -61,7 +62,7 @@ async def upload_and_analyze(
     files: List[UploadFile] = File(...),
     project_description: str = Form(""),
     project_id: Optional[int] = Form(None),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     """Upload document(s) and start AI analysis to generate test cases."""
@@ -90,37 +91,35 @@ async def upload_and_analyze(
     async with _lock:
         _sessions[session_id] = session
 
-    db_record = db_models.GenSession(
-        id=session_id,
+    await crud.create_gen_session(
+        db,
+        session_id=session_id,
         filename=filenames[0] if filenames else "unknown",
         filenames=json.dumps(filenames),
         project_id=project_id,
         project_description=project_description,
-        status="analyzing",
     )
-    db.add(db_record)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: db.commit())
 
     def _run_full_analysis() -> None:
         try:
             from app.gen.analyzer import extract_multi_file_content, two_phase_analyze, get_default_prompts
-            from app.database import SessionLocal
+            from app.database import AsyncSessionLocal
 
             combined_text, _, warnings = extract_multi_file_content(
                 file_contents, filenames
             )
 
-            thread_db = SessionLocal()
-            try:
-                defaults = get_default_prompts()
-                prompt_rows = thread_db.query(db_models.PromptTemplate).all()
-                prompts = {}
-                for row in prompt_rows:
-                    if row.is_custom and row.template_key in defaults:
-                        prompts[row.template_key] = {"content": row.template_content}
-            finally:
-                thread_db.close()
+            async def _load_prompts() -> dict:
+                async with AsyncSessionLocal() as thread_db:
+                    defaults = get_default_prompts()
+                    prompt_rows = await crud.list_prompt_templates(thread_db)
+                    prompts: dict = {}
+                    for row in prompt_rows:
+                        if row.is_custom and row.template_key in defaults:
+                            prompts[row.template_key] = {"content": row.template_content}
+                    return prompts
+
+            prompts = asyncio.run(_load_prompts())
 
             result = two_phase_analyze(
                 combined_text,
@@ -161,39 +160,20 @@ async def upload_and_analyze(
 def _update_db_session(session_id: str, status: str, error_msg: str, fp_count: int, tc_count: int,
                        functional_points: list = None, test_cases: list = None) -> None:
     """Update GenSession DB record after analysis completes, and persist results."""
-    from app.database import SessionLocal
-    db = SessionLocal()
-    try:
-        record = db.query(db_models.GenSession).filter(db_models.GenSession.id == session_id).first()
-        if record:
-            record.status = status
-            record.error_message = error_msg
-            record.functional_points_count = fp_count
-            record.test_cases_count = tc_count
-            if status in ("completed", "failed"):
-                record.completed_at = datetime.now()
+    from app.database import AsyncSessionLocal
 
-            if status == "completed" and functional_points and test_cases:
-                for fp in functional_points:
-                    db.add(db_models.GenFunctionalPoint(
-                        session_id=session_id,
-                        fp_id=fp.id,
-                        module=fp.module,
-                        name=fp.name,
-                        description=fp.description,
-                        category=fp.category,
-                    ))
-                for tc in test_cases:
-                    db.add(db_models.GenTestCase(
-                        session_id=session_id,
-                        test_case_id=tc.test_case_id,
-                        module=tc.module,
-                        title=tc.title,
-                        preconditions=tc.preconditions,
-                        test_steps=tc.test_steps,
-                        expected_result=tc.expected_result,
-                        priority=tc.priority,
-                    ))
-            db.commit()
-    finally:
-        db.close()
+    async def _work() -> None:
+        async with AsyncSessionLocal() as db:
+            await crud.persist_gen_session_results(
+                db,
+                session_id,
+                status=status,
+                error_message=error_msg,
+                functional_points_count=fp_count,
+                test_cases_count=tc_count,
+                completed_at=datetime.now() if status in ("completed", "failed") else None,
+                functional_points=functional_points,
+                test_cases=test_cases,
+            )
+
+    asyncio.run(_work())

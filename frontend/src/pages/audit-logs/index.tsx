@@ -3,6 +3,7 @@ import { Card, Table, Input, Select, Button, Space, DatePicker, Message } from '
 import { IconSearch, IconRefresh } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import logger from '@/utils/logger';
 import styles from './style/index.module.less';
 
 const { RangePicker } = DatePicker;
@@ -56,7 +57,7 @@ function AuditLogs() {
   };
 
   const fetchUsers = () => {
-    axios.get('/api/users/').then((res) => setUsers(res.data || [])).catch((err) => { console.error('Failed to load users:', err); });
+    axios.get('/api/users/').then((res) => setUsers(res.data || [])).catch((err) => { logger.error('Failed to load users:', err); });
   };
 
   useEffect(() => { fetchUsers(); }, []);

@@ -130,3 +130,146 @@
   animation: progressGlow 2s ease-in-out infinite;
   border-radius: var(--border-radius-medium);
 }
+
+// 通用布局工具类
+.fullWidth {
+  width: 100%;
+}
+
+.flexRow {
+  display: flex;
+}
+
+.flexCenter {
+  display: flex;
+  align-items: center;
+}
+
+.flexGrow {
+  flex: 1;
+  min-width: 0;
+}
+
+.formLabel {
+  width: 120px;
+  flex-shrink: 0;
+}
+
+.formLabelWithTop {
+  width: 120px;
+  flex-shrink: 0;
+  padding-top: 4px;
+}
+
+.selectNarrow {
+  width: 300px;
+}
+
+.inputMaxWidth {
+  max-width: 600px;
+}
+
+// 编号列表
+.numberedList {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.numberedListItem {
+  margin-bottom: 4px;
+}
+
+// 分析中状态
+.analyzingCentered {
+  text-align: center;
+}
+
+.primaryIcon {
+  color: rgb(var(--primary-6));
+}
+
+// 结果展示
+.resultCentered {
+  text-align: center;
+  padding: 12px 0;
+}
+
+.resultTitle {
+  margin-top: 8px;
+}
+
+.successIconLarge {
+  font-size: 48px;
+  color: rgb(var(--success-6));
+}
+
+.successTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: rgb(var(--success-6));
+}
+
+.dangerIconLarge {
+  font-size: 48px;
+  color: rgb(var(--danger-6));
+}
+
+.dangerText {
+  color: rgb(var(--danger-6));
+}
+
+.mutedText {
+  color: var(--color-text-3);
+}
+
+// 功能点
+.tagMarginRight {
+  margin-right: 8px;
+}
+
+.description {
+  white-space: pre-wrap;
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+// 提示词配置
+.promptListWrapper {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+.spinCentered {
+  display: block;
+  margin: 20px auto;
+}
+
+.promptItemMeta {
+  font-size: 12px;
+}
+
+.promptHeaderSpace {
+  margin-bottom: 12px;
+}
+
+.promptLabel {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.codeArea {
+  min-height: 300px;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.promptActions {
+  margin-top: 12px;
+}
+
+.emptyPromptState {
+  text-align: center;
+  padding: 60px;
+  color: var(--color-text-3);
+}

@@ -3,6 +3,7 @@ import { Card, Table, Modal, Form, Input, Select, Button, Message, Space } from 
 import { IconPlus, IconEdit } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import styles from './style/index.module.less';
 
 interface UserInfo {
   id: number;
@@ -63,7 +64,7 @@ function UserManagement() {
         await axios.put(`/api/users/${editingUser.id}`, values);
         Message.success(t['user.updated']);
       } else {
-        await axios.post('/api/users/', { ...values, password: values.password || 'User@2024' });
+        await axios.post('/api/users/', { ...values, password: values.password });
         Message.success(t['user.created']);
       }
       setUserVisible(false);
@@ -108,7 +109,7 @@ function UserManagement() {
 
   return (
     <Card>
-      <Space style={{ marginBottom: 16 }}>
+      <Space className={styles.actionsRow}>
         <Button type="primary" icon={<IconPlus />} onClick={() => openUserModal()}>
           {t['new.user']}
         </Button>

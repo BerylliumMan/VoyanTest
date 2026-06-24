@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from .. import models
-from ..database import get_db
+from ..database import get_async_db
 from ..auth import require_admin
 from .. import crud
 from app.tz import now as tz_now
@@ -16,7 +16,7 @@ router = APIRouter(
 
 
 @router.get("/agents", response_model=List[models.Agent])
-def list_agents(db: Session = Depends(get_db)) -> list[models.Agent]:
+async def list_agents(db: AsyncSession = Depends(get_async_db)) -> list[models.Agent]:
     """不直接用 DB 的 `status` 字段——它会"粘性 online"（一旦设过永远不重置）。
 
     status 按心跳时间动态算，看两个源头：DB.last_heartbeat（HTTP 路径）
@@ -41,7 +41,7 @@ def list_agents(db: Session = Depends(get_db)) -> list[models.Agent]:
 
         return False
 
-    db_agents = crud.list_agents(db)
+    db_agents = await crud.list_agents(db)
     db_names = {a.name for a in db_agents}
 
     for a in db_agents:
@@ -63,42 +63,42 @@ def list_agents(db: Session = Depends(get_db)) -> list[models.Agent]:
 
 
 @router.post("/agents/register", response_model=models.Agent)
-def register_agent(agent: models.AgentCreate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Agent:
-    if crud.get_agent_by_name(db, agent.name) is not None:
+async def register_agent(agent: models.AgentCreate, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> models.Agent:
+    if await crud.get_agent_by_name(db, agent.name) is not None:
         raise HTTPException(status_code=400, detail="Agent name already exists")
-    return crud.create_agent(db, agent)
+    return await crud.create_agent(db, agent)
 
 
 @router.put("/agents/{agent_id}", response_model=models.Agent)
-def update_agent(agent_id: int, agent: models.AgentUpdate, admin=Depends(require_admin), db: Session = Depends(get_db)) -> models.Agent:
-    db_agent = crud.update_agent(db, agent_id, agent)
+async def update_agent(agent_id: int, agent: models.AgentUpdate, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> models.Agent:
+    db_agent = await crud.update_agent(db, agent_id, agent)
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return db_agent
 
 
 @router.delete("/agents/{agent_id}")
-def delete_agent(agent_id: int, admin=Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    if crud.delete_agent(db, agent_id) is None:
+async def delete_agent(agent_id: int, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> dict:
+    if await crud.delete_agent(db, agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"message": "Agent deleted"}
 
 
 @router.get("/agents/{agent_id}/logs", response_model=models.AgentLogPage)
-def get_agent_logs(
+async def get_agent_logs(
     agent_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
 ) -> models.AgentLogPage:
-    if crud.get_agent(db, agent_id) is None:
+    if await crud.get_agent(db, agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return crud.list_agent_logs(db, agent_id, page, size)
+    return await crud.list_agent_logs(db, agent_id, page, size)
 
 
 @router.post("/agents/{agent_id}/heartbeat", response_model=models.Agent)
-def agent_heartbeat(agent_id: int, db: Session = Depends(get_db)) -> models.Agent:
-    db_agent = crud.update_agent_heartbeat(db, agent_id)
+async def agent_heartbeat(agent_id: int, db: AsyncSession = Depends(get_async_db)) -> models.Agent:
+    db_agent = await crud.update_agent_heartbeat(db, agent_id)
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return db_agent

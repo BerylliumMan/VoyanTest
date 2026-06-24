@@ -4,10 +4,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
-from app.database import get_db
+from app.database import get_async_db
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class PreviewPlanResponse(BaseModel):
 
 
 @router.post("/preview-plan", response_model=PreviewPlanResponse)
-def preview_plan(req: PreviewPlanRequest, db: Session = Depends(get_db)) -> PreviewPlanResponse:
+async def preview_plan(req: PreviewPlanRequest, db: AsyncSession = Depends(get_async_db)) -> PreviewPlanResponse:
     """
     预览 AI Agent 对测试用例的执行计划。
     返回每步的描述和预计操作。
@@ -47,11 +47,11 @@ def preview_plan(req: PreviewPlanRequest, db: Session = Depends(get_db)) -> Prev
             warning="请先保存测试用例后再预览计划",
         )
 
-    db_case = crud.get_test_case(db, req.case_id)
+    db_case = await crud.get_test_case(db, req.case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    steps = crud.get_steps_for_case(db, req.case_id)
+    steps = await crud.get_steps_for_case(db, req.case_id)
     plan_items = []
     for s in steps:
         plan_items.append(PreviewPlanItem(

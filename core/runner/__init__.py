@@ -11,7 +11,7 @@
     _validate_nav_url, _resolve_env_cookies, _inject_auth_cookies
 
 测试通过 patch("core.runner.X") mock 子模块内的依赖 — 必须把这些名字
-(SessionLocal / crud / tz_now) 在包级也暴露出来。
+(AsyncSessionLocal / crud / tz_now) 在包级也暴露出来。
 """
 
 from core.runner._execution import run_test_case_in_browser
@@ -23,9 +23,9 @@ from core.runner._validators import (
     _validate_nav_url,
 )
 
-# Re-export 子模块依赖 — 让 patch("core.runner.SessionLocal", ...) 仍能命中
+# Re-export 子模块依赖 — 让 patch("core.runner.AsyncSessionLocal", ...) 仍能命中
 from app import crud  # noqa: E402
-from app.database import SessionLocal  # noqa: E402
+from app.database import AsyncSessionLocal  # noqa: E402
 from app.tz import now as tz_now  # noqa: E402
 
 # Re-export urlparse — tests patch core.runner.urlparse
@@ -45,7 +45,7 @@ __all__ = [
     "_resolve_env_cookies",
     "_inject_auth_cookies",
     # Re-exported dependencies (for mock patching)
-    "SessionLocal",
+    "AsyncSessionLocal",
     "crud",
     "tz_now",
     "urlparse",

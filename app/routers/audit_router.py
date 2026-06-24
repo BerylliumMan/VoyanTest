@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import logging
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-from app import db_models, models
-from app.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from app import crud, models
+from app.database import get_async_db
 from app.auth import require_admin
 from app.rate_limiter import limiter
 from datetime import datetime
@@ -18,9 +17,9 @@ router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"])
 
 @router.get("/", response_model=models.AuditLogPage)
 @limiter.limit("30/minute")
-def list_audit_logs(
+async def list_audit_logs(
     request: Request,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     admin=Depends(require_admin),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -29,32 +28,35 @@ def list_audit_logs(
     date_from: str = Query(None),
     date_to: str = Query(None),
 ) -> models.AuditLogPage:
-    q = db.query(db_models.AuditLog)
-    if user_id is not None:
-        q = q.filter(db_models.AuditLog.user_id == user_id)
-    if action:
-        # 转义 LIKE 通配符防止意外匹配过多记录
-        escaped = action.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        q = q.filter(db_models.AuditLog.action.like(f"%{escaped}%", escape="\\"))
+    # 解析 date_from / date_to，解析失败记 warning 但不阻塞查询
+    parsed_date_from = None
+    parsed_date_to = None
     if date_from:
         try:
-            dt = datetime.fromisoformat(date_from)
-            q = q.filter(db_models.AuditLog.created_at >= dt)
+            parsed_date_from = datetime.fromisoformat(date_from)
         except ValueError:
             logger.warning("无效的 date_from 参数: %s", date_from)
     if date_to:
         try:
-            dt = datetime.fromisoformat(date_to)
-            q = q.filter(db_models.AuditLog.created_at <= dt)
+            parsed_date_to = datetime.fromisoformat(date_to)
         except ValueError:
             logger.warning("无效的 date_to 参数: %s", date_to)
 
-    total = q.count()
-    logs = q.order_by(desc(db_models.AuditLog.created_at)).offset((page - 1) * size).limit(size).all()
+    result = await crud.list_audit_logs(
+        db,
+        user_id=user_id,
+        action=action,
+        date_from=parsed_date_from,
+        date_to=parsed_date_to,
+        page=page,
+        size=size,
+    )
+    total = result["total"]
+    logs = result["items"]
 
     # 关联用户名
     user_ids = {l.user_id for l in logs if l.user_id}
-    users = {u.id: u.username for u in db.query(db_models.User).filter(db_models.User.id.in_(user_ids)).all()} if user_ids else {}
+    users = {u.id: u.username for u in await crud.get_users_by_ids(db, list(user_ids))} if user_ids else {}
 
     items = []
     for l in logs:

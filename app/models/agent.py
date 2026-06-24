@@ -14,8 +14,8 @@ class Agent(Base):
     endpoint = Column(String(500), nullable=False)
     description = Column(Text, default="")
     status = Column(String(50), default="offline")
-    last_heartbeat = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=tz_now)
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
 
 
 class AgentLog(Base):
@@ -25,4 +25,4 @@ class AgentLog(Base):
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
     level = Column(String(50), default="info")
     message = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=tz_now)
+    created_at = Column(DateTime(timezone=True), default=tz_now)

@@ -43,7 +43,7 @@ export interface ApiRequestOptions {
  *   - 默认 `showError` 为 true；想静默失败时传 `{ showError: false }`
  *   - 不修改 main.tsx 中的全局 axios 拦截器（401 重定向仍由拦截器处理）
  */
-export async function apiRequest<T = any>(
+export async function apiRequest<T = unknown>(
   config: AxiosRequestConfig,
   options?: ApiRequestOptions
 ): Promise<T> {
@@ -74,17 +74,17 @@ export async function apiRequest<T = any>(
 }
 
 /** GET 便捷方法：默认不弹成功消息（纯查询） */
-export const apiGet = <T = any>(url: string, params?: any) =>
+export const apiGet = <T = unknown>(url: string, params?: Record<string, unknown>) =>
   apiRequest<T>({ method: 'GET', url, params }, { showSuccess: false });
 
 /** POST 便捷方法：传 successMessage 时弹成功提示 */
-export const apiPost = <T = any>(url: string, data?: any, msg?: string) =>
+export const apiPost = <T = unknown>(url: string, data?: unknown, msg?: string) =>
   apiRequest<T>({ method: 'POST', url, data }, { successMessage: msg });
 
 /** PUT 便捷方法：传 successMessage 时弹成功提示 */
-export const apiPut = <T = any>(url: string, data?: any, msg?: string) =>
+export const apiPut = <T = unknown>(url: string, data?: unknown, msg?: string) =>
   apiRequest<T>({ method: 'PUT', url, data }, { successMessage: msg });
 
 /** DELETE 便捷方法：传 successMessage 时弹成功提示 */
-export const apiDelete = <T = any>(url: string, msg?: string) =>
+export const apiDelete = <T = unknown>(url: string, msg?: string) =>
   apiRequest<T>({ method: 'DELETE', url }, { successMessage: msg });

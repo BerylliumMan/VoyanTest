@@ -11,6 +11,7 @@ import {
 } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import logger from '@/utils/logger';
 import styles from './style/index.module.less';
 
 const { Title, Text } = Typography;
@@ -28,9 +29,9 @@ const NumberedList: React.FC<{ text: string }> = ({ text }) => {
   const items = splitNumberedItems(text);
   if (items.length === 0) return <span>-</span>;
   return (
-    <ol style={{ margin: 0, paddingLeft: 20 }}>
+    <ol className={styles.numberedList}>
       {items.map((item, idx) => (
-        <li key={idx} style={{ marginBottom: 4 }}>{item}</li>
+        <li key={idx} className={styles.numberedListItem}>{item}</li>
       ))}
     </ol>
   );
@@ -184,7 +185,7 @@ const GenPage: React.FC = () => {
           Message.error(status.message || '分析失败');
         }
       } catch (err) {
-        console.error('Polling error:', err);
+        logger.error('Polling error:', err);
       }
     }, 2000);
   };
@@ -329,14 +330,14 @@ const GenPage: React.FC = () => {
   return (
     <div className={styles.container}>
       <Card>
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+        <Space direction="vertical" size="large" className={styles.fullWidth}>
           <div>
             <Title heading={5}>项目信息</Title>
-            <Space style={{ width: '100%' }} direction="vertical">
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                <Text style={{ width: 120, flexShrink: 0 }}>选择项目：</Text>
+            <Space className={styles.fullWidth} direction="vertical">
+              <div className={styles.flexCenter}>
+                <Text className={styles.formLabel}>选择项目：</Text>
                 <Select
-                  style={{ width: 300 }}
+                  className={styles.selectNarrow}
                   placeholder="请选择项目"
                   value={selectedProject}
                   onChange={(v) =>
@@ -345,10 +346,10 @@ const GenPage: React.FC = () => {
                   options={projects.map((p) => ({ label: p.name, value: p.id }))}
                 />
               </div>
-              <div style={{ display: 'flex' }}>
-                <Text style={{ width: 120, flexShrink: 0, paddingTop: 4 }}>项目描述（可选）：</Text>
+              <div className={styles.flexRow}>
+                <Text className={styles.formLabelWithTop}>项目描述（可选）：</Text>
                 <Input.TextArea
-                  style={{ maxWidth: 600 }}
+                  className={styles.inputMaxWidth}
                   placeholder="描述项目的功能和测试重点…"
                   value={description}
                   onChange={(e) => setDescription(e)}
@@ -416,7 +417,7 @@ const GenPage: React.FC = () => {
               <Divider />
               {analysisStatus.status === 'analyzing' && (
                 <Card className={styles.analyzingCard}>
-                  <Space direction="vertical" style={{ width: '100%' }} size="large">
+                  <Space direction="vertical" className={styles.fullWidth} size="large">
                     <div>
                       <div className={styles.stepRow}>
                         {[
@@ -487,9 +488,9 @@ const GenPage: React.FC = () => {
                     </div>
 
                     {/* 状态信息 */}
-                    <div style={{ textAlign: 'center' }}>
+                    <div className={styles.analyzingCentered}>
                       <Space>
-                        <IconLoading spin style={{ color: 'rgb(var(--primary-6))' }} />
+                        <IconLoading spin className={styles.primaryIcon} />
                         <Text>{analysisStatus.message || '分析中…'}</Text>
                       </Space>
                     </div>
@@ -499,14 +500,14 @@ const GenPage: React.FC = () => {
 
               {analysisStatus.status === 'completed' && (
                 <Card>
-                  <div style={{ textAlign: 'center', padding: '12px 0' }}>
-                    <IconCheck style={{ fontSize: 48, color: 'rgb(var(--success-6))' }} aria-hidden />
-                    <div style={{ marginTop: 8 }}>
-                      <Text style={{ fontSize: 16, fontWeight: 600, color: 'rgb(var(--success-6))' }}>
+                  <div className={styles.resultCentered}>
+                    <IconCheck className={styles.successIconLarge} aria-hidden />
+                    <div className={styles.resultTitle}>
+                      <Text className={styles.successTitle}>
                         分析完成
                       </Text>
                     </div>
-                    <Text style={{ color: 'var(--color-text-3)' }}>
+                    <Text className={styles.mutedText}>
                       共提取 {functionalPoints.length} 个功能点，生成 {testCases.length} 个测试用例
                     </Text>
                   </div>
@@ -515,10 +516,10 @@ const GenPage: React.FC = () => {
 
               {analysisStatus.status === 'failed' && (
                 <Card>
-                  <div style={{ textAlign: 'center', padding: '12px 0' }}>
-                    <IconClose style={{ fontSize: 48, color: 'rgb(var(--danger-6))' }} aria-hidden />
-                    <div style={{ marginTop: 8 }}>
-                      <Text style={{ color: 'rgb(var(--danger-6))' }}>
+                  <div className={styles.resultCentered}>
+                    <IconClose className={styles.dangerIconLarge} aria-hidden />
+                    <div className={styles.resultTitle}>
+                      <Text className={styles.dangerText}>
                         {analysisStatus.message || '分析失败'}
                       </Text>
                     </div>
@@ -540,14 +541,14 @@ const GenPage: React.FC = () => {
                       name={String(fp.id)}
                       header={
                         <span>
-                          <Tag color="arcoblue" size="small" style={{ marginRight: 8 }}>
+                          <Tag color="arcoblue" size="small" className={styles.tagMarginRight}>
                             {fp.module || '通用'}
                           </Tag>
                           {fp.name}
                         </span>
                       }
                     >
-                      <div style={{ whiteSpace: 'pre-wrap', color: 'var(--color-text-2)', fontSize: 13, lineHeight: 1.7 }}>
+                      <div className={styles.description}>
                         {fp.description || '暂无描述'}
                       </div>
                     </Collapse.Item>
@@ -587,12 +588,12 @@ const GenPage: React.FC = () => {
             }}
           >
             <Collapse.Item header="提示词配置" name="prompt-config">
-              <Space style={{ width: '100%' }} align="start">
-                <div style={{ width: 240, flexShrink: 0 }}>
+              <Space className={styles.fullWidth} align="start">
+                <div className={styles.promptListWrapper}>
                   {promptLoading ? (
-                    <Spin style={{ display: 'block', margin: '20px auto' }} />
+                    <Spin className={styles.spinCentered} />
                   ) : prompts.length === 0 ? (
-                    <Text style={{ color: 'var(--color-text-3)' }}>暂无模板</Text>
+                    <Text className={styles.mutedText}>暂无模板</Text>
                   ) : (
                     <List
                       size="small"
@@ -615,28 +616,28 @@ const GenPage: React.FC = () => {
                                 {item.is_custom && <Tag color="blue" size="small">已修改</Tag>}
                               </Space>
                             }
-                            description={<Text style={{ fontSize: 12 }}>{item.template_key}</Text>}
+                            description={<Text className={styles.promptItemMeta}>{item.template_key}</Text>}
                           />
                         </List.Item>
                       )}
                     />
                   )}
                 </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
+                <div className={styles.flexGrow}>
                   {selectedPrompt ? (
                     <>
-                      <Space style={{ marginBottom: 12 }}>
-                        <Text style={{ fontWeight: 600, fontSize: 14 }}>{selectedPrompt.label}</Text>
+                      <Space className={styles.promptHeaderSpace}>
+                        <Text className={styles.promptLabel}>{selectedPrompt.label}</Text>
                         {selectedPrompt.is_custom && (
                           <Tag color="blue" size="small">已自定义</Tag>
                         )}
                       </Space>
                       <Input.TextArea
-                        style={{ minHeight: 300, fontFamily: 'monospace', fontSize: 13 }}
+                        className={styles.codeArea}
                         value={editedContent}
                         onChange={setEditedContent}
                       />
-                      <Space style={{ marginTop: 12 }}>
+                      <Space className={styles.promptActions}>
                         <Button
                           type="primary"
                           icon={<IconSave />}
@@ -657,7 +658,7 @@ const GenPage: React.FC = () => {
                       </Space>
                     </>
                   ) : (
-                    <div style={{ textAlign: 'center', padding: 60, color: 'var(--color-text-3)' }}>
+                    <div className={styles.emptyPromptState}>
                       请从左侧选择一个提示词模板
                     </div>
                   )}

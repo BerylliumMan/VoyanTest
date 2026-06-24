@@ -1,6 +1,7 @@
 import React from 'react';
 import loadable, { LoadableComponent } from '@loadable/component';
 import { Spin } from '@arco-design/web-react';
+import logger from './logger';
 import styles from '../style/layout.module.less';
 
 // https://github.com/gregberge/loadable-components/pull/226
@@ -12,15 +13,17 @@ type LoadableReturn = React.ComponentType<unknown> & {
   preload: () => Promise<unknown>;
 };
 
+// Widens the strict generic signature to accept a loader returning an
+// unknown component shape.
+const loadableTyped = loadable as <P>(
+  loadFn: () => Promise<P>,
+  opts: { fallback?: unknown }
+) => LoadableComponent<P>;
+
 function load(fn: LoadableFn, options: { fallback?: unknown }): LoadableReturn {
-  const Component = (loadable as unknown as <P>(
-    loadFn: () => Promise<P>,
-    opts: { fallback?: unknown }
-  ) => LoadableComponent<P>)(fn as () => Promise<unknown>, options) as unknown as LoadableReturn;
-
-  Component.preload = fn.requireAsync || fn;
-
-  return Component;
+  const Component = loadableTyped(fn, options);
+  const customPreload: () => Promise<unknown> = fn.requireAsync || fn;
+  return Object.assign(Component as React.ComponentType<unknown>, { preload: customPreload });
 }
 
 function LoadingComponent(props: {
@@ -29,7 +32,7 @@ function LoadingComponent(props: {
   pastDelay: boolean;
 }) {
   if (props.error) {
-    console.error(props.error);
+    logger.error(props.error);
     return null;
   }
   return (

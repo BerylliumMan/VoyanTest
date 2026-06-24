@@ -58,12 +58,12 @@ const Reports: React.FC = () => {
 
   const getStatusTag = (s: string, animated?: boolean) => (
     <Tag color={STATUS_COLORS[s] || 'blue'}>
-      {animated ? <><IconLoading style={{ marginRight: 4 }} />{STATUS_LABELS[s] || s}</> : STATUS_LABELS[s] || s}
+      {animated ? <><IconLoading className={styles.iconMarginRight} />{STATUS_LABELS[s] || s}</> : STATUS_LABELS[s] || s}
     </Tag>
   );
 
   const getBatchStatusTag = (s: string, passed: number, total: number) => {
-    if (s === 'running') return <Tag color="blue"><IconLoading style={{ marginRight: 4 }} />{t['running']}</Tag>;
+    if (s === 'running') return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
     if (passed === total) return <Tag color="green">{t['all.passed']}</Tag>;
     if (passed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
     if (total > 0) return <Tag color="red">{t['all.failed']}</Tag>;
@@ -265,8 +265,8 @@ const Reports: React.FC = () => {
       render: (_: unknown, r: BatchItem) => (
         <span>
           <Tag color="green">{t['passed'] + ' ' + r.passed}</Tag>
-          <Tag color="red" style={{ marginLeft: 4 }}>{t['failed'] + ' ' + r.failed}</Tag>
-          <span style={{ marginLeft: 8, color: 'var(--color-text-2)' }}>{`/ ${r.total_cases} ${t['case.count']}`}</span>
+          <Tag color="red" className={styles.tagMarginLeft}>{t['failed'] + ' ' + r.failed}</Tag>
+          <span className={styles.resultMeta}>{`/ ${r.total_cases} ${t['case.count']}`}</span>
         </span>
       ),
     },
@@ -317,7 +317,7 @@ const Reports: React.FC = () => {
             : t['loading']
         }
         footer={<Button onClick={handleCloseDetail}>{t['close']}</Button>}
-        style={{ width: 900 }}
+        className={styles.modalWide}
       >
         <Spin loading={detailLoading}>
           {detail && (
@@ -332,7 +332,7 @@ const Reports: React.FC = () => {
                   { label: t['failed'], value: detail.failed },
                   { label: t['start.time'], value: detail.started_at ? new Date(detail.started_at).toLocaleString() : '--' },
                 ]}
-                style={{ marginBottom: 24 }}
+                className={styles.descriptionsMargin}
               />
 
               {detail.runs && detail.runs.length > 0 ? (
@@ -342,7 +342,7 @@ const Reports: React.FC = () => {
                     const expanded = expandedRuns.has(run.run_id);
                     const isRunning = run.status === 'running';
                     return (
-                    <Card key={run.run_id} className={styles['batch-card']} style={{
+                    <Card key={run.run_id} className={`${styles['batch-card']} ${styles.runCardBody}`} style={{
                       borderLeft: `3px solid ${
                         run.status === 'passed' ? 'var(--color-success-6)' :
                         run.status === 'failed' ? 'var(--color-danger-6)' :
@@ -350,7 +350,6 @@ const Reports: React.FC = () => {
                         'var(--color-border-2)'
                       }`,
                     }}
-                      bodyStyle={{ padding: 12 }}
                     >
                       <div className={styles['batch-header']}
                         onClick={() => toggleRun(run.run_id)}
@@ -366,13 +365,12 @@ const Reports: React.FC = () => {
                         </span>
                       </div>
                       {expanded && run.steps && run.steps.length > 0 && (
-                        <div style={{ marginTop: 12 }}>
+                        <div className={styles.stepTopMargin}>
                           {run.steps.map((step: StepDetail, idx: number) => (
-                            <Card key={idx} className={`${styles['step-card']}${step.success === undefined && isRunning ? ` ${styles['step-dimmed']}` : ''}`}
-                              bodyStyle={{ padding: 10 }}
+                            <Card key={idx} className={`${styles['step-card']}${step.success === undefined && isRunning ? ` ${styles['step-dimmed']}` : ''} ${styles.stepCardBody}`}
                             >
                               <div className={styles['step-header']}>
-                                <Tag style={{ width: 28, textAlign: 'center' }}>
+                                <Tag className={styles.stepIndexTag}>
                                   {step.step_number || idx + 1}
                                 </Tag>
                                 <span className={styles['step-description']}>
@@ -383,7 +381,7 @@ const Reports: React.FC = () => {
                                   : step.success !== undefined
                                     ? getStatusTag(step.success ? 'passed' : 'failed')
                                     : isRunning
-                                      ? <Tag color="blue"><IconLoading style={{ marginRight: 2 }} />{t['step.waiting']}</Tag>
+                                      ? <Tag color="blue"><IconLoading className={styles.iconMarginRightSmall} />{t['step.waiting']}</Tag>
                                       : getStatusTag('failed')
                                 }
                               </div>
@@ -398,7 +396,7 @@ const Reports: React.FC = () => {
                                 </div>
                               )}
                               {step.screenshot_path && (
-                                <div style={{ marginTop: 6 }}>
+                                <div className={styles.screenshotWrapper}>
                                   <img
                                     src={`/${step.screenshot_path}`}
                                     alt={t['screenshot'].replace('{num}', String(step.step_number ?? ''))}
@@ -411,7 +409,7 @@ const Reports: React.FC = () => {
                         </div>
                       )}
                       {expanded && (!run.steps || run.steps.length === 0) && (
-                        <div style={{ marginTop: 12, color: 'var(--color-text-2)', fontSize: 13 }}>
+                        <div className={styles.stepEmptyText}>
                           {isRunning ? t['step.executing'] : t['no.steps']}
                         </div>
                       )}

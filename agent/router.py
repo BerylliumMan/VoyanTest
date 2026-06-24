@@ -33,46 +33,40 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
     if not session_id:
         await ws.close(code=4001, reason="missing session_id")
         return
-    from app.database import SessionLocal
+    from app.database import AsyncSessionLocal
     from app.auth import get_session
-    _auth_db = SessionLocal()
-    try:
-        _session = get_session(_auth_db, session_id)
+    async with AsyncSessionLocal() as _auth_db:
+        _session = await get_session(_auth_db, session_id)
         if not _session:
             await ws.close(code=4003, reason="invalid session")
             return
-    finally:
-        _auth_db.close()
 
     await ws.accept()
     agent_id = agent_name
     session = None
-    db = None
 
     async def _send(raw: str):
         await ws.send_text(raw)
 
-    def _sync_to_db(name: str, ip: str, hostname: str):
+    async def _sync_to_db(name: str, ip: str, hostname: str):
         """Create or update AgentDB record for this WebSocket agent."""
         try:
-            from app.database import SessionLocal
+            from app.database import AsyncSessionLocal
             from app.db_models import Agent as AgentDBModel
-            nonlocal db
-            if db is None:
-                db = SessionLocal()
-            existing = db.query(AgentDBModel).filter(AgentDBModel.name == name).first()
-            if existing:
-                existing.status = "online"
-                existing.last_heartbeat = tz_now()
-            else:
-                agent = AgentDBModel(
-                    name=name,
-                    endpoint=f"ws://{ip}" if ip else "",
-                    description=f"WebSocket Agent ({hostname})",
-                    status="online",
-                )
-                db.add(agent)
-            db.commit()
+            async with AsyncSessionLocal() as db:
+                existing = db.query(AgentDBModel).filter(AgentDBModel.name == name).first()
+                if existing:
+                    existing.status = "online"
+                    existing.last_heartbeat = tz_now()
+                else:
+                    agent = AgentDBModel(
+                        name=name,
+                        endpoint=f"ws://{ip}" if ip else "",
+                        description=f"WebSocket Agent ({hostname})",
+                        status="online",
+                    )
+                    db.add(agent)
+                await db.commit()
         except Exception as exc:
             logger.warning(f"Failed to sync agent to DB: {exc}")
 
@@ -86,14 +80,14 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
                 agent_id = agent_name
                 agent = agent_manager.register(agent_id, reg, _send)
                 session = agent_manager.get_session(agent_id)
-                _sync_to_db(agent_name, reg.ip_address, reg.hostname)
+                await _sync_to_db(agent_name, reg.ip_address, reg.hostname)
                 ack = WSMessage(type=WSMessageType.REGISTERED, agent_id=agent_id,
                                 payload={"status": "ok", "message": f"Registered as {agent_id}"})
                 await session.send(ack) if session else None
 
             elif msg.type == WSMessageType.HEARTBEAT:
                 agent_manager.heartbeat(agent_id)
-                _sync_to_db(agent_name, "", "")
+                await _sync_to_db(agent_name, "", "")
 
             elif msg.type in (WSMessageType.STEP_RESULT, WSMessageType.SNAPSHOT_RESULT,
                               WSMessageType.SCREENSHOT_RESULT, WSMessageType.RUN_COMPLETE):
@@ -111,8 +105,3 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
         logger.error(f"Agent {agent_id} error: {e}")
     finally:
         agent_manager.unregister(agent_id)
-        if db:
-            try:
-                db.close()
-            except Exception:
-                pass

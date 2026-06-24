@@ -11,6 +11,7 @@ import axios from 'axios';
 import { GlobalState } from '@/store';
 import { GlobalContext } from '@/context';
 import useLocale from '@/utils/useLocale';
+import logger from '@/utils/logger';
 import Logo from '@/assets/logo.svg';
 import IconButton from './IconButton';
 import Settings from '../Settings';
@@ -23,7 +24,7 @@ function Navbar({ show }: { show: boolean }) {
   const { setLang, lang, theme, setTheme } = useContext(GlobalContext);
 
   async function logout() {
-    try { await axios.post('/api/auth/logout'); } catch (e: unknown) { console.error('Logout failed', e); }
+    try { await axios.post('/api/auth/logout'); } catch (e: unknown) { logger.error('Logout failed', e); }
     localStorage.removeItem('userStatus');
     window.location.href = '/login';
   }

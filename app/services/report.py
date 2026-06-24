@@ -20,8 +20,9 @@ import os
 from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import crud, db_models
@@ -106,7 +107,7 @@ class ReportService:
     # ----------------------------
 
     @staticmethod
-    def get_statistics(
+    async def get_statistics(
         db: Session,
         project_id: Optional[int],
         days: int,
@@ -124,7 +125,7 @@ class ReportService:
 
         allowed_ids = _resolve_allowed_ids(user, project_id)
 
-        stats = crud.get_run_statistics(
+        stats = await crud.get_run_statistics(
             db,
             start_date=start_date,
             end_date=end_date,
@@ -165,7 +166,7 @@ class ReportService:
         }
 
     @staticmethod
-    def get_trends(
+    async def get_trends(
         db: Session,
         project_id: Optional[int],
         days: int,
@@ -177,7 +178,7 @@ class ReportService:
 
         allowed_ids = _resolve_allowed_ids(user, project_id)
 
-        rows = crud.get_run_trends(
+        rows = await crud.get_run_trends(
             db,
             start_date=start_date,
             end_date=end_date,
@@ -219,7 +220,7 @@ class ReportService:
     # ----------------------------
 
     @staticmethod
-    def get_batches(
+    async def get_batches(
         db: Session,
         project_id: Optional[int],
         page: int,
@@ -239,18 +240,18 @@ class ReportService:
                 filter_project_id = None
 
         if allowed_ids is not None and not project_id:
-            result = crud.list_run_batches(
+            result = await crud.list_run_batches(
                 db,
                 project_ids=allowed_ids,
-                status=status,  # type: ignore[arg-type]
+                status=cast(str, status),
                 page=page,
                 size=size,
             )
         else:
-            result = crud.list_run_batches(
+            result = await crud.list_run_batches(
                 db,
-                project_id=filter_project_id,  # type: ignore[arg-type]
-                status=status,  # type: ignore[arg-type]
+                project_id=cast(int, filter_project_id),
+                status=cast(str, status),
                 page=page,
                 size=size,
             )
@@ -259,9 +260,10 @@ class ReportService:
         project_ids = {b.project_id for b in result["items"] if b.project_id}
         projects: dict[int, db_models.Project] = {}
         if project_ids:
-            for p in db.query(db_models.Project).filter(
-                db_models.Project.id.in_(project_ids)
-            ).all():
+            result = await db.execute(
+                select(db_models.Project).where(db_models.Project.id.in_(project_ids))
+            )
+            for p in result.scalars().all():
                 projects[p.id] = p
 
         items = []
@@ -291,7 +293,7 @@ class ReportService:
         }
 
     @staticmethod
-    def export_batch_report(
+    async def export_batch_report(
         db: Session,
         batch_id: int,
         user: Any,
@@ -301,7 +303,7 @@ class ReportService:
         与详情端点不同，导出还需要从各 run 的 ``report.json`` 中读取步骤
         数据，因此权限校验通过后展开 runs 的步骤。
         """
-        batch = crud.get_run_batch(db, batch_id)
+        batch = await crud.get_run_batch(db, batch_id)
         if not batch:
             raise BatchNotFound("Batch not found")
 
@@ -310,16 +312,16 @@ class ReportService:
             raise BatchNotFound("Batch not found")
 
         # 动态计算状态（可能修复卡死的 pending 记录）
-        crud._compute_batch_status(db, batch)
+        await crud._compute_batch_status(db, batch)
 
         project = (
-            db.query(db_models.Project)
-            .filter(db_models.Project.id == batch.project_id)
-            .first()
-        )
+            await db.execute(
+                select(db_models.Project).where(db_models.Project.id == batch.project_id)
+            )
+        ).scalar_one_or_none()
         project_name = project.name if project else ""
 
-        related = crud.get_batch_detail_with_related(db, batch_id)
+        related = await crud.get_batch_detail_with_related(db, batch_id)
         runs = related["runs"]
         cases = related["cases"]
 

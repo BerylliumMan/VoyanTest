@@ -16,7 +16,7 @@ class Project(Base):
     base_url = Column(String, nullable=True)
     browser = Column(String, default="chromium")
     headless = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=tz_now)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
 
     test_cases = relationship("TestCase", backref="project", cascade="save-update, merge")
     environments = relationship("Environment", backref="project", cascade="all, delete-orphan")
@@ -35,7 +35,7 @@ class Environment(Base):
     # 预置 cookie 列表（执行前注入到浏览器上下文，避免重复登录）
     # 结构: [{"name": "session", "value": "xxx", "domain": "example.com", "path": "/"}]
     cookies = Column(JSON, default=list)
-    created_at = Column(DateTime, default=tz_now)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
 
 
 class Module(Base):
@@ -46,7 +46,7 @@ class Module(Base):
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     parent_id = Column(Integer, ForeignKey("modules.id"), nullable=True, index=True)
-    created_at = Column(DateTime, default=tz_now)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
 
     test_cases = relationship("TestCase", backref="module", passive_deletes=True)
     children = relationship("Module", backref="parent", remote_side=[id])

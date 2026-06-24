@@ -5,6 +5,7 @@ import useLocale from '@/utils/useLocale';
 import AiConfig from './AiConfig';
 import UserManagement from './UserManagement';
 import ScheduleManagement from './ScheduleManagement';
+import styles from './index.module.less';
 
 const { TabPane } = Tabs;
 
@@ -14,13 +15,13 @@ function Settings() {
   return (
     <div>
       <Tabs defaultActiveTab="ai">
-        <TabPane key="ai" title={<><IconSettings style={{ marginRight: 6 }} />{t['ai.config']}</>}>
+        <TabPane key="ai" title={<><IconSettings className={styles.tabIcon} />{t['ai.config']}</>}>
           <AiConfig />
         </TabPane>
-        <TabPane key="users" title={<><IconUser style={{ marginRight: 6 }} />{t['user.mgmt']}</>}>
+        <TabPane key="users" title={<><IconUser className={styles.tabIcon} />{t['user.mgmt']}</>}>
           <UserManagement />
         </TabPane>
-        <TabPane key="schedules" title={<><IconClockCircle style={{ marginRight: 6 }} />{t['schedule.mgmt']}</>}>
+        <TabPane key="schedules" title={<><IconClockCircle className={styles.tabIcon} />{t['schedule.mgmt']}</>}>
           <ScheduleManagement />
         </TabPane>
       </Tabs>

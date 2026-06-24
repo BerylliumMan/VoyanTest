@@ -10,15 +10,18 @@ def _strip_br(value: str) -> str:
     return re.sub(r"<\s*br\s*/?\s*>", " ", value, flags=re.IGNORECASE)
 
 
-def _load_ai_config() -> dict:
+async def _load_ai_config() -> dict:
     """Load AI config from uitest-work's ai_configs table."""
-    from app.database import SessionLocal
+    from app.database import AsyncSessionLocal
     from app import db_models
     from app.security.encryption import decrypt_value
+    from sqlalchemy import select
 
-    db = SessionLocal()
-    try:
-        row = db.query(db_models.AIConfig).filter(db_models.AIConfig.id == 1).first()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(db_models.AIConfig).where(db_models.AIConfig.id == 1)
+        )
+        row = result.scalar_one_or_none()
         if not row:
             raise RuntimeError(
                 "AI config not found. Configure via Settings page."
@@ -29,13 +32,11 @@ def _load_ai_config() -> dict:
             'api_base': row.api_base,
             'temperature': row.temperature,
         }
-    finally:
-        db.close()
 
 
-def call_model(messages: list, temperature: float | None = None, stream_callback=None) -> str:
+async def call_model(messages: list, temperature: float | None = None, stream_callback=None) -> str:
     """Call the AI model using uitest-work's AI config."""
-    config = _load_ai_config()
+    config = await _load_ai_config()
 
     api_url = config['api_base'].rstrip('/')
     # Ensure URL includes /chat/completions path (some proxies like OneAPI store base URL without it)

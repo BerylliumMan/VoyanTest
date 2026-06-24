@@ -3,6 +3,7 @@ import { Card, Table, Button, Modal, Form, Input, Message, Tag, Space, Popconfir
 import { IconPlus, IconEdit, IconDelete } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import logger from '@/utils/logger';
 import styles from './style/index.module.less';
 
 interface AgentItem { id: number | null; name: string; status: string; endpoint: string; description: string; hostname?: string; }
@@ -66,7 +67,7 @@ function Agents() {
     try {
       const res = await axios.get(`/api/agents/${agentId}/logs`, { params: { page: 1, size: 50 } });
       setLogs((prev: Record<number, RunRecord[]>) => ({ ...prev, [agentId]: res.data.items || [] }));
-    } catch (e: unknown) { console.error('Failed to load agent logs:', e); }
+    } catch (e: unknown) { logger.error('Failed to load agent logs:', e); }
   };
 
   const statusColorMap: Record<string, string> = {

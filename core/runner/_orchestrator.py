@@ -10,7 +10,6 @@ DB 操作的 SQL 细节已经下沉到 core.runner._persistence（mark_run_faile
 / precreate_pending_runs / update_run_on_completion），本模块只负责
 协调浏览器/用例循环 + 批量跟踪。
 """
-import asyncio
 import logging
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.tz import now as tz_now
 
 from app import crud
-from app.database import SessionLocal
+from app.database import AsyncSessionLocal
 
 from core.runner._execution import run_test_case_in_browser
 from core.runner._persistence import (
@@ -50,8 +49,7 @@ async def _record_batch_case_failure(
     """
     _run_id = precreated_run_ids.get(case_id)
     if _run_id:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: mark_run_failed(db, _run_id, message, batch_id=batch_id))
+        await mark_run_failed(db, _run_id, message, batch_id=batch_id)
 
 
 # ---------------------------------------------------------------------------
@@ -70,18 +68,15 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
     headless = True
     base_url_override = None
     if environment_id:
-        _db = SessionLocal()
-        try:
-            loop = asyncio.get_running_loop()
-            env = await loop.run_in_executor(None, lambda: crud.get_environment(_db, environment_id))
-            if env:
-                browser_type = env.browser
-                headless = env.headless
-                base_url_override = env.base_url
-        except SQLAlchemyError as exc:
-            logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
-        finally:
-            _db.close()
+        async with AsyncSessionLocal() as _db:
+            try:
+                env = await crud.get_environment(_db, environment_id)
+                if env:
+                    browser_type = env.browser
+                    headless = env.headless
+                    base_url_override = env.base_url
+            except SQLAlchemyError as exc:
+                logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
 
     mcp_manager = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
     start_time = tz_now()
@@ -94,7 +89,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
         # asyncio.TimeoutError — any of them must be reported as a clean
         # "browser startup failed" so the run results stay consistent.
         logger.exception("Failed to start MCP manager for case %s", case_id)
-        save_run_results(
+        await save_run_results(
             case_id, "failed", start_time, tz_now(),
             (tz_now() - start_time).total_seconds(),
             None, None,
@@ -160,6 +155,9 @@ async def run_batch_test_cases(
 
     Each case executes in order; failures are caught per-case and logged,
     and the loop continues.  Browser cleanup happens in a finally block.
+
+    Note: 该函数通过 FastAPI BackgroundTasks.add_task 调用。FastAPI 的
+    BackgroundTasks 原生支持 async 协程，无需额外包装。
     """
     if browser_pool is None:
         from core.browser_pool import BrowserPool as browser_pool
@@ -172,51 +170,39 @@ async def run_batch_test_cases(
 
     # 创建批次（如果未提供 batch_id）
     if batch_id is None:
-        _db = SessionLocal()
-        try:
-            loop = asyncio.get_running_loop()
-            batch = await loop.run_in_executor(None, lambda: crud.create_run_batch(_db, project_id, total_cases=total_cases))
+        async with AsyncSessionLocal() as _db:
+            batch = await crud.create_run_batch(_db, project_id, total_cases=total_cases)
             batch_id = batch.id
-        finally:
-            _db.close()
 
     mcp_manager = None
-
     base_url_override = None
-    try:
+
+    async with AsyncSessionLocal() as batch_db:
         # Get project/environment browser settings
-        _db = SessionLocal()
         try:
-            loop = asyncio.get_running_loop()
             if environment_id:
-                env = await loop.run_in_executor(None, lambda: crud.get_environment(_db, environment_id))
+                env = await crud.get_environment(batch_db, environment_id)
                 if env:
                     browser_type = env.browser
                     headless = env.headless
                     base_url_override = env.base_url
                 else:
-                    project_data = await loop.run_in_executor(None, lambda: crud.get_project(_db, project_id))
+                    project_data = await crud.get_project(batch_db, project_id)
                     browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
                     headless = project_data.headless if project_data and project_data.headless is not None else True
             else:
-                project_data = await loop.run_in_executor(None, lambda: crud.get_project(_db, project_id))
+                project_data = await crud.get_project(batch_db, project_id)
                 browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
                 headless = project_data.headless if project_data and project_data.headless is not None else True
         except SQLAlchemyError:
             logger.warning("Failed to load environment/project settings; falling back to defaults", exc_info=True)
             browser_type = 'chromium'
             headless = True
-        finally:
-            _db.close()
 
         # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
         # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
-        batch_db = SessionLocal()
-        loop = asyncio.get_running_loop()
-        precreated_run_ids = await loop.run_in_executor(
-            None, lambda: precreate_pending_runs(
-                batch_db, case_ids, batch_id, init_case_ids=init_case_ids
-            )
+        precreated_run_ids = await precreate_pending_runs(
+            batch_db, case_ids, batch_id, init_case_ids=init_case_ids
         )
 
         # 创建或复用浏览器
@@ -310,10 +296,3 @@ async def run_batch_test_cases(
                 })
 
         return results
-
-    finally:
-        if 'batch_db' in locals():
-            try:
-                batch_db.close()
-            except SQLAlchemyError as exc:
-                logger.debug("Error closing batch_db: %s", exc, exc_info=True)

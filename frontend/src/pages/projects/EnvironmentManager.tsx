@@ -6,15 +6,26 @@ import {
 import { IconPlus, IconEdit, IconDelete, IconCheck } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import styles from './style/index.module.less';
 
 // Arco Design Form.Item/Input.Password 支持 valuePropName/showEyeButton 但未在类型中暴露，
-// 这里用宽松类型绕过类型检查
-const FormItem = Form.Item as unknown as React.FC<
-  Record<string, unknown> & { children?: React.ReactNode }
->;
-const PasswordInput = Input.Password as unknown as React.FC<
-  Record<string, unknown>
->;
+// 这里用宽松类型包装以暴露这些运行时支持的属性
+const FormItem = Form.Item as React.FC<{
+  children?: React.ReactNode;
+  label?: React.ReactNode;
+  field?: string;
+  valuePropName?: string;
+  initialValue?: unknown;
+  rules?: unknown[];
+  noStyle?: boolean;
+  [key: string]: unknown;
+}>;
+const PasswordInput = Input.Password as React.FC<{
+  placeholder?: string;
+  className?: string;
+  visibilityToggle?: boolean;
+  [key: string]: unknown;
+}>;
 
 interface Environment {
   id: number;
@@ -138,7 +149,7 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({ projectId }) =>
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+      <div className={styles.envHeader}>
         <strong>{t['environments']}</strong>
         <Button size="small" type="primary" icon={<IconPlus />} onClick={openCreateEnv}>{t['environment.new']}</Button>
       </div>
@@ -149,7 +160,7 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({ projectId }) =>
       {/* Environment Edit Modal */}
       <Modal visible={envModalVisible} onCancel={() => setEnvModalVisible(false)}
         title={editingEnv ? t['environment.edit'] : t['environment.new']}
-        onOk={handleEnvSubmit} style={{ width: 500 }}
+        onOk={handleEnvSubmit} className={styles.envFormModal}
       >
         <Form form={envForm} layout="vertical">
           <Form.Item field="name" label={t['environment.form.name']}
@@ -168,26 +179,26 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({ projectId }) =>
                 { label: 'Chromium', value: 'chromium' },
                 { label: 'Firefox', value: 'firefox' },
                 { label: 'WebKit', value: 'webkit' },
-              ]} style={{ width: 120 }} />
+              ]} className={styles.browserSelect} />
             </Form.Item>
             <FormItem field="headless" label={t['environment.form.headless']} initialValue={true} valuePropName="checked">
               <Switch />
             </FormItem>
           </Space>
-          <Collapse style={{ marginBottom: 0 }}>
+          <Collapse className={styles.collapseNoMargin}>
             <Collapse.Item header="认证 Cookie" name="cookies">
               <Form.List field="cookies">
                 {(fields, { add, remove }) => (
                   <div>
                     {fields.map((field, index) => (
-                      <div key={field.key} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+                      <div key={field.key} className={styles.cookieRow}>
                         <Form.Item
                           {...field}
                           field={`${field.field}.name`}
                           rules={[{ required: true, message: '请输入 Cookie 名称' }]}
                           noStyle
                         >
-                          <Input placeholder="Cookie 名称" style={{ flex: 1 }} />
+                          <Input placeholder="Cookie 名称" className={styles.flexInput} />
                         </Form.Item>
                         <FormItem
                           {...field}
@@ -195,14 +206,14 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({ projectId }) =>
                           rules={[{ required: true, message: '请输入 Cookie 值' }]}
                           noStyle
                         >
-                          <PasswordInput placeholder="Cookie 值" style={{ flex: 1 }} showEyeButton />
+                          <PasswordInput placeholder="Cookie 值" className={styles.flexInput} showEyeButton />
                         </FormItem>
                         <Form.Item
                           {...field}
                           field={`${field.field}.domain`}
                           noStyle
                         >
-                          <Input placeholder="可不填" style={{ flex: 1 }} />
+                          <Input placeholder="可不填" className={styles.flexInput} />
                         </Form.Item>
                         <Button
                           type="text"

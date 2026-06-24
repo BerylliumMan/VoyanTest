@@ -21,8 +21,8 @@ class GenSession(Base):
     functional_points_count = Column(Integer, default=0)
     test_cases_count = Column(Integer, default=0)
     imported_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=tz_now)
-    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
     project = relationship("Project", backref="gen_sessions")
     functional_points = relationship("GenFunctionalPoint", backref="session", cascade="all, delete-orphan")
@@ -70,10 +70,10 @@ class ScheduledTask(Base):
     task_type = Column(String(50), nullable=False)  # testcase, module, project
     target_id = Column(Integer, nullable=False)
     enabled = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=tz_now)
-    updated_at = Column(DateTime, default=tz_now, onupdate=tz_now)
-    last_run_at = Column(DateTime, nullable=True)
-    next_run_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
+    updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
     run_count = Column(Integer, default=0)
 
 
@@ -85,7 +85,7 @@ class ScheduledTaskRun(Base):
     task_id = Column(Integer, ForeignKey("scheduled_tasks.id"), nullable=False, index=True)
     run_id = Column(Integer, ForeignKey("test_runs.id"), nullable=True, index=True)
     status = Column(String, nullable=False)  # success, failed, running
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=True)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=True)
     duration = Column(Float, nullable=True)
     error_message = Column(Text, nullable=True)

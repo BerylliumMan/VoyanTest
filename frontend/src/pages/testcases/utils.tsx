@@ -3,6 +3,7 @@ import {
   Button, Popover, Space, Modal,
 } from '@arco-design/web-react';
 import { Module } from './types';
+import styles from './style/components.module.less';
 
 interface TreeNodeData {
   key: string;
@@ -58,7 +59,7 @@ export function renderTree(
               </Space>
             }
           >
-            <Button size="mini" type="text" style={{ fontSize: 12, padding: '0 2px', minWidth: 20 }}>▼</Button>
+            <Button size="mini" type="text" className={styles['tree-trigger']}>▼</Button>
           </Popover>
         )}
       </span>

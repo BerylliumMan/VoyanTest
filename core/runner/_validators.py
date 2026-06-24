@@ -4,6 +4,7 @@ import ipaddress
 import logging
 from urllib.parse import urlparse
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
@@ -55,21 +56,22 @@ def _validate_nav_url(url: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_env_cookies(db, base_url_override: str | None) -> list[dict]:
+async def _resolve_env_cookies(db, base_url_override: str | None) -> list[dict]:
     """根据 base_url_override 查找匹配的环境记录，返回该环境的 cookies 列表。
 
     没有 override / 找不到 / 没有 cookies → 返回空列表（不影响流程）。
+    支持 AsyncSession（使用 ``await db.execute(select(...))``）。
     """
     if not base_url_override:
         return []
     try:
         from app import db_models
-        env = (
-            db.query(db_models.Environment)
-            .filter(db_models.Environment.base_url == base_url_override)
+        result = await db.execute(
+            select(db_models.Environment)
+            .where(db_models.Environment.base_url == base_url_override)
             .order_by(db_models.Environment.is_default.desc(), db_models.Environment.id.asc())
-            .first()
         )
+        env = result.scalars().first()
         if not env:
             return []
         cookies = env.cookies

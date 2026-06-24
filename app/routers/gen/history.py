@@ -4,18 +4,17 @@ session is also done here for parity with the original behavior.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from io import BytesIO
 from typing import Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ... import crud
 from ...auth import get_current_user
-from ...database import get_db
+from ...database import get_async_db
 from .schemas import (
     GenHistoryItem,
     GenHistoryListResponse,
@@ -33,13 +32,12 @@ async def get_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     project_id: Optional[int] = Query(None, description="按项目筛选"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> GenHistoryListResponse:
     """Get analysis history list."""
 
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: crud.gen.list_gen_sessions(db, page=page, page_size=page_size, project_id=project_id))
+    result = await crud.gen.list_gen_sessions(db, page=page, page_size=page_size, project_id=project_id)
     items = result["items"]
     total = result["total"]
 
@@ -69,19 +67,18 @@ async def get_history(
 @router.get("/history/{session_id}/export-xlsx")
 async def export_gen_test_cases_xlsx(
     session_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> Response:
     """Export generated test cases as xlsx file."""
 
-    loop = asyncio.get_running_loop()
-    record = await loop.run_in_executor(None, lambda: crud.gen.get_gen_session(db, session_id))
+    record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
     if record.status != "completed":
         raise HTTPException(400, f"分析未完成，状态: {record.status}")
 
-    db_tcs = await loop.run_in_executor(None, lambda: crud.gen.list_gen_test_cases(db, session_id))
+    db_tcs = await crud.gen.list_gen_test_cases(db, session_id)
 
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -147,20 +144,19 @@ async def export_gen_test_cases_xlsx(
 @router.get("/history/{session_id}", response_model=GenPreviewResponse)
 async def get_history_detail(
     session_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> GenPreviewResponse:
     """Get analysis detail from DB."""
 
-    loop = asyncio.get_running_loop()
-    record = await loop.run_in_executor(None, lambda: crud.gen.get_gen_session(db, session_id))
+    record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
     if record.status != "completed":
         raise HTTPException(400, f"分析未完成，状态: {record.status}")
 
-    db_fps = await loop.run_in_executor(None, lambda: crud.gen.list_gen_functional_points(db, session_id))
-    db_tcs = await loop.run_in_executor(None, lambda: crud.gen.list_gen_test_cases(db, session_id))
+    db_fps = await crud.gen.list_gen_functional_points(db, session_id)
+    db_tcs = await crud.gen.list_gen_test_cases(db, session_id)
 
     fps = [
         {"id": fp.fp_id, "module": fp.module, "name": fp.name, "category": fp.category, "description": fp.description}
@@ -188,13 +184,12 @@ async def get_history_detail(
 @router.delete("/history/{session_id}")
 async def delete_history(
     session_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     """Delete analysis history record."""
 
-    loop = asyncio.get_running_loop()
-    record = await loop.run_in_executor(None, lambda: crud.gen.get_gen_session(db, session_id))
+    record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
 
@@ -202,7 +197,7 @@ async def delete_history(
     async with _lock:
         _sessions.pop(session_id, None)
 
-    await loop.run_in_executor(None, lambda: crud.gen.delete_gen_session(db, session_id))
+    await crud.gen.delete_gen_session(db, session_id)
     return {"message": "删除成功"}
 
 
@@ -211,21 +206,20 @@ async def update_gen_test_case(
     session_id: str,
     test_case_id: str,
     body: GenTestCaseUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     """Update a test case in the analysis session."""
 
-    loop = asyncio.get_running_loop()
-    record = await loop.run_in_executor(None, lambda: crud.gen.get_gen_session(db, session_id))
+    record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
 
-    tc = await loop.run_in_executor(None, lambda: crud.gen.get_gen_test_case(db, session_id, test_case_id))
+    tc = await crud.gen.get_gen_test_case(db, session_id, test_case_id)
     if not tc:
         raise HTTPException(404, "用例不存在")
 
-    await loop.run_in_executor(None, lambda: crud.gen.update_gen_test_case(db, session_id, test_case_id, body))
+    await crud.gen.update_gen_test_case(db, session_id, test_case_id, body)
     return {"message": "更新成功"}
 
 
@@ -233,19 +227,18 @@ async def update_gen_test_case(
 async def delete_gen_test_case(
     session_id: str,
     test_case_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     """Delete a test case from the analysis session."""
 
-    loop = asyncio.get_running_loop()
-    record = await loop.run_in_executor(None, lambda: crud.gen.get_gen_session(db, session_id))
+    record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
 
-    tc = await loop.run_in_executor(None, lambda: crud.gen.get_gen_test_case(db, session_id, test_case_id))
+    tc = await crud.gen.get_gen_test_case(db, session_id, test_case_id)
     if not tc:
         raise HTTPException(404, "用例不存在")
 
-    await loop.run_in_executor(None, lambda: crud.gen.delete_gen_test_case(db, session_id, test_case_id))
+    await crud.gen.delete_gen_test_case(db, session_id, test_case_id)
     return {"message": "删除成功"}

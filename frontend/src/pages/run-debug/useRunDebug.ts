@@ -133,8 +133,12 @@ export function useRunDebug(
         wsRef.current = null;
       }
     };
-    // effect 内 connect 闭包使用最新 props（ref 持有）；仅在 runId 变化时重连即可，
-    // 显式列出内部引用反而会因 ref/reconnectTimer 等导致循环重连
+    // 故意仅依赖 runId：
+    //  - connect 闭包通过 wsRef / phaseRef 持有最新 props 与 state（ref 引用稳定），
+    //  - handleWsMessage 已通过自身 useCallback([t]) 自动保持新鲜，
+    //  - setWsConnected / setPhase 是 React 保证稳定的 setter。
+    // 若把 handleWsMessage / setWsConnected / setPhase / connect 加入 deps，
+    // 会因 t 变化（locale 切换）触发 WebSocket 反复重连，破坏现有连接。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 

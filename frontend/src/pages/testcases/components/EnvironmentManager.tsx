@@ -7,13 +7,23 @@ import { Environment } from '../types';
 import styles from '../style/components.module.less';
 
 // Arco Design Form.Item/Input.Password 支持 valuePropName/showEyeButton 但未在类型中暴露，
-// 这里用宽松类型绕过类型检查
-const FormItem = Form.Item as unknown as React.FC<
-  Record<string, unknown> & { children?: React.ReactNode }
->;
-const PasswordInput = Input.Password as unknown as React.FC<
-  Record<string, unknown>
->;
+// 这里用宽松类型包装以暴露这些运行时支持的属性
+const FormItem = Form.Item as React.FC<{
+  children?: React.ReactNode;
+  label?: React.ReactNode;
+  field?: string;
+  valuePropName?: string;
+  initialValue?: unknown;
+  rules?: unknown[];
+  noStyle?: boolean;
+  [key: string]: unknown;
+}>;
+const PasswordInput = Input.Password as React.FC<{
+  placeholder?: string;
+  className?: string;
+  visibilityToggle?: boolean;
+  [key: string]: unknown;
+}>;
 
 type FormInstance = ReturnType<typeof Form.useForm>[0];
 
@@ -109,20 +119,20 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({
               <Switch />
             </FormItem>
           </Space>
-          <Collapse style={{ marginBottom: 0 }}>
+          <Collapse className={styles['cookie-collapse']}>
             <Collapse.Item header="认证 Cookie" name="cookies">
               <Form.List field="cookies">
                 {(fields, { add, remove }) => (
                   <div>
                     {fields.map((field, index) => (
-                      <div key={field.key} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+                      <div key={field.key} className={styles['cookie-row']}>
                         <Form.Item
                           {...field}
                           field={`${field.field}.name`}
                           rules={[{ required: true, message: '请输入 Cookie 名称' }]}
                           noStyle
                         >
-                          <Input placeholder="Cookie 名称" style={{ flex: 1 }} />
+                          <Input placeholder="Cookie 名称" className={styles['cookie-input']} />
                         </Form.Item>
                         <Form.Item
                           {...field}
@@ -130,14 +140,14 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({
                           rules={[{ required: true, message: '请输入 Cookie 值' }]}
                           noStyle
                         >
-                          <PasswordInput placeholder="Cookie 值" style={{ flex: 1 }} showEyeButton />
+                          <PasswordInput placeholder="Cookie 值" className={styles['cookie-input']} showEyeButton />
                         </Form.Item>
                         <Form.Item
                           {...field}
                           field={`${field.field}.domain`}
                           noStyle
                         >
-                          <Input placeholder="可不填" style={{ flex: 1 }} />
+                          <Input placeholder="可不填" className={styles['cookie-input']} />
                         </Form.Item>
                         <Button
                           type="text"

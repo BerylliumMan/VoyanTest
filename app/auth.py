@@ -1,17 +1,42 @@
 """认证模块 — 密码哈希、Session 管理、FastAPI 依赖注入."""
+import base64
+import hashlib
+import hmac
 import uuid
 import json
 from datetime import timedelta
-from app.tz import now as tz_now
-from passlib.hash import bcrypt
-from sqlalchemy.orm import Session as DbSession
 
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from passlib.hash import bcrypt
+
+from app.tz import now as tz_now
 from app.config import get_settings
 
 settings = get_settings()
 
+_SESSION_SIG_SEP = "."
 
-# ==================== 密码工具 (T008) ====================
+
+def _session_signing_key() -> bytes:
+    raw = settings.session_secret_key
+    if raw:
+        return raw.encode()
+    return b"voyantest-dev-fallback-secret-key!!"
+
+
+def _sign_session(session_id: str, user_id: int) -> str:
+    msg = f"{user_id}{_SESSION_SIG_SEP}{session_id}".encode()
+    digest = hmac.new(_session_signing_key(), msg, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")[:22]
+
+
+def _verify_session(session_id: str, user_id: int, signature: str) -> bool:
+    expected = _sign_session(session_id, user_id)
+    return hmac.compare_digest(expected, signature)
+
+
+# ==================== 密码工具 ====================
 
 def hash_password(password: str) -> str:
     return bcrypt.hash(password)
@@ -22,7 +47,6 @@ def verify_password(password: str, hash_value: str) -> bool:
 
 
 def validate_password_strength(password: str) -> tuple[bool, str]:
-    """T045: 密码强度校验 — >=8位, 含字母、数字和特殊字符"""
     if len(password) < 8:
         return False, "密码至少 8 位"
     has_letter = any(c.isalpha() for c in password)
@@ -34,10 +58,16 @@ def validate_password_strength(password: str) -> tuple[bool, str]:
     return True, ""
 
 
-# ==================== Session 管理 (T009) ====================
+# ==================== Session 管理 (async) ====================
 
-def create_session(db: DbSession, user_id: int, ip_address: str = None) -> str:
-    """创建会话，返回 session_id。T009"""
+def _parse_session_cookie(raw: str) -> tuple[str, str | None]:
+    if _SESSION_SIG_SEP in raw:
+        sid, sig = raw.rsplit(_SESSION_SIG_SEP, 1)
+        return sid, sig
+    return raw, None
+
+
+async def create_session(db: AsyncSession, user_id: int, ip_address: str = None) -> str:
     from app import db_models
     session_id = uuid.uuid4().hex
     now = tz_now()
@@ -49,48 +79,43 @@ def create_session(db: DbSession, user_id: int, ip_address: str = None) -> str:
         last_activity=now,
     )
     db.add(session)
-    db.commit()
-    return session_id
+    await db.commit()
+    sig = _sign_session(session_id, user_id)
+    return f"{session_id}{_SESSION_SIG_SEP}{sig}"
 
 
-def get_session(db: DbSession, session_id: str):
-    """获取有效会话，过期返回 None。"""
+async def get_session(db: AsyncSession, session_id: str):
     from app import db_models
+    raw_sid, _sig = _parse_session_cookie(session_id)
     now = tz_now()
-    session = db.query(db_models.Session).filter(
-        db_models.Session.id == session_id,
-        db_models.Session.expires_at > now,
-    ).first()
+    result = await db.execute(
+        select(db_models.Session).where(
+            db_models.Session.id == raw_sid,
+            db_models.Session.expires_at > now,
+        )
+    )
+    session = result.scalar_one_or_none()
     if session:
-        # 续期
         session.last_activity = now
         session.expires_at = now + timedelta(minutes=settings.session_expire_minutes)
-        db.commit()
+        await db.commit()
     return session
 
 
-def delete_session(db: DbSession, session_id: str):
-    """删除会话（登出）。"""
+async def delete_session(db: AsyncSession, session_id: str):
     from app import db_models
-    db.query(db_models.Session).filter(
-        db_models.Session.id == session_id
-    ).delete()
-    db.commit()
+    raw_sid, _sig = _parse_session_cookie(session_id)
+    await db.execute(delete(db_models.Session).where(db_models.Session.id == raw_sid))
+    await db.commit()
 
 
-def cleanup_expired_sessions(db: DbSession):
-    """清理过期会话。"""
+async def cleanup_expired_sessions(db: AsyncSession):
     from app import db_models
-    db.query(db_models.Session).filter(
-        db_models.Session.expires_at <= tz_now()
-    ).delete()
-    db.commit()
+    await db.execute(delete(db_models.Session).where(db_models.Session.expires_at <= tz_now()))
+    await db.commit()
 
 
-# ==================== 审计日志 (T051) ====================
-
-def log_audit(db: DbSession, user_id: int | None, action: str, details: dict = None, ip_address: str = None):
-    """写入审计日志。"""
+async def log_audit(db: AsyncSession, user_id: int | None, action: str, details: dict = None, ip_address: str = None):
     from app import db_models
     log = db_models.AuditLog(
         user_id=user_id,
@@ -99,43 +124,59 @@ def log_audit(db: DbSession, user_id: int | None, action: str, details: dict = N
         ip_address=ip_address,
     )
     db.add(log)
-    db.commit()
+    await db.commit()
 
 
-# ==================== FastAPI 依赖注入 (T010) ====================
+# ==================== FastAPI 依赖注入 ====================
 
 from fastapi import Request, HTTPException, Depends
-from app.database import get_db
+from app.database import get_async_db
 
 
 def get_session_id_from_cookie(request: Request) -> str | None:
-    return request.cookies.get("session_id")
+    raw = request.cookies.get("session_id")
+    if raw is None:
+        return None
+    sid, _sig = _parse_session_cookie(raw)
+    return sid
 
 
-def get_current_user(request: Request, db: DbSession = Depends(get_db)):
-    """验证登录状态，返回 User 或 raise 401。T010"""
-    session_id = get_session_id_from_cookie(request)
-    if not session_id:
-        raise HTTPException(status_code=401, detail="未登录")
-    session = get_session(db, session_id)
-    if not session:
-        raise HTTPException(status_code=401, detail="会话已过期，请重新登录")
+async def _get_validated_session(db: AsyncSession, request: Request) -> object | None:
+    raw_sid = request.cookies.get("session_id")
+    if not raw_sid:
+        return None
+    sid, sig = _parse_session_cookie(raw_sid)
+
+    sess = await get_session(db, sid)
+    if sess is None:
+        return None
+    if sig is not None:
+        if not _verify_session(sid, sess.user_id, sig):
+            return None
+    return sess
+
+
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_async_db)):
+    sess = await _get_validated_session(db, request)
+    if sess is None:
+        raise HTTPException(status_code=401, detail="未登录或会话已过期")
     from app import db_models
-    user = db.query(db_models.User).filter(db_models.User.id == session.user_id).first()
+    result = await db.execute(
+        select(db_models.User).where(db_models.User.id == sess.user_id)
+    )
+    user = result.scalar_one_or_none()
     if not user or user.status == "disabled":
         raise HTTPException(status_code=401, detail="账号已被禁用")
     return user
 
 
 def require_admin(user=Depends(get_current_user)):
-    """验证管理员角色，否则 raise 403。"""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
 
 
 def require_project_access(project_id: int = None):
-    """依赖工厂：验证当前用户有权访问指定项目。admin 全通，tester 仅限 project_ids。"""
     def dependency(user=Depends(get_current_user)):
         if user.role == "admin":
             return user
@@ -148,7 +189,6 @@ def require_project_access(project_id: int = None):
 
 
 def get_user_project_filter(user) -> list[int] | None:
-    """返回当前用户可访问的项目 ID 列表。admin 返回 None（全通），tester 返回 project_ids。"""
     if user.role == "admin":
-        return None  # 全通
+        return None
     return user.project_ids or []

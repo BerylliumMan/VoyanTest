@@ -18,9 +18,9 @@ class RunBatch(Base):
     total_cases = Column(Integer, default=0)
     passed = Column(Integer, default=0)
     failed = Column(Integer, default=0)
-    created_at = Column(DateTime, default=tz_now)
-    started_at = Column(DateTime, nullable=True)
-    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
 
     runs = relationship("TestRun", backref="batch")
 
@@ -33,8 +33,8 @@ class TestRun(Base):
     batch_id = Column(Integer, ForeignKey("run_batches.id"), nullable=True, index=True)
     status = Column(String, nullable=False)
     # nullable: 预创建 pending 行留空，避开 _compute_batch_status 卡死检查误判
-    start_time = Column(DateTime, nullable=True)
-    end_time = Column(DateTime, nullable=True)
+    start_time = Column(DateTime(timezone=True), nullable=True)
+    end_time = Column(DateTime(timezone=True), nullable=True)
     duration = Column(Float, nullable=True)
     report_path = Column(String, nullable=True)
     log_path = Column(String, nullable=True)
@@ -48,7 +48,7 @@ class RunLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     run_id = Column(Integer, ForeignKey("test_runs.id"), nullable=False, index=True)
     step_id = Column(Integer, ForeignKey("test_steps.id", ondelete="SET NULL"), nullable=True, index=True)
-    timestamp = Column(DateTime, default=tz_now)
+    timestamp = Column(DateTime(timezone=True), default=tz_now)
     level = Column(String, nullable=False)
     message = Column(Text, nullable=False)
     screenshot_path = Column(String, nullable=True)

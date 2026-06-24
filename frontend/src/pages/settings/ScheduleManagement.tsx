@@ -3,6 +3,7 @@ import { Card, Table, Modal, Form, Input, Select, Switch, Button, Message, Space
 import { IconPlus, IconEdit, IconDelete } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import styles from './style/index.module.less';
 
 interface ScheduleInfo {
   id: number;
@@ -146,7 +147,7 @@ function ScheduleManagement() {
 
   return (
     <Card>
-      <div style={{ marginBottom: 16 }}>
+      <div className={styles.actionsRow}>
         <Button type="primary" icon={<IconPlus />} onClick={() => openScheduleModal()}>
           {t['schedule.new']}
         </Button>

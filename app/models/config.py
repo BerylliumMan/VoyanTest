@@ -19,7 +19,7 @@ class AIConfig(Base):
     api_key = Column(String(500), nullable=False)
     api_base = Column(String(500), nullable=False)
     temperature = Column(Float, nullable=False, default=0.1)
-    updated_at = Column(DateTime, default=tz_now, onupdate=tz_now)
+    updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 
 
 class PromptTemplate(Base):
@@ -34,4 +34,4 @@ class PromptTemplate(Base):
     label = Column(String(200), nullable=False)  # display name
     template_content = Column(Text, nullable=False)
     is_custom = Column(Boolean, default=False)  # True if user modified it
-    updated_at = Column(DateTime, default=tz_now, onupdate=tz_now)
+    updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)

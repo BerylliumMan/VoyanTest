@@ -4,6 +4,7 @@ import {
 } from '@arco-design/web-react';
 import { Step, Module, TestCase } from '../types';
 import StepList from './StepList';
+import styles from '../style/components.module.less';
 
 interface StepItem { step_order: number; description: string; }
 interface TestCaseDetail extends TestCase { steps: StepItem[]; }
@@ -80,7 +81,7 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
     <Modal
       visible={visible} onCancel={onCancel}
       title={editingCase ? t['edit.case'] : t['new.case']}
-      onOk={onSubmit} style={{ width: 700 }}
+      onOk={onSubmit} className={styles['editor-modal']}
     >
       <Form form={form} layout="vertical">
         <Form.Item field="name" label={t['name']} rules={[{ required: true, message: t['case.name.placeholder'] }]}>

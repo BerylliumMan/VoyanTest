@@ -3,6 +3,7 @@ import { Card, Grid, Select, Spin, Table, Tag } from '@arco-design/web-react';
 import { IconLoading, IconStorage, IconCheckCircleFill, IconCloseCircleFill, IconList } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
+import logger from '@/utils/logger';
 import styles from './style/index.module.less';
 
 interface ProjectSummary { id: number; name: string; last_run_status?: string; }
@@ -36,7 +37,7 @@ function Dashboard() {
       setStats(statsRes.data);
       setTrends(trendsRes.data.data || []);
       setRecent(batchesRes.data.items || []);
-    }).catch((err) => { console.error('Failed to load dashboard data:', err); }).finally(() => setLoading(false));
+    }).catch((err) => { logger.error('Failed to load dashboard data:', err); }).finally(() => setLoading(false));
   };
 
   useEffect(() => { fetchData(projectId); }, [projectId]);
@@ -111,9 +112,9 @@ function Dashboard() {
         </Col>
       </Row>
 
-      <Row gutter={16} style={{ display: 'flex', alignItems: 'stretch' }}>
-        <Col span={12} style={{ display: 'flex' }}>
-          <Card title={t['trend.7days']} style={{ flex: 1 }}>
+      <Row gutter={16} className={styles.rowFlex}>
+        <Col span={12} className={styles.colFlex}>
+          <Card title={t['trend.7days']} className={styles.flexCard}>
             {trends.length ? (
               <div className={styles['trend-bar']}>
                 {trends.map((d: TrendItem, i: number) => {
@@ -131,8 +132,8 @@ function Dashboard() {
             ) : <div className={styles['empty-state']}>{t['no.data']}</div>}
           </Card>
         </Col>
-        <Col span={12} style={{ display: 'flex' }}>
-          <Card title={t['recent.runs']} style={{ flex: 1 }}>
+        <Col span={12} className={styles.colFlex}>
+          <Card title={t['recent.runs']} className={styles.flexCard}>
             {recent.length ? (
               <Table
                 data={recent} rowKey="id" pagination={false} size="small"
@@ -142,7 +143,7 @@ function Dashboard() {
                   { title: t['status'], dataIndex: 'status', width: 100,
  render: (_: unknown, r: BatchRun) => {
                        const s = r.status;
-                       if (s === 'running') return <Tag color="blue"><IconLoading style={{ marginRight: 4 }} />{t['running']}</Tag>;
+                       if (s === 'running') return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
                        if (r.passed === r.total_cases && r.total_cases > 0) return <Tag color="green">{t['all.passed']}</Tag>;
                        if (r.passed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
                        if (r.total_cases > 0) return <Tag color="red">{t['all.failed']}</Tag>;

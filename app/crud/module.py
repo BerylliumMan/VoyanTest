@@ -1,7 +1,8 @@
 # app/crud/module.py - 模块 CRUD
 import logging
 
-from sqlalchemy.orm import Session
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db_models, models
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 # 模块CRUD
 # ----------------------------
 
-def create_module(db: Session, project_id: int, module: models.ModuleCreate) -> db_models.Module:
+async def create_module(db: AsyncSession, project_id: int, module: models.ModuleCreate) -> db_models.Module:
     """创建新模块"""
     db_module = db_models.Module(
         project_id=project_id,
@@ -21,23 +22,34 @@ def create_module(db: Session, project_id: int, module: models.ModuleCreate) -> 
         parent_id=module.parent_id
     )
     db.add(db_module)
-    db.commit()
-    db.refresh(db_module)
+    await db.commit()
+    await db.refresh(db_module)
     return db_module
 
-def get_module(db: Session, module_id: int) -> db_models.Module | None:
+async def get_module(db: AsyncSession, module_id: int) -> db_models.Module | None:
     """通过ID获取模块"""
-    return db.query(db_models.Module).filter(db_models.Module.id == module_id).first()
+    result = await db.execute(
+        select(db_models.Module).where(db_models.Module.id == module_id)
+    )
+    return result.scalar_one_or_none()
 
-def get_modules_for_project(db: Session, project_id: int) -> list[db_models.Module]:
+async def get_modules_for_project(db: AsyncSession, project_id: int) -> list[db_models.Module]:
     """获取项目的所有模块"""
-    return db.query(db_models.Module).filter(db_models.Module.project_id == project_id).order_by(db_models.Module.name.asc()).all()
+    result = await db.execute(
+        select(db_models.Module)
+        .where(db_models.Module.project_id == project_id)
+        .order_by(db_models.Module.name.asc())
+    )
+    return result.scalars().all()
 
-def get_module_tree(db: Session, project_id: int) -> list[dict]:
+async def get_module_tree(db: AsyncSession, project_id: int) -> list[dict]:
     """递归构建模块树形结构"""
-    all_modules = db.query(db_models.Module).filter(
-        db_models.Module.project_id == project_id
-    ).order_by(db_models.Module.name.asc()).all()
+    result = await db.execute(
+        select(db_models.Module)
+        .where(db_models.Module.project_id == project_id)
+        .order_by(db_models.Module.name.asc())
+    )
+    all_modules = result.scalars().all()
 
     module_map = {}
     for m in all_modules:
@@ -61,17 +73,18 @@ def get_module_tree(db: Session, project_id: int) -> list[dict]:
 
     return tree
 
-def get_module_descendants(db: Session, module_id: int) -> list[int]:
+async def get_module_descendants(db: AsyncSession, module_id: int) -> list[int]:
     """递归获取模块及所有下级模块 ID 列表"""
     result_ids = [module_id]
-    children = db.query(db_models.Module).filter(
-        db_models.Module.parent_id == module_id
-    ).all()
+    children_result = await db.execute(
+        select(db_models.Module).where(db_models.Module.parent_id == module_id)
+    )
+    children = children_result.scalars().all()
     for child in children:
-        result_ids.extend(get_module_descendants(db, child.id))
+        result_ids.extend(await get_module_descendants(db, child.id))
     return result_ids
 
-def validate_module_parent(db: Session, module_id: int, parent_id: int) -> bool:
+async def validate_module_parent(db: AsyncSession, module_id: int, parent_id: int) -> bool:
     """检查 parent_id 不会形成循环引用"""
     if parent_id is None:
         return True
@@ -83,15 +96,18 @@ def validate_module_parent(db: Session, module_id: int, parent_id: int) -> bool:
         if current == module_id or current in visited:
             return False
         visited.add(current)
-        parent_module = db.query(db_models.Module).filter(db_models.Module.id == current).first()
+        parent_result = await db.execute(
+            select(db_models.Module).where(db_models.Module.id == current)
+        )
+        parent_module = parent_result.scalar_one_or_none()
         if not parent_module:
             break
         current = parent_module.parent_id
     return True
 
-def update_module(db: Session, module_id: int, module: models.ModuleUpdate) -> db_models.Module | None:
+async def update_module(db: AsyncSession, module_id: int, module: models.ModuleUpdate) -> db_models.Module | None:
     """更新模块"""
-    db_module = get_module(db, module_id)
+    db_module = await get_module(db, module_id)
     if not db_module:
         return None
 
@@ -99,31 +115,34 @@ def update_module(db: Session, module_id: int, module: models.ModuleUpdate) -> d
     for key, value in update_data.items():
         setattr(db_module, key, value)
 
-    db.commit()
-    db.refresh(db_module)
+    await db.commit()
+    await db.refresh(db_module)
     return db_module
 
-def delete_module(db: Session, module_id: int) -> bool | None:
+async def delete_module(db: AsyncSession, module_id: int) -> bool | None:
     """删除模块（含删除保护：模块或子模块下有测试用例时拒绝删除；否则级联删除子模块）"""
-    db_module = get_module(db, module_id)
+    db_module = await get_module(db, module_id)
     if not db_module:
         return None
 
     # 检查模块及其所有子模块下是否有测试用例
-    descendant_ids = get_module_descendants(db, module_id)
-    case_count = db.query(db_models.TestCase).filter(
-        db_models.TestCase.module_id.in_(descendant_ids)
-    ).count()
+    descendant_ids = await get_module_descendants(db, module_id)
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(db_models.TestCase)
+        .where(db_models.TestCase.module_id.in_(descendant_ids))
+    )
+    case_count = count_result.scalar()
     if case_count > 0:
         raise ValueError(f"模块或其子模块下有 {case_count} 个测试用例，无法删除")
 
     # 先删除所有子模块（从叶子到根），再删除自身
     child_ids = [cid for cid in descendant_ids if cid != module_id]
     if child_ids:
-        db.query(db_models.Module).filter(
-            db_models.Module.id.in_(child_ids)
-        ).delete(synchronize_session=False)
+        await db.execute(
+            delete(db_models.Module).where(db_models.Module.id.in_(child_ids))
+        )
 
-    db.delete(db_module)
-    db.commit()
+    await db.delete(db_module)
+    await db.commit()
     return True

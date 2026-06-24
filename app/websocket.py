@@ -94,7 +94,7 @@ _pause_decisions: dict[int, dict] = {}
 
 
 async def websocket_logs(websocket: WebSocket, run_id: int):
-    from app.database import SessionLocal
+    from app.database import AsyncSessionLocal
     from app.auth import get_session
 
     # 从 cookie 读取 session_id（query param 回退已移除）
@@ -103,14 +103,11 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
         await websocket.close(code=4001, reason="missing session_id")
         return
 
-    db = SessionLocal()
-    try:
-        session = get_session(db, session_id)
+    async with AsyncSessionLocal() as db:
+        session = await get_session(db, session_id)
         if not session:
             await websocket.close(code=4003, reason="invalid session")
             return
-    finally:
-        db.close()
 
     await log_manager.connect(websocket, run_id)
     

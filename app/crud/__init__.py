@@ -1,9 +1,9 @@
 # app/crud/__init__.py - Re-export all public functions from sub-modules
 from app.crud.project import (
-    get_db,
     create_project,
     get_project,
     get_all_projects,
+    list_projects_for_user,
     update_project,
     delete_project,
 )
@@ -74,12 +74,45 @@ from app.crud.agent import (
 from app.crud.gen import (
     list_gen_sessions,
     get_gen_session,
+    create_gen_session,
+    increment_imported_count,
+    update_gen_session_status,
+    persist_gen_session_results,
     delete_gen_session,
     list_gen_functional_points,
     list_gen_test_cases,
     get_gen_test_case,
     update_gen_test_case,
     delete_gen_test_case,
+)
+from app.crud.user import (
+    list_users,
+    get_user_by_username,
+    get_user_by_id,
+    get_users_by_ids,
+    create_user,
+    update_user_fields,
+    unlock_user_if_expired,
+    commit_user,
+)
+from app.crud.config import (
+    get_ai_config,
+    upsert_ai_config,
+    list_prompt_templates,
+    get_prompt_template_by_key,
+    upsert_prompt_template,
+    restore_prompt_template,
+)
+from app.crud.audit import (
+    list_audit_logs,
+)
+from app.crud.schedule import (
+    list_scheduled_tasks,
+    get_scheduled_task,
+    create_scheduled_task,
+    update_scheduled_task,
+    delete_scheduled_task,
+    toggle_scheduled_task,
 )
 
 __all__ = [
@@ -88,6 +121,7 @@ __all__ = [
     "create_project",
     "get_project",
     "get_all_projects",
+    "list_projects_for_user",
     "update_project",
     "delete_project",
     # environment
@@ -152,10 +186,39 @@ __all__ = [
     # gen
     "list_gen_sessions",
     "get_gen_session",
+    "create_gen_session",
+    "increment_imported_count",
+    "update_gen_session_status",
+    "persist_gen_session_results",
     "delete_gen_session",
     "list_gen_functional_points",
     "list_gen_test_cases",
     "get_gen_test_case",
     "update_gen_test_case",
     "delete_gen_test_case",
+    # user
+    "list_users",
+    "get_user_by_username",
+    "get_user_by_id",
+    "get_users_by_ids",
+    "create_user",
+    "update_user_fields",
+    "unlock_user_if_expired",
+    "commit_user",
+    # config
+    "get_ai_config",
+    "upsert_ai_config",
+    "list_prompt_templates",
+    "get_prompt_template_by_key",
+    "upsert_prompt_template",
+    "restore_prompt_template",
+    # audit
+    "list_audit_logs",
+    # schedule
+    "list_scheduled_tasks",
+    "get_scheduled_task",
+    "create_scheduled_task",
+    "update_scheduled_task",
+    "delete_scheduled_task",
+    "toggle_scheduled_task",
 ]  # noqa: E501

@@ -64,7 +64,7 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
       onCancel={onClose}
       title={run ? run.case_name : ''}
       footer={<Button onClick={onClose}>{t['close']}</Button>}
-      style={{ width: 800 }}
+      className={styles.runDetailModal}
     >
       {run && (
         <div>
@@ -76,17 +76,16 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
               { label: t['start.time'], value: run.started_at ? new Date(run.started_at).toLocaleString() : '--' },
               { label: t['end.time'], value: run.finished_at ? new Date(run.finished_at).toLocaleString() : '--' },
             ]}
-            style={{ marginBottom: 24 }}
+            className={styles.descriptionsMarginLarge}
           />
           {run.steps && run.steps.length > 0 ? (
             <div>
               <h4 className={styles['run-section-title']}>{t['step.detail']}</h4>
               {run.steps.map((step: StepDetail, idx: number) => (
-                <Card key={idx} className={styles['step-card']}
-                  bodyStyle={{ padding: 12 }}
+                <Card key={idx} className={`${styles['step-card']} ${styles.runDetailStepBody}`}
                 >
                   <div className={styles['step-header']}>
-                    <Tag style={{ width: 28, textAlign: 'center' }}>
+                    <Tag className={styles.stepIndexTag}>
                       {step.step_number || idx + 1}
                     </Tag>
                     <span className={styles['step-description']}>{step.original_description || step.description}</span>
@@ -106,7 +105,7 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
                     </div>
                   )}
                   {step.screenshot_path && (
-                    <div style={{ marginTop: 8 }}>
+                    <div className={styles.screenshotTopMargin}>
                       <img
                         src={`/${step.screenshot_path}`}
                         alt={t['screenshot'].replace('{num}', String(step.step_number ?? ''))}

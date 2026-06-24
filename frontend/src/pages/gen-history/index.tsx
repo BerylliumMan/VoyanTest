@@ -150,7 +150,7 @@ const GenHistoryPage: React.FC = () => {
       title: '项目',
       dataIndex: 'project_name',
       width: 140,
-      render: (val: string) => val || <span style={{ color: '#888' }}>-</span>,
+      render: (val: string) => val || <span className={styles.placeholderText}>-</span>,
     },
     {
       title: '状态',
@@ -173,7 +173,9 @@ const GenHistoryPage: React.FC = () => {
       dataIndex: 'imported_count',
       width: 80,
       render: (val: number, record: GenHistoryItem) => (
-        <span style={{ color: val > 0 ? 'rgb(var(--success-6))' : undefined }}>
+        <span
+          className={val > 0 ? styles.importedCount : undefined}
+        >
           {val} / {record.test_cases_count}
         </span>
       ),
@@ -234,7 +236,7 @@ const GenHistoryPage: React.FC = () => {
           <Title heading={5}>分析记录</Title>
           <Space>
             <Select
-              style={{ width: 200 }}
+              className={styles.projectSelect}
               placeholder="全部项目"
               allowClear
               value={selectedProject}
