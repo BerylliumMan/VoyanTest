@@ -152,7 +152,7 @@ async def mark_run_failed(
                 status="failed",
                 start_time=_start,
                 end_time=_now,
-                duration=0.0,
+                duration=(_now - _start).total_seconds() if _start and _now else 0.0,
             )
         )
         await db.execute(stmt)

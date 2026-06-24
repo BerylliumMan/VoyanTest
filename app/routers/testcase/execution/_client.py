@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
+from app.auth import get_current_user
 from app.database import AsyncSessionLocal, get_async_db
 from app.tz import now as tz_now
 from core.runner import save_run_results
@@ -36,7 +37,7 @@ router = APIRouter()
 
 
 @router.post("/{case_id}/run-client")
-async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
+async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), agent_name: Optional[str] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
     """Run a test case on a connected client agent via WebSocket."""
     from agent.manager import agent_manager
 
@@ -96,7 +97,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
             with open(report_path, "w", encoding="utf-8") as f:
                 _json.dump(report, f, ensure_ascii=False, indent=2)
 
-            save_run_results(
+            await save_run_results(
                 case_id, status, start_time, tz_now(),
                 (tz_now() - start_time).total_seconds(),
                 report_path, None, [], batch_id=batch.id,
@@ -105,7 +106,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
             logger.exception("Client execution failed")
             _all_success = False
             end_time = tz_now()
-            save_run_results(
+            await save_run_results(
                 case_id, "failed", start_time, end_time,
                 (end_time - start_time).total_seconds(),
                 None, None,
@@ -165,7 +166,7 @@ async def run_test_case_on_client(case_id: int, agent_name: Optional[str] = None
 
 
 @router.post("/batch-run-client")
-async def batch_run_client(body: BatchCaseIdsRequest, db: AsyncSession = Depends(get_async_db)) -> dict:
+async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """Run multiple test cases sequentially on a connected client agent."""
     from agent.manager import agent_manager
 
@@ -239,7 +240,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: AsyncSession = Depends
                 with open(report_path, "w", encoding="utf-8") as f:
                     _json.dump(report, f, ensure_ascii=False, indent=2)
 
-                save_run_results(
+                await save_run_results(
                     case_id, status, start_time, tz_now(),
                     (tz_now() - start_time).total_seconds(),
                     report_path, None, [], batch_id=batch.id,
@@ -249,7 +250,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, db: AsyncSession = Depends
                 logger.exception("Agent run failed for case %s", case_id)
                 _all_success = False
                 end_time = tz_now()
-                save_run_results(
+                await save_run_results(
                     case_id, "failed", start_time, end_time,
                     (end_time - start_time).total_seconds(),
                     None, None,

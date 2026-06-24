@@ -61,13 +61,21 @@ class BrowserPool:
             cls._instances[project_id] = manager
 
     @classmethod
-    def is_active(cls, project_id: int) -> bool:
-        return project_id in cls._instances
+    async def is_active(cls, project_id: int) -> bool:
+        async with cls._lock:
+            return project_id in cls._instances
+
+    @classmethod
+    async def get(cls, project_id: int):
+        """Return active manager for *project_id*, or None under lock."""
+        async with cls._lock:
+            return cls._instances.get(project_id)
 
     @classmethod
     async def close(cls, project_id: int) -> None:
         """Stop the manager and remove it from the pool."""
-        mgr = cls._instances.pop(project_id, None)
+        async with cls._lock:
+            mgr = cls._instances.pop(project_id, None)
         if mgr is None:
             logger.warning(
                 f"BrowserPool.close({project_id}): no active manager"

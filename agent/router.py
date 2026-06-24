@@ -53,8 +53,10 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
         try:
             from app.database import AsyncSessionLocal
             from app.db_models import Agent as AgentDBModel
+            from sqlalchemy import select
             async with AsyncSessionLocal() as db:
-                existing = db.query(AgentDBModel).filter(AgentDBModel.name == name).first()
+                result = await db.execute(select(AgentDBModel).where(AgentDBModel.name == name))
+                existing = result.scalar_one_or_none()
                 if existing:
                     existing.status = "online"
                     existing.last_heartbeat = tz_now()

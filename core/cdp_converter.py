@@ -248,7 +248,7 @@ async def convert_events_to_steps(
         return []
 
     if client is None:
-        client = create_openai_client()
+        client = await create_openai_client()
 
     _, _, resolved_model = _resolve_config(explicit_model=model)
 

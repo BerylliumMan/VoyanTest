@@ -197,7 +197,8 @@ async def auth_middleware(request: Request, call_next):
                 if not user or user.status == "disabled":
                     return JSONResponse(status_code=401, content={"detail": "账号已禁用"})
             except SQLAlchemyError:
-                pass
+                logger.exception("Database error in auth_middleware — denying request")
+                return JSONResponse(status_code=503, content={"detail": "服务暂时不可用"})
     return await call_next(request)
 
 
@@ -237,6 +238,7 @@ async def enforce_password_changed(request: Request, call_next):
             if user and user.must_change_password:
                 return JSONResponse(status_code=403, content={"detail": "请先修改默认密码"})
         except SQLAlchemyError:
+            logger.exception("Database error in enforce_password_changed — allowing request to proceed with caution")
             pass
     return await call_next(request)
 

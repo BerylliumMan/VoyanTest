@@ -254,9 +254,10 @@ async def _run_test_case_in_browser_impl(
             )
 
             # ==============================================================
-            # 重试循环
+            # 重试循环（while 而非 for，使自愈 continue 不消耗尝试次数）
             # ==============================================================
-            for attempt in range(retry_max + 1):
+            attempt = 0
+            while attempt <= retry_max:
                 if attempt > 0:
                     logger.info("  重试第 %s/%s 次...", attempt, retry_max)
                     await asyncio.sleep(retry_delay)
@@ -343,6 +344,7 @@ async def _run_test_case_in_browser_impl(
                         continue  # 用新选择器重试
                     elif attempt == 0 and not step_success and error_msg:
                         logger.debug("  跳过自愈（非定位错误）: %s", error_msg[:80])
+                attempt += 1
 
             # ==============================================================
             # 步骤最终失败处理
@@ -422,6 +424,7 @@ async def _run_test_case_in_browser_impl(
                         if last_result:
                             last_result['status'] = 'skipped'
                             last_result['error'] = (last_result.get('error') or '') + ' (用户跳过)'
+                        step_success = True  # 用户已确认跳过，不计入连续失败
                     elif decision == "edit":
                         new_desc = _pause_decisions.get(run_id, {}).get("new_description", "")
                         if new_desc:
@@ -481,12 +484,12 @@ async def _run_test_case_in_browser_impl(
                     else:  # "abort" 或其他
                         logger.info("  用户选择中止执行")
                         should_abort = True
-                        # 重置暂停事件，避免后续误用
-                        if run_id in _pause_events:
-                            _pause_events[run_id] = asyncio.Event()
 
                     # 清除本次决策，避免污染下次
                     _pause_decisions.pop(run_id, None)
+                    # 重置暂停事件，确保下次 pause 使用全新 Event
+                    if run_id in _pause_events:
+                        _pause_events[run_id] = asyncio.Event()
 
                 # 如果 abort 被触发，跳出主循环
                 if should_abort:
@@ -561,12 +564,17 @@ async def _run_test_case_in_browser_impl(
                                 _pause_decisions.pop(run_id, None)
                                 if decision == "abort":
                                     should_abort = True
-                                    if run_id in _pause_events:
-                                        _pause_events[run_id] = asyncio.Event()
                                     break
+                                # 重置暂停事件，确保下次 pause 使用全新 Event
+                                if run_id in _pause_events:
+                                    _pause_events[run_id] = asyncio.Event()
                                 # skip / retry / edit 对断言失败也适用
                                 # 简化处理：skip → 继续，其他 → 继续（断言失败不致命）
                             consecutive_failures += 1
+                            if last_result:
+                                last_result['success'] = False
+                        else:
+                            consecutive_failures = 0
                     except Exception as assert_exc:  # noqa: BLE001 - 见下方注释
                         # Broad catch is necessary: execute_step_assertions drives
                         # MCP tool calls + LLM calls + DOM inspection — any failure

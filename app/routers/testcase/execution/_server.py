@@ -20,6 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
+from app.auth import get_current_user
 from app.database import AsyncSessionLocal, get_async_db
 from app.tz import now as tz_now
 
@@ -34,6 +35,7 @@ router = APIRouter()
 async def run_test_case_endpoint(
     case_id: int,
     background_tasks: BackgroundTasks,
+    user=Depends(get_current_user),
     environment_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
@@ -47,11 +49,11 @@ async def run_test_case_endpoint(
     from core.browser_pool import BrowserPool
 
     project_id = db_case.project_id
-    if BrowserPool.is_active(project_id):
+    if await BrowserPool.is_active(project_id):
         from app.routers.testcase import execution as _exec
 
         async def _run_with_existing_browser() -> None:
-            mgr = BrowserPool._instances.get(project_id)
+            mgr = await BrowserPool.get(project_id)
             if mgr is not None:
                 base_url_override = None
                 if environment_id:
@@ -73,6 +75,7 @@ async def run_test_case_endpoint(
 async def run_test_case_debug(
     case_id: int,
     req: DebugRunRequest = DebugRunRequest(),
+    user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
     """启动调试运行——打开 WebSocket 桥接和暂停模式。"""
@@ -117,7 +120,7 @@ async def _run_debug_mode(case_id: int, batch_id: int, run_id: int, environment_
         )
         from app.websocket import _pause_events
         _pause_events.pop(run_id, None)
-    except Exception:
+    except Exception as exc:
         logger.exception("Debug run failed")
         try:
             from app.websocket import LogBroadcaster
@@ -127,7 +130,7 @@ async def _run_debug_mode(case_id: int, batch_id: int, run_id: int, environment_
 
 
 @router.post("/batch-run")
-async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)) -> dict:
+async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTasks, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """批量运行选中的测试用例 - 创建批次"""
     if not req.case_ids:
         raise HTTPException(status_code=400, detail="No cases selected")
@@ -174,6 +177,7 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
 async def run_module_test_cases(
     module_id: int,
     background_tasks: BackgroundTasks,
+    user=Depends(get_current_user),
     environment_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
@@ -207,6 +211,7 @@ async def run_module_test_cases(
 async def run_project_test_cases(
     project_id: int,
     background_tasks: BackgroundTasks,
+    user=Depends(get_current_user),
     environment_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:

@@ -5,7 +5,7 @@ from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 from .. import models
 from ..database import get_async_db
-from ..auth import require_admin
+from ..auth import require_admin, get_current_user
 from .. import crud
 from app.tz import now as tz_now
 
@@ -16,7 +16,7 @@ router = APIRouter(
 
 
 @router.get("/agents", response_model=List[models.Agent])
-async def list_agents(db: AsyncSession = Depends(get_async_db)) -> list[models.Agent]:
+async def list_agents(user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> list[models.Agent]:
     """不直接用 DB 的 `status` 字段——它会"粘性 online"（一旦设过永远不重置）。
 
     status 按心跳时间动态算，看两个源头：DB.last_heartbeat（HTTP 路径）
@@ -87,6 +87,7 @@ async def delete_agent(agent_id: int, admin=Depends(require_admin), db: AsyncSes
 @router.get("/agents/{agent_id}/logs", response_model=models.AgentLogPage)
 async def get_agent_logs(
     agent_id: int,
+    user=Depends(get_current_user),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db),
@@ -97,7 +98,7 @@ async def get_agent_logs(
 
 
 @router.post("/agents/{agent_id}/heartbeat", response_model=models.Agent)
-async def agent_heartbeat(agent_id: int, db: AsyncSession = Depends(get_async_db)) -> models.Agent:
+async def agent_heartbeat(agent_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.Agent:
     db_agent = await crud.update_agent_heartbeat(db, agent_id)
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")

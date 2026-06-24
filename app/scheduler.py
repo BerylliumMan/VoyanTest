@@ -49,13 +49,16 @@ class TaskScheduler:
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._check_interval = 60  # 检查间隔（秒）
         self._executor: Optional[Callable] = None
+        self._lock = asyncio.Lock()
     
     def set_executor(self, executor: Callable):
         """设置任务执行器"""
         self._executor = executor
     
-    def add_task(self, task_id: str, name: str, cron_expression: str,
+    async def add_task(self, task_id: str, name: str, cron_expression: str,
                  task_type: str, target_id: int, enabled: bool = True) -> ScheduledTask:
+        """
+        添加定时任务
         """
         添加定时任务
         
@@ -87,62 +90,65 @@ class TaskScheduler:
         
         return task
     
-    def remove_task(self, task_id: str) -> bool:
+    async def remove_task(self, task_id: str) -> bool:
         """移除定时任务"""
-        if task_id in self.tasks:
-            # 取消正在等待的任务
-            if task_id in self._task_handles:
-                self._task_handles[task_id].cancel()
-                del self._task_handles[task_id]
-            
-            del self.tasks[task_id]
-            logger.info("移除定时任务: %s", task_id)
-            return True
+        async with self._lock:
+            if task_id in self.tasks:
+                if task_id in self._task_handles:
+                    self._task_handles[task_id].cancel()
+                    del self._task_handles[task_id]
+                del self.tasks[task_id]
+                logger.info("移除定时任务: %s", task_id)
+                return True
         return False
     
-    def enable_task(self, task_id: str) -> bool:
+    async def enable_task(self, task_id: str) -> bool:
         """启用任务"""
-        if task_id in self.tasks:
-            self.tasks[task_id].enabled = True
-            # 重新计算下次执行时间
-            self.tasks[task_id].next_run = self.tasks[task_id].calculate_next_run()
-            logger.info("启用定时任务: %s", task_id)
-            return True
+        async with self._lock:
+            if task_id in self.tasks:
+                self.tasks[task_id].enabled = True
+                self.tasks[task_id].next_run = self.tasks[task_id].calculate_next_run()
+                logger.info("启用定时任务: %s", task_id)
+                return True
         return False
     
-    def disable_task(self, task_id: str) -> bool:
+    async def disable_task(self, task_id: str) -> bool:
         """禁用任务"""
-        if task_id in self.tasks:
-            self.tasks[task_id].enabled = False
-            # 取消正在等待的任务
-            if task_id in self._task_handles:
-                self._task_handles[task_id].cancel()
-                del self._task_handles[task_id]
-            logger.info("禁用定时任务: %s", task_id)
-            return True
+        async with self._lock:
+            if task_id in self.tasks:
+                self.tasks[task_id].enabled = False
+                if task_id in self._task_handles:
+                    self._task_handles[task_id].cancel()
+                    del self._task_handles[task_id]
+                logger.info("禁用定时任务: %s", task_id)
+                return True
         return False
     
-    def update_task_cron(self, task_id: str, cron_expression: str) -> bool:
+    async def update_task_cron(self, task_id: str, cron_expression: str) -> bool:
         """更新任务的 Cron 表达式"""
-        if task_id in self.tasks:
-            task = self.tasks[task_id]
-            task.cron_expression = cron_expression
-            task.next_run = task.calculate_next_run()
-            logger.info("更新任务 %s 的 Cron 表达式: %s, 下次执行: %s", task_id, cron_expression, task.next_run)
-            return True
+        async with self._lock:
+            if task_id in self.tasks:
+                task = self.tasks[task_id]
+                task.cron_expression = cron_expression
+                task.next_run = task.calculate_next_run()
+                logger.info("更新任务 %s 的 Cron 表达式: %s, 下次执行: %s", task_id, cron_expression, task.next_run)
+                return True
         return False
     
-    def get_task(self, task_id: str) -> Optional[ScheduledTask]:
+    async def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         """获取任务信息"""
-        return self.tasks.get(task_id)
+        async with self._lock:
+            return self.tasks.get(task_id)
     
-    def get_all_tasks(self) -> List[ScheduledTask]:
+    async def get_all_tasks(self) -> List[ScheduledTask]:
         """获取所有任务"""
-        return list(self.tasks.values())
+        async with self._lock:
+            return list(self.tasks.values())
     
-    def get_enabled_tasks(self) -> List[ScheduledTask]:
+    async def get_enabled_tasks(self) -> List[ScheduledTask]:
         """获取所有启用的任务"""
-        return [t for t in self.tasks.values() if t.enabled]
+        async with self._lock:
+            return [t for t in self.tasks.values() if t.enabled]
     
     async def start(self):
         """启动调度器"""
@@ -154,8 +160,10 @@ class TaskScheduler:
         logger.info("定时任务调度器已启动")
         
         # 启动所有启用的任务
-        for task in self.get_enabled_tasks():
-            asyncio.create_task(self._schedule_task(task))
+        enabled = await self.get_enabled_tasks()
+        for task in enabled:
+            handle = asyncio.create_task(self._schedule_task(task), name=f"sched-{task.id}")
+            self._task_handles[task.id] = handle
         
         # 启动检查循环
         while self._running:
@@ -220,11 +228,13 @@ class TaskScheduler:
     
     async def run_task_now(self, task_id: str) -> bool:
         """立即执行指定任务"""
-        task = self.get_task(task_id)
+        task = await self.get_task(task_id)
         if not task:
             return False
         
-        asyncio.create_task(self._execute_task(task))
+        handle = asyncio.create_task(self._execute_task(task), name=f"sched-exec-{task_id}")
+        self._task_handles[task_id] = handle
+        handle.add_done_callback(lambda _: self._task_handles.pop(task_id, None))
         return True
 
 

@@ -19,15 +19,15 @@ class LogWebSocketManager:
     def __init__(self):
         # 存储活跃的连接：run_id -> Set[WebSocket]
         self.active_connections: Dict[int, Set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
         
     async def connect(self, websocket: WebSocket, run_id: int):
         """建立 WebSocket 连接"""
         await websocket.accept()
-        
-        if run_id not in self.active_connections:
-            self.active_connections[run_id] = set()
-        
-        self.active_connections[run_id].add(websocket)
+        async with self._lock:
+            if run_id not in self.active_connections:
+                self.active_connections[run_id] = set()
+            self.active_connections[run_id].add(websocket)
         
         # 发送连接成功消息
         await self.send_message(run_id, {
@@ -36,26 +36,28 @@ class LogWebSocketManager:
             "message": "WebSocket 连接成功"
         })
     
-    def disconnect(self, websocket: WebSocket, run_id: int):
+    async def disconnect(self, websocket: WebSocket, run_id: int):
         """断开 WebSocket 连接"""
-        if run_id in self.active_connections:
-            self.active_connections[run_id].discard(websocket)
-            
-            # 如果没有连接了，清理
-            if not self.active_connections[run_id]:
-                del self.active_connections[run_id]
+        async with self._lock:
+            if run_id in self.active_connections:
+                self.active_connections[run_id].discard(websocket)
+                # 如果没有连接了，清理
+                if not self.active_connections[run_id]:
+                    del self.active_connections[run_id]
     
     async def send_message(self, run_id: int, message: dict):
         """向指定 run_id 的所有连接发送消息"""
-        if run_id not in self.active_connections:
-            return
+        async with self._lock:
+            if run_id not in self.active_connections:
+                return
+            connections = list(self.active_connections[run_id])
         
         # 转换为 JSON
         message_json = json.dumps(message, ensure_ascii=False)
         
-        # 发送给所有连接
+        # 发送给所有连接（锁外发送，避免持有锁时 await）
         disconnected = set()
-        for connection in self.active_connections[run_id]:
+        for connection in connections:
             try:
                 await connection.send_text(message_json)
             except (RuntimeError, ConnectionError):
@@ -63,19 +65,21 @@ class LogWebSocketManager:
                 disconnected.add(connection)
         
         # 清理断开的连接
-        for conn in disconnected:
-            self.active_connections[run_id].discard(conn)
-        
-        # 如果没有连接了，清理
-        if not self.active_connections[run_id]:
-            del self.active_connections[run_id]
+        if disconnected:
+            async with self._lock:
+                for conn in disconnected:
+                    self.active_connections[run_id].discard(conn)
+                if not self.active_connections[run_id]:
+                    del self.active_connections[run_id]
     
     async def broadcast(self, message: dict):
         """广播消息给所有连接"""
-        for run_id in list(self.active_connections.keys()):
+        async with self._lock:
+            run_ids = list(self.active_connections.keys())
+        for run_id in run_ids:
             await self.send_message(run_id, message)
     
-    def get_connection_count(self, run_id: int = None) -> int:
+    async def get_connection_count(self, run_id: int = None) -> int:
         """获取连接数"""
         if run_id is not None:
             return len(self.active_connections.get(run_id, set()))
