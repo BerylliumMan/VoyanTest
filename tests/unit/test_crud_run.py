@@ -14,7 +14,7 @@ class TestTestRun:
     @pytest.mark.asyncio
     async def test_create_test_run(self, db, sample_testcase):
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
         assert run.id is not None
         assert run.status == "running"
         assert run.case_id == sample_testcase["id"]
@@ -22,20 +22,20 @@ class TestTestRun:
     @pytest.mark.asyncio
     async def test_update_status(self, db, sample_testcase):
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
-        updated = update_test_run_status(db, run.id, "passed", end_time=now, duration=10.5)
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
+        updated = await update_test_run_status(db, run.id, "passed", end_time=now, duration=10.5)
         assert updated is not None
         assert updated.status == "passed"
         assert updated.duration == 10.5
 
     @pytest.mark.asyncio
     async def test_update_status_not_found(self, db):
-        assert update_test_run_status(db, 99999, "passed") is None
+        assert await update_test_run_status(db, 99999, "passed") is None
 
     @pytest.mark.asyncio
     async def test_create_run_log(self, db, sample_testcase):
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
         log = create_run_log(db, run.id, "INFO", "test message", step_id=1)
         assert log.id is not None
         assert log.level == "INFO"
@@ -43,7 +43,7 @@ class TestTestRun:
     @pytest.mark.asyncio
     async def test_create_run_log_with_screenshot(self, db, sample_testcase):
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
         log = create_run_log(db, run.id, "ERROR", "failed", step_id=1, screenshot_path="/ss/1.png")
         assert log.screenshot_path == "/ss/1.png"
 
@@ -59,24 +59,24 @@ class TestRunBatch:
     @pytest.mark.asyncio
     async def test_get_batch_found(self, db, sample_project):
         batch = await create_run_batch(db, sample_project["id"], "Get Test", total_cases=1)
-        found = get_run_batch(db, batch.id)
+        found = await get_run_batch(db, batch.id)
         assert found is not None
         assert found.id == batch.id
 
     @pytest.mark.asyncio
     async def test_get_batch_not_found(self, db):
-        assert get_run_batch(db, 99999) is None
+        assert await get_run_batch(db, 99999) is None
 
     @pytest.mark.asyncio
     async def test_list_batches_empty(self, db):
-        result = list_run_batches(db)
+        result = await list_run_batches(db)
         assert result["total"] >= 0
         assert "items" in result
 
     @pytest.mark.asyncio
     async def test_list_batches_with_data(self, db, sample_project):
         await create_run_batch(db, sample_project["id"], "Batch 1", total_cases=2)
-        result = list_run_batches(db)
+        result = await list_run_batches(db)
         assert result["total"] >= 1
 
     @pytest.mark.asyncio
@@ -103,7 +103,7 @@ class TestRunBatch:
         """覆盖 list_run_batches 预加载 runs 的内层循环（line 108）。"""
         batch = await create_run_batch(db, sample_project["id"], "With Runs", total_cases=1)
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "passed", now, now)
+        run = await create_test_run(db, sample_testcase["id"], "passed", now, now)
         run.batch_id = batch.id
         await db.commit()
 
@@ -118,49 +118,49 @@ class TestRunBatch:
     @pytest.mark.asyncio
     async def test_update_batch_found(self, db, sample_project):
         batch = await create_run_batch(db, sample_project["id"], "Old Name", total_cases=1)
-        updated = update_run_batch(db, batch.id, name="New Name")
+        updated = await update_run_batch(db, batch.id, name="New Name")
         assert updated is not None
         assert updated.name == "New Name"
 
     @pytest.mark.asyncio
     async def test_update_batch_not_found(self, db):
-        assert update_run_batch(db, 99999, name="Nope") is None
+        assert await update_run_batch(db, 99999, name="Nope") is None
 
     @pytest.mark.asyncio
     async def test_delete_batch_found(self, db, sample_project):
         batch = await create_run_batch(db, sample_project["id"], "Delete Me", total_cases=1)
-        assert delete_run_batch(db, batch.id) is True
-        assert get_run_batch(db, batch.id) is None
+        assert await delete_run_batch(db, batch.id) is True
+        assert await get_run_batch(db, batch.id) is None
 
     @pytest.mark.asyncio
     async def test_delete_batch_not_found(self, db):
-        assert delete_run_batch(db, 99999) is False
+        assert await delete_run_batch(db, 99999) is False
 
 
 class TestBatchCounters:
     @pytest.mark.asyncio
     async def test_update_counter_passed(self, db, sample_project):
         batch = await create_run_batch(db, sample_project["id"], "Counter", total_cases=2)
-        result = update_batch_counters(db, batch.id, "passed")
+        result = await update_batch_counters(db, batch.id, "passed")
         assert result is not None
         assert result.passed == 1
 
     @pytest.mark.asyncio
     async def test_update_counter_failed(self, db, sample_project):
         batch = await create_run_batch(db, sample_project["id"], "Counter F", total_cases=2)
-        result = update_batch_counters(db, batch.id, "failed")
+        result = await update_batch_counters(db, batch.id, "failed")
         assert result is not None
         assert result.failed == 1
 
     @pytest.mark.asyncio
     async def test_update_counter_not_found(self, db):
-        assert update_batch_counters(db, 99999, "passed") is None
+        assert await update_batch_counters(db, 99999, "passed") is None
 
     @pytest.mark.asyncio
     async def test_update_counter_completes_batch(self, db, sample_project):
         batch = await create_run_batch(db, sample_project["id"], "Complete", total_cases=1)
-        update_batch_counters(db, batch.id, "passed")
-        refreshed = get_run_batch(db, batch.id)
+        await update_batch_counters(db, batch.id, "passed")
+        refreshed = await get_run_batch(db, batch.id)
         assert refreshed.finished_at is not None
 
 
@@ -170,7 +170,7 @@ class TestBatchStatus:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Old Batch", total_cases=1)
         batch.created_at = tz_now() - timedelta(seconds=60)
-        _compute_batch_status(db, batch, preloaded_runs=[])
+        await _compute_batch_status(db, batch, preloaded_runs=[])
         assert batch.status == "failed"
         db.expire_all()
 
@@ -178,7 +178,7 @@ class TestBatchStatus:
     async def test_compute_no_runs_recent(self, db, sample_project):
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Recent Batch", total_cases=1)
-        _compute_batch_status(db, batch, preloaded_runs=[])
+        await _compute_batch_status(db, batch, preloaded_runs=[])
         assert batch.status in ("running", "failed")
         db.expire_all()
 
@@ -188,8 +188,8 @@ class TestTestRunReportPath:
     @pytest.mark.asyncio
     async def test_update_status_sets_report_path(self, db, sample_testcase):
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
-        updated = update_test_run_status(
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
+        updated = await update_test_run_status(
             db, run.id, "passed", end_time=now, duration=5.0,
             report_path="/reports/run-{}.html".format(run.id),
         )
@@ -201,9 +201,9 @@ class TestTestRunReportPath:
     @pytest.mark.asyncio
     async def test_update_status_empty_report_path_keeps_existing(self, db, sample_testcase):
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
-        update_test_run_status(db, run.id, "running", report_path="/old.html")
-        updated = update_test_run_status(db, run.id, "passed", report_path="")
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
+        await update_test_run_status(db, run.id, "running", report_path="/old.html")
+        updated = await update_test_run_status(db, run.id, "passed", report_path="")
         assert updated.report_path == "/old.html"
 
 
@@ -225,9 +225,9 @@ class TestDeleteRunBatchCascade:
         run_a_id, run_b_id, log_a_id, log_b_id = run_a.id, run_b.id, log_a.id, log_b.id
         batch_id = batch.id
 
-        assert delete_run_batch(db, batch_id) is True
+        assert await delete_run_batch(db, batch_id) is True
 
-        assert get_run_batch(db, batch_id) is None
+        assert await get_run_batch(db, batch_id) is None
         assert db.query(db_models.TestRun).filter(db_models.TestRun.id == run_a_id).first() is None
         assert db.query(db_models.TestRun).filter(db_models.TestRun.id == run_b_id).first() is None
         assert db.query(db_models.RunLog).filter(db_models.RunLog.id == log_a_id).first() is None
@@ -237,11 +237,11 @@ class TestDeleteRunBatchCascade:
     async def test_delete_batch_with_runs_no_logs(self, db, sample_project, sample_testcase):
         batch = await create_run_batch(db, sample_project["id"], "Cascade NoLogs", total_cases=1)
         now = tz_now()
-        run = create_test_run(db, sample_testcase["id"], "running", now, now)
+        run = await create_test_run(db, sample_testcase["id"], "running", now, now)
         run.batch_id = batch.id
         await db.commit()
 
-        assert delete_run_batch(db, batch.id) is True
+        assert await delete_run_batch(db, batch.id) is True
         assert db.query(db_models.TestRun).filter(db_models.TestRun.id == run.id).first() is None
 
 
@@ -267,9 +267,9 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Stuck Pending", total_cases=1)
         stuck_start = tz_now() - timedelta(seconds=60)
-        run = self._make_run(db, sample_testcase["id"], batch.id, "pending", start_time=stuck_start)
+        run = await self._make_run(db, sample_testcase["id"], batch.id, "pending", start_time=stuck_start)
 
-        _compute_batch_status(db, batch, preloaded_runs=[run])
+        await _compute_batch_status(db, batch, preloaded_runs=[run])
 
         assert run.status == "failed"
         assert run.end_time is not None
@@ -285,9 +285,9 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Stuck Naive", total_cases=1)
         naive_start = (tz_now() - timedelta(seconds=60)).replace(tzinfo=None)
-        run = self._make_run(db, sample_testcase["id"], batch.id, "pending", start_time=naive_start)
+        run = await self._make_run(db, sample_testcase["id"], batch.id, "pending", start_time=naive_start)
 
-        _compute_batch_status(db, batch, preloaded_runs=[run])
+        await _compute_batch_status(db, batch, preloaded_runs=[run])
 
         assert run.status == "failed"
         assert batch.status == "failed"
@@ -299,12 +299,12 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Running", total_cases=3)
         now = tz_now()
-        run_running = self._make_run(db, sample_testcase["id"], batch.id, "running", start_time=now)
-        run_passed = self._make_run(db, sample_testcase["id"], batch.id, "passed",
+        run_running = await self._make_run(db, sample_testcase["id"], batch.id, "running", start_time=now)
+        run_passed = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
                                      start_time=now - timedelta(seconds=10),
                                      end_time=now, duration=10.0)
 
-        _compute_batch_status(db, batch, preloaded_runs=[run_running, run_passed])
+        await _compute_batch_status(db, batch, preloaded_runs=[run_running, run_passed])
 
         assert batch.status == "running"
         assert batch.passed == 1
@@ -316,9 +316,9 @@ class TestComputeBatchStatusAdvanced:
     async def test_compute_pending_counts_as_running(self, db, sample_project, sample_testcase):
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Has Pending", total_cases=2)
-        run = self._make_run(db, sample_testcase["id"], batch.id, "pending", start_time=None)
+        run = await self._make_run(db, sample_testcase["id"], batch.id, "pending", start_time=None)
 
-        _compute_batch_status(db, batch, preloaded_runs=[run])
+        await _compute_batch_status(db, batch, preloaded_runs=[run])
 
         assert batch.status == "running"
 
@@ -329,11 +329,11 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Partial", total_cases=3)
         now = tz_now()
-        run_passed = self._make_run(db, sample_testcase["id"], batch.id, "passed",
+        run_passed = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
                                      start_time=now - timedelta(seconds=5),
                                      end_time=now, duration=5.0)
 
-        _compute_batch_status(db, batch, preloaded_runs=[run_passed])
+        await _compute_batch_status(db, batch, preloaded_runs=[run_passed])
 
         assert batch.status == "partial"
         assert batch.passed == 1
@@ -346,12 +346,12 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "All Pass", total_cases=2)
         now = tz_now()
-        r1 = self._make_run(db, sample_testcase["id"], batch.id, "passed",
+        r1 = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
                             start_time=now - timedelta(seconds=10), end_time=now, duration=10.0)
-        r2 = self._make_run(db, sample_testcase["id"], batch.id, "passed",
+        r2 = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
                             start_time=now - timedelta(seconds=5), end_time=now, duration=5.0)
 
-        _compute_batch_status(db, batch, preloaded_runs=[r1, r2])
+        await _compute_batch_status(db, batch, preloaded_runs=[r1, r2])
 
         assert batch.status == "passed"
         assert batch.passed == 2
@@ -364,12 +364,12 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Mixed", total_cases=2)
         now = tz_now()
-        r_pass = self._make_run(db, sample_testcase["id"], batch.id, "passed",
+        r_pass = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
                                 start_time=now - timedelta(seconds=10), end_time=now, duration=10.0)
-        r_fail = self._make_run(db, sample_testcase["id"], batch.id, "failed",
+        r_fail = await self._make_run(db, sample_testcase["id"], batch.id, "failed",
                                 start_time=now - timedelta(seconds=8), end_time=now, duration=8.0)
 
-        _compute_batch_status(db, batch, preloaded_runs=[r_pass, r_fail])
+        await _compute_batch_status(db, batch, preloaded_runs=[r_pass, r_fail])
 
         assert batch.status == "failed"
         assert batch.passed == 1
@@ -382,12 +382,12 @@ class TestComputeBatchStatusAdvanced:
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Stuck Mixed", total_cases=2)
         now = tz_now()
-        real_failed = self._make_run(db, sample_testcase["id"], batch.id, "failed",
+        real_failed = await self._make_run(db, sample_testcase["id"], batch.id, "failed",
                                       start_time=now - timedelta(seconds=5), end_time=now, duration=5.0)
-        stuck = self._make_run(db, sample_testcase["id"], batch.id, "pending",
+        stuck = await self._make_run(db, sample_testcase["id"], batch.id, "pending",
                                start_time=now - timedelta(seconds=60))
 
-        _compute_batch_status(db, batch, preloaded_runs=[real_failed, stuck])
+        await _compute_batch_status(db, batch, preloaded_runs=[real_failed, stuck])
 
         assert stuck.status == "failed"
         assert batch.failed == 2
