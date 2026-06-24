@@ -94,7 +94,7 @@ async def db(engine):
 
 
 @pytest.fixture
-def client(db):
+def client(db, ensure_admin_user):
     from fastapi.testclient import TestClient
     from app.main import app
     from app.database import get_async_db
@@ -133,6 +133,22 @@ def ensure_admin_user(db):
     import asyncio
     asyncio.run(_create())
     yield
+
+
+@pytest.fixture
+def admin_user(db, ensure_admin_user):
+    """返回数据库中的 admin 用户对象。"""
+    from app.auth import hash_password
+    import asyncio
+    from app import db_models
+
+    async def _get():
+        from sqlalchemy import select
+        result = await db.execute(
+            select(db_models.User).where(db_models.User.username == "admin")
+        )
+        return result.scalar_one_or_none()
+    return asyncio.run(_get())
 
 
 @pytest.fixture
