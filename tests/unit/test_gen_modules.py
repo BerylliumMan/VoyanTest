@@ -13,7 +13,7 @@ All external dependencies (fitz, requests, db, model) are mocked.
 import io
 import json
 import base64
-from unittest.mock import MagicMock, patch, mock_open, PropertyMock
+from unittest.mock import MagicMock, patch, mock_open, PropertyMock, AsyncMock
 
 import pytest
 
@@ -359,13 +359,17 @@ class TestModelClientLoadConfig:
         mock_row.temperature = 0.5
 
         mock_db = MagicMock()
-        mock_query = MagicMock()
-        mock_query.filter.return_value.first.return_value = mock_row
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=mock_row))
+        )
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_sessionmaker = MagicMock(return_value=mock_session)
 
-        with patch("app.database.SessionLocal", return_value=mock_db), \
+        with patch("app.database.AsyncSessionLocal", new=mock_sessionmaker), \
              patch("app.security.encryption.decrypt_value", return_value="decrypted-key"):
-            result = _load_ai_config()
+            result = await _load_ai_config()
 
         assert result["model"] == "gpt-4"
         assert result["api_key"] == "decrypted-key"
@@ -377,14 +381,18 @@ class TestModelClientLoadConfig:
         from app.gen.model_client import _load_ai_config
 
         mock_db = MagicMock()
-        mock_query = MagicMock()
-        mock_query.filter.return_value.first.return_value = None
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        )
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_sessionmaker = MagicMock(return_value=mock_session)
 
-        with patch("app.database.SessionLocal", return_value=mock_db), \
+        with patch("app.database.AsyncSessionLocal", new=mock_sessionmaker), \
              patch("app.security.encryption.decrypt_value", return_value="x"):
             with pytest.raises(RuntimeError, match="AI config not found"):
-                _load_ai_config()
+                await _load_ai_config()
 
 
 class TestModelClientCallModel:
@@ -398,7 +406,7 @@ class TestModelClientCallModel:
             "api_base": api_base,
             "temperature": temperature,
         }
-        return patch("app.gen.model_client._load_ai_config", return_value=cfg)
+        return patch("app.gen.model_client._load_ai_config", new=AsyncMock(return_value=cfg))
 
     @pytest.mark.asyncio
     async def test_call_model_successful_post(self):
@@ -411,7 +419,7 @@ class TestModelClientCallModel:
         }
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
-            result = call_model([{"role": "user", "content": "hi"}], temperature=0.7)
+            result = await call_model([{"role": "user", "content": "hi"}], temperature=0.7)
 
         assert result == "Hello world"
         assert mpost.call_args.args[0].endswith("/chat/completions")
@@ -434,7 +442,7 @@ class TestModelClientCallModel:
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp), \
              caplog.at_level(logging.WARNING, logger="app.gen.model_client"):
-            result = call_model([{"role": "user", "content": "x"}])
+            result = await call_model([{"role": "user", "content": "x"}])
         assert "X" in result
 
     @pytest.mark.asyncio
@@ -448,7 +456,7 @@ class TestModelClientCallModel:
         }
         with self._patch_config(api_key="") as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
-            result = call_model([{"role": "user", "content": "x"}])
+            result = await call_model([{"role": "user", "content": "x"}])
         # When api_key is empty, no Authorization header
         assert result == "ok"
 
@@ -464,7 +472,7 @@ class TestModelClientCallModel:
         }
         with self._patch_config(api_base="https://api.example.com/v1") as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
-            call_model([{"role": "user", "content": "x"}])
+            await call_model([{"role": "user", "content": "x"}])
         # Verify URL ends with /chat/completions
         called_url = mpost.call_args.args[0]
         assert called_url.endswith("/chat/completions")
@@ -480,7 +488,7 @@ class TestModelClientCallModel:
         }
         with self._patch_config(api_base="https://api.example.com/v1/chat/completions") as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
-            call_model([{"role": "user", "content": "x"}])
+            await call_model([{"role": "user", "content": "x"}])
         called_url = mpost.call_args.args[0]
         # Should not double-append
         assert called_url.count("/chat/completions") == 1
@@ -491,7 +499,7 @@ class TestModelClientCallModel:
 
         with self._patch_config(model=""):
             with pytest.raises(RuntimeError, match="MODEL_NAME not configured"):
-                call_model([{"role": "user", "content": "x"}])
+                await call_model([{"role": "user", "content": "x"}])
 
     @pytest.mark.asyncio
     async def test_call_model_temperature_default_from_config(self):
@@ -505,7 +513,7 @@ class TestModelClientCallModel:
         with self._patch_config(temperature=0.42) as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
             # No temperature passed
-            call_model([{"role": "user", "content": "x"}])
+            await call_model([{"role": "user", "content": "x"}])
         # The payload should include temperature=0.42
         payload = mpost.call_args.kwargs["json"]
         assert payload["temperature"] == 0.42
@@ -520,7 +528,7 @@ class TestModelClientCallModel:
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp):
             with pytest.raises(requests.HTTPError):
-                call_model([{"role": "user", "content": "x"}])
+                await call_model([{"role": "user", "content": "x"}])
 
     @pytest.mark.asyncio
     async def test_call_model_strips_br_in_response(self):
@@ -533,7 +541,7 @@ class TestModelClientCallModel:
         }
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp):
-            result = call_model([{"role": "user", "content": "x"}])
+            result = await call_model([{"role": "user", "content": "x"}])
         assert "<br>" not in result
         assert "line1 line2" == result
 
@@ -561,7 +569,7 @@ class TestModelClientCallModel:
 
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp):
-            result = call_model(
+            result = await call_model(
                 [{"role": "user", "content": "x"}],
                 stream_callback=cb,
             )
@@ -589,7 +597,7 @@ class TestModelClientCallModel:
 
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp):
-            result = call_model(
+            result = await call_model(
                 [{"role": "user", "content": "x"}],
                 stream_callback=lambda c: None,
             )
@@ -615,7 +623,7 @@ class TestModelClientCallModel:
 
         with self._patch_config() as p, \
              patch("app.gen.model_client.requests.post", return_value=mock_resp):
-            result = call_model(
+            result = await call_model(
                 [{"role": "user", "content": "x"}],
                 stream_callback=lambda c: None,
             )
@@ -684,7 +692,7 @@ class TestResponseParserParseResponse:
 | TC-001 | 用户管理 | 登录 | 已注册 | 1.输入 2.点击 | 1.成功 | 高 |
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         assert len(session.functional_points) == 2
         # FP module/name/category extracted
         assert session.functional_points[0].module == "用户管理"
@@ -704,7 +712,7 @@ class TestResponseParserParseResponse:
 | TC-002 | 订单 | 创建订单 | 已登录 | 1.点击 | 1.成功 | 中 |
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         assert len(session.test_cases) == 2
         assert session.test_cases[0].test_case_id == "TC-001"
         assert session.test_cases[0].module == "用户"
@@ -721,7 +729,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         # Only the data row should be parsed (separator skipped)
         assert len(session.test_cases) == 1
 
@@ -736,7 +744,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         # Header row skipped, only TC-001 counted
         assert len(session.test_cases) == 1
 
@@ -748,7 +756,7 @@ class TestResponseParserParseResponse:
 
         text = """| TC-001 | M | T | P | S | R | 高 |"""
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         # Should still parse the TC
         assert len(session.test_cases) == 1
 
@@ -764,7 +772,7 @@ class TestResponseParserParseResponse:
 - 文本行: 完全不是 FP
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         # Only the 【】-prefixed one is parsed
         assert len(session.functional_points) == 1
         assert session.functional_points[0].module == "模块A"
@@ -780,7 +788,7 @@ class TestResponseParserParseResponse:
 - **【某模块】无括号功能点**: 描述
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         assert session.functional_points[0].module == "某模块"
         assert "无括号" in session.functional_points[0].name
 
@@ -794,7 +802,7 @@ class TestResponseParserParseResponse:
 * **【M】Name(cat)**: desc
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         assert len(session.functional_points) == 1
 
     @pytest.mark.asyncio
@@ -808,7 +816,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         # Only the long row counts
         assert len(session.test_cases) == 1
 
@@ -825,7 +833,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        await _parse_response(session, text)
+        _parse_response(session, text)
         # First row filtered out (6 cells after filter < 7), second row parsed
         assert len(session.test_cases) == 1
         assert session.test_cases[0].test_case_id == "TC-001"
@@ -842,7 +850,7 @@ class TestResponseParserFpHelpers:
 - **【M】FP1(cat)**: d
 - **【M】FP2**: d
 """
-        fps = await _parse_fps_from_text(text, session_id="abc")
+        fps = _parse_fps_from_text(text, session_id="abc")
         assert len(fps) == 2
         assert fps[0].session_id == "abc"
 
@@ -852,7 +860,7 @@ class TestResponseParserFpHelpers:
 
         text = """| TC-1 | M | T | P | S | R | 高 |
 | TC-2 | M | T | P | S | R | 中 |"""
-        tcs = await _parse_tcs_from_text(text, session_id="x", start_index=10)
+        tcs = _parse_tcs_from_text(text, session_id="x", start_index=10)
         assert len(tcs) == 2
         # IDs are renumbered from start_index
         assert tcs[0].test_case_id == "TC-011"
@@ -861,7 +869,7 @@ class TestResponseParserFpHelpers:
     @pytest.mark.asyncio
     async def test_parse_tcs_from_text_default_index(self):
         from app.gen.response_parser import _parse_tcs_from_text
-        tcs = await _parse_tcs_from_text("| TC-1 | M | T | P | S | R | 高 |")
+        tcs = _parse_tcs_from_text("| TC-1 | M | T | P | S | R | 高 |")
         # Default start_index=0 → TC-001
         assert tcs[0].test_case_id == "TC-001"
 
@@ -883,7 +891,7 @@ class TestFeatureExtractorExtractFPs:
 ## 测试用例
 | TC-001 | M | T | P | S | R | 高 |
 """
-        with patch("app.gen.feature_extractor.call_model", return_value=mock_response):
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)):
             fps = extract_functional_points(text="Some document text")
 
         assert len(fps) == 1
@@ -896,7 +904,7 @@ class TestFeatureExtractorExtractFPs:
         mock_response = """## 功能点清单
 - **【UI】按钮(cat)**: desc
 """
-        with patch("app.gen.feature_extractor.call_model", return_value=mock_response) as mcall:
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)) as mcall:
             fps = extract_functional_points(image_data=("png", "fakebase64"))
 
         assert len(fps) == 1
@@ -911,7 +919,7 @@ class TestFeatureExtractorExtractFPs:
         from app.gen.feature_extractor import extract_functional_points
 
         mock_response = "## 功能点清单\n"
-        with patch("app.gen.feature_extractor.call_model", return_value=mock_response) as mcall:
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)) as mcall:
             fps = extract_functional_points(
                 text="doc",
                 project_description="This is a banking app"
@@ -929,7 +937,7 @@ class TestFeatureExtractorExtractFPs:
         def cb(cur, total, msg):
             progress_calls.append((cur, total, msg))
 
-        with patch("app.gen.feature_extractor.call_model", return_value="## 功能点清单\n"):
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="## 功能点清单\n")):
             extract_functional_points(text="x", progress_callback=cb)
 
         # At least one progress call
@@ -943,7 +951,7 @@ class TestFeatureExtractorExtractFPs:
         def cb(cur, total, msg):
             progress_calls.append(msg)
 
-        with patch("app.gen.feature_extractor.call_model", return_value="## 功能点清单\n"):
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="## 功能点清单\n")):
             extract_functional_points(image_data=("jpg", "b64"), progress_callback=cb)
 
         # Should have called with "正在分析图片提取功能点"
@@ -953,7 +961,7 @@ class TestFeatureExtractorExtractFPs:
     async def test_extract_fps_custom_prompt(self):
         from app.gen.feature_extractor import extract_functional_points
 
-        with patch("app.gen.feature_extractor.call_model", return_value="## 功能点清单\n") as mcall:
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="## 功能点清单\n")) as mcall:
             extract_functional_points(text="x", fp_prompt="CUSTOM FP PROMPT")
         sys_msg = mcall.call_args.args[0][0]["content"]
         assert "CUSTOM FP PROMPT" in sys_msg
@@ -962,7 +970,7 @@ class TestFeatureExtractorExtractFPs:
     async def test_extract_fps_no_fps_in_response(self):
         from app.gen.feature_extractor import extract_functional_points
 
-        with patch("app.gen.feature_extractor.call_model", return_value="no markers at all"):
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="no markers at all")):
             fps = extract_functional_points(text="x")
         assert fps == []
 
@@ -985,8 +993,8 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(3)
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
-        with patch("app.gen.feature_extractor.call_model", return_value=mock_response):
-            result = await generate_test_cases_for_fps(fps, "")
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)):
+            result = generate_test_cases_for_fps(fps, "")
 
         assert "test_cases" in result
         assert "warnings" in result
@@ -1000,8 +1008,8 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(16)  # 2 batches of 8 (FP_BATCH_SIZE=8)
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
-        with patch("app.gen.feature_extractor.call_model", return_value=mock_response):
-            result = await generate_test_cases_for_fps(fps, "")
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)):
+            result = generate_test_cases_for_fps(fps, "")
 
         # Should have generated TCs for both batches
         assert len(result["test_cases"]) >= 2
@@ -1013,8 +1021,8 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(2)
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
-        with patch("app.gen.feature_extractor.call_model", return_value=mock_response) as mcall:
-            await generate_test_cases_for_fps(fps, "My project context")
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)) as mcall:
+            generate_test_cases_for_fps(fps, "My project context")
 
         # System prompt should include project context
         sys_msg = mcall.call_args.args[0][0]["content"]
@@ -1031,9 +1039,9 @@ class TestFeatureExtractorGenerateTCs:
             "| TC-1 | M | T | P | S | R | 高 |",  # success
         ]
 
-        with patch("app.gen.feature_extractor.call_model", side_effect=responses), \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(side_effect=responses)), \
              patch("app.gen.feature_extractor.time.sleep"):  # skip retry sleep
-            result = await generate_test_cases_for_fps(fps, "")
+            result = generate_test_cases_for_fps(fps, "")
 
         assert len(result["test_cases"]) >= 1
 
@@ -1043,9 +1051,9 @@ class TestFeatureExtractorGenerateTCs:
 
         fps = self._make_fps(1)
         # Always empty
-        with patch("app.gen.feature_extractor.call_model", return_value="no markers"), \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="no markers")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            result = await generate_test_cases_for_fps(fps, "")
+            result = generate_test_cases_for_fps(fps, "")
 
         # Should add a warning
         assert len(result["warnings"]) >= 1
@@ -1057,9 +1065,9 @@ class TestFeatureExtractorGenerateTCs:
 
         fps = self._make_fps(1)
         # All attempts raise
-        with patch("app.gen.feature_extractor.call_model", side_effect=RuntimeError("api down")), \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(side_effect=RuntimeError("api down"))), \
              patch("app.gen.feature_extractor.time.sleep"):
-            result = await generate_test_cases_for_fps(fps, "")
+            result = generate_test_cases_for_fps(fps, "")
 
         # After MAX_RETRIES, should add warning
         assert len(result["warnings"]) >= 1
@@ -1073,9 +1081,9 @@ class TestFeatureExtractorGenerateTCs:
         def cb(cur, total, msg):
             progress_calls.append((cur, total, msg))
 
-        with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |"), \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            await generate_test_cases_for_fps(
+            generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=3,
             )
@@ -1087,9 +1095,9 @@ class TestFeatureExtractorGenerateTCs:
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
         fps = self._make_fps(1)
-        with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |") as mcall, \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")) as mcall, \
              patch("app.gen.feature_extractor.time.sleep"):
-            await generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
+            generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
 
         # Check that custom prompt was used
         sys_msg = mcall.call_args.args[0][0]["content"]
@@ -1105,9 +1113,9 @@ class TestFeatureExtractorGenerateTCs:
         def cb(cur, total, msg):
             progress_calls.append(msg)
 
-        with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |"), \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            await generate_test_cases_for_fps(
+            generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=2,
             )
@@ -1121,10 +1129,10 @@ class TestFeatureExtractorGenerateTCs:
         import logging
 
         fps = self._make_fps(1)
-        with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |"), \
+        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
              patch("app.gen.feature_extractor.time.sleep"), \
              patch.object(logging.getLogger("app.gen.feature_extractor"), "info") as minfo:
-            await generate_test_cases_for_fps(fps, "")
+            generate_test_cases_for_fps(fps, "")
         # INFO log was called for successful batch
         assert any("generated" in str(c) for c in minfo.call_args_list)
 
@@ -1165,7 +1173,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         mock_tcs = [MagicMock()]
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=mock_fps), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": mock_tcs, "warnings": []}):
             result = two_phase_analyze("Some document text")
 
@@ -1183,7 +1191,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         long_text = "X" * 10000
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]) as mext, \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             result = two_phase_analyze(long_text)
 
@@ -1196,7 +1204,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         from app.gen.orchestrator import two_phase_analyze
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             result = two_phase_analyze("short text")
 
@@ -1225,7 +1233,7 @@ class TestOrchestratorTwoPhaseAnalyze:
             progress_calls.append(msg)
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             two_phase_analyze("text", progress_callback=cb)
 
@@ -1236,7 +1244,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         from app.gen.orchestrator import two_phase_analyze
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]) as mext, \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             two_phase_analyze("text", project_description="Banking context")
 
@@ -1254,7 +1262,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         mock_fp = MagicMock()
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[mock_fp]) as mext, \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}) as mgen:
             two_phase_analyze("text", prompts=prompts)
 
@@ -1273,7 +1281,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         mock_fp = MagicMock()
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[mock_fp]) as mext, \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}) as mgen:
             two_phase_analyze("text", prompts=prompts)
 
@@ -1285,7 +1293,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         from app.gen.orchestrator import two_phase_analyze
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[MagicMock()]), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": ["batch failed"]}):
             result = two_phase_analyze("text")
         assert "batch failed" in result["warnings"]
@@ -1303,7 +1311,7 @@ class TestOrchestratorImageAnalyze:
 
         with patch("app.gen.orchestrator.encode_image", return_value="b64data"), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[MagicMock()]) as mext, \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
             result = _analyze_image_two_phase(mock_file, None, "")
 
@@ -1414,7 +1422,7 @@ class TestOrchestratorPdfAnalyze:
                    return_value=[("png", "b64a"), ("png", "b64b")]), \
              patch("app.gen.orchestrator.extract_functional_points",
                    side_effect=[[fp1], [fp2]]), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
             result = _analyze_pdf_two_phase(mock_file, None, "")
 
@@ -1453,7 +1461,7 @@ class TestOrchestratorPdfAnalyze:
                    return_value=[("png", "b64a"), ("png", "b64b")]), \
              patch("app.gen.orchestrator.extract_functional_points",
                    side_effect=[[fp], RuntimeError("llm timeout")]), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             result = _analyze_pdf_two_phase(mock_file, None, "")
 
@@ -1497,7 +1505,7 @@ class TestOrchestratorPdfAnalyze:
              patch("app.gen.orchestrator.render_pdf_pages_to_images",
                    return_value=[("png", "b64a"), ("png", "b64b")]), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[fp]), \
-             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
             _analyze_pdf_two_phase(mock_file, cb, "")
 

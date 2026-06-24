@@ -193,7 +193,7 @@ class TestModuleDescendants:
         c1 = await _make_module(db, project.id, "c1", parent_id=root.id)
         c2 = await _make_module(db, project.id, "c2", parent_id=root.id)
         g1 = await _make_module(db, project.id, "g1", parent_id=c1.id)
-        ids = sorted(crud.get_module_descendants(db, root.id))
+        ids = sorted(await crud.get_module_descendants(db, root.id))
         assert ids == sorted([root.id, c1.id, c2.id, g1.id])
 
 

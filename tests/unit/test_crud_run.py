@@ -1,6 +1,7 @@
 """Tests for app/crud/run.py — TestRun and RunBatch CRUD operations."""
 from datetime import datetime, timedelta
 import pytest
+from sqlalchemy import select
 from app import db_models
 from app.tz import now as tz_now
 from app.crud.run import (
@@ -229,10 +230,14 @@ class TestDeleteRunBatchCascade:
         assert await delete_run_batch(db, batch_id) is True
 
         assert await get_run_batch(db, batch_id) is None
-        assert db.query(db_models.TestRun).filter(db_models.TestRun.id == run_a_id).first() is None
-        assert db.query(db_models.TestRun).filter(db_models.TestRun.id == run_b_id).first() is None
-        assert db.query(db_models.RunLog).filter(db_models.RunLog.id == log_a_id).first() is None
-        assert db.query(db_models.RunLog).filter(db_models.RunLog.id == log_b_id).first() is None
+        run_a_check = (await db.execute(select(db_models.TestRun).where(db_models.TestRun.id == run_a_id))).scalar_one_or_none()
+        assert run_a_check is None
+        run_b_check = (await db.execute(select(db_models.TestRun).where(db_models.TestRun.id == run_b_id))).scalar_one_or_none()
+        assert run_b_check is None
+        log_a_check = (await db.execute(select(db_models.RunLog).where(db_models.RunLog.id == log_a_id))).scalar_one_or_none()
+        assert log_a_check is None
+        log_b_check = (await db.execute(select(db_models.RunLog).where(db_models.RunLog.id == log_b_id))).scalar_one_or_none()
+        assert log_b_check is None
 
     @pytest.mark.asyncio
     async def test_delete_batch_with_runs_no_logs(self, db, sample_project, sample_testcase):
@@ -243,7 +248,8 @@ class TestDeleteRunBatchCascade:
         await db.commit()
 
         assert await delete_run_batch(db, batch.id) is True
-        assert db.query(db_models.TestRun).filter(db_models.TestRun.id == run.id).first() is None
+        run_check = (await db.execute(select(db_models.TestRun).where(db_models.TestRun.id == run.id))).scalar_one_or_none()
+        assert run_check is None
 
 
 class TestComputeBatchStatusAdvanced:

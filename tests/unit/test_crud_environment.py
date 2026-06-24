@@ -194,7 +194,7 @@ class TestDeleteEnvironment:
         env2 = await crud.create_environment(db, project.id, _make_env_create(name="非默认环境"))
         assert env1.is_default is True
         assert await crud.delete_environment(db, env2.id) is not None
-        assert await crud.get_environment(db, env1.id).is_default is True
+        assert (await crud.get_environment(db, env1.id)).is_default is True
 
     @pytest.mark.asyncio
     async def test_last_env(self, db):
