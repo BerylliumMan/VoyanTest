@@ -182,7 +182,6 @@ class TestTestCaseCRUD:
         await crud.delete_test_case(db, created.id)
         assert await crud.get_test_case(db, created.id) is None
 
-    @pytest.mark.xfail(reason="pre-existing get_next_project_case_number logic bug")
     @pytest.mark.asyncio
     async def test_get_test_cases_by_project(self, db):
         project = await crud.create_project(db, models.ProjectCreate(name="分页用例项目"))
@@ -195,7 +194,6 @@ class TestTestCaseCRUD:
         assert result["total_items"] == 5
         assert len(result["items"]) == 5
 
-    @pytest.mark.xfail(reason="pre-existing get_next_project_case_number logic bug")
     @pytest.mark.asyncio
     async def test_get_test_cases_by_project_pagination(self, db):
         project = await crud.create_project(db, models.ProjectCreate(name="分页2项目"))

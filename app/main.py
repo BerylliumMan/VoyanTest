@@ -105,6 +105,28 @@ async def _run_startup_init():
             await _init_db.rollback()
             raise
 
+    # Check for missing columns across all models and add them
+    try:
+        from sqlalchemy import inspect, text
+        from app.models.project import Environment
+        async with engine.connect() as _conn:
+            def _check_cols(sync_conn):
+                insp = inspect(sync_conn)
+                cols = {c["name"] for c in insp.get_columns("environments")}
+                missing = []
+                for col in Environment.__table__.c:
+                    if col.name not in cols:
+                        missing.append(col.name)
+                for name in missing:
+                    col_type = "JSON"  # cookies is JSON
+                    sync_conn.execute(text(
+                        f"ALTER TABLE environments ADD COLUMN {name} {col_type}"
+                    ))
+                    logger.info("已补列: environments.%s", name)
+            await _conn.run_sync(_check_cols)
+    except Exception as _e:
+        logger.warning("列迁移失败: %s", _e, exc_info=True)
+
     # Clean up expired sessions at startup
     from app.auth import cleanup_expired_sessions
     async with AsyncSessionLocal() as _cleanup_db:

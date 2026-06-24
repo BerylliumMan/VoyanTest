@@ -192,36 +192,25 @@ class TestAuthDeps:
             await get_current_user(request=req, db=MagicMock())
         assert excinfo.value.status_code == 401
 
-    @pytest.mark.xfail(reason="pre-existing AsyncMock setup issue, not related to current fixes")
     @pytest.mark.asyncio
-    async def test_get_current_user_expired_session(self):
+    async def test_get_current_user_expired_session(self, db):
+        """无效 session_id 应返回 401。"""
         from app.auth import get_current_user
         req = MagicMock()
-        req.cookies = {"session_id": "bad"}
-        db = AsyncMock()
-        async_result = AsyncMock()
-        async_result.scalar_one_or_none.return_value = None
-        db.execute.return_value = async_result
+        req.cookies = {"session_id": "this-session-does-not-exist"}
         with pytest.raises(Exception) as excinfo:
             await get_current_user(request=req, db=db)
         assert excinfo.value.status_code == 401
 
-    @pytest.mark.xfail(reason="pre-existing AsyncMock setup issue, not related to current fixes")
     @pytest.mark.asyncio
-    async def test_get_current_user_disabled(self):
+    async def test_get_current_user_disabled(self, db, admin_user):
+        """已禁用用户应返回 401。"""
         from app.auth import get_current_user, create_session
+        admin_user.status = "disabled"
+        await db.commit()
+        sid = await create_session(db, admin_user.id)
         req = MagicMock()
-        db = AsyncMock()
-        req.cookies = {"session_id": "test"}
-        mock_session = MagicMock()
-        mock_session.user_id = 1
-        mock_user = MagicMock()
-        mock_user.status = "disabled"
-        # 第一次 execute 返回 session,第二次返回 user
-        from sqlalchemy.ext.asyncio import AsyncSession
-        # 当使用 mock 时,execute 返回的 result 可以通过 side_effect 链式模拟
-        # 这里简化为只断言异常
-        db.execute.return_value.scalar_one_or_none.side_effect = [mock_session, mock_user]
+        req.cookies = {"session_id": sid}
         with pytest.raises(Exception) as excinfo:
             await get_current_user(request=req, db=db)
         assert excinfo.value.status_code == 401

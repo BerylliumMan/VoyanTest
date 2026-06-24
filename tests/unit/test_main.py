@@ -231,7 +231,6 @@ class TestRunStartupInit:
         tables_after = await get_tables()
         assert tables_after == existing_tables
 
-    @pytest.mark.xfail(reason="pre-existing _run_startup_init 不会自动补 cookies 列")
     @pytest.mark.asyncio
     async def test_cookies_column_added_when_missing(self, engine, db, monkeypatch):
         """当 environments 表没有 cookies 列时，启动会补上。"""

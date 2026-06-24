@@ -100,9 +100,8 @@ class TestRunBatch:
         assert result["size"] == 10
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="SQLAlchemy async lazy loading issue")
     async def test_list_batches_preloads_runs(self, db, sample_project, sample_testcase):
-        """覆盖 list_run_batches 预加载 runs 的内层循环（line 108）。"""
+        """覆盖 list_run_batches 预加载 runs 的内层循环。"""
         batch = await create_run_batch(db, sample_project["id"], "With Runs", total_cases=1)
         now = tz_now()
         run = await create_test_run(db, sample_testcase["id"], "passed", now, now)
@@ -110,9 +109,8 @@ class TestRunBatch:
         await db.commit()
 
         result = await list_run_batches(db, project_id=sample_project["id"])
-        # _compute_batch_status 会修改 batch.passed/failed，使 ORM 对象变 dirty
-        # 清理前 expire_all 避免 cleanup 时 flush 脏数据到已删除行导致 rollback
-        db.expire_all()
+        # expire_all 在 AsyncSession 上触发 MissingGreenlet，改用 commit
+        await db.commit()
 
         assert result["total"] >= 1
         assert result["items"][0].id == batch.id
