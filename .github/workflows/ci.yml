@@ -32,7 +32,18 @@ jobs:
       - name: Run pytest
         run: |
           source venv/bin/activate
-          python3 -m pytest tests/ -v --tb=short --cov=app --cov=core --cov-report=term --ignore=tests/unit/core/test_playwright_manager.py -x -q 2>&1 | tail -30
+          python3 -m pytest tests/unit/ -v --tb=short --cov=app --cov=core --cov-report=term --ignore=tests/unit/core/test_playwright_manager.py -x -q 2>&1 | tail -30
+
+      # PostgreSQL for E2E tests
+      - name: Start PostgreSQL
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql postgresql-client
+          echo "port = 15435" | sudo tee -a /etc/postgresql/*/main/postgresql.conf
+          sudo pg_ctlcluster * main start || sudo service postgresql start
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
+          sudo -u postgres psql -c "CREATE DATABASE uitest_e2e"
+          sudo -u postgres psql -c "CREATE DATABASE uitest_e2e_webui"
+          echo "PG ready on port 15435"
 
       # E2E 测试：自启动 uvicorn 子进程 + 真实 Playwright 浏览器
       # 需要先构建前端，否则 SPA 静态资源缺失，登录页会白屏
