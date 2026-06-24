@@ -6,5 +6,5 @@ class TestLimiter:
     def test_limiter_exists(self):
         assert limiter is not None
 
-    def test_limiter_has_key_func(self):
-        assert limiter.key_func is not None
+    def test_limiter_has_storage(self):
+        assert limiter._storage is not None

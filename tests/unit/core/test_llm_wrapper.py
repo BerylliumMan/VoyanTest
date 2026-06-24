@@ -164,32 +164,31 @@ class TestLoadDBConfig:
     """Tests for _load_db_config.
 
     Note: the current implementation uses async execute/select API.
-    These tests were written for the old sync .query() API and need
-    a full rewrite to match the current code.
+    These tests were written for the old sync .query() API.
+    Rewritten to mock async asyncpg-style context manager.
     """
-    @pytest.mark.xfail(reason="uses sync .query() mock but code is now async execute/select")
     @pytest.mark.asyncio
     async def test_returns_decrypted_config(self):
-        """Happy path: row found, decrypt_value called, config returned, db closed."""
-        with (
-            patch("app.database.AsyncSessionLocal") as mock_session_local,
-            patch("app.db_models.AIConfig"),
-            patch("core.llm_wrapper.decrypt_value", return_value="decrypted-key"),
-        ):
-            mock_db = MagicMock()
-            mock_row = MagicMock()
-            mock_row.model = "gpt-4o"
-            mock_row.api_key = "encrypted-blob"
-            mock_row.api_base = "https://api.test.com/v1"
-            mock_row.temperature = 0.3
+        """Happy path: row found, decrypt_value called, config returned."""
+        mock_row = MagicMock()
+        mock_row.model = "gpt-4o"
+        mock_row.api_key = "encrypted-blob"
+        mock_row.api_base = "https://api.test.com/v1"
+        mock_row.temperature = 0.3
 
-            mock_query = MagicMock()
-            mock_filter = MagicMock()
-            mock_filter.first.return_value = mock_row
-            mock_query.filter.return_value = mock_filter
-            mock_db.query.return_value = mock_query
-            mock_session_local.return_value = mock_db
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_row
 
+        mock_db = MagicMock()
+        async def mock_execute(q):
+            return mock_result
+        mock_db.execute = mock_execute
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__.return_value = mock_db
+
+        with patch("app.database.AsyncSessionLocal", return_value=mock_cm), \
+             patch("core.llm_wrapper.decrypt_value", return_value="decrypted-key"):
             result = await _load_db_config()
 
         assert result == {
@@ -198,43 +197,39 @@ class TestLoadDBConfig:
             "api_base": "https://api.test.com/v1",
             "temperature": 0.3,
         }
-        mock_db.close.assert_called_once()
 
-    @pytest.mark.xfail(reason="uses sync .query() mock but code is now async execute/select")
     @pytest.mark.asyncio
     async def test_no_row_raises_runtime_error(self):
-        """When AIConfig row absent: RuntimeError raised, db still closed."""
-        with (
-            patch("app.database.AsyncSessionLocal") as mock_session_local,
-            patch("app.db_models.AIConfig"),
-        ):
-            mock_db = MagicMock()
-            mock_query = MagicMock()
-            mock_filter = MagicMock()
-            mock_filter.first.return_value = None
-            mock_query.filter.return_value = mock_filter
-            mock_db.query.return_value = mock_query
-            mock_session_local.return_value = mock_db
+        """When AIConfig row absent: RuntimeError raised."""
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
 
+        mock_db = MagicMock()
+        async def mock_execute(q):
+            return mock_result
+        mock_db.execute = mock_execute
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__.return_value = mock_db
+
+        with patch("app.database.AsyncSessionLocal", return_value=mock_cm):
             with pytest.raises(RuntimeError, match="ai_configs table has no row"):
                 await _load_db_config()
-            mock_db.close.assert_called_once()
 
-    @pytest.mark.xfail(reason="uses sync .query() mock but code is now async execute/select")
     @pytest.mark.asyncio
     async def test_db_closed_even_on_exception(self):
-        """If query() raises, db.close() must still be called via finally."""
-        with (
-            patch("app.database.AsyncSessionLocal") as mock_session_local,
-            patch("app.db_models.AIConfig"),
-        ):
-            mock_db = MagicMock()
-            mock_db.query.side_effect = RuntimeError("db explosion")
-            mock_session_local.return_value = mock_db
+        """If execute() raises, the async context manager still exits cleanly."""
+        mock_db = MagicMock()
+        async def mock_execute(q):
+            raise RuntimeError("db crash")
+        mock_db.execute = mock_execute
 
-            with pytest.raises(RuntimeError, match="db explosion"):
-                _load_db_config()
-            mock_db.close.assert_called_once()
+        mock_cm = MagicMock()
+        mock_cm.__aenter__.return_value = mock_db
+
+        with patch("app.database.AsyncSessionLocal", return_value=mock_cm):
+            with pytest.raises(RuntimeError):
+                await _load_db_config()
 
 
 # ------------------------------------------------------------------

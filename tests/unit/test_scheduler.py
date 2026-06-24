@@ -211,7 +211,7 @@ class TestTaskSchedulerAsync:
                 s._running = False
 
             s._check_interval = 0.01
-            await asyncio.gather(await s.start(), stop_after())
+            await asyncio.gather(s.start(), stop_after())
             assert mock_create.call_count >= 1
 
     @pytest.mark.asyncio
