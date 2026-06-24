@@ -132,7 +132,6 @@ class TestGetNextProjectCaseNumber:
         assert await get_next_project_case_number(db, project.id) == 1
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_subsequent_increments(self, db):
         project = await _project(db)
         await _case(db, project.id, name="a")
@@ -141,7 +140,6 @@ class TestGetNextProjectCaseNumber:
         assert await get_next_project_case_number(db, project.id) == 4
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_per_project_independent(self, db):
         p1 = await _project(db, name="P1")
         p2 = await _project(db, name="P2")
@@ -206,7 +204,6 @@ class TestGetAllTestCasesForProjectPaginated:
     """覆盖 line 91-96。"""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_pagination_first_page(self, db):
         project = await _project(db)
         for i in range(5):
@@ -219,7 +216,6 @@ class TestGetAllTestCasesForProjectPaginated:
         assert result["items"][0].id < result["items"][-1].id
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_pagination_second_page_remaining(self, db):
         project = await _project(db)
         for i in range(7):
@@ -272,7 +268,6 @@ class TestGetAllTestCasesForModulePaginated:
     """覆盖 line 102-107。"""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_pagination(self, db):
         project = await _project(db)
         m = await _module(db, project.id)
@@ -293,7 +288,6 @@ class TestSearchTestCases:
     """覆盖 line 109-119（搜索 by name/description + 分页）。"""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_search_by_name(self, db):
         project = await _project(db)
         await _case(db, project.id, name="登录流程")
@@ -332,7 +326,6 @@ class TestSearchTestCases:
         assert result["items"] == []
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_search_pagination(self, db):
         project = await _project(db)
         for i in range(5):
@@ -421,7 +414,6 @@ class TestGetInitTestCases:
     """覆盖 line 159-164。"""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="get_next_project_case_number scalar issue")
     async def test_returns_only_init_cases_descending(self, db):
         project = await _project(db)
         c1 = await _case(db, project.id, name="c1")

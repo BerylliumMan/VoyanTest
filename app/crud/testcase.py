@@ -57,7 +57,7 @@ async def get_next_project_case_number(db: AsyncSession, project_id: int) -> int
         .where(db_models.TestCase.project_id == project_id)
         .order_by(db_models.TestCase.project_case_number.desc())
     )
-    max_num = result.scalar_one_or_none()
+    max_num = result.scalar()
     return (max_num + 1) if max_num else 1
 
 
