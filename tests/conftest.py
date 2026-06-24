@@ -158,3 +158,15 @@ def sample_project(client, admin_cookies):
     }, cookies=admin_cookies)
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+@pytest.fixture
+def sample_testcase(client, admin_cookies, sample_project):
+    """创建示例测试用例，返回 testcase dict。"""
+    resp = client.post("/api/testcases/", json={
+        "project_id": sample_project["id"],
+        "name": "示例用例",
+        "steps": [{"step_order": 1, "description": "打开页面", "expected_result": "页面加载成功"}],
+    }, cookies=admin_cookies)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
