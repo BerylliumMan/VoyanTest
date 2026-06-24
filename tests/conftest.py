@@ -160,6 +160,10 @@ def admin_user(db, ensure_admin_user):
 @pytest.fixture
 def admin_cookies(client, ensure_admin_user):
     """登录管理员，返回 session cookie。"""
+    # 全量测试时 rate limiter 配额可能已耗尽，每次登录前重置
+    from app.rate_limiter import limiter
+    if hasattr(limiter, "_storage"):
+        limiter._storage.reset()
     resp = client.post("/api/auth/login", json={
         "username": "admin", "password": "Admin@2024",
     })
