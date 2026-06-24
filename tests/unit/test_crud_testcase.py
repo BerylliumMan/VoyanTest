@@ -61,7 +61,7 @@ class TestTestStepCRUD:
     @pytest.mark.asyncio
     async def test_get_steps_for_case_ordered(self, db):
         project = await _project(db)
-        case = _empty_case(db, project.id)
+        case = await _empty_case(db, project.id)
         await crud.create_test_step(db, models.TestStepCreate(
             case_id=case.id, step_order=3, description="c",
         ))
@@ -78,7 +78,7 @@ class TestTestStepCRUD:
     @pytest.mark.asyncio
     async def test_get_steps_for_case_empty(self, db):
         project = await _project(db)
-        case = _empty_case(db, project.id)
+        case = await _empty_case(db, project.id)
         assert await crud.get_steps_for_case(db, case.id) == []
 
     @pytest.mark.asyncio
