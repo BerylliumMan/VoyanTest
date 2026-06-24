@@ -110,29 +110,35 @@ def client(db, ensure_admin_user):
 @pytest.fixture
 def ensure_admin_user(db):
     """确保 admin 用户存在于测试数据库（用于需要认证的测试）。"""
-    from app.auth import hash_password
-
-    async def _create():
-        from sqlalchemy import select
-        from app import db_models
-        result = await db.execute(
-            select(db_models.User).where(db_models.User.username == "admin")
-        )
-        if result.scalar_one_or_none():
-            return
-        admin = db_models.User(
-            username="admin",
-            password_hash=hash_password("Admin@2024"),
-            role="admin",
-            status="active",
-            must_change_password=False,
-        )
-        db.add(admin)
-        await db.commit()
-
     import asyncio
-    asyncio.run(_create())
+    asyncio.run(_do_ensure_admin_user(db))
     yield
+
+
+async def _do_ensure_admin_user(db):
+    """确保 admin 用户存在（公共异步实现，可被 test 直接调用来重置 admin）。"""
+    from app.auth import hash_password
+    from sqlalchemy import select
+    from app import db_models
+
+    result = await db.execute(
+        select(db_models.User).where(db_models.User.username == "admin")
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.password_hash = hash_password("Admin@2024")
+        existing.must_change_password = False
+        await db.commit()
+        return
+    admin = db_models.User(
+        username="admin",
+        password_hash=hash_password("Admin@2024"),
+        role="admin",
+        status="active",
+        must_change_password=False,
+    )
+    db.add(admin)
+    await db.commit()
 
 
 @pytest.fixture

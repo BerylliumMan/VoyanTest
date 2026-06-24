@@ -23,7 +23,7 @@ class TestEnsureAdminUser:
         """ensure_admin_user 覆盖已有 admin 的密码和 must_change_password。"""
         from app import db_models
         from app.auth import hash_password, verify_password
-        from tests.conftest import _ensure_admin_user_body
+        from tests.conftest import _do_ensure_admin_user
 
         result = await db.execute(
             select(db_models.User).where(db_models.User.username == "admin")
@@ -33,7 +33,7 @@ class TestEnsureAdminUser:
         existing.must_change_password = True
         await db.commit()
 
-        await _ensure_admin_user_body(db)
+        await _do_ensure_admin_user(db)
 
         result2 = await db.execute(
             select(db_models.User).where(db_models.User.username == "admin")
