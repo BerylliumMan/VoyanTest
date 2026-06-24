@@ -24,8 +24,8 @@ async def _case(db, project_id, name="C", module_id=None, steps=None):
     ))
 
 
-def _empty_case(db, project_id, name="C", module_id=None):
-    return crud.create_test_case(db, models.TestCaseCreate(
+async def _empty_case(db, project_id, name="C", module_id=None):
+    return await crud.create_test_case(db, models.TestCaseCreate(
         project_id=project_id, module_id=module_id, name=name, steps=[],
     ))
 
@@ -196,8 +196,8 @@ class TestGetAllTestCasesForProject:
         p2 = await _project(db, name="P2")
         await _case(db, p1.id, name="p1-case")
         await _case(db, p2.id, name="p2-case")
-        assert len(crud.get_all_test_cases_for_project(db, p1.id)) == 1
-        assert len(crud.get_all_test_cases_for_project(db, p2.id)) == 1
+        assert len(await crud.get_all_test_cases_for_project(db, p1.id)) == 1
+        assert len(await crud.get_all_test_cases_for_project(db, p2.id)) == 1
 
 
 class TestGetAllTestCasesForProjectPaginated:
@@ -254,8 +254,8 @@ class TestGetAllTestCasesForModule:
         m2 = await _module(db, project.id, "m2")
         await _case(db, project.id, module_id=m1.id, name="in-m1")
         await _case(db, project.id, module_id=m2.id, name="in-m2")
-        assert len(crud.get_all_test_cases_for_module(db, m1.id)) == 1
-        assert len(crud.get_all_test_cases_for_module(db, m2.id)) == 1
+        assert len(await crud.get_all_test_cases_for_module(db, m1.id)) == 1
+        assert len(await crud.get_all_test_cases_for_module(db, m2.id)) == 1
 
     @pytest.mark.asyncio
     async def test_empty(self, db):
@@ -432,8 +432,8 @@ class TestGetInitTestCases:
         c1 = await _case(db, p1.id, name="p1c")
         await _case(db, p2.id, name="p2c")
         await crud.update_test_case_is_init(db, c1.id, True)
-        assert len(crud.get_init_test_cases(db, p1.id)) == 1
-        assert len(crud.get_init_test_cases(db, p2.id)) == 0
+        assert len(await crud.get_init_test_cases(db, p1.id)) == 1
+        assert len(await crud.get_init_test_cases(db, p2.id)) == 0
 
     @pytest.mark.asyncio
     async def test_no_init_cases(self, db):

@@ -5,7 +5,7 @@ from app import crud, db_models, models
 
 
 async def _create_project(db, name="环境测试项目", base_url="https://example.com"):
-    return crud.create_project(db, models.ProjectCreate(
+    return await crud.create_project(db, models.ProjectCreate(
         name=name, base_url=base_url, browser="chromium", headless=True,
     ))
 
@@ -25,7 +25,7 @@ class TestGetEnvironments:
         project = await _create_project(db)
         await crud.create_environment(db, project.id, _make_env_create(name="A", base_url="https://a.com"))
         await crud.create_environment(db, project.id, _make_env_create(name="B", base_url="https://b.com"))
-        assert len(crud.get_environments(db, project.id)) == 2
+        assert len(await crud.get_environments(db, project.id)) == 2
 
     @pytest.mark.asyncio
     async def test_ordered_by_created_at(self, db):
@@ -93,7 +93,7 @@ class TestCreateEnvironment:
         project = await _create_project(db, name="同步项目")
         await crud.create_environment(
             db, project.id,
-            await _make_env_create(base_url="https://synced.com", browser="firefox", headless=False),
+            _make_env_create(base_url="https://synced.com", browser="firefox", headless=False),
         )
         assert project.base_url == "https://synced.com"
         assert project.browser == "firefox"
@@ -127,7 +127,7 @@ class TestUpdateEnvironment:
         project = await _create_project(db)
         env = await crud.create_environment(
             db, project.id,
-            await _make_env_create(name="原始名称", base_url="https://original.com", headless=False),
+            _make_env_create(name="原始名称", base_url="https://original.com", headless=False),
         )
         result = await crud.update_environment(db, env.id, models.EnvironmentUpdate(name="新名称"))
         assert result.name == "新名称"
@@ -248,7 +248,7 @@ class TestEnsureDefaultEnvironment:
         project = await _create_project(db)
         await crud.create_environment(db, project.id, _make_env_create())
         await crud.ensure_default_environment(db, project.id)
-        assert len(crud.get_environments(db, project.id)) == 1
+        assert len(await crud.get_environments(db, project.id)) == 1
 
     @pytest.mark.asyncio
     async def test_creates_from_project(self, db):

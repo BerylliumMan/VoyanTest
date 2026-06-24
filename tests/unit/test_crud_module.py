@@ -7,11 +7,11 @@ from app.models import TestStepCreatePayload
 
 
 async def _make_project(db, name="P"):
-    return crud.create_project(db, models.ProjectCreate(name=name))
+    return await crud.create_project(db, models.ProjectCreate(name=name))
 
 
 async def _make_module(db, project_id, name, parent_id=None, description=None):
-    return crud.create_module(
+    return await crud.create_module(
         db, project_id,
         models.ModuleCreate(
             project_id=project_id, name=name,

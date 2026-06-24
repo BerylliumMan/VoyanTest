@@ -667,7 +667,7 @@ class TestResponseParserToHtml:
 
 
 class TestResponseParserParseResponse:
-    """Test _parse_response on AnalysisSession."""
+    """Test await _parse_response on AnalysisSession."""
 
     @pytest.mark.asyncio
     async def test_parse_response_extracts_functional_points(self):
@@ -684,7 +684,7 @@ class TestResponseParserParseResponse:
 | TC-001 | 用户管理 | 登录 | 已注册 | 1.输入 2.点击 | 1.成功 | 高 |
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         assert len(session.functional_points) == 2
         # FP module/name/category extracted
         assert session.functional_points[0].module == "用户管理"
@@ -704,7 +704,7 @@ class TestResponseParserParseResponse:
 | TC-002 | 订单 | 创建订单 | 已登录 | 1.点击 | 1.成功 | 中 |
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         assert len(session.test_cases) == 2
         assert session.test_cases[0].test_case_id == "TC-001"
         assert session.test_cases[0].module == "用户"
@@ -721,7 +721,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         # Only the data row should be parsed (separator skipped)
         assert len(session.test_cases) == 1
 
@@ -736,7 +736,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         # Header row skipped, only TC-001 counted
         assert len(session.test_cases) == 1
 
@@ -748,7 +748,7 @@ class TestResponseParserParseResponse:
 
         text = """| TC-001 | M | T | P | S | R | 高 |"""
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         # Should still parse the TC
         assert len(session.test_cases) == 1
 
@@ -764,7 +764,7 @@ class TestResponseParserParseResponse:
 - 文本行: 完全不是 FP
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         # Only the 【】-prefixed one is parsed
         assert len(session.functional_points) == 1
         assert session.functional_points[0].module == "模块A"
@@ -780,7 +780,7 @@ class TestResponseParserParseResponse:
 - **【某模块】无括号功能点**: 描述
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         assert session.functional_points[0].module == "某模块"
         assert "无括号" in session.functional_points[0].name
 
@@ -794,7 +794,7 @@ class TestResponseParserParseResponse:
 * **【M】Name(cat)**: desc
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         assert len(session.functional_points) == 1
 
     @pytest.mark.asyncio
@@ -808,7 +808,7 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         # Only the long row counts
         assert len(session.test_cases) == 1
 
@@ -825,14 +825,14 @@ class TestResponseParserParseResponse:
 | TC-001 | M | T | P | S | R | 高 |
 """
         session = AnalysisSession()
-        _parse_response(session, text)
+        await _parse_response(session, text)
         # First row filtered out (6 cells after filter < 7), second row parsed
         assert len(session.test_cases) == 1
         assert session.test_cases[0].test_case_id == "TC-001"
 
 
 class TestResponseParserFpHelpers:
-    """Test _parse_fps_from_text and _parse_tcs_from_text."""
+    """Test await _parse_fps_from_text and await _parse_tcs_from_text."""
 
     @pytest.mark.asyncio
     async def test_parse_fps_from_text(self):
@@ -842,7 +842,7 @@ class TestResponseParserFpHelpers:
 - **【M】FP1(cat)**: d
 - **【M】FP2**: d
 """
-        fps = _parse_fps_from_text(text, session_id="abc")
+        fps = await _parse_fps_from_text(text, session_id="abc")
         assert len(fps) == 2
         assert fps[0].session_id == "abc"
 
@@ -852,7 +852,7 @@ class TestResponseParserFpHelpers:
 
         text = """| TC-1 | M | T | P | S | R | 高 |
 | TC-2 | M | T | P | S | R | 中 |"""
-        tcs = _parse_tcs_from_text(text, session_id="x", start_index=10)
+        tcs = await _parse_tcs_from_text(text, session_id="x", start_index=10)
         assert len(tcs) == 2
         # IDs are renumbered from start_index
         assert tcs[0].test_case_id == "TC-011"
@@ -861,7 +861,7 @@ class TestResponseParserFpHelpers:
     @pytest.mark.asyncio
     async def test_parse_tcs_from_text_default_index(self):
         from app.gen.response_parser import _parse_tcs_from_text
-        tcs = _parse_tcs_from_text("| TC-1 | M | T | P | S | R | 高 |")
+        tcs = await _parse_tcs_from_text("| TC-1 | M | T | P | S | R | 高 |")
         # Default start_index=0 → TC-001
         assert tcs[0].test_case_id == "TC-001"
 
@@ -968,7 +968,7 @@ class TestFeatureExtractorExtractFPs:
 
 
 class TestFeatureExtractorGenerateTCs:
-    """Test generate_test_cases_for_fps."""
+    """Test await generate_test_cases_for_fps."""
 
     def _make_fps(self, n: int):
         from app.gen.models import FunctionalPoint
@@ -986,7 +986,7 @@ class TestFeatureExtractorGenerateTCs:
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
         with patch("app.gen.feature_extractor.call_model", return_value=mock_response):
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         assert "test_cases" in result
         assert "warnings" in result
@@ -1001,7 +1001,7 @@ class TestFeatureExtractorGenerateTCs:
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
         with patch("app.gen.feature_extractor.call_model", return_value=mock_response):
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         # Should have generated TCs for both batches
         assert len(result["test_cases"]) >= 2
@@ -1014,7 +1014,7 @@ class TestFeatureExtractorGenerateTCs:
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
         with patch("app.gen.feature_extractor.call_model", return_value=mock_response) as mcall:
-            generate_test_cases_for_fps(fps, "My project context")
+            await generate_test_cases_for_fps(fps, "My project context")
 
         # System prompt should include project context
         sys_msg = mcall.call_args.args[0][0]["content"]
@@ -1033,7 +1033,7 @@ class TestFeatureExtractorGenerateTCs:
 
         with patch("app.gen.feature_extractor.call_model", side_effect=responses), \
              patch("app.gen.feature_extractor.time.sleep"):  # skip retry sleep
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         assert len(result["test_cases"]) >= 1
 
@@ -1045,7 +1045,7 @@ class TestFeatureExtractorGenerateTCs:
         # Always empty
         with patch("app.gen.feature_extractor.call_model", return_value="no markers"), \
              patch("app.gen.feature_extractor.time.sleep"):
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         # Should add a warning
         assert len(result["warnings"]) >= 1
@@ -1059,7 +1059,7 @@ class TestFeatureExtractorGenerateTCs:
         # All attempts raise
         with patch("app.gen.feature_extractor.call_model", side_effect=RuntimeError("api down")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         # After MAX_RETRIES, should add warning
         assert len(result["warnings"]) >= 1
@@ -1075,7 +1075,7 @@ class TestFeatureExtractorGenerateTCs:
 
         with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |"), \
              patch("app.gen.feature_extractor.time.sleep"):
-            generate_test_cases_for_fps(
+            await generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=3,
             )
@@ -1089,7 +1089,7 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(1)
         with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |") as mcall, \
              patch("app.gen.feature_extractor.time.sleep"):
-            generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
+            await generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
 
         # Check that custom prompt was used
         sys_msg = mcall.call_args.args[0][0]["content"]
@@ -1107,7 +1107,7 @@ class TestFeatureExtractorGenerateTCs:
 
         with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |"), \
              patch("app.gen.feature_extractor.time.sleep"):
-            generate_test_cases_for_fps(
+            await generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=2,
             )
@@ -1124,7 +1124,7 @@ class TestFeatureExtractorGenerateTCs:
         with patch("app.gen.feature_extractor.call_model", return_value="| TC-1 | M | T | P | S | R | 高 |"), \
              patch("app.gen.feature_extractor.time.sleep"), \
              patch.object(logging.getLogger("app.gen.feature_extractor"), "info") as minfo:
-            generate_test_cases_for_fps(fps, "")
+            await generate_test_cases_for_fps(fps, "")
         # INFO log was called for successful batch
         assert any("generated" in str(c) for c in minfo.call_args_list)
 
@@ -1165,7 +1165,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         mock_tcs = [MagicMock()]
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=mock_fps), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": mock_tcs, "warnings": []}):
             result = two_phase_analyze("Some document text")
 
@@ -1183,7 +1183,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         long_text = "X" * 10000
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]) as mext, \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             result = two_phase_analyze(long_text)
 
@@ -1196,7 +1196,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         from app.gen.orchestrator import two_phase_analyze
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             result = two_phase_analyze("short text")
 
@@ -1225,7 +1225,7 @@ class TestOrchestratorTwoPhaseAnalyze:
             progress_calls.append(msg)
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             two_phase_analyze("text", progress_callback=cb)
 
@@ -1236,7 +1236,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         from app.gen.orchestrator import two_phase_analyze
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]) as mext, \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             two_phase_analyze("text", project_description="Banking context")
 
@@ -1254,7 +1254,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         mock_fp = MagicMock()
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[mock_fp]) as mext, \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}) as mgen:
             two_phase_analyze("text", prompts=prompts)
 
@@ -1273,7 +1273,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         mock_fp = MagicMock()
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[mock_fp]) as mext, \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}) as mgen:
             two_phase_analyze("text", prompts=prompts)
 
@@ -1285,7 +1285,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         from app.gen.orchestrator import two_phase_analyze
 
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[MagicMock()]), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": ["batch failed"]}):
             result = two_phase_analyze("text")
         assert "batch failed" in result["warnings"]
@@ -1303,7 +1303,7 @@ class TestOrchestratorImageAnalyze:
 
         with patch("app.gen.orchestrator.encode_image", return_value="b64data"), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[MagicMock()]) as mext, \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
             result = _analyze_image_two_phase(mock_file, None, "")
 
@@ -1414,7 +1414,7 @@ class TestOrchestratorPdfAnalyze:
                    return_value=[("png", "b64a"), ("png", "b64b")]), \
              patch("app.gen.orchestrator.extract_functional_points",
                    side_effect=[[fp1], [fp2]]), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
             result = _analyze_pdf_two_phase(mock_file, None, "")
 
@@ -1453,7 +1453,7 @@ class TestOrchestratorPdfAnalyze:
                    return_value=[("png", "b64a"), ("png", "b64b")]), \
              patch("app.gen.orchestrator.extract_functional_points",
                    side_effect=[[fp], RuntimeError("llm timeout")]), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
             result = _analyze_pdf_two_phase(mock_file, None, "")
 
@@ -1497,7 +1497,7 @@ class TestOrchestratorPdfAnalyze:
              patch("app.gen.orchestrator.render_pdf_pages_to_images",
                    return_value=[("png", "b64a"), ("png", "b64b")]), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[fp]), \
-             patch("app.gen.orchestrator.generate_test_cases_for_fps",
+             patch("app.gen.orchestrator.await generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
             _analyze_pdf_two_phase(mock_file, cb, "")
 
