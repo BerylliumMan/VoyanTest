@@ -60,7 +60,7 @@ async def import_test_cases(
         raise HTTPException(404, "项目不存在")
 
     from app.gen.adapter import import_test_cases as do_import
-    created = await loop.run_in_executor(None, lambda: do_import(db, body.project_id, test_cases_data, body.selected_ids))
+    created = await do_import(db, body.project_id, test_cases_data, body.selected_ids)
 
     await crud.increment_imported_count(db, body.session_id, body.project_id, len(created))
 

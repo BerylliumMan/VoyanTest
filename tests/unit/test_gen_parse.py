@@ -200,7 +200,7 @@ class TestImportTestCases:
             "1.步骤1 2.步骤2 3.步骤3 4.步骤4 5.步骤5",
             "1.结果1 2.结果2 3.结果3 4.结果4 5.结果5",
         )
-        created = import_test_cases(self.db, self.project.id, [tc])
+        created = await import_test_cases(self.db, self.project.id, [tc])
         assert len(created) == 1
         # Verify TestSteps
         result = await self.db.execute(
@@ -220,7 +220,7 @@ class TestImportTestCases:
             "1.打开页面 2.输入数据 3.点击保存",
             "1.页面提示保存成功",
         )
-        created = import_test_cases(self.db, self.project.id, [tc])
+        created = await import_test_cases(self.db, self.project.id, [tc])
         result = await self.db.execute(
             select(db_models.TestStep)
             .where(db_models.TestStep.case_id == created[0].id)
@@ -239,7 +239,7 @@ class TestImportTestCases:
             "1.点击【新增】",
             "1.弹窗打开 2.字段显示 3.按钮可用",
         )
-        created = import_test_cases(self.db, self.project.id, [tc])
+        created = await import_test_cases(self.db, self.project.id, [tc])
         result = await self.db.execute(
             select(db_models.TestStep)
             .where(db_models.TestStep.case_id == created[0].id)
@@ -258,7 +258,7 @@ class TestImportTestCases:
             "1.点击【新增】 2.在【名称】框输入数据 3.点击【保存】",
             "1.保存成功 2.列表刷新 3.数据显示正确",
         )
-        created = import_test_cases(self.db, self.project.id, [tc])
+        created = await import_test_cases(self.db, self.project.id, [tc])
         result = await self.db.execute(
             select(db_models.TestStep)
             .where(db_models.TestStep.case_id == created[0].id)

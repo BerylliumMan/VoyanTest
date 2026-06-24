@@ -30,15 +30,15 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _get_db() -> Session:
-    """创建数据库会话；连接失败时直接退出（exit 3）。"""
+async def _get_db() -> "AsyncSession":
+    """创建异步数据库会话；连接失败时直接退出（exit 3）。"""
     try:
-        from app.database import SessionLocal
+        from app.database import AsyncSessionLocal
 
-        return SessionLocal()
+        return AsyncSessionLocal()
     except Exception as exc:
         print(f"错误: 数据库连接失败: {exc}", file=sys.stderr)
         sys.exit(3)
@@ -49,13 +49,13 @@ def _get_db() -> Session:
 # ────────────────────────────────────────────────────────────────────
 
 
-def list_projects() -> None:
+async def list_projects() -> None:
     """列出所有项目。"""
-    db = _get_db()
+    db = await _get_db()
     try:
         from app import crud
 
-        projects = crud.get_all_projects(db)
+        projects = await crud.get_all_projects(db)
         if not projects:
             print("(没有找到任何项目)")
             return
@@ -69,21 +69,21 @@ def list_projects() -> None:
             created_str = str(created)[:19] if created else "-"
             print(f"{p.id:<6} {p.name:<30} {base:<45} {browser:<12} {created_str}")
     finally:
-        db.close()
+        await db.close()
 
 
-def list_cases(project_id: int) -> None:
+async def list_cases(project_id: int) -> None:
     """列出某项目下所有测试用例。"""
-    db = _get_db()
+    db = await _get_db()
     try:
         from app import crud
 
-        project = crud.get_project(db, project_id)
+        project = await crud.get_project(db, project_id)
         if not project:
             print(f"错误: 项目 ID {project_id} 未找到", file=sys.stderr)
             sys.exit(2)
 
-        cases = crud.get_all_test_cases_for_project(db, project_id)
+        cases = await crud.get_all_test_cases_for_project(db, project_id)
         if not cases:
             print(f"项目 '{project.name}' (ID={project_id}) 下没有测试用例")
             return
@@ -99,7 +99,7 @@ def list_cases(project_id: int) -> None:
             created_str = str(created)[:19] if created else "-"
             print(f"{c.id:<6} {str(pcn):<8} {c.name:<45} {str(mod):<8} {is_init:<6} {created_str}")
     finally:
-        db.close()
+        await db.close()
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -107,8 +107,8 @@ def list_cases(project_id: int) -> None:
 # ────────────────────────────────────────────────────────────────────
 
 
-def _resolve_case_ids(
-    db: Session,
+async def _resolve_case_ids(
+    db: "AsyncSession",
     project_id: int,
     case_ids_arg: list[int] | None,
 ) -> list[int]:
@@ -118,15 +118,15 @@ def _resolve_case_ids(
     if case_ids_arg:
         # 验证每个 ID 有效
         for cid in case_ids_arg:
-            case = crud.get_test_case(db, cid)
+            case = await crud.get_test_case(db, cid)
             if not case:
                 print(f"错误: 测试用例 ID {cid} 未找到", file=sys.stderr)
                 sys.exit(2)
         return case_ids_arg
 
-    cases = crud.get_all_test_cases_for_project(db, project_id)
+    cases = await crud.get_all_test_cases_for_project(db, project_id)
     if not cases:
-        project = crud.get_project(db, project_id)
+        project = await crud.get_project(db, project_id)
         name = project.name if project else f"ID={project_id}"
         print(f"警告: 项目 '{name}' 下没有测试用例")
         sys.exit(0)
@@ -199,17 +199,17 @@ async def _execute_and_report(
     sys.exit(0)
 
 
-def cmd_run(args: argparse.Namespace) -> None:
+async def cmd_run(args: argparse.Namespace) -> None:
     """run 子命令：批量执行测试用例。"""
     # 设置 headless 环境变量
     if args.headless:
         os.environ["HEADLESS"] = "true"
 
-    db = _get_db()
+    db = await _get_db()
     try:
         from app import crud
 
-        project = crud.get_project(db, args.project_id)
+        project = await crud.get_project(db, args.project_id)
         if not project:
             print(f"错误: 项目 ID {args.project_id} 未找到", file=sys.stderr)
             sys.exit(2)
@@ -219,51 +219,47 @@ def cmd_run(args: argparse.Namespace) -> None:
             case_ids_arg: list[int] | None = [int(x.strip()) for x in args.case_ids.split(",")]
         else:
             case_ids_arg = None
-        case_ids = _resolve_case_ids(db, args.project_id, case_ids_arg)
+        case_ids = await _resolve_case_ids(db, args.project_id, case_ids_arg)
     finally:
-        db.close()
+        await db.close()
 
-    asyncio.run(
-        _execute_and_report(
-            case_ids=case_ids,
-            project_id=args.project_id,
-            env_id=args.env_id,
-            headless=args.headless,
-            output_path=args.output,
-        )
+    await _execute_and_report(
+        case_ids=case_ids,
+        project_id=args.project_id,
+        env_id=args.env_id,
+        headless=args.headless,
+        output_path=args.output,
     )
 
 
-def cmd_run_single(args: argparse.Namespace) -> None:
+async def cmd_run_single(args: argparse.Namespace) -> None:
     """run-single 子命令：执行单个测试用例。"""
     if args.headless:
         os.environ["HEADLESS"] = "true"
 
-    db = _get_db()
+    db = await _get_db()
     try:
         from app import crud
 
-        case = crud.get_test_case(db, args.case_id)
+        case = await crud.get_test_case(db, args.case_id)
         if not case:
             print(f"错误: 测试用例 ID {args.case_id} 未找到", file=sys.stderr)
             sys.exit(2)
 
         project_id: int = int(case.project_id)  # pyright: ignore[reportArgumentType]
-        project = crud.get_project(db, project_id)
+        project = await crud.get_project(db, project_id)
         if not project:
             print(f"错误: 用例 {args.case_id} 所属项目 ID {project_id} 未找到", file=sys.stderr)
             sys.exit(2)
     finally:
-        db.close()
+        await db.close()
 
-    asyncio.run(
-        _execute_and_report(
-            case_ids=[args.case_id],
-            project_id=project_id,
-            env_id=args.env_id,
-            headless=args.headless,
-            output_path=args.output,
-        )
+    await _execute_and_report(
+        case_ids=[args.case_id],
+        project_id=project_id,
+        env_id=args.env_id,
+        headless=args.headless,
+        output_path=args.output,
     )
 
 
@@ -272,7 +268,7 @@ def cmd_run_single(args: argparse.Namespace) -> None:
 # ────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+async def _main() -> None:
     parser = argparse.ArgumentParser(
         prog="voyan",
         description="VoyanTest CLI — 命令行测试执行工具，用于 CI/CD 流水线",
@@ -321,16 +317,21 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "list-projects":
-        list_projects()
+        await list_projects()
     elif args.command == "list-cases":
-        list_cases(args.project_id)
+        await list_cases(args.project_id)
     elif args.command == "run":
-        cmd_run(args)
+        await cmd_run(args)
     elif args.command == "run-single":
-        cmd_run_single(args)
+        await cmd_run_single(args)
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def main() -> None:
+    """CLI 入口点，使用 asyncio.run 执行异步主函数。"""
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":

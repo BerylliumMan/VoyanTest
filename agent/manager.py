@@ -124,8 +124,8 @@ class AgentManager:
                          "steps": steps},
             ))
 
-            llm_client = create_openai_client()
-            _, _, model = _llm_resolve_config()
+            llm_client = await create_openai_client()
+            _, _, model = await _llm_resolve_config()
 
             for idx, step in enumerate(steps):
                 if failed_step_number is not None:

@@ -76,8 +76,8 @@ def mock_llm():
 @pytest.fixture(autouse=True)
 def _mock_llm_config():
     """Mock LLM config/DB queries — agent batch tests don't need real LLM connections."""
-    with patch('agent.manager._llm_resolve_config') as mock_resolve, \
-         patch('agent.manager.create_openai_client') as mock_client:
+    with patch('agent.manager._llm_resolve_config', new_callable=AsyncMock) as mock_resolve, \
+         patch('agent.manager.create_openai_client', new_callable=AsyncMock) as mock_client:
         mock_resolve.return_value = ("sk-test", "https://api.test.com/v1", "test-model")
         mock_client.return_value = MagicMock()
         yield

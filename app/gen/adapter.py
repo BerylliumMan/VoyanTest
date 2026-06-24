@@ -1,7 +1,8 @@
 """Adapter: convert gentestcases analysis results to uitest-work DB models."""
 import re
 import logging
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from app import db_models
 from app.crud.testcase import get_next_project_case_number
 
@@ -28,22 +29,25 @@ def _split_expected_results(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _find_or_create_module(db: Session, project_id: int, module_name: str) -> db_models.Module:
+async def _find_or_create_module(db: AsyncSession, project_id: int, module_name: str) -> db_models.Module:
     """Find existing module by name in project, or create it."""
-    module = db.query(db_models.Module).filter(
-        db_models.Module.project_id == project_id,
-        db_models.Module.name == module_name,
-    ).first()
+    result = await db.execute(
+        select(db_models.Module).where(
+            db_models.Module.project_id == project_id,
+            db_models.Module.name == module_name,
+        )
+    )
+    module = result.scalar_one_or_none()
     if not module:
         module = db_models.Module(project_id=project_id, name=module_name)
         db.add(module)
-        db.flush()
+        await db.flush()
         logger.info("Created module: %s (id=%d)", module_name, module.id)
     return module
 
 
-def import_test_cases(
-    db: Session,
+async def import_test_cases(
+    db: AsyncSession,
     project_id: int,
     test_cases: list,  # list of gen.models.TestCase (gentestcases format)
     selected_ids: list[str] | None = None,  # list of test_case_id strings to import, None = all
@@ -69,7 +73,7 @@ def import_test_cases(
 
         # Find or create module
         module_name = gen_tc.module.strip() if gen_tc.module else "通用"
-        module = _find_or_create_module(db, project_id, module_name)
+        module = await _find_or_create_module(db, project_id, module_name)
 
         # Build description from preconditions
         description = ""
@@ -80,16 +84,17 @@ def import_test_cases(
         priority = PRIORITY_MAP.get(gen_tc.priority.strip(), "medium")
 
         # Create uitest-work TestCase
+        project_case_number = await get_next_project_case_number(db, project_id)
         tc = db_models.TestCase(
             project_id=project_id,
             module_id=module.id,
-            project_case_number=get_next_project_case_number(db, project_id),
+            project_case_number=project_case_number,
             name=gen_tc.title.strip() if gen_tc.title else f"Test Case {gen_tc.test_case_id}",
             description=description,
             priority=priority,
         )
         db.add(tc)
-        db.flush()
+        await db.flush()
 
         # Split test_steps and expected_results into TestStep records
         steps_text = _split_numbered_steps(gen_tc.test_steps)
@@ -117,5 +122,5 @@ def import_test_cases(
         created.append(tc)
         logger.info("Imported %s → TestCase id=%d (%s)", gen_tc.test_case_id, tc.id, tc.name)
 
-    db.commit()
+    await db.commit()
     return created

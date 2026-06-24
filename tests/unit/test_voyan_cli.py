@@ -20,7 +20,7 @@ def _run_cli_sync(*args: str) -> subprocess.CompletedProcess:
     读写的是真实数据库而非测试数据库。
     """
     env = os.environ.copy()
-    env["DATABASE_URL"] = "sqlite:///./uitest.db"
+    env["DATABASE_URL"] = "sqlite+aiosqlite:///./uitest.db"
     return subprocess.run(
         ["python3", CLI_SCRIPT, *args],
         capture_output=True,
