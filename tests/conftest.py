@@ -31,6 +31,7 @@ def event_loop():
 @pytest_asyncio.fixture(scope="session")
 async def engine():
     from app.database import Base
+    import app.db_models  # noqa: F401 — 确保所有 ORM model 注册到 Base.metadata
     eng = create_async_engine(
         TEST_DATABASE_URL,
         connect_args={"check_same_thread": False},
