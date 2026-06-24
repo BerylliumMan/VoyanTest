@@ -70,6 +70,8 @@ class TestCaseBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     is_init: bool = False
+    tags: Optional[str] = None
+    priority: str = "medium"
 
 class TestStepBase(BaseModel):
     case_id: int
@@ -117,6 +119,8 @@ class TestCaseUpdate(BaseModel):
     module_id: Optional[int] = None
     steps: List[TestStepUpdate] = []
     is_init: Optional[bool] = None
+    tags: Optional[str] = None
+    priority: Optional[str] = None
 
 class TestStepCreatePayload(BaseModel):
     step_order: int = Field(..., gt=0)
@@ -157,6 +161,8 @@ class TestCase(TestCaseBase):
     created_at: datetime
     steps: List[TestStep] = []
     is_init: bool = False
+
+    model_config = {"from_attributes": True}
 
 class Project(ProjectBase):
     id: int

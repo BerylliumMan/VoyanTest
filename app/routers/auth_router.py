@@ -64,7 +64,7 @@ async def _login_user(request: Request, username: str, password: str, db: AsyncS
 
 
 @router.post("/login")
-@limiter.limit("5/minute")
+@limiter.limit("30/minute")
 async def login(request: Request, body: models.LoginRequest, db: AsyncSession = Depends(get_async_db)) -> JSONResponse:
     """JSON 登录."""
     user, sid = await _login_user(request, body.username, body.password, db)
@@ -78,7 +78,7 @@ async def login(request: Request, body: models.LoginRequest, db: AsyncSession = 
 
 
 @router.post("/login-form")
-@limiter.limit("5/minute")
+@limiter.limit("30/minute")
 async def login_form(request: Request, username: str = Form(...), password: str = Form(...), db: AsyncSession = Depends(get_async_db)) -> RedirectResponse:
     """HTML 表单登录."""
     try:
