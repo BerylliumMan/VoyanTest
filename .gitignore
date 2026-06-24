@@ -120,8 +120,7 @@ reports/summary.md
 AGENTS.md
 CLAUDE.md
 
-# Docker compose (local)
-docker-compose-sonarqube.yml
+
 
 # Install & build
 install.sh

@@ -99,6 +99,22 @@ def patched_cdp_session_cls(mock_cdp_session):
         yield MockCls, mock_cdp_session
 
 
+@pytest.fixture
+def admin_user(db, ensure_admin_user):
+    """返回数据库中的 admin 用户对象（供 _inject_session 注入 user_id 使用）。"""
+    import asyncio
+    from sqlalchemy import select
+    from app import db_models
+
+    async def _get():
+        result = await db.execute(
+            select(db_models.User).where(db_models.User.username == "admin")
+        )
+        return result.scalar_one_or_none()
+
+    return asyncio.run(_get())
+
+
 # ===========================================================================
 # POST /api/recordings/start
 # ===========================================================================
