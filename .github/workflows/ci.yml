@@ -46,6 +46,7 @@ jobs:
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
           sudo -u postgres psql -c "CREATE DATABASE uitest_e2e"
           sudo -u postgres psql -c "CREATE DATABASE uitest_e2e_webui"
+          sudo -u postgres psql -c "CREATE DATABASE uitest_e2e_login"
           echo "PG ready on port 15435"
 
       # E2E 测试：自启动 uvicorn 子进程 + 真实 Playwright 浏览器
@@ -62,7 +63,7 @@ jobs:
       - name: Run E2E tests
         run: |
           source venv/bin/activate
-          xvfb-run python3 -m pytest tests/e2e/test_web_ui.py -v --timeout=120 --no-cov 2>&1 | tail -15
+          xvfb-run python3 -m pytest tests/e2e/ -v --timeout=120 --no-cov 2>&1 | tail -20
         timeout-minutes: 15
         env:
           CI: "true"

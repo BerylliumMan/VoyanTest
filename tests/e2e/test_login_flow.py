@@ -93,7 +93,7 @@ def server() -> str:
     )
 
     try:
-        _wait_for_server(HEALTH_URL, timeout_s=30)
+        _wait_for_server(HEALTH_URL, timeout_s=60)
     except Exception:
         # 启动失败时 dump 子进程输出辅助排错
         try:
