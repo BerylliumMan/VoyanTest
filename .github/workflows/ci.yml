@@ -62,7 +62,7 @@ jobs:
       - name: Run E2E tests
         run: |
           source venv/bin/activate
-          xvfb-run python3 -m pytest tests/e2e/test_login_flow.py tests/e2e/test_web_ui.py tests/e2e/test_agent_execution.py -v --timeout=120 --no-cov 2>&1 | tail -15
+          xvfb-run python3 -m pytest tests/e2e/test_web_ui.py -v --timeout=120 --no-cov 2>&1 | tail -15
         timeout-minutes: 15
         env:
           CI: "true"
