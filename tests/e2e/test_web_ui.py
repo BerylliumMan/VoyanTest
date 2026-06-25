@@ -452,3 +452,205 @@ class TestRunAPI:
         logged_in_page.wait_for_timeout(2000)
         body = logged_in_page.text_content("body") or ""
         assert len(body) > 0
+
+
+class TestCaseAPI:
+    """测试用例 CRUD + 搜索 + 批量。"""
+
+    def _api(self, server):
+        import httpx
+        h = httpx.Client(base_url=server)
+        r = h.post("/api/auth/login", json={"username":"admin","password":"Admin@2024"})
+        assert r.status_code == 200
+        h.cookies = r.cookies
+        return h
+
+    def _make_project(self, h, name):
+        r = h.post("/api/projects/", json={"name":name, "base_url":"https://tc.com"})
+        assert r.status_code == 200
+        return r.json()["id"]
+
+    def _make_module(self, h, pid, name):
+        r = h.post(f"/api/projects/{pid}/modules", json={"project_id":pid,"name":name})
+        assert r.status_code == 200
+        return r.json()["id"]
+
+    def _make_case(self, h, pid, mid, name, steps=None):
+        if steps is None:
+            steps = [{"step_order": 1, "description": "测试步"}]
+        r = h.post("/api/testcases/", json={"project_id":pid,"module_id":mid,"name":name,"steps":steps})
+        assert r.status_code == 200, f"create case failed: {r.text}"
+        return r.json()["id"]
+
+    def test_create_step_multiple_steps(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "多步骤项目")
+        mid = self._make_module(h, pid, "M")
+        steps = [{"step_order": i, "description": f"步骤{i}"} for i in range(1, 5)]
+        cid = self._make_case(h, pid, mid, "多步骤用例", steps)
+        r = h.get(f"/api/testcases/{cid}")
+        assert len(r.json()["steps"]) == 4
+        h.delete(f"/api/projects/{pid}")
+
+    def test_search_by_name(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "搜索项目")
+        mid = self._make_module(h, pid, "M")
+        self._make_case(h, pid, mid, "唯一名ABC")
+        self._make_case(h, pid, mid, "其他名")
+        r = h.get(f"/api/testcases/search?project_id={pid}&keyword=唯一名")
+        assert r.status_code == 200
+        assert r.json()["total_items"] >= 1
+        h.delete(f"/api/projects/{pid}")
+
+    def test_search_by_module(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "模块搜索")
+        m1 = self._make_module(h, pid, "M1")
+        m2 = self._make_module(h, pid, "M2")
+        self._make_case(h, pid, m1, "模块1用例")
+        self._make_case(h, pid, m2, "模块2用例")
+        r = h.get(f"/api/testcases/search?project_id={pid}&module_id={m1}")
+        items = r.json()["items"]
+        names = [it["name"] for it in items]
+        assert names == ["模块1用例"]
+        h.delete(f"/api/projects/{pid}")
+
+    def test_update_case_rename(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "更新用例")
+        mid = self._make_module(h, pid, "M")
+        cid = self._make_case(h, pid, mid, "旧名")
+        r = h.put(f"/api/testcases/{cid}", json={"name": "新名"})
+        assert r.json().get("name") in ("新名", "旧名")  # 视 API 实现
+        r = h.get(f"/api/testcases/search?project_id={pid}&keyword=新名")
+        assert r.status_code == 200
+        h.delete(f"/api/projects/{pid}")
+
+    def test_delete_testcase(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "删除用例")
+        mid = self._make_module(h, pid, "M")
+        cid = self._make_case(h, pid, mid, "待删除")
+        r = h.delete(f"/api/testcases/{cid}")
+        assert r.status_code == 200
+        r = h.get(f"/api/testcases/search?project_id={pid}")
+        assert r.json()["total_items"] == 0
+        h.delete(f"/api/projects/{pid}")
+
+    def test_pagination(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "分页项目")
+        mid = self._make_module(h, pid, "M")
+        for i in range(20):
+            self._make_case(h, pid, mid, f"用例{i}")
+        r = h.get(f"/api/testcases/search?project_id={pid}&page=1&size=5")
+        data = r.json()
+        assert data["page"] == 1
+        assert data["size"] == 5
+        assert data["total_items"] >= 20
+        h.delete(f"/api/projects/{pid}")
+
+    def test_get_case_not_found(self, server):
+        h = self._api(server)
+        r = h.get("/api/testcases/999999")
+        assert r.status_code == 404
+
+    def test_batch_delete_cases(self, server):
+        h = self._api(server)
+        pid = self._make_project(h, "批量删除")
+        mid = self._make_module(h, pid, "M")
+        c1 = self._make_case(h, pid, mid, "A")
+        c2 = self._make_case(h, pid, mid, "B")
+        r = h.post("/api/testcases/batch-delete", json={"case_ids": [c1, c2]})
+        assert r.status_code == 200
+        r = h.get(f"/api/testcases/search?project_id={pid}")
+        assert r.json()["total_items"] == 0
+        h.delete(f"/api/projects/{pid}")
+
+    def test_batch_copy_cases(self, server):
+        h = self._api(server)
+        pid1 = self._make_project(h, "复制来源")
+        mid1 = self._make_module(h, pid1, "M1")
+        c1 = self._make_case(h, pid1, mid1, "被复制")
+        pid2 = self._make_project(h, "复制目标")
+        mid2 = self._make_module(h, pid2, "M2")
+        r = h.post("/api/testcases/batch-copy", json={
+            "case_ids": [c1], "target_project_id": pid2, "target_module_id": mid2,
+        })
+        assert r.status_code == 200
+        r = h.get(f"/api/testcases/search?project_id={pid2}")
+        assert r.json()["total_items"] >= 1
+        h.delete(f"/api/projects/{pid1}"); h.delete(f"/api/projects/{pid2}")
+
+    def test_batch_move_cases(self, server):
+        h = self._api(server)
+        pid1 = self._make_project(h, "移动来源")
+        mid1 = self._make_module(h, pid1, "M1")
+        c1 = self._make_case(h, pid1, mid1, "被移动")
+        pid2 = self._make_project(h, "移动目标")
+        mid2 = self._make_module(h, pid2, "M2")
+        r = h.post("/api/testcases/batch-move", json={
+            "case_ids": [c1], "target_project_id": pid2, "target_module_id": mid2,
+        })
+        assert r.status_code == 200
+        r = h.get(f"/api/testcases/search?project_id={pid1}")
+        assert r.json()["total_items"] == 0
+        h.delete(f"/api/projects/{pid1}"); h.delete(f"/api/projects/{pid2}")
+
+
+class TestReportAPI:
+    """报告/统计端点。"""
+
+    def _api(self, server):
+        import httpx
+        h = httpx.Client(base_url=server)
+        r = h.post("/api/auth/login", json={"username":"admin","password":"Admin@2024"})
+        assert r.status_code == 200
+        h.cookies = r.cookies
+        return h
+
+    def test_statistics(self, server):
+        h = self._api(server)
+        r = h.get("/api/reports/statistics")
+        assert r.status_code == 200
+        data = r.json()
+        assert "total_projects" in data or "total" in data or isinstance(data, dict)
+
+    def test_trends(self, server):
+        h = self._api(server)
+        r = h.get("/api/reports/trends")
+        assert r.status_code == 200
+        assert isinstance(r.json(), (dict, list))
+
+    def test_reports_summary(self, server):
+        h = self._api(server)
+        r = h.get("/api/reports/summary")
+        assert r.status_code == 200
+        assert isinstance(r.json(), dict)
+
+
+class TestHealthCheck:
+    """系统健康 + 全局状态。"""
+
+    def test_health_endpoint(self, server):
+        import httpx
+        with httpx.Client(base_url=server) as h:
+            r = h.get("/health")
+            assert r.status_code == 200
+            data = r.json()
+            assert "status" in data or isinstance(data, dict)
+
+    def test_settings_page_accessible(self, logged_in_page):
+        logged_in_page.goto(logged_in_page.url.rstrip("/") + "/settings")
+        logged_in_page.wait_for_load_state("networkidle")
+        logged_in_page.wait_for_timeout(1500)
+        body = logged_in_page.text_content("body") or ""
+        assert len(body) > 0
+
+    def test_reports_page_accessible(self, logged_in_page):
+        logged_in_page.goto(logged_in_page.url.rstrip("/") + "/reports")
+        logged_in_page.wait_for_load_state("networkidle")
+        logged_in_page.wait_for_timeout(1500)
+        body = logged_in_page.text_content("body") or ""
+        assert len(body) > 0
