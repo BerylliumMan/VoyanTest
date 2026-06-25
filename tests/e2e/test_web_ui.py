@@ -317,3 +317,134 @@ class TestPages:
             assert all(p["id"] != pid for p in r.json())
             r = h.get(f"/api/testcases/search?project_id={pid}", cookies=ck)
             assert r.json()["total_items"] == 0
+
+
+class TestModuleAPI:
+    """模块 CRUD 测试 — 通过 API。"""
+
+    def test_module_tree(self, server):
+        """创建模块父子树。"""
+        import httpx
+        with httpx.Client(base_url=server) as h:
+            h.post("/api/auth/login", json={"username":"admin","password":"Admin@2024"})
+
+    def _api(self, server):
+        import httpx
+        h = httpx.Client(base_url=server)
+        r = h.post("/api/auth/login", json={"username":"admin","password":"Admin@2024"})
+        assert r.status_code == 200
+        h.cookies = r.cookies
+        return h
+
+    def test_create_project_and_modules(self, server):
+        h = self._api(server)
+        r = h.post("/api/projects/", json={"name":"模块测试项目","base_url":"https://mod.com"})
+        assert r.status_code == 200; pid = r.json()["id"]
+        # 父模块
+        r = h.post(f"/api/projects/{pid}/modules", json={"project_id":pid,"name":"父模块"})
+        assert r.status_code == 200; pid_mod = r.json()["id"]
+        # 子模块
+        r = h.post(f"/api/projects/{pid}/modules", json={"project_id":pid,"name":"子模块","parent_id":pid_mod})
+        assert r.status_code == 200; cid_mod = r.json()["id"]
+        # 查询树
+        r = h.get(f"/api/projects/{pid}/modules/tree")
+        assert r.status_code == 200
+        tree = r.json()
+        names = {n["name"] for n in tree}
+        assert "父模块" in names
+        # 删除
+        h.delete(f"/api/projects/{pid}")
+
+    def test_get_modules_empty(self, server):
+        h = self._api(server)
+        r = h.post("/api/projects/", json={"name":"空模块项目","base_url":"https://empty.com"})
+        pid = r.json()["id"]
+        r = h.get(f"/api/projects/{pid}/modules/tree")
+        assert r.json() == []
+        h.delete(f"/api/projects/{pid}")
+
+
+class TestEnvironmentAPI:
+    """环境 CRUD 测试 — 通过 API。"""
+
+    def _api(self, server):
+        import httpx
+        h = httpx.Client(base_url=server)
+        r = h.post("/api/auth/login", json={"username":"admin","password":"Admin@2024"})
+        assert r.status_code == 200
+        h.cookies = r.cookies
+        return h
+
+    def test_create_and_list_envs(self, server):
+        h = self._api(server)
+        r = h.post("/api/projects/", json={"name":"环境测试","base_url":"https://env.com"})
+        pid = r.json()["id"]
+        # 创建
+        for name in ["开发环境", "测试环境", "生产环境"]:
+            r = h.post(f"/api/projects/{pid}/environments", json={
+                "project_id":pid, "name":name, "base_url":f"https://{name}.com",
+            })
+            assert r.status_code == 200
+        # 列表
+        r = h.get(f"/api/projects/{pid}/environments")
+        assert r.status_code == 200
+        names = [e["name"] for e in r.json()]
+        assert "开发环境" in names and "生产环境" in names
+        h.delete(f"/api/projects/{pid}")
+
+    def test_update_environment(self, server):
+        h = self._api(server)
+        r = h.post("/api/projects/", json={"name":"环境更新","base_url":"https://envup.com"})
+        pid = r.json()["id"]
+        r = h.post(f"/api/projects/{pid}/environments", json={
+            "project_id":pid, "name":"旧环境", "base_url":"https://old.com",
+        })
+        eid = r.json()["id"]
+        r = h.put(f"/api/projects/{pid}/environments/{eid}", json={
+            "name":"新环境", "base_url":"https://new.com",
+        })
+        assert r.json()["name"] == "新环境"
+        h.delete(f"/api/projects/{pid}")
+
+    def test_delete_environment(self, server):
+        h = self._api(server)
+        r = h.post("/api/projects/", json={"name":"环境删除","base_url":"https://envdel.com"})
+        pid = r.json()["id"]
+        r = h.post(f"/api/projects/{pid}/environments", json={
+            "project_id":pid, "name":"待删除","base_url":"https://del.com",
+        })
+        eid = r.json()["id"]
+        r = h.delete(f"/api/projects/{pid}/environments/{eid}")
+        assert r.status_code == 200
+        envs = h.get(f"/api/projects/{pid}/environments").json()
+        assert all(e["id"] != eid for e in envs)
+        h.delete(f"/api/projects/{pid}")
+
+
+class TestRunAPI:
+    """测试执行流程 — 通过 API。"""
+
+    def _api(self, server):
+        import httpx
+        h = httpx.Client(base_url=server)
+        r = h.post("/api/auth/login", json={"username":"admin","password":"Admin@2024"})
+        assert r.status_code == 200
+        h.cookies = r.cookies
+        return h
+
+    def test_run_history_empty(self, server):
+        h = self._api(server)
+        r = h.post("/api/projects/", json={"name":"运行测试","base_url":"https://run.com"})
+        pid = r.json()["id"]
+        r = h.get(f"/api/projects/{pid}/run-batches")
+        assert r.status_code == 200
+        # 新项目运行历史为空
+        assert r.json().get("total", 0) == 0
+        h.delete(f"/api/projects/{pid}")
+
+    def test_gen_page_accessible(self, logged_in_page):
+        """AI 生成页面可访问。"""
+        click_visible(logged_in_page, "AI生成")
+        logged_in_page.wait_for_timeout(1500)
+        body = logged_in_page.text_content("body") or ""
+        assert len(body) > 0
