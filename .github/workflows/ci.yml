@@ -35,9 +35,9 @@ jobs:
           python3 -m pytest tests/unit/ -v --tb=short --cov=app --cov=core --cov-report=term --ignore=tests/unit/core/test_playwright_manager.py -x -q 2>&1 | tail -30
 
       # PostgreSQL for E2E tests
-      - name: Start PostgreSQL
+      - name: Start PostgreSQL and install xvfb
         run: |
-          sudo apt-get update && sudo apt-get install -y postgresql postgresql-client
+          sudo apt-get update && sudo apt-get install -y postgresql postgresql-client xvfb
           echo "port = 15435" | sudo tee -a /etc/postgresql/*/main/postgresql.conf
           sudo pg_ctlcluster * main restart 2>/dev/null || sudo service postgresql restart 2>/dev/null || true
           sleep 3
@@ -62,7 +62,7 @@ jobs:
       - name: Run E2E tests
         run: |
           source venv/bin/activate
-          python3 -m pytest tests/e2e/test_login_flow.py tests/e2e/test_web_ui.py tests/e2e/test_agent_execution.py -v --timeout=120 --no-cov
+          xvfb-run python3 -m pytest tests/e2e/test_login_flow.py tests/e2e/test_web_ui.py tests/e2e/test_agent_execution.py -v --timeout=120 --no-cov 2>&1 | tail -15
         timeout-minutes: 15
         env:
           CI: "true"
