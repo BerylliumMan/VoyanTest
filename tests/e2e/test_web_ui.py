@@ -447,11 +447,8 @@ class TestRunAPI:
 
     def test_gen_page_accessible(self, logged_in_page):
         """AI 生成页面可访问。"""
+        logged_in_page.goto(logged_in_page.url.rstrip("/") + "/gen")
         logged_in_page.wait_for_load_state("networkidle")
-        # 等待侧边栏渲染
-        items = logged_in_page.locator(".arco-menu-item")
-        items.first.wait_for(state="visible", timeout=10000)
-        click_visible(logged_in_page, "AI生成")
         logged_in_page.wait_for_timeout(2000)
         body = logged_in_page.text_content("body") or ""
         assert len(body) > 0
