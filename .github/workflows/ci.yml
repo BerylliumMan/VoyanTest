@@ -47,10 +47,10 @@ jobs:
 
       # E2E 测试：自启动 uvicorn 子进程 + 真实 Playwright 浏览器
       # 需要先构建前端，否则 SPA 静态资源缺失，登录页会白屏
-      - name: Set up Node.js 18 (for frontend build)
+      - name: Set up Node.js 20 (for frontend build)
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "20"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
@@ -77,10 +77,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js 18
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "20"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
