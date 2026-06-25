@@ -32,7 +32,7 @@ jobs:
       - name: Run pytest
         run: |
           source venv/bin/activate
-          python3 -m pytest tests/unit/ -v --tb=short --cov=app --cov=core --cov-report=term --ignore=tests/unit/core/test_playwright_manager.py -x -q 2>&1 | tail -30
+          python3 -m pytest tests/unit/ -v --tb=short --cov=app --cov=core --cov-report=term --ignore=tests/unit/core/test_playwright_manager.py -x -q
 
       # PostgreSQL for E2E tests
       - name: Start PostgreSQL and install xvfb
@@ -63,7 +63,7 @@ jobs:
       - name: Run E2E tests
         run: |
           source venv/bin/activate
-          xvfb-run python3 -m pytest tests/e2e/ -v --timeout=120 --no-cov 2>&1 | tail -20
+          xvfb-run python3 -m pytest tests/e2e/ -v --timeout=120 --no-cov
         timeout-minutes: 15
         env:
           CI: "true"
