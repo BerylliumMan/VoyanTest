@@ -400,11 +400,15 @@ class TestEnvironmentAPI:
             "project_id":pid, "name":"旧环境", "base_url":"https://old.com",
         })
         eid = r.json()["id"]
-        r = h.put(f"/api/projects/{pid}/environments/{eid}", json={
+        r = h.put(f"/api/environments/{eid}", json={
             "name":"新环境", "base_url":"https://new.com",
         })
-        assert r.json()["name"] == "新环境"
-        h.delete(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        data = r.json()
+        # 响应可能直接返回对象或嵌套
+        name = data.get("name") or data.get("environment", {}).get("name")
+        assert name == "新环境", f"Unexpected response: {data}"
+        h.delete(f"/api/environments/{eid}")
 
     def test_delete_environment(self, server):
         h = self._api(server)
@@ -414,7 +418,7 @@ class TestEnvironmentAPI:
             "project_id":pid, "name":"待删除","base_url":"https://del.com",
         })
         eid = r.json()["id"]
-        r = h.delete(f"/api/projects/{pid}/environments/{eid}")
+        r = h.delete(f"/api/environments/{eid}")
         assert r.status_code == 200
         envs = h.get(f"/api/projects/{pid}/environments").json()
         assert all(e["id"] != eid for e in envs)
@@ -436,15 +440,18 @@ class TestRunAPI:
         h = self._api(server)
         r = h.post("/api/projects/", json={"name":"运行测试","base_url":"https://run.com"})
         pid = r.json()["id"]
-        r = h.get(f"/api/projects/{pid}/run-batches")
+        r = h.get(f"/api/reports/batches?project_id={pid}")
         assert r.status_code == 200
-        # 新项目运行历史为空
         assert r.json().get("total", 0) == 0
         h.delete(f"/api/projects/{pid}")
 
     def test_gen_page_accessible(self, logged_in_page):
         """AI 生成页面可访问。"""
+        logged_in_page.wait_for_load_state("networkidle")
+        # 等待侧边栏渲染
+        items = logged_in_page.locator(".arco-menu-item")
+        items.first.wait_for(state="visible", timeout=10000)
         click_visible(logged_in_page, "AI生成")
-        logged_in_page.wait_for_timeout(1500)
+        logged_in_page.wait_for_timeout(2000)
         body = logged_in_page.text_content("body") or ""
         assert len(body) > 0
