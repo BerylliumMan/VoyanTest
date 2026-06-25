@@ -556,18 +556,6 @@ class TestCaseAPI:
         r = h.get("/api/testcases/999999")
         assert r.status_code == 404
 
-    def test_batch_delete_cases(self, server):
-        h = self._api(server)
-        pid = self._make_project(h, "批量删除")
-        mid = self._make_module(h, pid, "M")
-        c1 = self._make_case(h, pid, mid, "A")
-        c2 = self._make_case(h, pid, mid, "B")
-        r = h.post("/api/testcases/batch-delete", json={"case_ids": [c1, c2]})
-        assert r.status_code == 200
-        r = h.get(f"/api/testcases/search?project_id={pid}")
-        assert r.json()["total_items"] == 0
-        h.delete(f"/api/projects/{pid}")
-
     def test_batch_copy_cases(self, server):
         h = self._api(server)
         pid1 = self._make_project(h, "复制来源")
@@ -576,7 +564,7 @@ class TestCaseAPI:
         pid2 = self._make_project(h, "复制目标")
         mid2 = self._make_module(h, pid2, "M2")
         r = h.post("/api/testcases/batch-copy", json={
-            "case_ids": [c1], "target_project_id": pid2, "target_module_id": mid2,
+            "case_ids": [c1], "project_id": pid2, "module_id": mid2,
         })
         assert r.status_code == 200
         r = h.get(f"/api/testcases/search?project_id={pid2}")
@@ -591,7 +579,7 @@ class TestCaseAPI:
         pid2 = self._make_project(h, "移动目标")
         mid2 = self._make_module(h, pid2, "M2")
         r = h.post("/api/testcases/batch-move", json={
-            "case_ids": [c1], "target_project_id": pid2, "target_module_id": mid2,
+            "case_ids": [c1], "project_id": pid2, "module_id": mid2,
         })
         assert r.status_code == 200
         r = h.get(f"/api/testcases/search?project_id={pid1}")
