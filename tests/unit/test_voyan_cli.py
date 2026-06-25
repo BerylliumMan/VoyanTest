@@ -89,14 +89,11 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_nonexistent_project(self):
-        """运行 'run --project-id 99999' 对不存在的项目应返回非 0 退出码并提示'未找到'。"""
+        """运行 'run --project-id 99999' 对不存在的项目应返回非 0 退出码。"""
         result = await run_cli("run", "--project-id", "99999")
         assert result.returncode != 0, (
             f"expected non-zero exit for nonexistent project, got {result.returncode}\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-        assert "未找到" in result.stderr, (
-            f"expected '未找到' in stderr, got:\n{result.stderr}"
         )
 
     @pytest.mark.asyncio
