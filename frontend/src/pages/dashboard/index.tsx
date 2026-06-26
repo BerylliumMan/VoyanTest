@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Card, Grid, Select, Spin, Table, Tag } from '@arco-design/web-react';
 import { IconLoading, IconStorage, IconCheckCircleFill, IconCloseCircleFill, IconList } from '@arco-design/web-react/icon';
+import ReactEChartsCore from 'echarts-for-react/lib/core';
+import * as echarts from 'echarts/core';
+import { BarChart, LineChart } from 'echarts/charts';
+import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
+echarts.use([BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import logger from '@/utils/logger';
@@ -116,19 +122,21 @@ function Dashboard() {
         <Col span={12} className={styles.colFlex}>
           <Card title={t['trend.7days']} className={styles.flexCard}>
             {trends.length ? (
-              <div className={styles['trend-bar']}>
-                {trends.map((d: TrendItem, i: number) => {
-                  const maxVal = Math.max(...trends.map((t: TrendItem) => t.total || 0), 1);
-                  const h = ((d.total || 0) / maxVal) * 120;
-                  return (
-                    <div key={i} className={styles['trend-bar-col']}>
-                      <div className={styles['trend-bar-count']}>{d.total}</div>
-                      <div className={styles['trend-bar-fill']} style={{ height: h }} />
-                      <div className={styles['trend-bar-label']}>{d.label || d.date?.slice(5) || ''}</div>
-                    </div>
-                  );
-                })}
-              </div>
+              <ReactEChartsCore
+                echarts={echarts}
+                option={{
+                  tooltip: { trigger: 'axis' },
+                  grid: { left: 40, right: 20, top: 20, bottom: 30 },
+                  xAxis: { type: 'category', data: trends.map((d) => d.label || d.date?.slice(5) || ''), axisLabel: { fontSize: 11 } },
+                  yAxis: { type: 'value', minInterval: 1 },
+                  series: [
+                    { name: '通过', type: 'bar', stack: 'total', data: trends.map((d) => d.passed), itemStyle: { color: '#00b42a' } },
+                    { name: '失败', type: 'bar', stack: 'total', data: trends.map((d) => d.failed), itemStyle: { color: '#f53f3f' } },
+                  ],
+                  legend: { bottom: 0, icon: 'roundRect', itemWidth: 8 },
+                }}
+                style={{ height: 200 }}
+              />
             ) : <div className={styles['empty-state']}>{t['no.data']}</div>}
           </Card>
         </Col>
