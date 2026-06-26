@@ -23,6 +23,7 @@ from app import crud
 from app.auth import get_current_user
 from app.database import AsyncSessionLocal, get_async_db
 from app.tz import now as tz_now
+from app.services.notifications import notify_batch_completed
 
 from ._schemas import BatchRunRequest, DebugRunRequest
 
@@ -67,6 +68,12 @@ async def run_test_case_endpoint(
     else:
         from app.routers.testcase import execution as _exec
         background_tasks.add_task(_exec.run_test_case, case_id, batch.id, environment_id=environment_id)
+
+    user_id = getattr(user, "id", None)
+    if user_id:
+        async def _notify() -> None:
+            await notify_batch_completed(batch.id, user_id)
+        background_tasks.add_task(_notify)
 
     return {"id": batch.id, "status": "running", "batch_id": batch.id}
 
@@ -169,6 +176,10 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
         environment_id=req.environment_id,
         init_case_ids=init_case_ids,
     )
+
+    user_id = getattr(user, "id", None)
+    if user_id:
+        background_tasks.add_task(notify_batch_completed, batch.id, user_id)
 
     return {"batch_id": batch.id, "total": total, "started": total, "status": "running"}
 
