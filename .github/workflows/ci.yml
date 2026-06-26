@@ -87,7 +87,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Lint check
-        run: npm run eslint 2>&1 || true
+        run:           npm run eslint
 
       - name: Build
         run: npm run build
