@@ -103,3 +103,21 @@ async def agent_heartbeat(agent_id: int, user=Depends(get_current_user), db: Asy
     if db_agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return db_agent
+
+
+@router.get("/agents/{agent_id}/stats")
+async def agent_stats(agent_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """获取 Agent 执行统计。"""
+    from sqlalchemy import select, func
+    from app import db_models
+
+    agent = await crud.get_agent(db, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    total = await db.execute(
+        select(func.count()).select_from(db_models.TestRun).where(
+            db_models.TestRun.execution_mode == "client"
+        )
+    )
+    return {"total_runs": total.scalar() or 0}
