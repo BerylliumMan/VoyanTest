@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Button, Tag, Input, InputNumber, Collapse, Typography } from '@arco-design/web-react';
+import { Button, Tag, Input, InputNumber, Collapse, Typography, Space } from '@arco-design/web-react';
 import { IconMenu, IconPlus, IconCopy, IconDelete, IconSettings, IconTool } from '@arco-design/web-react/icon';
 import { Step } from '../types';
+import { AssertionEditor, parseAssertion } from './AssertionEditor';
 import styles from '../style/components.module.less';
 
 interface StepListProps {
@@ -51,18 +52,17 @@ const StepList: React.FC<StepListProps> = ({
               onChange={(v) => onUpdate(idx, 'description', v)}
               autoSize={{ minRows: 1 }}
             />
-            {step.healed_selector && (
-              <div className={styles['healed-hint']}>
-                <IconTool /> 已修复: {step.healed_selector}
-              </div>
-            )}
-            <Input.TextArea
-              className={styles['step-input']}
-              placeholder={t['step.result.placeholder'] || '预期结果'}
-              value={step.parsed_result || ''}
-              onChange={(v) => onUpdate(idx, 'parsed_result', v)}
-              autoSize={{ minRows: 1 }}
-            />
+            <div style={{ marginTop: 4 }}>
+              {step.healed_selector && (
+                <div className={styles['healed-hint']}>
+                  <IconTool /> 已修复: {step.healed_selector}
+                </div>
+              )}
+              <AssertionEditor
+                value={step.parsed_result}
+                onChange={(v) => onUpdate(idx, 'parsed_result', v)}
+              />
+            </div>
             {/* 高级设置折叠面板 */}
             <Collapse
               className={styles['retry-collapse']}
