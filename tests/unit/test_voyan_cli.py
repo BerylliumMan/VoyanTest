@@ -3,6 +3,7 @@
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ def _run_cli_sync(*args: str) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["DATABASE_URL"] = "sqlite+aiosqlite:///./uitest.db"
     return subprocess.run(
-        ["python3", CLI_SCRIPT, *args],
+        [sys.executable, CLI_SCRIPT, *args],
         capture_output=True,
         text=True,
         cwd=CWD,
