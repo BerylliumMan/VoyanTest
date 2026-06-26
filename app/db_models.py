@@ -18,7 +18,7 @@ from app.database import Base  # noqa: F401
 
 # Auth / users / audit
 from app.models.auth import (  # noqa: F401
-    User, Session, AuditLog,
+    User, Session, AuditLog, ApiKey,
 )
 
 # Project / environment / module

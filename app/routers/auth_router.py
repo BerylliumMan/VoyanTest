@@ -7,6 +7,7 @@ from urllib.parse import quote
 from app.tz import now as tz_now
 from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from fastapi.responses import RedirectResponse, JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app import crud, models
 from app.database import get_async_db
@@ -120,3 +121,54 @@ async def change_password(request: Request, body: models.ChangePasswordRequest, 
     )
     await log_audit(db, user.id, "password_changed", ip_address=client_ip(request))
     return {"message": "密码修改成功"}
+
+
+from pydantic import BaseModel
+
+class UpdateProfileRequest(BaseModel):
+    nickname: str | None = None
+    email: str | None = None
+
+@router.put("/profile")
+async def update_profile(body: UpdateProfileRequest, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """更新个人信息（昵称/邮箱）。"""
+    fields = {}
+    if body.nickname is not None:
+        fields["nickname"] = body.nickname
+    if body.email is not None:
+        fields["email"] = body.email
+    if fields:
+        await crud.update_user_fields(db, user.id, **fields)
+    return {"message": "个人信息已更新"}
+
+@router.get("/api-key")
+async def get_api_key(user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """获取当前用户的 API key（掩码显示）。"""
+    from app import db_models
+    result = await db.execute(
+        select(db_models.ApiKey).where(db_models.ApiKey.user_id == user.id, db_models.ApiKey.is_active == True)
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        return {"api_key": None}
+    masked = key.key_value[:8] + "****" + key.key_value[-4:] if len(key.key_value) > 12 else "****"
+    return {"api_key": masked, "created_at": key.created_at.isoformat() if key.created_at else None}
+
+@router.post("/api-key")
+async def generate_api_key(user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """生成新的 API key（会失效旧的）。"""
+    import uuid
+    from app import db_models
+    from datetime import datetime
+
+    # 失效旧的 key
+    old_keys = await db.execute(
+        select(db_models.ApiKey).where(db_models.ApiKey.user_id == user.id, db_models.ApiKey.is_active == True)
+    )
+    for k in old_keys.scalars().all():
+        k.is_active = False
+
+    new_key = "vty-" + uuid.uuid4().hex[:24]
+    db.add(db_models.ApiKey(user_id=user.id, key_value=new_key, created_at=datetime.utcnow(), is_active=True))
+    await db.commit()
+    return {"api_key": new_key, "message": "新 API key 已生成，请立即保存"}

@@ -1,6 +1,7 @@
 # app/models/auth.py
 # 认证与用户管理 ORM 模型
 from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON
+from datetime import datetime
 
 from app.database import Base
 from app.tz import now as tz_now
@@ -38,3 +39,12 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    key_value = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
