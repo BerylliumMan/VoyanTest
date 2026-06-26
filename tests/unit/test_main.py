@@ -36,7 +36,10 @@ class TestPublicPathsAndHealth:
     async def test_health_returns_ok(self, client):
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "database" in data
+        assert "browser_pool" in data
 
     @pytest.mark.asyncio
     async def test_openapi_json_accessible_without_auth(self, client):
