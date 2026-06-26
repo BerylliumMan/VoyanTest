@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space,
+  Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space, Select,
 } from '@arco-design/web-react';
 import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete } from '@arco-design/web-react/icon';
 import axios from 'axios';
@@ -84,6 +84,10 @@ const Reports: React.FC = () => {
   const [pollingBatchId, setPollingBatchId] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [compareVisible, setCompareVisible] = useState(false);
+  const [compareA, setCompareA] = useState<number | undefined>();
+  const [compareB, setCompareB] = useState<number | undefined>();
+  const [compareResult, setCompareResult] = useState<any>(null);
 
   const getCookie = (name: string) => {
     const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
@@ -293,6 +297,9 @@ const Reports: React.FC = () => {
   return (
     <div>
       <Card className={styles['card-full']}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+          <Button onClick={() => { setCompareVisible(true); setCompareResult(null); }}>对比批次</Button>
+        </div>
         <Spin loading={loading} className={styles['spin-full']}>
           <Table
             columns={columns} data={data} rowKey="id" stripe
@@ -427,6 +434,33 @@ const Reports: React.FC = () => {
 
       {/* Run Detail Modal */}
       <RunDetail visible={runVisible} run={selectedRun} onClose={() => setRunVisible(false)} />
+
+      {/* Compare Modal */}
+      <Modal title="报告对比" visible={compareVisible} onCancel={() => setCompareVisible(false)} footer={null}>
+        <Space style={{ marginBottom: 16 }}>
+          <Select placeholder="批次 A" style={{ width: 200 }} value={compareA} onChange={setCompareA}>
+            {data.map((b: any) => <Select.Option key={b.id} value={b.id}>{b.name}</Select.Option>)}
+          </Select>
+          <Select placeholder="批次 B" style={{ width: 200 }} value={compareB} onChange={setCompareB}>
+            {data.map((b: any) => <Select.Option key={b.id} value={b.id}>{b.name}</Select.Option>)}
+          </Select>
+          <Button type="primary" onClick={async () => {
+            if (!compareA || !compareB) return;
+            try {
+              const r = await axios.post(`/api/reports/compare?batch_a=${compareA}&batch_b=${compareB}`);
+              setCompareResult(r.data);
+            } catch { Message.error('对比失败'); }
+          }}>对比</Button>
+        </Space>
+        {compareResult && (
+          <Descriptions column={2} data={[
+            { label: '批次 A', value: `${compareResult.a.name} (${compareResult.a.status})` },
+            { label: '批次 B', value: `${compareResult.b.name} (${compareResult.b.status})` },
+            { label: '通过 diff', value: <span style={{ color: (compareResult.passed_diff || 0) >= 0 ? 'green' : 'red' }}>{compareResult.passed_diff}</span> },
+            { label: '失败 diff', value: <span style={{ color: (compareResult.failed_diff || 0) <= 0 ? 'green' : 'red' }}>{compareResult.failed_diff}</span> },
+          ]} />
+        )}
+      </Modal>
     </div>
   );
 };
