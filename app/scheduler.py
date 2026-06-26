@@ -195,9 +195,11 @@ class TaskScheduler:
             handle = asyncio.create_task(self._schedule_task(task), name=f"sched-{task.id}")
             self._task_handles[task.id] = handle
         
-        # 启动检查循环
-        while self._running:
-            await asyncio.sleep(self._check_interval)
+        # 后台检查循环（不阻塞 start() 返回）
+        async def _check_loop():
+            while self._running:
+                await asyncio.sleep(self._check_interval)
+        asyncio.create_task(_check_loop())
     
     async def stop(self):
         """停止调度器"""
