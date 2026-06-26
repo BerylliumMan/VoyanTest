@@ -266,3 +266,26 @@ async def restore_prompt(
         is_custom=False,
         default_content=defaults[key]["content"],
     )
+
+
+class HealingConfig(BaseModel):
+    enabled: bool = True
+    max_retries: int = 3
+    threshold: float = 0.8
+
+
+_healing_config = HealingConfig()
+
+
+@router.get("/healing", response_model=HealingConfig)
+async def get_healing_config(admin=Depends(require_admin)) -> HealingConfig:
+    """获取自愈选择器配置。"""
+    return _healing_config
+
+
+@router.put("/healing", response_model=HealingConfig)
+async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)) -> HealingConfig:
+    """更新自愈选择器配置。"""
+    global _healing_config
+    _healing_config = cfg
+    return _healing_config
