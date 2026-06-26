@@ -22,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .routers import project_router, testcase_router, module_router, report_router, config_router, environment_router, scheduler_router, agent_router
-from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router
+from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -301,6 +301,7 @@ app.include_router(mgmt_agent_router.router)
 app.include_router(audit_router.router)
 app.include_router(gen_router.router)
 app.include_router(recordings_router.router)
+app.include_router(notification_router.router)
 
 if AGENT_SUPPORT:
     app.include_router(agent_router)

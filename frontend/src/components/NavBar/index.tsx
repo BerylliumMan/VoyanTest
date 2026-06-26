@@ -1,10 +1,10 @@
-import React, { useContext } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import {
-  Tooltip, Avatar, Select, Dropdown, Menu, Message, Button,
+  Tooltip, Avatar, Select, Dropdown, Menu, Message, Button, Badge, List, Space, Tag,
 } from '@arco-design/web-react';
 import {
   IconLanguage, IconSunFill, IconMoonFill,
-  IconUser, IconSettings, IconPoweroff, IconLoading,
+  IconUser, IconSettings, IconPoweroff, IconLoading, IconNotification,
 } from '@arco-design/web-react/icon';
 import { useSelector } from 'react-redux';
 import axios from 'axios';
@@ -22,6 +22,34 @@ function Navbar({ show }: { show: boolean }) {
   const t = useLocale();
   const { userInfo, userLoading } = useSelector((state: GlobalState) => state);
   const { setLang, lang, theme, setTheme } = useContext(GlobalContext);
+  const [notifCount, setNotifCount] = useState(0);
+  const [notifs, setNotifs] = useState<any[]>([]);
+  const [notifVisible, setNotifVisible] = useState(false);
+
+  useEffect(() => {
+    if (!userInfo) return;
+    axios.get('/api/notifications/unread-count').then((r) => setNotifCount(r.data?.count || 0)).catch(() => {});
+  }, [userInfo]);
+
+  const loadNotifs = async () => {
+    try {
+      const r = await axios.get('/api/notifications/?size=10');
+      setNotifs(r.data?.items || []);
+      setNotifVisible(true);
+    } catch { /* silent */ }
+  };
+
+  const markRead = async (id: number) => {
+    await axios.put(`/api/notifications/${id}/read`);
+    setNotifCount((c) => Math.max(0, c - 1));
+    setNotifs((prev) => prev.map((n) => n.id === id ? { ...n, read: true } : n));
+  };
+
+  const markAllRead = async () => {
+    await axios.put('/api/notifications/read-all');
+    setNotifCount(0);
+    setNotifs((prev) => prev.map((n) => ({ ...n, read: true })));
+  };
 
   async function logout() {
     try { await axios.post('/api/auth/logout'); } catch (e: unknown) { logger.error('Logout failed', e); }
@@ -107,6 +135,34 @@ function Navbar({ show }: { show: boolean }) {
             />
           </Tooltip>
         </li>
+        {userInfo && (
+          <li>
+            <Dropdown
+              droplist={
+                <Menu onClickMenuItem={(key) => key === 'clear' && markAllRead()}>
+                  {notifs.length === 0 ? (
+                    <Menu.Item key="empty" disabled>暂无通知</Menu.Item>
+                  ) : notifs.slice(0, 5).map((n) => (
+                    <Menu.Item key={n.id} onClick={() => !n.read && markRead(n.id)}>
+                      <Space>
+                        <Tag color={n.type === 'error' ? 'red' : n.type === 'success' ? 'green' : 'blue'} size="small">{n.type}</Tag>
+                        <span style={{ fontWeight: n.read ? 'normal' : 'bold' }}>{n.title}</span>
+                      </Space>
+                    </Menu.Item>
+                  ))}
+                  {notifs.length > 0 && <Menu.Item key="clear">全部标为已读</Menu.Item>}
+                </Menu>
+              }
+              position="br"
+              trigger="click"
+              onVisibleChange={(v) => { if (v) loadNotifs(); else setNotifVisible(false); }}
+            >
+              <Badge count={notifCount} dot={notifCount > 0}>
+                <IconButton icon={<IconNotification />} aria-label="通知" />
+              </Badge>
+            </Dropdown>
+          </li>
+        )}
         {userInfo && (
           <li>
             <Dropdown droplist={droplist} position="br" disabled={userLoading}>

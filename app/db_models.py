@@ -55,3 +55,6 @@ from app.models.gen import (  # noqa: F401
 
 # CDP recording sessions
 from app.models.recording import RecordingSession  # noqa: F401
+
+# Notifications
+from app.models.notification import Notification  # noqa: F401
