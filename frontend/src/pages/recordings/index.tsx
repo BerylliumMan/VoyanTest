@@ -16,10 +16,12 @@ import {
   IconSwap,
   IconRefresh,
   IconSave,
+  IconHistory,
 } from '@arco-design/web-react/icon';
 import useLocale from '@/utils/useLocale';
 import { useRecordings, RecordedEvent, TestStep } from './hooks';
 import SaveAsCaseDialog from './components/SaveAsCaseDialog';
+import RecordingHistory from './components/RecordingHistory';
 import styles from './index.module.less';
 
 /**
@@ -86,6 +88,7 @@ const Recordings: React.FC = () => {
   // 仅 UI 局部状态：手动刷新按钮的 loading
   const [eventsLoading, setEventsLoading] = useState(false);
   const [saveDialogVisible, setSaveDialogVisible] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   const handleStart = async () => {
     if (!url.trim()) {
@@ -284,7 +287,28 @@ const Recordings: React.FC = () => {
               )}
             </Space>
           </Space>
+
+          <Button
+            size="small"
+            type="text"
+            icon={<IconHistory />}
+            onClick={() => setShowHistory(!showHistory)}
+          >
+            历史录制
+          </Button>
         </Card>
+
+        {showHistory && (
+          <Card className={styles.cardMargin}>
+            <RecordingHistory
+              onLoadSession={(sid) => {
+                setShowHistory(false);
+                setUrl('');
+                Message.info('会话 ID: ' + sid);
+              }}
+            />
+          </Card>
+        )}
 
         {/* B. 事件区 */}
         {showEventsCard && (

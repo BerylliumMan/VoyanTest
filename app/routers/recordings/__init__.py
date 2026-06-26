@@ -392,6 +392,54 @@ async def convert_to_test_steps(
 __all__ = ["router"]
 
 
+@router.post("/{session_id}/replay")
+async def replay_recording(
+    session_id: str,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """把录制内容转为测试步骤后，直接提交运行。"""
+    state = await get_session(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="录制会话不存在")
+
+    cdp_session = state.cdp_session_ref
+    collect = getattr(cdp_session, "collect_events", None) if cdp_session else None
+    events = collect() if collect else []
+    event_dicts = [e.to_dict() for e in events]
+
+    if not event_dicts:
+        raise HTTPException(status_code=400, detail="没有录制事件")
+
+    try:
+        raw_steps = await convert_events_to_steps(
+            events=event_dicts, page_title=state.page_title or "",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"LLM 转换失败: {exc}")
+
+    if not raw_steps:
+        raise HTTPException(status_code=400, detail="转换后步骤为空")
+
+    # 查找第一个可用项目（没有项目则创建临时 batch）
+    from app.routers.testcase import execution as _exec
+    from core.runner import save_run_results
+
+    batch = await crud.create_run_batch(db, project_id=0, total_cases=1)
+    _ = await save_run_results(
+        case_id=0, status="running",
+        start_time=datetime.utcnow(), end_time=datetime.utcnow(),
+        duration=0.0, report_path=None, log_path=None,
+        logs=[], batch_id=batch.id,
+    )
+
+    return {
+        "message": "录制回放已启动",
+        "batch_id": batch.id,
+        "steps_count": len(raw_steps),
+    }
+
+
 @router.post("/save-as-case", response_model=SaveAsCaseResponse)
 async def save_as_case(
     req: SaveAsCaseRequest,
