@@ -19,8 +19,11 @@ import uuid
 
 import openai
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import crud, db_models
 from app.auth import get_current_user
+from app.database import get_async_db
 from core.cdp_session import CDPRecordingSession
 from core.cdp_converter import convert_events_to_steps
 from core.browser_pool import BrowserPool
@@ -32,6 +35,8 @@ from .schemas import (
     ConvertRequest,
     ConvertStepItem,
     ConvertResponse,
+    SaveAsCaseRequest,
+    SaveAsCaseResponse,
 )
 from .state import (
     get_session,
@@ -308,3 +313,38 @@ async def convert_to_test_steps(
 
 
 __all__ = ["router"]
+
+
+@router.post("/save-as-case", response_model=SaveAsCaseResponse)
+async def save_as_case(
+    req: SaveAsCaseRequest,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> SaveAsCaseResponse:
+    """把转换后的步骤保存为项目中的测试用例。"""
+    if not req.steps:
+        raise HTTPException(status_code=400, detail="没有步骤可保存")
+
+    project = await crud.get_project(db, req.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    tc = db_models.TestCase(
+        project_id=req.project_id,
+        module_id=req.module_id,
+        name=req.name,
+    )
+    db.add(tc)
+    await db.flush()
+
+    for i, step in enumerate(req.steps):
+        db.add(db_models.TestStep(
+            case_id=tc.id,
+            step_order=i + 1,
+            description=step.step_description,
+            parsed_result=step.expected_result,
+        ))
+    await db.commit()
+    await db.refresh(tc)
+
+    return SaveAsCaseResponse(case_id=tc.id, name=tc.name, steps_count=len(req.steps))

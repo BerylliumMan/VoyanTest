@@ -50,3 +50,16 @@ class ConvertResponse(BaseModel):
     page_title: str = ""
     steps: list[ConvertStepItem]
     events_count: int = 0
+
+
+class SaveAsCaseRequest(BaseModel):
+    project_id: int
+    module_id: int | None = None
+    name: str
+    steps: list[ConvertStepItem]
+
+
+class SaveAsCaseResponse(BaseModel):
+    case_id: int
+    name: str
+    steps_count: int

@@ -15,9 +15,11 @@ import {
   IconStop,
   IconSwap,
   IconRefresh,
+  IconSave,
 } from '@arco-design/web-react/icon';
 import useLocale from '@/utils/useLocale';
 import { useRecordings, RecordedEvent, TestStep } from './hooks';
+import SaveAsCaseDialog from './components/SaveAsCaseDialog';
 import styles from './index.module.less';
 
 /**
@@ -83,6 +85,7 @@ const Recordings: React.FC = () => {
 
   // 仅 UI 局部状态：手动刷新按钮的 loading
   const [eventsLoading, setEventsLoading] = useState(false);
+  const [saveDialogVisible, setSaveDialogVisible] = useState(false);
 
   const handleStart = async () => {
     if (!url.trim()) {
@@ -352,6 +355,15 @@ const Recordings: React.FC = () => {
                     {t['recordings.steps_count'].replace('{count}', String(steps.length))}
                   </span>
                 )}
+                {steps.length > 0 && status === 'stopped' && (
+                  <Button
+                    type="outline"
+                    icon={<IconSave />}
+                    onClick={() => setSaveDialogVisible(true)}
+                  >
+                    保存到用例库
+                  </Button>
+                )}
               </Space>
 
               {steps.length > 0 && (
@@ -368,6 +380,15 @@ const Recordings: React.FC = () => {
           </Card>
         )}
       </div>
+      <SaveAsCaseDialog
+        visible={saveDialogVisible}
+        onClose={() => setSaveDialogVisible(false)}
+        steps={steps}
+        onSaved={(caseId) => {
+          setSaveDialogVisible(false);
+          setUrl('');
+        }}
+      />
     </>
   );
 };
