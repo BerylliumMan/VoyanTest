@@ -60,7 +60,7 @@ const RunDebugPage: React.FC = () => {
 
   /* --- 业务逻辑（状态/WS/事件/计算属性）由 hook 提供 --- */
   const {
-    caseData, steps, phase, wsConnected,
+    caseData, steps, phase, wsConnected, wsStatus,
     selectedStepIdx, setSelectedStepIdx,
     loading, pauseReason, pauseStepDesc,
     editVisible, setEditVisible, editForm,
@@ -107,10 +107,14 @@ const RunDebugPage: React.FC = () => {
           <div className={styles['ws-indicator']}>
             <span
               className={`${styles['ws-dot']} ${
-                wsConnected ? styles.connected : styles.disconnected
+                wsStatus === 'connected' ? styles.connected
+                  : wsStatus === 'reconnecting' ? styles.reconnecting
+                  : styles.disconnected
               }`}
             />
-            {wsConnected ? t['debug.connected'] : t['debug.disconnected']}
+            {wsStatus === 'connected' ? t['debug.connected']
+              : wsStatus === 'reconnecting' ? '重连中…'
+              : t['debug.disconnected']}
           </div>
           <Tag
             color={

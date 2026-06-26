@@ -76,6 +76,17 @@
     background: var(--color-danger-6);
     box-shadow: 0 0 6px var(--color-danger-4);
   }
+
+  &.reconnecting {
+    background: var(--color-warning-6);
+    box-shadow: 0 0 6px var(--color-warning-4);
+    animation: reconnect-pulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes reconnect-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 /* 主内容区：两栏布局 */

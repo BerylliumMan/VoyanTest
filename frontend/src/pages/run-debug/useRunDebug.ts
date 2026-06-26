@@ -22,6 +22,7 @@ export function useRunDebug(
   const [steps, setSteps] = useState<StepInfo[]>([]);
   const [phase, setPhase] = useState<ExecutionPhase>('idle');
   const [wsConnected, setWsConnected] = useState(false);
+  const [wsStatus, setWsStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('disconnected');
   const [selectedStepIdx, setSelectedStepIdx] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -93,6 +94,7 @@ export function useRunDebug(
 
       ws.onopen = () => {
         setWsConnected(true);
+        setWsStatus('connected');
         setPhase((prev) => (prev === 'idle' ? 'running' : prev));
       };
 
@@ -107,6 +109,7 @@ export function useRunDebug(
 
       ws.onclose = () => {
         setWsConnected(false);
+        setWsStatus('reconnecting');
         wsRef.current = null;
         // 完成状态不重连
         if (!destroyed && phaseRef.current !== 'completed') {
@@ -116,6 +119,7 @@ export function useRunDebug(
 
       ws.onerror = () => {
         setWsConnected(false);
+        setWsStatus('reconnecting');
         wsRef.current = null;
         if (!destroyed && phaseRef.current !== 'completed') {
           reconnectTimer = setTimeout(connect, 3000);
@@ -261,6 +265,7 @@ export function useRunDebug(
     steps,
     phase,
     wsConnected,
+    wsStatus,
     selectedStepIdx,
     setSelectedStepIdx,
     loading,
