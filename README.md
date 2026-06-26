@@ -28,6 +28,12 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 - **🔧 自动重试**：步骤级配置重试次数和间隔，自动处理 flaky 测试
 - **✅ 步骤断言**：5 种断言类型（URL/文本/元素可见/输入值/元素数量），中文自然语言配置
 - **🧠 自愈选择器**：元素定位失败时 AI 自动分析 DOM 找到替代选择器，减少人工维护
+- **📹 CDP 录制**：录制真实浏览器操作 → 转换为测试步骤 → 保存为用例 → 一键回放
+- **📊 xlsx 导入导出**：测试用例支持 Excel 批量导入导出
+- **📈 趋势图**：Dashboard 7 日通过/失败堆叠柱状图（ECharts）
+- **🔔 通知中心**：批次运行完成自动通知，支持铃铛图标查看
+- **🔑 API Key**：个人 API 密钥管理，支持 CLI/第三方集成
+- **🛡️ CSRF 防护**：Double Submit Cookie 模式，所有写入请求自动校验
 
 ### AI 驱动
 - **📝 AI 用例生成**：上传需求文档（docx/pdf/md/图片），AI 自动提取功能点生成测试用例
@@ -97,13 +103,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 |-------------|---------|
 | ![测试用例](docs/images/05_testcases.png) | ![报告](docs/images/06_reports.png) |
 
-### 3. CDP 录制回放（新）
+### 3. CDP 录制回放
 
-在「录制回放」页录制真实浏览器操作，自动转换为可执行的测试步骤：
+在「录制回放」页录制真实浏览器操作，自动转换为可执行的测试步骤。支持**保存到用例库**、**历史录制管理**和**一键回放**：
 
 | 录制控制 | 事件与转换 |
 |---------|-----------|
-| ![录制](docs/images/03_recordings.png) | 输入 URL → 开始录制 → 操作浏览器 → 停止 → 转换为测试步骤 |
+| ![录制](docs/images/03_recordings.png) | 输入 URL → 开始录制 → 操作浏览器 → 停止 → 转换为测试步骤 → 保存/回放 |
 
 ### 4. AI 用例生成
 
@@ -190,11 +196,11 @@ flowchart LR
 
 | 层级 | 技术 |
 |------|------|
-| 后端 | FastAPI + SQLAlchemy + SQLite |
+| 后端 | FastAPI + SQLAlchemy + SQLite/PostgreSQL |
 | 浏览器自动化 | Playwright MCP |
 | AI/LLM | OpenAI SDK（兼容任意 API） |
-| 前端 | React 18 + Arco Design Pro + Vite |
-| 实时通信 | WebSocket（执行日志 + 调试协议） |
+| 前端 | React 18 + Arco Design Pro + Vite + ECharts |
+| 实时通信 | WebSocket（执行日志 + 调试协议 + 重连 3 态指示） |
 | 分布式 | WebSocket + 自定义 Agent 协议 |
 | CLI | argparse + asyncio（退出码标准） |
 
@@ -204,8 +210,10 @@ flowchart LR
 VoyanTest/
 ├── app/              # FastAPI 后端
 │   ├── gen/          # AI 生成引擎
-│   ├── models/       # 领域模型（auth / project / testcase / batch 等）
-│   └── routers/      # API 路由（含 run-debug 调试端点）
+│   ├── middleware/    # 中间件（CSRF 等）
+│   ├── models/       # 领域模型（auth / project / testcase / batch / recording / notification 等）
+│   ├── services/     # 服务层（通知、报告等）
+│   └── routers/      # API 路由（含 run-debug 调试端点、录制历史、通知中心）
 ├── core/             # 执行引擎
 │   ├── runner/            # 测试执行器（含重试/暂停/自愈）
 │   ├── assertions.py      # 步骤断言引擎（5 种类型）
@@ -218,10 +226,13 @@ VoyanTest/
 ...
 ├── frontend/         # React 前端
 │   └── src/pages/
-│       ├── recordings/    # CDP 录制回放页面
-│       ├── run-debug/     # 交互式调试执行页面
-│       ├── testcases/     # 用例管理（含重试配置 UI）
-│       └── settings/      # 系统设置（含用户项目权限）
+│       ├── recordings/    # CDP 录制回放（含历史/保存对话框）
+│       ├── run-debug/     # 交互式调试执行（含 WS 重连状态）
+│       ├── testcases/     # 用例管理（含断言编辑器、xlsx 导入导出）
+│       ├── reports/       # 报告（含对比弹窗）
+│       ├── agents/        # Agent 管理（含详情页）
+│       ├── audit-logs/    # 审计日志（结构化 JSON 展示）
+│       └── settings/      # 系统设置（含自愈配置 Tab）
 ├── agent/            # 分布式 Agent 客户端
 ├── voyan_cli.py      # CLI 命令行工具（voyan run / list / run-single）
 ├── alembic/          # 数据库迁移
