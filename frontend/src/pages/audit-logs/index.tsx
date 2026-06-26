@@ -79,11 +79,25 @@ function AuditLogs() {
     }));
   };
 
+  const renderDetail = (v: string) => {
+    if (!v) return '-';
+    try {
+      const parsed = JSON.parse(v);
+      return (
+        <pre style={{ margin: 0, fontSize: 12, maxHeight: 150, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+          {JSON.stringify(parsed, null, 2)}
+        </pre>
+      );
+    } catch {
+      return v;
+    }
+  };
+
   const columns = [
     { title: t['audit.time'], dataIndex: 'created_at', width: 170, render: (v: string) => v ? new Date(v).toLocaleString() : '-' },
     { title: t['audit.user'], dataIndex: 'username', width: 120, render: (v: string) => v || '-' },
     { title: t['audit.action'], dataIndex: 'action', width: 150 },
-    { title: t['audit.detail'], dataIndex: 'details', render: (v: string) => v || '-' },
+    { title: t['audit.detail'], dataIndex: 'details', render: renderDetail },
     { title: t['audit.ip'], dataIndex: 'ip_address', width: 140, render: (v: string) => v || '-' },
   ];
 
