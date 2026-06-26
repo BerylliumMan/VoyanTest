@@ -407,3 +407,26 @@ async def delete_batch(batch_id: int, user=Depends(get_current_user), db: AsyncS
     except Exception as e:
         logger.exception("Delete batch %s failed", batch_id)
         raise HTTPException(status_code=500, detail=f"Failed to delete batch: {e}")
+
+
+@router.post("/compare")
+async def compare_batches(
+    batch_a: int,
+    batch_b: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """对比两个批次的运行结果。"""
+    from app.crud.run import get_run_batch
+
+    a = await get_run_batch(db, batch_a)
+    b = await get_run_batch(db, batch_b)
+    if not a or not b:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    return {
+        "a": {"id": a.id, "name": a.name, "status": a.status, "passed": a.passed, "failed": a.failed, "total": a.total_cases},
+        "b": {"id": b.id, "name": b.name, "status": b.status, "passed": b.passed, "failed": b.failed, "total": b.total_cases},
+        "passed_diff": (b.passed or 0) - (a.passed or 0),
+        "failed_diff": (b.failed or 0) - (a.failed or 0),
+    }
