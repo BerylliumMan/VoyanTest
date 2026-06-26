@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, File, HTTPException, UploadFile, Depends
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, models, db_models
@@ -155,3 +157,83 @@ async def get_project_test_cases(project_id: int, page: int = 1, size: int = 20,
         "page": page,
         "size": size,
     }
+
+
+@router.get("/export")
+async def export_test_cases(
+    project_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """导出项目测试用例为 xlsx。"""
+    from openpyxl import Workbook
+
+    cases = await crud.get_all_test_cases_for_project(db, project_id)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "测试用例"
+    ws.append(["用例名称", "模块", "步骤序号", "步骤描述", "预期结果", "优先级", "标签"])
+
+    for tc in cases:
+        mn = (await crud.get_module(db, tc.module_id)).name if tc.module_id else ""
+        steps = await crud.get_steps_for_case(db, tc.id)
+        if steps:
+            for s in steps:
+                ws.append([tc.name, mn, s.step_order, s.description, s.parsed_result, tc.priority or "medium", tc.tags or ""])
+        else:
+            ws.append([tc.name, mn, "", "", "", tc.priority or "medium", tc.tags or ""])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=testcases_project_{project_id}.xlsx"},
+    )
+
+
+@router.post("/import")
+async def import_test_cases(
+    project_id: int,
+    file: UploadFile = File(...),
+    admin=Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """从 xlsx 文件导入测试用例。"""
+    from openpyxl import load_workbook
+
+    if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
+
+    contents = await file.read()
+    wb = load_workbook(io.BytesIO(contents))
+    ws = wb.active
+    if ws is None:
+        raise HTTPException(status_code=400, detail="工作表为空")
+
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    created = 0
+    errors = []
+
+    for row in rows:
+        name, _module, _so, desc, expected, priority, tags = [str(c or "") for c in row]
+        if not name:
+            continue
+        try:
+            steps_payload = []
+            if desc:
+                steps_payload.append(models.TestStepCreatePayload(
+                    step_order=1, description=desc, expected_result=expected,
+                ))
+            await crud.create_test_case(db, models.TestCaseCreate(
+                project_id=project_id, name=name,
+                steps=steps_payload, priority=priority or "medium", tags=tags or "",
+            ))
+            created += 1
+        except Exception as e:
+            errors.append(f"创建用例「{name}」失败: {e}")
+
+    return {"created": created, "errors": errors}

@@ -247,6 +247,32 @@ const TestCases: React.FC = () => {
         <Select.Option value="init">仅初始化用例</Select.Option>
         <Select.Option value="normal">仅普通用例</Select.Option>
       </Select>
+      <Button size="small" onClick={() => window.open(`/api/testcases/export?project_id=${selectedProject}`, '_blank')}>
+        导出 xlsx
+      </Button>
+      <input
+        type="file"
+        accept=".xlsx,.xls"
+        style={{ display: 'none' }}
+        id="import-file-input"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const resp = await axios.post(`/api/testcases/import?project_id=${selectedProject}`, formData);
+            Message.success(`已导入 ${resp.data?.created || 0} 条用例`);
+            handleProjectChange(selectedProject);
+          } catch (err: any) {
+            Message.error('导入失败: ' + (err?.response?.data?.detail || '未知错误'));
+          }
+          e.target.value = '';
+        }}
+      />
+      <Button size="small" onClick={() => document.getElementById('import-file-input')?.click()}>
+        导入 xlsx
+      </Button>
     </Space>
   ) : null;
 
