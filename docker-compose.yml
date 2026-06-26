@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: voyantest
+      POSTGRES_PASSWORD: voyantest_prod
+      POSTGRES_DB: voyantest
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voyantest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build: .
+    ports:
+      - "8002:8002"
+    environment:
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8002"
+      DATABASE_URL: "postgresql+asyncpg://voyantest:voyantest_prod@postgres:5432/voyantest"
+      SESSION_SECRET_KEY: "${SESSION_SECRET_KEY:-change-me-in-production}"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - reports:/app/reports
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  reports:
+  logs:
