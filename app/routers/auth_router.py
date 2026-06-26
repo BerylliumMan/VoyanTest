@@ -75,6 +75,10 @@ async def login(request: Request, body: models.LoginRequest, db: AsyncSession = 
     _cookie_secure = os.getenv("COOKIE_SECURE", "false").lower() == "true"
     resp.set_cookie("session_id", sid, httponly=True, samesite="lax",
                     max_age=settings.session_expire_minutes * 60, secure=_cookie_secure)
+    # CSRF token for state-changing requests
+    from app.middleware.csrf import generate_csrf_token
+    resp.set_cookie("csrf_token", generate_csrf_token(), httponly=False, samesite="lax",
+                    max_age=settings.session_expire_minutes * 60, secure=_cookie_secure)
     return resp
 
 

@@ -197,6 +197,10 @@ app.add_middleware(
 from app.exception_handlers import unhandled_exception_handler
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
+# CSRF
+from app.middleware.csrf import CSRFMiddleware, generate_csrf_token
+app.add_middleware(CSRFMiddleware)
+
 WS_AUTH_SKIP_PREFIXES = ["/api/agents/ws/"]
 PUBLIC_PATHS = {"/api/auth/login", "/api/auth/login-form", "/api/auth/logout", "/health", "/docs", "/openapi.json"}
 PROTECTED_PREFIXES = ["/api/", "/reports/"]
