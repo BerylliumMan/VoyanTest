@@ -52,3 +52,6 @@ from app.models.gen import (  # noqa: F401
     GenSession, GenFunctionalPoint, GenTestCase,
     ScheduledTask, ScheduledTaskRun,
 )
+
+# CDP recording sessions
+from app.models.recording import RecordingSession  # noqa: F401

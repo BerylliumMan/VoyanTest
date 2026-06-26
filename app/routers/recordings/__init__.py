@@ -16,9 +16,11 @@ import asyncio
 import logging
 import time
 import uuid
+from datetime import datetime
 
 import openai
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
@@ -32,6 +34,7 @@ from .schemas import (
     StartRecordingRequest,
     RecordingStatusResponse,
     RecordedEventResponse,
+    RecordingListResponse,
     ConvertRequest,
     ConvertStepItem,
     ConvertResponse,
@@ -126,6 +129,20 @@ async def start_recording(
         req.url,
     )
 
+    # 保存到 DB 历史
+    try:
+        async with AsyncSessionLocal() as _db:
+            _db.add(db_models.RecordingSession(
+                session_id=session_id,
+                user_id=getattr(user, "id", None),
+                url=req.url or "",
+                page_title=req.page_title or "",
+                status="recording",
+            ))
+            await _db.commit()
+    except Exception:
+        logger.warning("无法保存录制会话历史", exc_info=True)
+
     return RecordingStatusResponse(
         session_id=session_id,
         status="recording",
@@ -167,6 +184,21 @@ async def stop_recording(
 
     await state_stop_session(session_id)
 
+    # 更新 DB 历史
+    try:
+        async with AsyncSessionLocal() as _db:
+            _rec = (await _db.execute(
+                select(db_models.RecordingSession).where(
+                    db_models.RecordingSession.session_id == session_id
+                )
+            )).scalar_one_or_none()
+            if _rec:
+                _rec.status = "stopped"
+                _rec.ended_at = datetime.utcnow()
+                await _db.commit()
+    except Exception:
+        logger.warning("无法更新录制会话历史", exc_info=True)
+
     elapsed = 0.0
     events_count = 0
     if cdp_session is not None:
@@ -188,6 +220,51 @@ async def stop_recording(
         elapsed_seconds=elapsed,
         events_count=events_count,
     )
+
+
+@router.get("/history", response_model=RecordingListResponse)
+async def list_recording_history(
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> RecordingListResponse:
+    """列出历史录制会话。"""
+    result = await db.execute(
+        select(db_models.RecordingSession)
+        .order_by(db_models.RecordingSession.started_at.desc())
+        .limit(50)
+    )
+    sessions = result.scalars().all()
+    return RecordingListResponse(sessions=[
+        RecordingStatusResponse(
+            session_id=s.session_id,
+            status=s.status,
+            url=s.url or "",
+            page_title=s.page_title or "",
+            elapsed_seconds=(s.ended_at - s.started_at).total_seconds() if s.ended_at else 0.0,
+            events_count=s.events_count or 0,
+        )
+        for s in sessions
+    ])
+
+
+@router.delete("/{session_id}/history")
+async def delete_recording_history(
+    session_id: str,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """删除一条录制会话历史。"""
+    result = await db.execute(
+        select(db_models.RecordingSession).where(
+            db_models.RecordingSession.session_id == session_id
+        )
+    )
+    rec = result.scalar_one_or_none()
+    if rec is None:
+        raise HTTPException(status_code=404, detail="录制会话不存在")
+    await db.delete(rec)
+    await db.commit()
+    return {"deleted": True}
 
 
 @router.get("/{session_id}/events", response_model=list[RecordedEventResponse])
