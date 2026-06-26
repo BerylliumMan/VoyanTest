@@ -65,6 +65,12 @@ export const routes: IRoute[] = [
     key: 'agents',
   },
   {
+    name: 'Agent 详情',
+    key: 'agent-detail',
+    path: '/agents/:id',
+    ignore: true,
+  },
+  {
     name: 'menu.audit_logs',
     key: 'audit-logs',
   },
