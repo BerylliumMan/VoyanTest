@@ -329,7 +329,29 @@ async def login_page(request: Request):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    """增强型健康检查 — 包含 DB + BrowserPool 探活。"""
+    db_status = "ok"
+    browser_status = "unknown"
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as _hc_db:
+            await _hc_db.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = f"error: {e}"
+
+    try:
+        from core.browser_pool import BrowserPool
+        async with BrowserPool._lock:
+            active = len(BrowserPool._instances)
+        browser_status = f"{active} active"
+    except Exception as e:
+        browser_status = f"error: {e}"
+
+    return {
+        "status": "ok" if db_status == "ok" else "degraded",
+        "database": db_status,
+        "browser_pool": browser_status,
+    }
 
 
 @app.get("/{path:path}", response_class=HTMLResponse)
