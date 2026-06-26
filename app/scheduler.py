@@ -54,7 +54,36 @@ class TaskScheduler:
     def set_executor(self, executor: Callable):
         """设置任务执行器"""
         self._executor = executor
-    
+
+    async def load_from_db(self):
+        """从 DB ScheduledTask 表加载任务到内存调度器。"""
+        try:
+            from app.database import AsyncSessionLocal
+            from app.models.gen import ScheduledTask as DBScheduledTask
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(DBScheduledTask).where(DBScheduledTask.enabled == True)
+                )
+                db_tasks = result.scalars().all()
+                for t in db_tasks:
+                    task = ScheduledTask(
+                        id=str(t.id),
+                        name=t.name,
+                        cron_expression=t.cron_expression or "",
+                        task_type=t.task_type,
+                        target_id=t.target_id,
+                        enabled=t.enabled,
+                        last_run=t.last_run_at,
+                        next_run=t.next_run_at,
+                        run_count=t.run_count or 0,
+                    )
+                    self.tasks[task.id] = task
+                    logger.info("从 DB 加载定时任务: %s (cron: %s)", task.name, task.cron_expression)
+        except Exception as e:
+            logger.warning("从 DB 加载定时任务失败: %s", e)
+
     async def add_task(self, task_id: str, name: str, cron_expression: str,
                  task_type: str, target_id: int, enabled: bool = True) -> ScheduledTask:
         """
@@ -153,6 +182,9 @@ class TaskScheduler:
         if self._running:
             logger.warning("调度器已在运行")
             return
+        
+        # 从 DB 加载任务
+        await self.load_from_db()
         
         self._running = True
         logger.info("定时任务调度器已启动")

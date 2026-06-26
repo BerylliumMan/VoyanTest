@@ -154,6 +154,12 @@ async def _periodic_session_cleanup():
 async def lifespan(app: FastAPI):
     await _run_startup_init()
     cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+    try:
+        from app.scheduler import start_scheduler
+        await start_scheduler()
+        logger.info("定时调度器已启动")
+    except Exception as e:
+        logger.warning("定时调度器启动失败: %s", e)
     yield
     cleanup_task.cancel()
     try:
