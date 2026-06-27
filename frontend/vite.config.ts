@@ -3,12 +3,13 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import svgrPlugin from '@arco-plugins/vite-plugin-svgr';
 import vitePluginForArco from '@arco-plugins/vite-react';
+import path from 'path';
 import setting from './src/settings.json';
 
 // https://vitejs.dev/config/
 export default defineConfig({
   resolve: {
-    alias: [{ find: '@', replacement: '/src' }],
+    alias: [{ find: '@', replacement: path.resolve(__dirname, 'src') }],
   },
   plugins: [
     react(),
@@ -36,7 +37,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../app/static',
+    outDir: 'dist',
     emptyOutDir: true,
   },
   test: {

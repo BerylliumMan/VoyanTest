@@ -7,17 +7,13 @@ WORKDIR /build/frontend
 
 # Copy dependency files first for layer caching
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci --prefer-offline
 
 # Copy frontend source and build
 COPY frontend/ .
 RUN npm run build && \
     mkdir -p /build/static && \
     cp -r dist/* /build/static/
-
-# ============================================================
-# Stage 2: Python backend + Playwright
-# ============================================================
 FROM python:3.11-slim
 
 WORKDIR /app
