@@ -155,3 +155,7 @@ build/
 *.spec
 
 myenv/
+
+# Docker image artifacts
+voyantest-docker.tar
+voyantest-docker.tar.gz
