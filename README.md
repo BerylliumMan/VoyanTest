@@ -71,6 +71,7 @@ docker run -d -p 8002:8002 \
   --name voyantest \
   -e DATABASE_URL="postgresql+asyncpg://user:pass@host:5432/dbname" \
   -e SESSION_SECRET_KEY="your-secret-key" \
+  -v voyantest-data:/app/data \
   -v voyantest-reports:/app/reports \
   -v voyantest-logs:/app/logs \
   voyantest:latest
@@ -79,6 +80,9 @@ docker run -d -p 8002:8002 \
 docker run -d -p 8002:8002 \
   --name voyantest \
   -e SESSION_SECRET_KEY="your-secret-key" \
+  -v voyantest-data:/app/data \
+  -v voyantest-reports:/app/reports \
+  -v voyantest-logs:/app/logs \
   voyantest:latest
 # 浏览器访问 http://localhost:8002/setup 填写 PG 连接
 ```
