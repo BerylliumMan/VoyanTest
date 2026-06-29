@@ -152,7 +152,11 @@ async def _periodic_session_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _run_startup_init()
+    try:
+        await _run_startup_init()
+    except Exception as e:
+        logger.warning("数据库初始化失败，进入配置模式: %s", e)
+        logger.warning("请通过 /setup 页面配置 PostgreSQL 数据库后重启")
     cleanup_task = asyncio.create_task(_periodic_session_cleanup())
     try:
         from app.scheduler import start_scheduler
