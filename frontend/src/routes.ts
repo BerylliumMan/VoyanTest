@@ -13,6 +13,12 @@ export type IRoute = AuthParams & {
 
 export const routes: IRoute[] = [
   {
+    name: '初始化',
+    key: 'setup',
+    path: '/setup',
+    ignore: true,
+  },
+  {
     name: 'menu.dashboard',
     key: 'dashboard',
   },

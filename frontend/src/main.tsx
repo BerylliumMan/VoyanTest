@@ -17,6 +17,8 @@ const PASSWORD_CHANGE_ALLOWED = [
   '/api/auth/login-form',
   '/api/auth/logout',
   '/api/auth/change-password',
+  '/api/setup/status',
+  '/api/setup/database',
 ];
 axios.interceptors.request.use(
   (config) => {
@@ -54,6 +56,7 @@ import PageLayout from './layout';
 import { GlobalContext } from './context';
 import Login from './pages/login';
 import ChangePassword from './pages/change-password';
+import Setup from './pages/setup';
 import checkLogin from './utils/checkLogin';
 import changeTheme from './utils/changeTheme';
 import useStorage from './utils/useStorage';
@@ -145,6 +148,7 @@ function Index() {
         <Provider store={store}>
           <GlobalContext.Provider value={contextValue}>
             <Switch>
+              <Route path="/setup" component={Setup} />
               <Route path="/login" component={Login} />
               <Route path="/change-password" component={ChangePassword} />
               <Route path="/" component={PageLayout} />
