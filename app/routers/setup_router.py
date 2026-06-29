@@ -129,7 +129,7 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
 
         # 通知运行中的 app 重新初始化引擎
         from app.database import init_db_engine
-        init_db_engine(db_url)
+        await init_db_engine(db_url)
         logger.info("运行中数据库引擎已切换")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"数据库初始化失败: {e}")

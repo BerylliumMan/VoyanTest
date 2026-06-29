@@ -52,7 +52,7 @@ async def _run_startup_init():
     """Run async DB initialization at startup (not at import time)."""
     import app.database as db_mod
     if db_mod.engine is None:
-        if not db_mod.init_db_engine():
+        if not await db_mod.init_db_engine():
             logger.warning("数据库未配置，跳过初始化（进入配置模式）")
             return
 
@@ -360,12 +360,15 @@ async def health_check():
     """增强型健康检查 — 包含 DB + BrowserPool 探活。"""
     db_status = "ok"
     browser_status = "unknown"
-    try:
-        from sqlalchemy import text
-        async with db_mod.AsyncSessionLocal() as _hc_db:
-            await _hc_db.execute(text("SELECT 1"))
-    except Exception as e:
-        db_status = f"error: {e}"
+    if db_mod.AsyncSessionLocal is not None:
+        try:
+            from sqlalchemy import text
+            async with db_mod.AsyncSessionLocal() as _hc_db:
+                await _hc_db.execute(text("SELECT 1"))
+        except Exception as e:
+            db_status = f"error: {e}"
+    else:
+        db_status = "not configured"
 
     try:
         from core.browser_pool import BrowserPool
