@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".db_config.json")
+from app.database import SETUP_CONFIG_FILE
 
 router = APIRouter(prefix="/api/setup", tags=["初始化"])
 
@@ -29,9 +29,9 @@ def _get_db_url(cfg: DBConfigRequest) -> str:
 
 def _is_setup_done() -> bool:
     """检查是否已完成 PG 配置。"""
-    if os.path.exists(CONFIG_FILE):
+    if os.path.exists(SETUP_CONFIG_FILE):
         try:
-            with open(CONFIG_FILE) as f:
+            with open(SETUP_CONFIG_FILE) as f:
                 data = json.load(f)
             return data.get("configured", False)
         except Exception:
@@ -44,7 +44,7 @@ async def setup_status() -> dict:
     """返回初始化状态。"""
     return {
         "configured": _is_setup_done(),
-        "config_file_exists": os.path.exists(CONFIG_FILE),
+        "config_file_exists": os.path.exists(SETUP_CONFIG_FILE),
     }
 
 
@@ -73,9 +73,9 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         "user": cfg.user,
         "database": cfg.database,
     }
-    with open(CONFIG_FILE, "w") as f:
+    with open(SETUP_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
-    logger.info("数据库配置已保存到 %s", CONFIG_FILE)
+    logger.info("数据库配置已保存到 %s", SETUP_CONFIG_FILE)
 
     # 初始化数据库（创建表 + 种子数据）
     try:
@@ -83,6 +83,7 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         from app.auth import hash_password
         from app import db_models
         from app.config import get_settings
+        from app.tz import now as tz_now
         from sqlalchemy import select
         from app.gen.analyzer import get_default_prompts
 
