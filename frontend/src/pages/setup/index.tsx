@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, Form, Input, InputNumber, Button, Message, Steps, Result, Spin, Typography } from '@arco-design/web-react';
-import { IconCheckCircle, IconSafe } from '@arco-design/web-react/icon';
+import { FormInstance } from '@arco-design/web-react/es/Form';
+import { IconSafe } from '@arco-design/web-react/icon';
 import { apiGet, apiPost } from '@/utils/apiRequest';
 import styles from './style/index.module.less';
 
@@ -11,10 +12,11 @@ function Setup() {
   const [checking, setChecking] = useState(false);
   const [done, setDone] = useState(false);
   const [step, setStep] = useState(0);
+  const formRef = useRef<FormInstance>(null);
 
   useEffect(() => {
     apiGet('/api/setup/status')
-      .then((data) => {
+      .then((data: any) => {
         if (data.configured) {
           setDone(true);
           window.location.href = '/login';
@@ -24,9 +26,12 @@ function Setup() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleSubmit = async (values: any) => {
-    setChecking(true);
+  const handleSubmit = async () => {
     try {
+      const values = await formRef.current?.validate();
+      if (!values) return;
+      setChecking(true);
+      setStep(1);
       const data = await apiPost('/api/setup/database', {
         host: values.host,
         port: values.port,
@@ -38,6 +43,7 @@ function Setup() {
       setStep(2);
       setTimeout(() => { window.location.href = '/login'; }, 2000);
     } catch (e: any) {
+      if (e?.errors) return; // form validation error
       Message.error('配置失败: ' + (e?.message || '未知错误'));
     } finally {
       setChecking(false);
@@ -78,8 +84,8 @@ function Setup() {
         </Steps>
 
         <Form
+          ref={formRef}
           layout="vertical"
-          onOk={handleSubmit}
           initialValues={{
             host: 'localhost',
             port: 5432,
@@ -104,7 +110,7 @@ function Setup() {
             <Input placeholder="voyantest" />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" long htmlType="submit" loading={checking}>
+            <Button type="primary" long onClick={handleSubmit} loading={checking}>
               {checking ? '正在测试连接并初始化...' : '测试连接并初始化'}
             </Button>
           </Form.Item>
