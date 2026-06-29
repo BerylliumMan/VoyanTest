@@ -37,6 +37,10 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     """校验请求头的 ``X-CSRF-Token`` 与 cookie 的 ``csrf_token`` 一致。"""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # WebSocket 请求直接跳过（BaseHTTPMiddleware 不支持 WS）
+        if request.scope.get("type") == "websocket":
+            return await call_next(request)
+
         settings = get_settings()
         if not settings.csrf_enabled:
             return await call_next(request)

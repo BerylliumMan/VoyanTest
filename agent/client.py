@@ -47,7 +47,7 @@ class AgentClient:
                  username: str = None, password: str = None):
         self.server_url = server_url.rstrip('/')
         self.agent_name = agent_name or f"Agent-{uuid.uuid4().hex[:8]}"
-        self.agent_id: Optional[str] = None
+        self.agent_id: Optional[str] = self.agent_name
         self.hostname = platform.node()
         self.ip_address = self._local_ip()
         self.running = False
@@ -93,11 +93,11 @@ class AgentClient:
                 if resp.status_code != 200:
                     logger.error(f"Login failed (HTTP {resp.status_code}): {resp.text}")
                     return
-                for cookie in resp.cookies:
-                    if cookie.name == "session_id":
-                        self._session_id = cookie.value
-                        logger.info(f"Authenticated as {self._username}")
-                        return
+                sid = resp.cookies.get("session_id")
+                if sid:
+                    self._session_id = sid
+                    logger.info(f"Authenticated as {self._username}")
+                    return
                 logger.warning("Login succeeded but no session_id cookie received")
         except Exception as e:
             logger.warning(f"Login request failed (server may not require auth): {e}")

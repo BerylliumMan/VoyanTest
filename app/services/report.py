@@ -257,17 +257,18 @@ class ReportService:
             )
 
         # 批量解析项目名（消除 N+1）
-        project_ids = {b.project_id for b in result["items"] if b.project_id}
+        batch_items = result["items"]
+        project_ids = {b.project_id for b in batch_items if b.project_id}
         projects: dict[int, db_models.Project] = {}
         if project_ids:
-            result = await db.execute(
+            proj_result = await db.execute(
                 select(db_models.Project).where(db_models.Project.id.in_(project_ids))
             )
-            for p in result.scalars().all():
+            for p in proj_result.scalars().all():
                 projects[p.id] = p
 
         items = []
-        for batch in result["items"]:
+        for batch in batch_items:
             project = projects.get(batch.project_id)
             items.append(
                 {
