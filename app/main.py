@@ -35,7 +35,7 @@ if not settings.session_secret_key:
         "SESSION_SECRET_KEY 未设置！生产环境中请务必设置该值，"
         "否则 session 签名的安全性无法保证。开发环境可忽略此警告。"
     )
-from app.database import engine, AsyncSessionLocal
+import app.database as db_mod
 from app.database import Base, init_db_engine
 from app import db_models
 import uvicorn
@@ -138,7 +138,7 @@ async def _run_startup_init():
 
     # Clean up expired sessions at startup
     from app.auth import cleanup_expired_sessions
-    async with AsyncSessionLocal() as _cleanup_db:
+    async with db_mod.AsyncSessionLocal() as _cleanup_db:
         try:
             await cleanup_expired_sessions(_cleanup_db)
             logger.info("过期会话清理完成")
@@ -152,7 +152,7 @@ async def _periodic_session_cleanup():
         await asyncio.sleep(900)
         try:
             from app.auth import cleanup_expired_sessions
-            async with AsyncSessionLocal() as _db:
+            async with db_mod.AsyncSessionLocal() as _db:
                 await cleanup_expired_sessions(_db)
                 logger.info("周期性过期会话清理完成")
         except SQLAlchemyError as e:
@@ -230,10 +230,10 @@ async def auth_middleware(request: Request, call_next):
         session_id = request.cookies.get("session_id")
         if not session_id:
             return JSONResponse(status_code=401, content={"detail": "未登录"})
-        if AsyncSessionLocal is None:
+        if db_mod.AsyncSessionLocal is None:
             return JSONResponse(status_code=503, content={"detail": "数据库未配置"})
         from app.auth import get_session
-        async with AsyncSessionLocal() as db:
+        async with db_mod.AsyncSessionLocal() as db:
             try:
                 session = await get_session(db, session_id)
                 if not session:
@@ -274,7 +274,7 @@ async def enforce_password_changed(request: Request, call_next):
     if not session_id:
         return await call_next(request)
     from app.auth import get_session
-    async with AsyncSessionLocal() as db:
+    async with db_mod.AsyncSessionLocal() as db:
         try:
             session = await get_session(db, session_id)
             if not session:
@@ -362,7 +362,7 @@ async def health_check():
     browser_status = "unknown"
     try:
         from sqlalchemy import text
-        async with AsyncSessionLocal() as _hc_db:
+        async with db_mod.AsyncSessionLocal() as _hc_db:
             await _hc_db.execute(text("SELECT 1"))
     except Exception as e:
         db_status = f"error: {e}"
