@@ -108,7 +108,7 @@ function Index() {
           payload: { userInfo: undefined, userLoading: false },
         });
         localStorage.removeItem('userStatus');
-        if (window.location.pathname.replace(/\//g, '') !== 'login') {
+        if (window.location.pathname.replace(/\//g, '') !== 'login' && window.location.pathname !== '/setup') {
           window.location.pathname = '/login';
         }
       });
@@ -117,7 +117,7 @@ function Index() {
   useEffect(() => {
     if (checkLogin()) {
       fetchUserInfo();
-    } else if (window.location.pathname.replace(/\//g, '') !== 'login') {
+    } else if (window.location.pathname.replace(/\//g, '') !== 'login' && window.location.pathname !== '/setup') {
       window.location.pathname = '/login';
     }
   }, []);
