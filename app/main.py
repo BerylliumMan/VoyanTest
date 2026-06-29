@@ -35,9 +35,9 @@ if not settings.session_secret_key:
         "SESSION_SECRET_KEY 未设置！生产环境中请务必设置该值，"
         "否则 session 签名的安全性无法保证。开发环境可忽略此警告。"
     )
-from app.database import AsyncSessionLocal, engine
+from app.database import engine, AsyncSessionLocal
+from app.database import Base, init_db_engine
 from app import db_models
-from app.db_models import Base
 import uvicorn
 
 try:
@@ -50,9 +50,18 @@ except ImportError:
 
 async def _run_startup_init():
     """Run async DB initialization at startup (not at import time)."""
+    import app.database as db_mod
+    if db_mod.engine is None:
+        if not db_mod.init_db_engine():
+            logger.warning("数据库未配置，跳过初始化（进入配置模式）")
+            return
+
+    engine = db_mod.engine
+    AsyncSessionLocal = db_mod.AsyncSessionLocal
+
     if os.getenv("DISABLE_CREATE_ALL", "false").lower() != "true":
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(db_mod.Base.metadata.create_all)
     else:
         logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（请确保已执行 alembic upgrade head）")
 
@@ -221,6 +230,8 @@ async def auth_middleware(request: Request, call_next):
         session_id = request.cookies.get("session_id")
         if not session_id:
             return JSONResponse(status_code=401, content={"detail": "未登录"})
+        if AsyncSessionLocal is None:
+            return JSONResponse(status_code=503, content={"detail": "数据库未配置"})
         from app.auth import get_session
         async with AsyncSessionLocal() as db:
             try:
