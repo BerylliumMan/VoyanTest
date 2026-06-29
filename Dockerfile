@@ -63,10 +63,9 @@ COPY --from=frontend-builder /build/static/ app/static/
 # Create required directories
 RUN mkdir -p reports logs
 
-# Environment defaults
+# Environment defaults — DATABASE_URL 通过 docker-compose 或 /setup 页面配置
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=8002 \
-    DATABASE_URL=sqlite+aiosqlite:///./data/voyantest.db \
     SESSION_SECRET_KEY= \
     DISABLE_CREATE_ALL=false \
     TZ=Asia/Shanghai
