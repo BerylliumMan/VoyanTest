@@ -64,7 +64,7 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"数据库连接失败: {e}")
 
-    # 保存配置
+    # 保存配置（先于初始化，防止初始化过程中断导致配置丢失）
     config = {
         "configured": True,
         "database_url": db_url,
@@ -91,7 +91,6 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-        from sqlalchemy.ext.asyncio import AsyncSessionLocal as make_session
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -127,6 +126,11 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
             logger.info("数据库初始化完成")
 
         await engine.dispose()
+
+        # 通知运行中的 app 重新初始化引擎
+        from app.database import init_db_engine
+        init_db_engine(db_url)
+        logger.info("运行中数据库引擎已切换")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"数据库初始化失败: {e}")
 
