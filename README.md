@@ -50,7 +50,40 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 
 ## 🚀 快速开始
 
-### 安装依赖
+### 方式一：Docker Compose（推荐）
+
+```bash
+git clone <仓库地址>
+cd VoyanTest
+docker compose up -d
+```
+
+浏览器打开 `http://localhost:8002/`，首次使用需通过 `/setup` 页面配置 PostgreSQL 数据库。
+
+### 方式二：Docker 镜像
+
+```bash
+# 加载镜像
+gunzip -c voyantest-docker.tar.gz | docker load
+
+# 启动（需要先有 PG 数据库）
+docker run -d -p 8002:8002 \
+  --name voyantest \
+  -e DATABASE_URL="postgresql+asyncpg://user:pass@host:5432/dbname" \
+  -e SESSION_SECRET_KEY="your-secret-key" \
+  -v voyantest-reports:/app/reports \
+  -v voyantest-logs:/app/logs \
+  voyantest:latest
+
+# 或通过 /setup 页面配置 PG（无需预设 DATABASE_URL）
+docker run -d -p 8002:8002 \
+  --name voyantest \
+  -e SESSION_SECRET_KEY="your-secret-key" \
+  voyantest:latest
+# 浏览器访问 http://localhost:8002/setup 填写 PG 连接
+```
+
+### 方式三：源码启动
 
 ```bash
 # Linux
@@ -58,6 +91,7 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 cd frontend && npm install && npm run build && cd ..
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
 ```powershell
@@ -66,13 +100,6 @@ python -m venv myenv && myenv\Scripts\activate
 pip install -r requirements_win.txt
 playwright install chromium
 cd frontend && npm install --ignore-scripts && npm run build && cd ..
-```
-
-### 启动服务
-
-```bash
-source venv/bin/activate    # Linux
-# myenv\Scripts\activate     # Windows
 uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
