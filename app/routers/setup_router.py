@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from app.database import SETUP_CONFIG_FILE
+from app.database import DATA_DIR, SETUP_CONFIG_FILE
 
 router = APIRouter(prefix="/api/setup", tags=["初始化"])
 
@@ -73,6 +73,7 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         "user": cfg.user,
         "database": cfg.database,
     }
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(SETUP_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
     logger.info("数据库配置已保存到 %s", SETUP_CONFIG_FILE)

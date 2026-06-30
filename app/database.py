@@ -16,7 +16,8 @@ Base = declarative_base()
 
 engine = None
 AsyncSessionLocal = None
-SETUP_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", ".db_config.json")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+SETUP_CONFIG_FILE = os.path.join(DATA_DIR, ".db_config.json")
 
 
 def _resolve_database_url() -> str | None:
