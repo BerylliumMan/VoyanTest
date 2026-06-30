@@ -252,10 +252,10 @@ function PageLayout() {
                         );
                       })}
                       <Route exact path="/">
-                        <Redirect to={`/${defaultRoute}`} />
+                        <Redirect to="/dashboard" />
                       </Route>
                       <Route path="*">
-                        <Redirect to={`/${defaultRoute}`} />
+                        <Redirect to="/dashboard" />
                       </Route>
                     </Switch>
                   </CSSTransition>
