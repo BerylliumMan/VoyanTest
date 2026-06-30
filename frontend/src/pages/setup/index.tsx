@@ -19,7 +19,8 @@ function Setup() {
       .then((data: any) => {
         if (data.configured) {
           setDone(true);
-          window.location.href = '/login';
+          setStep(2);
+          setTimeout(() => { window.location.href = '/login'; }, 2000);
         }
       })
       .catch(() => {})

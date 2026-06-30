@@ -12,6 +12,18 @@ function Login() {
     document.body.setAttribute('arco-theme', 'light');
   }, []);
 
+  // 进入登录页时检查数据库是否已初始化，未初始化则跳转配置页
+  useEffect(() => {
+    fetch('/api/setup/status')
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.configured) {
+          window.location.href = '/setup';
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <div className={styles.container}>
       <div className={styles.logo}>

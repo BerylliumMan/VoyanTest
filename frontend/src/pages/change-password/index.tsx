@@ -52,7 +52,7 @@ const ChangePassword: React.FC = () => {
               userLoading: false,
             },
           });
-          window.location.href = '/';
+          setTimeout(() => { window.location.href = '/'; }, 100);
         })
         .catch((err) => {
           const msg = err.response?.data?.detail || '密码修改失败，请重试';
