@@ -627,34 +627,34 @@ class AgentClient:
 def main():
     import argparse
 
-    # 检查是否为打包后的 exe 运行（无参数时进入交互模式）
+    # Check if running as packaged exe with no args → interactive mode
     is_frozen = getattr(sys, 'frozen', False)
 
     if is_frozen and len(sys.argv) == 1:
-        # 打包后无参数 → 交互模式
+        # Packaged with no args → interactive mode
         print("=" * 50)
         print("  VoyanTest Agent Client")
         print("=" * 50)
         print()
-        server = input("服务端地址 (如 ws://192.168.1.100:8002): ").strip()
+        server = input("Server URL (e.g. ws://192.168.1.100:8002): ").strip()
         if not server:
             server = "ws://localhost:8002"
         if not server.startswith("ws://") and not server.startswith("wss://"):
             server = "ws://" + server
-        name_input = input(f"Agent 名称 (留空自动生成): ").strip()
+        name_input = input("Agent name (leave empty for auto-generated): ").strip()
         name = name_input or None
-        headless_input = input("使用无头模式? (y/N): ").strip().lower()
+        headless_input = input("Use headless mode? (y/N): ").strip().lower()
         headless = headless_input in ("y", "yes")
-        username_input = input("用户名 (留空跳过认证): ").strip()
-        password_input = input("密码 (留空跳过认证): ").strip()
+        username_input = input("Username (leave empty to skip auth): ").strip()
+        password_input = input("Password (leave empty to skip auth): ").strip()
         print()
-        print(f"地址: {server}")
-        print(f"名称: {name or '(自动生成)'}")
-        print(f"无头模式: {'是' if headless else '否'}")
+        print(f"Server: {server}")
+        print(f"Name: {name or '(auto-generated)'}")
+        print(f"Headless: {'yes' if headless else 'no'}")
         if username_input:
-            print(f"用户: {username_input}")
+            print(f"User: {username_input}")
         print("-" * 50)
-        print("正在连接...")
+        print("Connecting...")
         print()
         args = argparse.Namespace(
             server=server,
@@ -672,34 +672,34 @@ def main():
         parser.add_argument("--password", help="Password for server authentication")
         args = parser.parse_args()
 
-        # 非打包且无 server 参数时也进入交互模式
+        # Unpackaged and no server arg → interactive mode
         if not args.server:
             print("=" * 50)
             print("  VoyanTest Agent Client")
             print("=" * 50)
             print()
-            server = input("服务端地址 (如 ws://192.168.1.100:8002): ").strip()
+            server = input("Server URL (e.g. ws://192.168.1.100:8002): ").strip()
             if not server:
                 server = "ws://localhost:8002"
             if not server.startswith("ws://") and not server.startswith("wss://"):
                 server = "ws://" + server
             args.server = server
-            name_input = input(f"Agent 名称 (留空自动生成): ").strip()
+            name_input = input("Agent name (leave empty for auto-generated): ").strip()
             args.name = name_input or None
-            headless_input = input("使用无头模式? (y/N): ").strip().lower()
+            headless_input = input("Use headless mode? (y/N): ").strip().lower()
             args.headless = headless_input in ("y", "yes")
-            username_input = input("用户名 (留空跳过认证): ").strip()
+            username_input = input("Username (leave empty to skip auth): ").strip()
             args.username = username_input or None
-            password_input = input("密码 (留空跳过认证): ").strip()
+            password_input = input("Password (leave empty to skip auth): ").strip()
             args.password = password_input or None
             print()
-            print(f"地址: {args.server}")
-            print(f"名称: {args.name or '(自动生成)'}")
-            print(f"无头模式: {'是' if args.headless else '否'}")
+            print(f"Server: {args.server}")
+            print(f"Name: {args.name or '(auto-generated)'}")
+            print(f"Headless: {'yes' if args.headless else 'no'}")
             if args.username:
-                print(f"用户: {args.username}")
+                print(f"User: {args.username}")
             print("-" * 50)
-            print("正在连接...")
+            print("Connecting...")
             print()
 
     logging.basicConfig(

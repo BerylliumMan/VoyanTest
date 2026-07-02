@@ -1,4 +1,4 @@
-"""MCP 启动诊断 — 测试 @playwright/mcp 能否正常通信。"""
+"""MCP startup diagnostics — test @playwright/mcp communication."""
 
 import asyncio
 import json
@@ -7,7 +7,7 @@ import sys
 
 async def main():
     print(f"Python: {sys.version}")
-    print(f"测试 MCP 子进程启动...\n")
+    print(f"Testing MCP subprocess startup...\n")
 
     proc = await asyncio.create_subprocess_exec(
         'npx', '-y', '@playwright/mcp@latest', '--browser=chromium', '--isolated',
@@ -38,7 +38,7 @@ async def main():
 
     asyncio.create_task(read_stderr())
 
-    # 1. 发送 initialize 请求
+    # Send initialize request
     req = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
@@ -54,24 +54,24 @@ async def main():
 
     resp = await asyncio.wait_for(read_stdout(), timeout=30)
     if resp:
-        print(f"\n✓ MCP initialize 成功!")
-        print(f"  协议版本: {resp.get('result', {}).get('protocolVersion', '?')}")
-        print(f"  服务端信息: {resp.get('result', {}).get('serverInfo', {})}")
+        print(f"\n✓ MCP initialize succeeded!")
+        print(f"  Protocol version: {resp.get('result', {}).get('protocolVersion', '?')}")
+        print(f"  Server info: {resp.get('result', {}).get('serverInfo', {})}")
 
-        # 2. 发送 initialized 通知
+        # Send initialized notification
         notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         proc.stdin.write((json.dumps(notif) + "\n").encode())
         await proc.stdin.drain()
         print(f"\n> notifications/initialized ✓")
 
-        # 3. 测试 browser_snapshot
+        # Test browser_snapshot
         req2 = {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "browser_snapshot", "arguments": {}},
         }
         proc.stdin.write((json.dumps(req2) + "\n").encode())
         await proc.stdin.drain()
-        print(f"\n> tools/call browser_snapshot (等待浏览器启动, 最长 60s)")
+        print(f"\n> tools/call browser_snapshot (awaiting browser startup, up to 60s)")
 
         resp2 = await asyncio.wait_for(read_stdout(), timeout=60)
         if resp2:
@@ -80,18 +80,18 @@ async def main():
             text = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
             is_err = result.get("isError", False)
             if is_err:
-                print(f"\n✗ snapshot 返回错误: {text[:300]}")
+                print(f"\n✗ snapshot returned error: {text[:300]}")
             else:
-                print(f"\n✓ snapshot 成功! 页面内容 ({len(text)} chars)")
+                print(f"\n✓ snapshot succeeded! Page content ({len(text)} chars)")
                 print(text[:500])
         else:
-            print(f"\n✗ browser_snapshot 无响应")
+            print(f"\n✗ browser_snapshot returned no response")
     else:
-        print(f"\n✗ initialize 无响应")
+        print(f"\n✗ initialize returned no response")
 
     proc.kill()
     await proc.wait()
-    print("\n诊断完成")
+    print("\nDiagnostics complete")
 
 
 if __name__ == "__main__":

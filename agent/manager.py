@@ -174,7 +174,7 @@ class AgentManager:
                         "thinking": "",
                         "action": "",
                         "next_goal": "",
-                        "error": f"因步骤{failed_step_number}失败而跳过",
+                        "error": f"Skipped due to step {failed_step_number} failure",
                         "screenshot_path": None,
                         "duration_ms": 0,
                     })
@@ -208,7 +208,7 @@ class AgentManager:
                         )
                         if not verification.passed:
                             result["success"] = False
-                            result["error"] = f"预期结果验证失败: {verification.reason}"
+                            result["error"] = f"Expected result verification failed: {verification.reason}"
                             # Capture screenshot on verification failure
                             ss_result = await self._get_screenshot(session, agent_id, run_id)
                             if ss_result and ss_result.get("screenshot_base64"):
@@ -265,7 +265,7 @@ class AgentManager:
 
                 if consecutive_failures >= max_failures:
                     failed_step_number = step_order
-                    logger.warning(f"步骤 {step_order} 失败，跳过后续步骤")
+                    logger.warning(f"Step {step_order} failed, skipping remaining steps")
                     # Add skipped entries for remaining steps
                     for remaining in steps[idx + 1:]:
                         step_results.append({
@@ -276,7 +276,7 @@ class AgentManager:
                             "thinking": "",
                             "action": "",
                             "next_goal": "",
-                            "error": f"因步骤{failed_step_number}失败而跳过",
+                        "error": f"Skipped due to step {failed_step_number} failure",
                             "screenshot_path": None,
                             "duration_ms": 0,
                         })
