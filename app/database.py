@@ -15,9 +15,39 @@ logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 engine = None
-AsyncSessionLocal = None
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 SETUP_CONFIG_FILE = os.path.join(DATA_DIR, ".db_config.json")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+class _LazySessionMaker:
+    """惰性 sessionmaker — 始终可调用，避免模块导入时捕获 None。
+
+    ``from app.database import AsyncSessionLocal`` 在任何时机导入都
+    拿到此实例（不是 None），调用 ``async with AsyncSessionLocal() as db:``
+    在 engine 未初始化时抛出清晰的 RuntimeError。
+    """
+
+    def __init__(self):
+        self._maker: async_sessionmaker | None = None
+
+    def configure(self, maker: async_sessionmaker) -> None:
+        self._maker = maker
+
+    def __call__(self) -> async_sessionmaker:
+        if self._maker is None:
+            raise RuntimeError(
+                "数据库未配置，请先通过 /setup 页面配置。"
+                "如需在 E2E 测试中使用，请设置 DATABASE_URL 环境变量。"
+            )
+        return self._maker()
+
+    @property
+    def is_ready(self) -> bool:
+        return self._maker is not None
+
+
+AsyncSessionLocal = _LazySessionMaker()
 
 
 def _resolve_database_url() -> str | None:
@@ -37,10 +67,10 @@ def _resolve_database_url() -> str | None:
 
 async def init_db_engine(db_url: str | None = None) -> bool:
     """初始化数据库引擎。成功返回 True。会测试连接是否可用。"""
-    global engine, AsyncSessionLocal
+    global engine
     url = db_url or _resolve_database_url()
     if not url:
-        engine = AsyncSessionLocal = None
+        engine = None
         return False
     try:
         new_engine = create_async_engine(url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
@@ -52,11 +82,11 @@ async def init_db_engine(db_url: str | None = None) -> bool:
         except Exception as conn_err:
             logger.warning("数据库连接测试失败，进入配置模式: %s", conn_err)
             await new_engine.dispose()
-            engine = AsyncSessionLocal = None
+            engine = None
             return False
         old_engine = engine
         engine = new_engine
-        AsyncSessionLocal = new_maker
+        AsyncSessionLocal.configure(new_maker)
         if old_engine:
             await old_engine.dispose()
         masked = url.split("://")[0] + "://***@" + url.split("@")[-1] if "@" in url else url
@@ -64,13 +94,13 @@ async def init_db_engine(db_url: str | None = None) -> bool:
         return True
     except Exception as e:
         logger.error("数据库引擎初始化失败: %s", e)
-        engine = AsyncSessionLocal = None
+        engine = None
         return False
 
 
 async def get_async_db() -> AsyncIterator[AsyncSession]:
     """FastAPI 依赖：获取异步数据库会话"""
-    if AsyncSessionLocal is None and not await init_db_engine():
+    if not AsyncSessionLocal.is_ready and not await init_db_engine():
         raise RuntimeError("数据库未配置，请先通过 /setup 页面配置")
     async with AsyncSessionLocal() as session:
         yield session
