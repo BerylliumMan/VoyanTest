@@ -175,8 +175,10 @@ class AgentClient:
 
         args = [_node_exe, _cli_js, '--browser=chromium']
 
-        # 查找捆绑的 Chromium
+        # 查找捆绑的 Chromium（多种布局兼容）
         _chrome_exe = os.path.join(_pkg_root, 'chromium', 'chrome-win64', 'chrome.exe')
+        if not os.path.isfile(_chrome_exe):
+            _chrome_exe = os.path.join(_pkg_root, 'chrome-win64', 'chrome.exe')
         if not os.path.isfile(_chrome_exe):
             playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
             if not playwright_browsers.is_dir():
@@ -184,6 +186,15 @@ class AgentClient:
             chrome_dirs = sorted(playwright_browsers.glob('chromium-*/chrome-win64/chrome.exe')) if playwright_browsers.is_dir() else []
             if chrome_dirs:
                 _chrome_exe = str(chrome_dirs[-1])
+        if not os.path.isfile(_chrome_exe):
+            # 尝试系统已安装的 Chrome
+            for _p in [
+                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            ]:
+                if os.path.isfile(_p):
+                    _chrome_exe = _p
+                    break
 
         if os.path.isfile(_chrome_exe):
             args.extend(['--executable-path', _chrome_exe])
