@@ -10,6 +10,7 @@ from pydantic import BaseModel
 class StartRecordingRequest(BaseModel):
     url: str
     page_title: str = ""
+    agent_name: str | None = None
 
 
 class RecordingStatusResponse(BaseModel):

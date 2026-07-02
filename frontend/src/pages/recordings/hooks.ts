@@ -78,19 +78,19 @@ export function useRecordings() {
   }, [status, sessionId]);
 
   const startRecording = useCallback(
-    async (targetUrl: string): Promise<boolean> => {
+    async (targetUrl: string, agentName?: string): Promise<boolean> => {
       if (!targetUrl.trim()) {
         // 调用方应已校验，这里仍做一次兜底
         return false;
       }
       setLoading(true);
       try {
+        const body: Record<string, string> = { url: targetUrl.trim(), page_title: '' };
+        if (agentName) {
+          body.agent_name = agentName;
+        }
         const data = await apiRequest<{ session_id: string }>(
-          {
-            method: 'POST',
-            url: '/api/recordings/start',
-            data: { url: targetUrl.trim(), page_title: '' },
-          },
+          { method: 'POST', url: '/api/recordings/start', data: body },
           { showError: false }
         );
         setSessionId(data.session_id);

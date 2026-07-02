@@ -96,6 +96,43 @@ class AgentManager:
     def get_session(self, agent_id: str) -> Optional[AgentSession]:
         return self.sessions.get(agent_id)
 
+    # ---- recording (agent-side browser, server-side CDP capture) ----
+
+    async def start_agent_recording(self, agent_id: str, url: str, headless: bool = False) -> str:
+        """Ask an agent to start its browser and return a CDP WebSocket URL.
+
+        Returns the CDP URL string that the server can connect to for recording.
+        """
+        session = self.sessions.get(agent_id)
+        if not session:
+            raise ValueError(f"Agent {agent_id} not connected")
+        session.agent.status = AgentStatus.BUSY
+        run_id = f"rec-{os.urandom(4).hex()}"
+        payload = await session.request(WSMessage(
+            type=WSMessageType.RECORDING_START, agent_id=agent_id,
+            run_id=run_id,
+            payload={"url": url, "headless": headless},
+        ))
+        cdp_url = (payload or {}).get("cdp_url")
+        if not cdp_url:
+            raise RuntimeError(f"Agent {agent_id} did not return a CDP URL")
+        return cdp_url
+
+    async def stop_agent_recording(self, agent_id: str) -> None:
+        """Tell agent to stop recording (browser stays alive)."""
+        session = self.sessions.get(agent_id)
+        if not session:
+            return
+        run_id = f"rec-stop-{os.urandom(4).hex()}"
+        try:
+            await session.request(WSMessage(
+                type=WSMessageType.RECORDING_STOP, agent_id=agent_id,
+                run_id=run_id, payload={},
+            ))
+        except (asyncio.TimeoutError, ValueError):
+            pass
+        session.agent.status = AgentStatus.ONLINE
+
     # ---- step-by-step execution (server-side LLM, agent-side browser) ----
 
     async def execute_on_agent(self, agent_id: str, run_id: str,

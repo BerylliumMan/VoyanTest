@@ -42,12 +42,16 @@ class WSMessageType(str, Enum):
     GET_SCREENSHOT = "get_screenshot"
     RUN_END = "run_end"
     SHUTDOWN = "shutdown"
+    RECORDING_START = "recording_start"
+    RECORDING_STOP = "recording_stop"
     # Agent → Server
     REGISTERED = "registered"
     SNAPSHOT_RESULT = "snapshot_result"
     SCREENSHOT_RESULT = "screenshot_result"
     STEP_RESULT = "step_result"
     RUN_COMPLETE = "run_complete"
+    RECORDING_READY = "recording_ready"
+    RECORDING_EVENTS = "recording_events"
     ERROR = "error"
     HEARTBEAT = "heartbeat"
 
@@ -91,6 +95,18 @@ class RunStartPayload(BaseModel):
     case_id: int
     case_name: str
     steps: List[Dict[str, Any]]  # [{step_order, description}]
+
+
+class RecordingStartPayload(BaseModel):
+    """Payload for RECORDING_START: server tells agent to start CDP recording."""
+    url: str = ""
+    headless: bool = False
+
+
+class RecordingReadyPayload(BaseModel):
+    """Payload for RECORDING_READY: agent reports CDP WebSocket URL."""
+    cdp_url: str
+    browser_type: str = "chromium"
 
 
 class RunCompletePayload(BaseModel):

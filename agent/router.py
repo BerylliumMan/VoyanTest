@@ -93,7 +93,8 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
                 await _sync_to_db(agent_name, "", "")
 
             elif msg.type in (WSMessageType.STEP_RESULT, WSMessageType.SNAPSHOT_RESULT,
-                              WSMessageType.SCREENSHOT_RESULT, WSMessageType.RUN_COMPLETE):
+                              WSMessageType.SCREENSHOT_RESULT, WSMessageType.RUN_COMPLETE,
+                              WSMessageType.RECORDING_READY, WSMessageType.RECORDING_EVENTS):
                 if session:
                     session.resolve(msg)
 

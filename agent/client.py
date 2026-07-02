@@ -483,6 +483,12 @@ class AgentClient:
         elif msg.type == WSMessageType.HEARTBEAT:
             pass
 
+        elif msg.type == WSMessageType.RECORDING_START:
+            await self._handle_recording_start(msg)
+
+        elif msg.type == WSMessageType.RECORDING_STOP:
+            await self._handle_recording_stop(msg)
+
     async def _handle_get_screenshot(self, run_id: str):
         try:
             ss_b64 = await self._mcp_screenshot_base64()
@@ -554,6 +560,67 @@ class AgentClient:
         result.duration_ms = (time.monotonic() - t_start) * 1000
         await self._send(
             WSMessageType.STEP_RESULT, msg.run_id, result.model_dump(),
+        )
+
+    # ---- Recording handlers ----
+
+    async def _handle_recording_start(self, msg: WSMessage):
+        """Start MCP browser in headed mode and report CDP URL back to server."""
+        payload = msg.payload or {}
+        url = payload.get("url", "")
+        headless = payload.get("headless", False)
+        logger.info(f"Recording start requested — url={url} headless={headless}")
+
+        try:
+            if not self._mcp_process:
+                self._headless = headless
+                await self._start_mcp()
+            else:
+                logger.info("Reusing existing MCP subprocess for recording")
+
+            # Get CDP WebSocket URL via MCP tool
+            cdp_result = await self._mcp_call_tool("browser_cdp_session", "", "")
+            cdp_url = None
+            if isinstance(cdp_result, dict):
+                text = cdp_result.get("text") or ""
+                if text.startswith("ws://") or text.startswith("wss://"):
+                    cdp_url = text.strip()
+                if not cdp_url:
+                    for key in ("url", "wsUrl", "webSocketDebuggerUrl", "cdp_url"):
+                        val = cdp_result.get(key)
+                        if isinstance(val, str) and (val.startswith("ws://") or val.startswith("wss://")):
+                            cdp_url = val
+                            break
+
+            if not cdp_url:
+                raise RuntimeError("Failed to obtain CDP URL from MCP browser")
+
+            logger.info(f"CDP URL obtained: {cdp_url}")
+
+            # Navigate to target URL if provided
+            if url:
+                try:
+                    await self._mcp_call_tool("browser_navigate", url, "")
+                except Exception as e:
+                    logger.warning(f"Navigation to {url} failed: {e}")
+
+            await self._send(
+                WSMessageType.RECORDING_READY, msg.run_id,
+                {"cdp_url": cdp_url, "browser_type": "chromium"},
+            )
+        except Exception as e:
+            logger.error(f"Recording start failed: {e}")
+            await self._send(
+                WSMessageType.ERROR, msg.run_id,
+                {"message": f"Recording start failed: {e}"},
+            )
+
+    async def _handle_recording_stop(self, msg: WSMessage):
+        """Handle recording stop — MCP browser stays alive for next use."""
+        logger.info("Recording stop requested — keeping browser alive")
+        await self._send(
+            WSMessageType.RECORDING_READY, msg.run_id,
+            {"status": "stopped"},
         )
 
 

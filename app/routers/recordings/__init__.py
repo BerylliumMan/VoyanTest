@@ -29,6 +29,7 @@ from app.database import get_async_db
 from core.cdp_session import CDPRecordingSession
 from core.cdp_converter import convert_events_to_steps
 from core.browser_pool import BrowserPool
+from core.playwright_manager import PlaywrightMCPManager
 
 from .schemas import (
     StartRecordingRequest,
@@ -53,16 +54,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/recordings", tags=["录制回放"])
 
 
-async def _pick_active_manager():
-    """Async accessor that holds ``BrowserPool._lock`` while picking a manager.
-
-    Iterating ``BrowserPool._instances`` while holding the lock ensures that
-    another coroutine can't mutate the dict mid-iteration.
-    """
+async def _pick_active_manager(project_id: int = 0) -> object:
+    """Pick an active PlaywrightMCPManager from BrowserPool, or create one."""
     async with BrowserPool._lock:
-        for _project_id, mgr in BrowserPool._instances.items():
+        for _pid, mgr in BrowserPool._instances.items():
             return mgr
-    return None
+
+    # 无活跃浏览器 → 创建新实例
+    logger.info("No active browser in pool, creating new PlaywrightMCPManager for recording")
+    try:
+        mgr = PlaywrightMCPManager(browser_type="chromium", headless=True)
+        await mgr.start()
+        await BrowserPool.register(project_id, mgr)
+        return mgr
+    except Exception as e:
+        logger.error(f"Failed to create browser for recording: {e}")
+        return None
 
 
 @router.post("/start", response_model=RecordingStatusResponse)
@@ -74,6 +81,9 @@ async def start_recording(
 
     Re-uses any active ``PlaywrightMCPManager`` from :class:`BrowserPool`,
     attaches the orchestrator, and (optionally) navigates to ``req.url``.
+
+    If ``req.agent_name`` is provided, the recording browser runs on the
+    specified agent instead of on the server.
     """
     # 1) 一个用户同时只能有一个 active 录制会话。
     existing = await get_session_for_user(user.id)
@@ -87,31 +97,41 @@ async def start_recording(
     session_id = f"rec-{uuid.uuid4().hex[:12]}"
     cdp_rec_session = CDPRecordingSession(session_id)
 
-    # 3) 从 BrowserPool 取一个活跃的 manager；都没有就 503。
-    manager = await _pick_active_manager()
-    if manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail="无可用的浏览器实例，请先在某个项目中启动浏览器后再开始录制",
-        )
+    # 3) 根据是否指定 agent_name 选择浏览器获取方式
+    if req.agent_name:
+        from agent.manager import agent_manager
+        agents = agent_manager.get_online_agents()
+        matched = [a for a in agents if a.name == req.agent_name]
+        if not matched:
+            raise HTTPException(status_code=400, detail=f"Agent '{req.agent_name}' 不在线或不存在")
+        agent = matched[0]
+        try:
+            cdp_url = await agent_manager.start_agent_recording(
+                agent.id, req.url, headless=False,
+            )
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(status_code=502, detail=f"Agent 录制启动失败: {e}")
+        started = await cdp_rec_session.start_recording(cdp_url)
+    else:
+        manager = await _pick_active_manager(0)
+        if manager is None:
+            raise HTTPException(
+                status_code=503,
+                detail="无可用的浏览器实例，请先在某个项目中启动浏览器后再开始录制，或指定 agent_name",
+            )
+        started = await cdp_rec_session.start_recording(manager)
+        if req.url:
+            navigate = getattr(manager, "call_tool", None)
+            if navigate is not None:
+                try:
+                    await navigate("browser_navigate", {"url": req.url})
+                except (RuntimeError, ConnectionError, OSError) as exc:
+                    logger.warning(
+                        "录制会话 %s 导航到 %s 失败: %s", session_id, req.url, exc
+                    )
 
-    # 4) 启动 CDP 录制（attaches via PlaywrightMCPManager.call_tool）。
-    started = await cdp_rec_session.start_recording(manager)
     if not started:
         raise HTTPException(status_code=500, detail="CDP 录制启动失败")
-
-    # 5) 可选：导航到目标 URL。失败不阻塞会话——用户可以稍后手动导航。
-    if req.url:
-        navigate = getattr(manager, "call_tool", None)
-        if navigate is not None:
-            try:
-                await navigate("browser_navigate", {"url": req.url})
-            except (RuntimeError, ConnectionError, OSError) as exc:
-                # Playwright MCP 浏览器调用失败（npx 子进程 / CDP 连接），
-                # 导航失败不影响录制会话本身的存续
-                logger.warning(
-                    "录制会话 %s 导航到 %s 失败: %s", session_id, req.url, exc
-                )
 
     # 6) 把会话登记到 state store。
     await create_session(

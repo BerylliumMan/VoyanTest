@@ -46,7 +46,7 @@ export function useRunDebug(
     async (cid: number) => {
       setLoading(true);
       try {
-        const res = await axios.get(`/api/test-cases/${cid}`);
+        const res = await axios.get(`/api/testcases/${cid}`);
         const data = res.data as CaseData;
         setCaseData(data);
         // 用 API 返回的步骤初始化步骤列表

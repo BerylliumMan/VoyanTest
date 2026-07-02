@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Card,
   Table,
@@ -7,6 +7,7 @@ import {
   Input,
   Space,
   Spin,
+  Select,
   Message,
   Badge,
 } from '@arco-design/web-react';
@@ -17,8 +18,10 @@ import {
   IconRefresh,
   IconSave,
   IconHistory,
+  IconDesktop,
 } from '@arco-design/web-react/icon';
 import useLocale from '@/utils/useLocale';
+import { apiRequest } from '@/utils/apiRequest';
 import { useRecordings, RecordedEvent, TestStep } from './hooks';
 import SaveAsCaseDialog from './components/SaveAsCaseDialog';
 import RecordingHistory from './components/RecordingHistory';
@@ -89,13 +92,27 @@ const Recordings: React.FC = () => {
   const [eventsLoading, setEventsLoading] = useState(false);
   const [saveDialogVisible, setSaveDialogVisible] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [agents, setAgents] = useState<{id: string; name: string}[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<string | undefined>(undefined);
+
+  // 获取在线 agent 列表
+  useEffect(() => {
+    apiRequest<{id: string; name: string; status: string}[]>(
+      { method: 'GET', url: '/api/agents/' },
+      { showSuccess: false, showError: false }
+    ).then(data => {
+      if (Array.isArray(data)) {
+        setAgents(data.filter(a => a.status === 'online').map(a => ({ id: a.id, name: a.name })));
+      }
+    }).catch(() => {});
+  }, []);
 
   const handleStart = async () => {
     if (!url.trim()) {
       Message.warning(t['recordings.url_required']);
       return;
     }
-    const ok = await startRecording(url);
+    const ok = await startRecording(url, selectedAgent);
     if (ok) {
       Message.success(t['recordings.started']);
     } else {
@@ -250,6 +267,21 @@ const Recordings: React.FC = () => {
                 disabled={status === 'recording'}
                 allowClear
               />
+              <Select
+                placeholder="选择 Agent（可选）"
+                allowClear
+                showSearch
+                value={selectedAgent}
+                onChange={(v) => setSelectedAgent(v)}
+                style={{ width: 160 }}
+                disabled={status === 'recording'}
+              >
+                {agents.map(a => (
+                  <Select.Option key={a.id} value={a.name}>
+                    <IconDesktop /> {a.name}
+                  </Select.Option>
+                ))}
+              </Select>
               <Button
                 type="primary"
                 status="success"
