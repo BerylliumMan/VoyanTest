@@ -29,7 +29,8 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
     """WebSocket endpoint for agent clients. Each agent connects here with its name."""
 
     # Auth: require valid session_id cookie (mirrors app/websocket.py:89-106)
-    session_id = ws.cookies.get("session_id")
+    # Support both Cookie header and ?token= query param
+    session_id = ws.cookies.get("session_id") or ws.query_params.get("token")
     if not session_id:
         await ws.close(code=4001, reason="missing session_id")
         return

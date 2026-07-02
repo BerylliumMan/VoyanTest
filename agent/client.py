@@ -93,12 +93,13 @@ class AgentClient:
                 if resp.status_code != 200:
                     logger.error(f"Login failed (HTTP {resp.status_code}): {resp.text}")
                     return
-                sid = resp.cookies.get("session_id")
-                if sid:
+                # httpx < v0.28: resp.cookies["session_id"] returns str
+                sid = resp.cookies.get("session_id") or resp.cookies.get("session_id")
+                if isinstance(sid, str) and sid.strip():
                     self._session_id = sid
                     logger.info(f"Authenticated as {self._username}")
-                    return
-                logger.warning("Login succeeded but no session_id cookie received")
+                else:
+                    logger.warning(f"Login succeeded but no session_id cookie received (got: {sid!r})")
         except Exception as e:
             logger.warning(f"Login request failed (server may not require auth): {e}")
 
@@ -111,10 +112,11 @@ class AgentClient:
         ws_url = self.server_url.replace("http://", "ws://").rstrip('/')
         uri = f"{ws_url}/api/agents/ws/{self.agent_name}"
 
-        # Step 2: connect to WebSocket (with session cookie if available)
+        # Pass session_id via Cookie header (primary) and query param (fallback for websockets lib)
         ws_headers = {}
         if self._session_id:
             ws_headers["Cookie"] = f"session_id={self._session_id}"
+            uri += f"?token={self._session_id}"
 
         logger.info(f"Connecting to {uri} ...")
         try:
