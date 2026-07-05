@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
 from app.auth import get_current_user
-from app.database import get_async_db
+from app.database import AsyncSessionLocal, get_async_db
 from core.cdp_session import CDPRecordingSession
 from core.cdp_converter import convert_events_to_steps
 from core.browser_pool import BrowserPool
@@ -112,6 +112,8 @@ async def start_recording(
         except (ValueError, RuntimeError) as e:
             raise HTTPException(status_code=502, detail=f"Agent 录制启动失败: {e}")
         started = await cdp_rec_session.start_recording(cdp_url)
+        setattr(cdp_rec_session, '_agent_id', agent.id)
+        setattr(cdp_rec_session, '_is_agent_recording', True)
     else:
         manager = await _pick_active_manager(0)
         if manager is None:
@@ -201,6 +203,17 @@ async def stop_recording(
             logger.warning(
                 "停止 CDP 录制失败 (session_id=%s): %s", session_id, exc
             )
+
+    # Agent-based recording: tell agent to kill its Chrome process
+    is_agent = getattr(cdp_session, '_is_agent_recording', False) if cdp_session is not None else False
+    if is_agent:
+        agent_id = getattr(cdp_session, '_agent_id', None)
+        if agent_id:
+            from agent.manager import agent_manager
+            try:
+                await agent_manager.stop_agent_recording(agent_id)
+            except Exception as exc:
+                logger.warning("Agent 停止录制失败 (agent_id=%s): %s", agent_id, exc)
 
     await state_stop_session(session_id)
 

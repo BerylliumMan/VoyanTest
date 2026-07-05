@@ -99,9 +99,9 @@ class AgentManager:
     # ---- recording (agent-side browser, server-side CDP capture) ----
 
     async def start_agent_recording(self, agent_id: str, url: str, headless: bool = False) -> str:
-        """Ask an agent to start its browser and return a CDP WebSocket URL.
+        """Ask agent to start Chrome with CDP for recording.
 
-        Returns the CDP URL string that the server can connect to for recording.
+        Returns the CDP WebSocket URL that the server can connect to.
         """
         session = self.sessions.get(agent_id)
         if not session:
@@ -113,9 +113,11 @@ class AgentManager:
             run_id=run_id,
             payload={"url": url, "headless": headless},
         ))
-        cdp_url = (payload or {}).get("cdp_url")
-        if not cdp_url:
-            raise RuntimeError(f"Agent {agent_id} did not return a CDP URL")
+        payload = payload or {}
+        status = payload.get("status")
+        cdp_url = payload.get("cdp_url")
+        if status != "ready" or not cdp_url:
+            raise RuntimeError(f"Agent failed to start recording: status={status} has_url={bool(cdp_url)}")
         return cdp_url
 
     async def stop_agent_recording(self, agent_id: str) -> None:

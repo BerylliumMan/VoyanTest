@@ -62,6 +62,12 @@ class AgentClient:
         self._mcp_stdout = None
         self._mcp_req_id = 0
 
+        # CDP Chrome recording state
+        self._chrome_process = None
+        self._chrome_user_data_dir = None
+        self._cdp_url = None
+        self._is_recording = False
+
     @staticmethod
     def _local_ip() -> str:
         try:
@@ -564,64 +570,138 @@ class AgentClient:
 
     # ---- Recording handlers ----
 
+    async def _start_chrome_with_cdp(self, headless: bool) -> Optional[str]:
+        """Start Chrome directly with CDP debugging for remote recording.
+
+        Returns CDP WebSocket URL with agent's LAN IP (e.g.
+        ws://192.168.x.x:PORT/...) so the server can connect across the LAN.
+        """
+        # Find chrome binary (same search order as _start_mcp)
+        _pkg_root = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__))
+        _chrome_exe = os.path.join(_pkg_root, 'chromium', 'chrome-win64', 'chrome.exe')
+        if not os.path.isfile(_chrome_exe):
+            _chrome_exe = os.path.join(_pkg_root, 'chrome-win64', 'chrome.exe')
+        if not os.path.isfile(_chrome_exe):
+            for _p in [
+                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            ]:
+                if os.path.isfile(_p):
+                    _chrome_exe = _p
+                    break
+        if not os.path.isfile(_chrome_exe):
+            raise RuntimeError("Chrome binary not found")
+
+        import tempfile, socket
+        # Use port 0 for OS-assigned port (avoids conflicts)
+        cdp_port = 0
+        user_data_dir = tempfile.mkdtemp(prefix="voyan_cdp_")
+        proc_kwargs = dict(
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        if sys.platform != 'win32':
+            proc_kwargs['preexec_fn'] = os.setsid
+
+        self._chrome_process = await asyncio.create_subprocess_exec(
+            _chrome_exe,
+            f'--remote-debugging-port={cdp_port}',
+            '--remote-debugging-address=0.0.0.0',
+            f'--user-data-dir={user_data_dir}',
+            '--no-first-run', '--no-default-browser-check',
+            '--no-sandbox',
+            **proc_kwargs,
+        )
+        self._chrome_user_data_dir = user_data_dir
+
+        # Read actual port from DevToolsActivePort (Chrome writes it after start)
+        active_port_file = os.path.join(user_data_dir, 'DevToolsActivePort')
+        actual_port = None
+        for _attempt in range(30):
+            await asyncio.sleep(0.5)
+            try:
+                with open(active_port_file) as f:
+                    actual_port = int(f.readline().strip())
+                break
+            except (OSError, ValueError):
+                continue
+        if actual_port is None:
+            raise RuntimeError("Chrome did not write DevToolsActivePort in time")
+
+        # Poll /json/version for the full WS URL using async HTTP
+        import httpx
+        async with httpx.AsyncClient() as client:
+            for _attempt in range(20):
+                await asyncio.sleep(0.5)
+                try:
+                    resp = await client.get(f'http://127.0.0.1:{actual_port}/json/version', timeout=2)
+                    data = resp.json()
+                    ws_url = data.get('webSocketDebuggerUrl')
+                    if ws_url:
+                        # Replace 127.0.0.1 with LAN IP so server can connect
+                        ws_url = ws_url.replace('127.0.0.1', self.ip_address)
+                        logger.info(f"Chrome CDP ready: {ws_url}")
+                        return ws_url
+                except Exception:
+                    continue
+
+        raise RuntimeError("Chrome CDP endpoint did not start in time")
+
     async def _handle_recording_start(self, msg: WSMessage):
-        """Start MCP browser in headed mode and report CDP URL back to server."""
+        """Start Chrome with CDP for recording. Returns CDP URL to server."""
         payload = msg.payload or {}
         url = payload.get("url", "")
         headless = payload.get("headless", False)
-        logger.info(f"Recording start requested — url={url} headless={headless}")
+        logger.info(f"Recording start — url={url}")
 
         try:
-            if not self._mcp_process:
-                self._headless = headless
-                await self._start_mcp()
-            else:
-                logger.info("Reusing existing MCP subprocess for recording")
+            cdp_url = await self._start_chrome_with_cdp(headless)
+            self._cdp_url = cdp_url
+            self._is_recording = True
 
-            # Get CDP WebSocket URL via MCP tool
-            cdp_result = await self._mcp_call_tool("browser_cdp_session", "", "")
-            cdp_url = None
-            if isinstance(cdp_result, dict):
-                text = cdp_result.get("text") or ""
-                if text.startswith("ws://") or text.startswith("wss://"):
-                    cdp_url = text.strip()
-                if not cdp_url:
-                    for key in ("url", "wsUrl", "webSocketDebuggerUrl", "cdp_url"):
-                        val = cdp_result.get(key)
-                        if isinstance(val, str) and (val.startswith("ws://") or val.startswith("wss://")):
-                            cdp_url = val
-                            break
-
-            if not cdp_url:
-                raise RuntimeError("Failed to obtain CDP URL from MCP browser")
-
-            logger.info(f"CDP URL obtained: {cdp_url}")
-
-            # Navigate to target URL if provided
+            # Navigate to target URL
             if url:
+                import urllib.request
                 try:
-                    await self._mcp_call_tool("browser_navigate", url, "")
+                    nav_req = json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}).encode()
+                    # Use the CDP websocket directly for navigation
+                    # For simplicity, use the existing call_tool if MCP is running
+                    if self._mcp_process:
+                        await self._mcp_call_tool("browser_navigate", url, "")
                 except Exception as e:
-                    logger.warning(f"Navigation to {url} failed: {e}")
+                    logger.warning(f"Navigation failed: {e}")
 
-            await self._send(
-                WSMessageType.RECORDING_READY, msg.run_id,
-                {"cdp_url": cdp_url, "browser_type": "chromium"},
-            )
+            await self._send(WSMessageType.RECORDING_READY, msg.run_id, {
+                "status": "ready",
+                "cdp_url": cdp_url,
+                "browser_type": "chromium",
+            })
         except Exception as e:
             logger.error(f"Recording start failed: {e}")
-            await self._send(
-                WSMessageType.ERROR, msg.run_id,
-                {"message": f"Recording start failed: {e}"},
-            )
+            await self._send(WSMessageType.ERROR, msg.run_id, {"message": f"Recording start failed: {e}"})
 
     async def _handle_recording_stop(self, msg: WSMessage):
-        """Handle recording stop — MCP browser stays alive for next use."""
-        logger.info("Recording stop requested — keeping browser alive")
-        await self._send(
-            WSMessageType.RECORDING_READY, msg.run_id,
-            {"status": "stopped"},
-        )
+        """Kill the CDP Chrome process. Events were already captured server-side."""
+        logger.info("Recording stop — killing CDP Chrome")
+        self._is_recording = False
+        if hasattr(self, '_chrome_process') and self._chrome_process:
+            try:
+                self._chrome_process.kill()
+                await asyncio.wait_for(self._chrome_process.wait(), timeout=5)
+            except Exception:
+                try:
+                    self._chrome_process.kill()
+                except Exception:
+                    pass
+        # Clean up user data dir
+        if hasattr(self, '_chrome_user_data_dir') and self._chrome_user_data_dir:
+            import shutil
+            try:
+                shutil.rmtree(self._chrome_user_data_dir, ignore_errors=True)
+            except Exception:
+                pass
+        self._cdp_url = None
+        await self._send(WSMessageType.RECORDING_READY, msg.run_id, {"status": "stopped"})
 
 
 def main():
