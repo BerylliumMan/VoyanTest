@@ -250,7 +250,7 @@ async def convert_events_to_steps(
     if client is None:
         client = await create_openai_client()
 
-    _, _, resolved_model = _resolve_config(explicit_model=model)
+    _, _, resolved_model = await _resolve_config(explicit_model=model)
 
     timeline = _format_timeline(events, page_title=page_title)
 
