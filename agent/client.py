@@ -40,6 +40,39 @@ ACTION_TOOL_MAP = {
 }
 
 
+
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, target_host: str, target_port: int) -> None:
+    """TCP proxy: forward all data from a connected client to the target host:port."""
+    try:
+        remote_r, remote_w = await asyncio.open_connection(target_host, target_port)
+        async def forward(src, dst):
+            try:
+                while True:
+                    data = await src.read(65536)
+                    if not data:
+                        break
+                    dst.write(data)
+                    await dst.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                try:
+                    dst.close()
+                except Exception:
+                    pass
+        await asyncio.gather(
+            forward(reader, remote_w),
+            forward(remote_r, writer),
+        )
+    except (ConnectionError, OSError) as exc:
+        logger.warning("CDP proxy pipe failed: %s", exc)
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
 class AgentClient:
     """WebSocket-based agent. Receives tool calls from server, executes via local MCP."""
 
@@ -626,7 +659,6 @@ class AgentClient:
         self._chrome_process = await asyncio.create_subprocess_exec(
             _chrome_exe,
             f'--remote-debugging-port={cdp_port}',
-            '--remote-debugging-address=0.0.0.0',
             f'--user-data-dir={user_data_dir}',
             '--no-first-run', '--no-default-browser-check',
             '--no-sandbox', '--disable-gpu',
@@ -657,6 +689,15 @@ class AgentClient:
             stdout, _ = await self._chrome_process.communicate()
             output = stdout.decode('utf-8', errors='replace') if stdout else '(empty)'
             raise RuntimeError(f"Chrome exited prematurely with code {self._chrome_process.returncode}. Output: {output[:500]}")
+
+        # Chrome only listens on 127.0.0.1 (--remote-debugging-address often ignored on Windows).
+        # Start a local TCP proxy on 0.0.0.0 so the server can connect across subnets.
+        _proxy_server = await asyncio.start_server(
+            lambda r, w: _pipe(r, w, '127.0.0.1', actual_port),
+            host='0.0.0.0', port=actual_port,
+        )
+        self._proxy_server = _proxy_server
+        logger.info(f"CDP proxy listening on 0.0.0.0:{_proxy_port} → 127.0.0.1:{actual_port}")
 
         # Poll /json/version for the full WS URL using async HTTP
         import httpx
@@ -727,6 +768,11 @@ class AgentClient:
                     self._chrome_process.kill()
                 except Exception:
                     pass
+        # Close CDP TCP proxy
+        if self._proxy_server:
+            self._proxy_server.close()
+            self._proxy_server = None
+
         # Clean up user data dir
         if hasattr(self, '_chrome_user_data_dir') and self._chrome_user_data_dir:
             import shutil
