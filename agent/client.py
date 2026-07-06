@@ -606,6 +606,7 @@ class AgentClient:
         self._chrome_process = await asyncio.create_subprocess_exec(
             _chrome_exe,
             f'--remote-debugging-port={cdp_port}',
+            '--remote-debugging-address=0.0.0.0',
             f'--user-data-dir={user_data_dir}',
             '--no-first-run', '--no-default-browser-check',
             '--no-sandbox', '--disable-gpu',
