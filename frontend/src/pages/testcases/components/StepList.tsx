@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { Button, Tag, Input, InputNumber, Collapse, Typography, Space } from '@arco-design/web-react';
-import { IconMenu, IconPlus, IconCopy, IconDelete, IconSettings, IconTool } from '@arco-design/web-react/icon';
+import React from 'react';
+import { Button, Tag, Input, Typography, Space } from '@arco-design/web-react';
+import { IconMenu, IconPlus, IconCopy, IconDelete, IconTool } from '@arco-design/web-react/icon';
 import { Step } from '../types';
 import styles from '../style/components.module.less';
 
@@ -20,15 +20,10 @@ interface StepListProps {
   t: Record<string, string>;
 }
 
-const CollapseItem = Collapse.Item;
-
 const StepList: React.FC<StepListProps> = ({
   steps, onAdd, onRemove, onUpdate, onInsert, onCopy, onPaste, copiedStep,
   onDragStart, onDragOver, onDragLeave, onDrop, t,
 }) => {
-  // 追踪每个步骤的高级设置展开状态
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-
   return (
     <div>
       {steps.map((step, idx) => (
@@ -65,49 +60,6 @@ const StepList: React.FC<StepListProps> = ({
                 autoSize={{ minRows: 1 }}
               />
             </div>
-            {/* 高级设置折叠面板 */}
-            <Collapse
-              className={styles['retry-collapse']}
-              activeKey={expandedKeys}
-              onChange={(keys) => setExpandedKeys(Array.isArray(keys) ? keys : keys ? [keys] : [])}
-              expandIcon={<IconSettings />}
-            >
-              <CollapseItem
-                key={`retry-${idx}`}
-                name={`retry-${idx}`}
-                header="高级设置"
-                showExpandIcon={true}
-              >
-                <div className={styles['retry-fields']}>
-                  <div className={styles['retry-field']}>
-                    <span className={styles['retry-label']}>失败重试次数</span>
-                    <InputNumber
-                      value={step.retry_max ?? 0}
-                      min={0}
-                      max={10}
-                      step={1}
-                      precision={0}
-                      placeholder="失败时最多重试次数，0表示不重试"
-                      onChange={(v) => onUpdate(idx, 'retry_max', v ?? 0)}
-                      className={styles['retry-input']}
-                    />
-                  </div>
-                  <div className={styles['retry-field']}>
-                    <span className={styles['retry-label']}>重试间隔(秒)</span>
-                    <InputNumber
-                      value={step.retry_delay ?? 1.0}
-                      min={0.1}
-                      max={300}
-                      step={0.1}
-                      precision={1}
-                      placeholder="每次重试之间的等待时间"
-                      onChange={(v) => onUpdate(idx, 'retry_delay', v ?? 1.0)}
-                      className={styles['retry-input']}
-                    />
-                  </div>
-                </div>
-              </CollapseItem>
-            </Collapse>
           </div>
           <Button type="text" icon={<IconPlus />} onClick={() => onInsert(idx)} title={t['step.insert_above']} aria-label="插入步骤" />
           <Button type="text" icon={<IconCopy />} onClick={() => onCopy(idx)} title={t['step.copy']} aria-label="复制步骤" />
