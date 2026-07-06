@@ -593,8 +593,8 @@ class AgentClient:
             raise RuntimeError("Chrome binary not found")
 
         import tempfile, socket
-        # Use port 0 for OS-assigned port (avoids conflicts)
-        cdp_port = 0
+        # Use fixed port 9222 so firewall rules can be applied
+        cdp_port = 9222
         user_data_dir = tempfile.mkdtemp(prefix="voyan_cdp_")
         proc_kwargs = dict(
             stdout=asyncio.subprocess.PIPE,
