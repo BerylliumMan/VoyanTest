@@ -689,13 +689,19 @@ class AgentClient:
             self._cdp_url = cdp_url
             self._is_recording = True
 
-            # Navigate to target URL via CDP
+            # Navigate to target URL via CDP (browser-level Target.createTarget)
             if url and cdp_url:
                 import websockets as _ws
                 try:
                     async with _ws.connect(cdp_url) as _cdp_ws:
-                        await _cdp_ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
+                        # Create a new page/tab with the target URL
+                        cmd = json.dumps({
+                            "id": 1, "method": "Target.createTarget",
+                            "params": {"url": url},
+                        })
+                        await _cdp_ws.send(cmd)
                         await _cdp_ws.recv()
+                        logger.info(f"CDP navigation to {url} sent via Target.createTarget")
                 except Exception as e:
                     logger.warning(f"CDP navigation to {url} failed: {e}")
 
