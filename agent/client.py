@@ -223,8 +223,8 @@ class AgentClient:
         import sys as _sys
         proc_kwargs = dict(
             stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         if _sys.platform != 'win32':
             proc_kwargs['preexec_fn'] = os.setsid
@@ -614,11 +614,11 @@ class AgentClient:
 
         import tempfile, socket
         # Use fixed port 9222 so firewall rules can be applied
-        cdp_port = 9222
+        cdp_port = 0
         user_data_dir = tempfile.mkdtemp(prefix="voyan_cdp_")
         proc_kwargs = dict(
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         if sys.platform != 'win32':
             proc_kwargs['preexec_fn'] = os.setsid
@@ -630,6 +630,9 @@ class AgentClient:
             f'--user-data-dir={user_data_dir}',
             '--no-first-run', '--no-default-browser-check',
             '--no-sandbox', '--disable-gpu',
+            '--disable-features=ChromeWhatsNewUI,ChromeWhatsNew',
+            '--disable-sync', '--disable-background-networking',
+            '--disable-default-apps', '--disable-extensions',
             '--start-maximized',
             **proc_kwargs,
         )
