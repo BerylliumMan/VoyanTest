@@ -503,11 +503,17 @@ class CDPRecordingSession:
                 )
 
     async def _install_page_recorder(self) -> None:
-        """Install the JS recorder script on every new document."""
+        """Install the JS recorder script on every new document and the current page."""
         try:
             await self._send_cdp(
                 "Page.addScriptToEvaluateOnNewDocument",
                 {"source": _INJECT_RECORDER_SCRIPT},
+            )
+            # Also inject into the current page immediately (addScriptToEvaluateOnNewDocument
+            # only applies to future navigations).
+            await self._send_cdp(
+                "Runtime.evaluate",
+                {"expression": _INJECT_RECORDER_SCRIPT, "awaitPromise": False},
             )
         except Exception as exc:  # noqa: BLE001 - 注入 recorder 脚本失败时 recording 仍可继续
             logger.warning(
