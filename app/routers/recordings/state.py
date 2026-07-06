@@ -93,12 +93,15 @@ async def get_session(session_id: str) -> RecordingSessionState | None:
 
 
 async def stop_session(session_id: str) -> bool:
-    """Mark a session as ``stopped``.  Returns ``True`` if it existed."""
+    """Mark a session as ``stopped`` and release user. Returns ``True`` if it existed."""
     async with _lock:
         raw = _sessions.get(session_id)
         if raw is None:
             return False
         raw.status = "stopped"
+        # Release the user → session mapping so the same user can start a new session
+        if _user_sessions.get(raw.user_id) == session_id:
+            del _user_sessions[raw.user_id]
     return True
 
 
