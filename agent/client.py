@@ -166,6 +166,9 @@ class AgentClient:
 
         # 确定包根目录（exe 同级）
         _pkg_root = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__))
+        _search_roots = [_pkg_root]
+        if getattr(sys, 'frozen', False):
+            _search_roots.append(os.path.dirname(_pkg_root))  # parent of dist/
 
         # 查找捆绑的 node.exe
         _node_exe = os.path.join(_pkg_root, 'node.exe')
@@ -182,17 +185,24 @@ class AgentClient:
         args = [_node_exe, _cli_js, '--browser=chromium']
 
         # 查找捆绑的 Chromium（多种布局兼容）
-        _chrome_exe = os.path.join(_pkg_root, 'chromium', 'chrome-win64', 'chrome.exe')
-        if not os.path.isfile(_chrome_exe):
-            _chrome_exe = os.path.join(_pkg_root, 'chrome-win64', 'chrome.exe')
-        if not os.path.isfile(_chrome_exe):
+        _chrome_exe = None
+        for _root in _search_roots:
+            _candidate = os.path.join(_root, 'chromium', 'chrome-win64', 'chrome.exe')
+            if os.path.isfile(_candidate):
+                _chrome_exe = _candidate
+                break
+            _candidate = os.path.join(_root, 'chrome-win64', 'chrome.exe')
+            if os.path.isfile(_candidate):
+                _chrome_exe = _candidate
+                break
+        if not _chrome_exe:
             playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
             if not playwright_browsers.is_dir():
                 playwright_browsers = Path.home() / 'AppData' / 'Local' / 'ms-playwright'
             chrome_dirs = sorted(playwright_browsers.glob('chromium-*/chrome-win64/chrome.exe')) if playwright_browsers.is_dir() else []
             if chrome_dirs:
                 _chrome_exe = str(chrome_dirs[-1])
-        if not os.path.isfile(_chrome_exe):
+        if not _chrome_exe:
             # 尝试系统已安装的 Chrome
             for _p in [
                 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -578,10 +588,20 @@ class AgentClient:
         """
         # Find chrome binary (same search order as _start_mcp)
         _pkg_root = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__))
-        _chrome_exe = os.path.join(_pkg_root, 'chromium', 'chrome-win64', 'chrome.exe')
-        if not os.path.isfile(_chrome_exe):
-            _chrome_exe = os.path.join(_pkg_root, 'chrome-win64', 'chrome.exe')
-        if not os.path.isfile(_chrome_exe):
+        _search_roots = [_pkg_root]
+        if getattr(sys, 'frozen', False):
+            _search_roots.append(os.path.dirname(_pkg_root))  # parent of dist/
+        _chrome_exe = None
+        for _root in _search_roots:
+            _candidate = os.path.join(_root, 'chromium', 'chrome-win64', 'chrome.exe')
+            if os.path.isfile(_candidate):
+                _chrome_exe = _candidate
+                break
+            _candidate = os.path.join(_root, 'chrome-win64', 'chrome.exe')
+            if os.path.isfile(_candidate):
+                _chrome_exe = _candidate
+                break
+        if not _chrome_exe:
             for _p in [
                 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
                 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -589,7 +609,7 @@ class AgentClient:
                 if os.path.isfile(_p):
                     _chrome_exe = _p
                     break
-        if not os.path.isfile(_chrome_exe):
+        if not _chrome_exe:
             raise RuntimeError("Chrome binary not found")
 
         import tempfile, socket
