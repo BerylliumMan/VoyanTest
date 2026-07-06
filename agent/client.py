@@ -610,6 +610,8 @@ class AgentClient:
             f'--user-data-dir={user_data_dir}',
             '--no-first-run', '--no-default-browser-check',
             '--no-sandbox',
+            '--start-maximized',
+            '--window-size=1920,1080',
             **proc_kwargs,
         )
         self._chrome_user_data_dir = user_data_dir
