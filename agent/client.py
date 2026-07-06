@@ -597,8 +597,8 @@ class AgentClient:
         cdp_port = 0
         user_data_dir = tempfile.mkdtemp(prefix="voyan_cdp_")
         proc_kwargs = dict(
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         if sys.platform != 'win32':
             proc_kwargs['preexec_fn'] = os.setsid
@@ -606,12 +606,10 @@ class AgentClient:
         self._chrome_process = await asyncio.create_subprocess_exec(
             _chrome_exe,
             f'--remote-debugging-port={cdp_port}',
-            '--remote-debugging-address=0.0.0.0',
             f'--user-data-dir={user_data_dir}',
             '--no-first-run', '--no-default-browser-check',
-            '--no-sandbox',
+            '--no-sandbox', '--disable-gpu',
             '--start-maximized',
-            '--window-size=1920,1080',
             **proc_kwargs,
         )
         self._chrome_user_data_dir = user_data_dir
@@ -629,6 +627,12 @@ class AgentClient:
                 continue
         if actual_port is None:
             raise RuntimeError("Chrome did not write DevToolsActivePort in time")
+
+        # Check Chrome still alive and dump any startup output
+        if self._chrome_process.returncode is not None:
+            stdout, _ = await self._chrome_process.communicate()
+            output = stdout.decode('utf-8', errors='replace') if stdout else '(empty)'
+            raise RuntimeError(f"Chrome exited prematurely with code {self._chrome_process.returncode}. Output: {output[:500]}")
 
         # Poll /json/version for the full WS URL using async HTTP
         import httpx
