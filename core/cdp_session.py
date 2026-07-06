@@ -86,6 +86,8 @@ _INJECT_RECORDER_SCRIPT = r"""
     return text ? tag + ":has-text(\"" + text.replace(/"/g, '\\"') + "\")" : tag;
   }
 
+  var _input_timers = {};
+
   document.addEventListener("click", function (ev) {
     var el = ev.target;
     report("click", {selector: describe(el), tag: el && el.tagName, text: (el && el.textContent || "").trim().slice(0, 80)});
@@ -95,9 +97,13 @@ _INJECT_RECORDER_SCRIPT = r"""
     var el = ev.target;
     if (!el) return;
     var tag = (el.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea") {
-      report("input", {selector: describe(el), value: el.value, tag: tag});
-    }
+    if (tag !== "input" && tag !== "textarea") return;
+    var key = describe(el) || tag;
+    if (_input_timers[key]) clearTimeout(_input_timers[key]);
+    _input_timers[key] = setTimeout(function() {
+      report("input", {selector: key, value: el.value, tag: tag});
+      delete _input_timers[key];
+    }, 500);
   }, true);
 
   document.addEventListener("change", function (ev) {
@@ -106,6 +112,15 @@ _INJECT_RECORDER_SCRIPT = r"""
     var tag = (el.tagName || "").toLowerCase();
     if (tag === "select") {
       report("select", {selector: describe(el), value: el.value, tag: tag});
+    }
+    // input/textarea change (blur): cancel pending timer and report immediately
+    if (tag === "input" || tag === "textarea") {
+      var key = describe(el) || tag;
+      if (_input_timers[key]) {
+        clearTimeout(_input_timers[key]);
+        delete _input_timers[key];
+      }
+      report("input", {selector: key, value: el.value, tag: tag});
     }
   }, true);
 })();
