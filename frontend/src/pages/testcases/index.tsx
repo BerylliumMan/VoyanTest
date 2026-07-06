@@ -179,38 +179,35 @@ const TestCases: React.FC = () => {
   const columns = [
     { title: 'ID', dataIndex: 'project_case_number', width: 60 },
     {
-      title: t['name'], dataIndex: 'name', render: (name: string, record: TestCase) => (
-        <Space>
+      title: t['name'], dataIndex: 'name', ellipsis: true, render: (name: string, record: TestCase) => (
+        <div className={styles.nameCell}>
           {record.is_init && <Tag color="blue" size="small">{t['init.case']}</Tag>}
-          <Button type="text" onClick={() => openEdit(record)}>{name}</Button>
-        </Space>
+          <Button type="text" className={styles.nameBtn} onClick={() => openEdit(record)}>{name}</Button>
+        </div>
       ),
     },
-    { title: t['module'], dataIndex: 'module_id', width: 120, render: (mid: number | null) => { const m = modules.find((mod) => mod.id === mid); return m ? <Tag>{m.name}</Tag> : <Tag color="gray">--</Tag>; } },
+    { title: t['module'], dataIndex: 'module_id', width: 90, render: (mid: number | null) => { const m = modules.find((mod) => mod.id === mid); return m ? <Tag>{m.name}</Tag> : <Tag color="gray">--</Tag>; } },
     {
-      title: t['description'], dataIndex: 'description', ellipsis: true,
+      title: t['description'], dataIndex: 'description', ellipsis: true, width: 160,
     },
     {
-      title: t['actions'], width: 480, render: (_: unknown, record: TestCase) => (
-        <Space>
-          <Button type="primary" size="small" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
-          <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} className={styles.agentSelect} size="mini">
+      title: t['actions'], render: (_: unknown, record: TestCase) => (
+        <div className={styles.actionsCell}>
+          <Button type="primary" size="mini" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
+          <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} className={styles.agentSelectMini} size="mini">
             {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
           </Select>
-          <Button type="outline" size="small" icon={<IconPlayArrow />} onClick={() => handleRunClient(record.id)}>{t['client']}</Button>
-          <Button type="outline" size="small" icon={<IconBug />} onClick={() => handleRunDebug(record.id)}>调试运行</Button>
-          <Button
-            type="text"
-            size="small"
-            icon={record.is_init ? <IconStarFill className={styles.initIcon} /> : <IconStar />}
+          <Button type="outline" size="mini" icon={<IconPlayArrow />} onClick={() => handleRunClient(record.id)}>{t['client']}</Button>
+          <Button type="outline" size="mini" icon={<IconBug />} onClick={() => handleRunDebug(record.id)}>调试</Button>
+          <Button type="text" size="mini" icon={record.is_init ? <IconStarFill className={styles.initIcon} /> : <IconStar />}
             onClick={() => handleToggleInit(record.id, !record.is_init)}
             aria-label={record.is_init ? '取消初始化' : '标记为初始化'}
           />
-          <Button type="text" size="small" icon={<IconEdit />} onClick={() => openEdit(record)} aria-label="编辑用例" />
+          <Button type="text" size="mini" icon={<IconEdit />} onClick={() => openEdit(record)} aria-label="编辑用例" />
           <Popconfirm title={t['confirm.delete.item']} onOk={() => handleDelete(record.id)}>
-            <Button type="text" size="small" status="danger" icon={<IconDelete />} aria-label="删除用例" />
+            <Button type="text" size="mini" status="danger" icon={<IconDelete />} aria-label="删除用例" />
           </Popconfirm>
-        </Space>
+        </div>
       ),
     },
   ];
