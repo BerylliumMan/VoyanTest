@@ -26,10 +26,7 @@ pyinstaller --clean --onefile --name VoyanTest-Agent ^
   --hidden-import pydantic ^
   --hidden-import rich ^
   --hidden-import httpx_sse ^
-  --hidden-import agent.client ^
-  --hidden-import agent.manager ^
-  --hidden-import agent.models ^
-  agent/__init__.py
+  agent/client.py
 
 echo ========================================
 echo Build complete!
