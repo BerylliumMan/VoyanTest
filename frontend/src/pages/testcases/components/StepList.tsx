@@ -39,19 +39,14 @@ const StepList: React.FC<StepListProps> = ({
           />
           <Tag className={styles['step-number-tag']}>{idx + 1}</Tag>
           <div className={styles['step-fields']}>
-            <Input.TextArea
-              className={styles['step-input']}
-              placeholder={t['step.placeholder']}
-              value={step.description}
-              onChange={(v) => onUpdate(idx, 'description', v)}
-              autoSize={{ minRows: 1 }}
-            />
-            <div style={{ marginTop: 4 }}>
-              {step.healed_selector && (
-                <div className={styles['healed-hint']}>
-                  <IconTool /> 已修复: {step.healed_selector}
-                </div>
-              )}
+            <div className={styles['step-row-fields']}>
+              <Input.TextArea
+                className={styles['step-input']}
+                placeholder={t['step.placeholder']}
+                value={step.description}
+                onChange={(v) => onUpdate(idx, 'description', v)}
+                autoSize={{ minRows: 1 }}
+              />
               <Input.TextArea
                 className={styles['step-input']}
                 placeholder={t['step.result.placeholder'] || '预期结果'}
@@ -60,6 +55,11 @@ const StepList: React.FC<StepListProps> = ({
                 autoSize={{ minRows: 1 }}
               />
             </div>
+            {step.healed_selector && (
+              <div className={styles['healed-hint']}>
+                <IconTool /> 已修复: {step.healed_selector}
+              </div>
+            )}
           </div>
           <Button type="text" icon={<IconPlus />} onClick={() => onInsert(idx)} title={t['step.insert_above']} aria-label="插入步骤" />
           <Button type="text" icon={<IconCopy />} onClick={() => onCopy(idx)} title={t['step.copy']} aria-label="复制步骤" />

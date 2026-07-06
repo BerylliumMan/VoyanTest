@@ -22,7 +22,7 @@ import {
 } from '@arco-design/web-react/icon';
 import useLocale from '@/utils/useLocale';
 import { apiRequest } from '@/utils/apiRequest';
-import { useRecordings, RecordedEvent, TestStep } from './hooks';
+import { useRecordings, RecordedEvent, TestStep, RecordingStatus } from './hooks';
 import SaveAsCaseDialog from './components/SaveAsCaseDialog';
 import RecordingHistory from './components/RecordingHistory';
 import styles from './index.module.less';
@@ -75,7 +75,9 @@ const Recordings: React.FC = () => {
   const t = useLocale();
   const {
     sessionId,
+    setSessionId,
     status,
+    setStatus,
     url,
     setUrl,
     events,
@@ -133,6 +135,21 @@ const Recordings: React.FC = () => {
   const handleRefresh = async () => {
     setEventsLoading(true);
     try {
+      // 如果 sessionId 为空，先尝试获取当前录制
+      if (!sessionId) {
+        try {
+          const data = await apiRequest<{ session_id: string; status: string }>(
+            { method: 'GET', url: '/api/recordings/current' },
+            { showSuccess: false, showError: false }
+          );
+          if (data?.session_id) {
+            setSessionId(data.session_id);
+            setStatus(data.status as RecordingStatus);
+          }
+        } catch {
+          // 没有进行中的录制
+        }
+      }
       const ok = await refreshEvents();
       if (!ok) {
         Message.error(t['recordings.refresh_failed']);

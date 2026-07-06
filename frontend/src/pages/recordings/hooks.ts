@@ -192,7 +192,9 @@ export function useRecordings() {
   return {
     t,
     sessionId,
+    setSessionId,
     status,
+    setStatus,
     url,
     setUrl,
     events,
