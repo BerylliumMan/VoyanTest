@@ -72,6 +72,24 @@ async def _pick_active_manager(project_id: int = 0) -> object:
         return None
 
 
+@router.get("/current", response_model=RecordingStatusResponse | None)
+async def get_current_recording(
+    user=Depends(get_current_user),
+) -> RecordingStatusResponse | None:
+    """Return the user's active recording session, or null."""
+    state = await get_session_for_user(user.id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="无进行中的录制会话")
+    return RecordingStatusResponse(
+        session_id=state.session_id,
+        status=state.status,
+        url=state.url or "",
+        page_title=state.page_title or "",
+        elapsed_seconds=time.time() - (state.started_at or time.time()),
+        events_count=state.events_count or 0,
+    )
+
+
 @router.post("/start", response_model=RecordingStatusResponse)
 async def start_recording(
     req: StartRecordingRequest,

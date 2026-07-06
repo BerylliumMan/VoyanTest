@@ -49,6 +49,25 @@ export function useRecordings() {
     };
   }, []);
 
+  // 页面挂载时检查是否有进行中的录制
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await apiRequest<{ session_id: string; status: string; url: string }>(
+          { method: 'GET', url: '/api/recordings/current' },
+          { showSuccess: false, showError: false }
+        );
+        if (data && data.session_id) {
+          setSessionId(data.session_id);
+          setStatus(data.status as RecordingStatus);
+          setUrl(data.url || '');
+        }
+      } catch {
+        // 没有进行中的录制，忽略
+      }
+    })();
+  }, []);
+
   // 录制中：每 2 秒拉一次事件流
   useEffect(() => {
     if (status === 'recording' && sessionId) {
