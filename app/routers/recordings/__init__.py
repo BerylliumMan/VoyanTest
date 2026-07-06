@@ -246,6 +246,7 @@ async def stop_recording(
             if _rec:
                 _rec.status = "stopped"
                 _rec.ended_at = datetime.utcnow()
+                _rec.events_count = int(getattr(cdp_session, "events_count", 0) or 0)
                 await _db.commit()
     except Exception:
         logger.warning("无法更新录制会话历史", exc_info=True)
