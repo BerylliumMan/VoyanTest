@@ -661,17 +661,15 @@ class AgentClient:
             self._cdp_url = cdp_url
             self._is_recording = True
 
-            # Navigate to target URL
-            if url:
-                import urllib.request
+            # Navigate to target URL via CDP
+            if url and cdp_url:
+                import websockets as _ws
                 try:
-                    nav_req = json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}).encode()
-                    # Use the CDP websocket directly for navigation
-                    # For simplicity, use the existing call_tool if MCP is running
-                    if self._mcp_process:
-                        await self._mcp_call_tool("browser_navigate", url, "")
+                    async with _ws.connect(cdp_url) as _cdp_ws:
+                        await _cdp_ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
+                        await _cdp_ws.recv()
                 except Exception as e:
-                    logger.warning(f"Navigation failed: {e}")
+                    logger.warning(f"CDP navigation to {url} failed: {e}")
 
             await self._send(WSMessageType.RECORDING_READY, msg.run_id, {
                 "status": "ready",
