@@ -613,7 +613,7 @@ class AgentClient:
 
     # ---- Recording handlers ----
 
-    async def _start_chrome_with_cdp(self, headless: bool) -> Optional[str]:
+    async def _start_chrome_with_cdp(self, headless: bool, target_url: str = "") -> Optional[str]:
         """Start Chrome directly with CDP debugging for remote recording.
 
         Returns CDP WebSocket URL with agent's LAN IP (e.g.
@@ -709,14 +709,33 @@ class AgentClient:
                     data = resp.json()
                     ws_url = data.get('webSocketDebuggerUrl')
                     if ws_url:
-                        # Replace 127.0.0.1 with LAN IP so server can connect
-                        ws_url = ws_url.replace('127.0.0.1', self.ip_address)
-                        logger.info(f"Chrome CDP ready: {ws_url}")
-                        return ws_url
+                        logger.info(f"Chrome CDP ready (browser): {ws_url}")
+                        break
                 except Exception:
                     continue
+            else:
+                raise RuntimeError("Chrome CDP endpoint did not start in time")
 
-        raise RuntimeError("Chrome CDP endpoint did not start in time")
+            # Create a page target via CDP and get the page-level WS URL
+            import websockets as _ws
+            try:
+                async with _ws.connect(ws_url) as _cdp:
+                    await _cdp.send(json.dumps({
+                        "id": 1, "method": "Target.createTarget",
+                        "params": {"url": target_url or "about:blank"},
+                    }))
+                    resp_msg = json.loads(await _cdp.recv())
+                    target_id = resp_msg.get("result", {}).get("targetId")
+                    if target_id:
+                        page_ws = f"ws://127.0.0.1:{actual_port}/devtools/page/{target_id}"
+                        logger.info(f"Page target created: {page_ws}")
+                        ws_url = page_ws
+            except Exception as exc:
+                logger.warning(f"Failed to create page target via CDP: {exc}")
+
+            ws_url = ws_url.replace('127.0.0.1', self.ip_address)
+            logger.info(f"CDP page WS URL: {ws_url}")
+            return ws_url
 
     async def _handle_recording_start(self, msg: WSMessage):
         """Start Chrome with CDP for recording. Returns CDP URL to server."""
@@ -726,25 +745,9 @@ class AgentClient:
         logger.info(f"Recording start — url={url}")
 
         try:
-            cdp_url = await self._start_chrome_with_cdp(headless)
+            cdp_url = await self._start_chrome_with_cdp(headless, url)
             self._cdp_url = cdp_url
             self._is_recording = True
-
-            # Navigate to target URL via CDP (browser-level Target.createTarget)
-            if url and cdp_url:
-                import websockets as _ws
-                try:
-                    async with _ws.connect(cdp_url) as _cdp_ws:
-                        # Create a new page/tab with the target URL
-                        cmd = json.dumps({
-                            "id": 1, "method": "Target.createTarget",
-                            "params": {"url": url},
-                        })
-                        await _cdp_ws.send(cmd)
-                        await _cdp_ws.recv()
-                        logger.info(f"CDP navigation to {url} sent via Target.createTarget")
-                except Exception as e:
-                    logger.warning(f"CDP navigation to {url} failed: {e}")
 
             await self._send(WSMessageType.RECORDING_READY, msg.run_id, {
                 "status": "ready",
