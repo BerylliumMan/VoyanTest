@@ -159,6 +159,10 @@ async def extract_multi_file_content(files, filenames, progress_callback=None) -
             logger.warning("文件 %s 提取失败: %s", filename, e)
             warnings.append(f"文件 {filename} 提取失败: {e}")
 
+    # 图片处理完毕后，短暂等待避免 API 限流
+    if idx < total_files - 1 and (image_fp_parts or text_parts):
+        await asyncio.sleep(2)
+
     # 拼接：文档文本在前，图片功能点描述在后
     combined = "\n\n".join(text_parts + image_fp_parts)
 
