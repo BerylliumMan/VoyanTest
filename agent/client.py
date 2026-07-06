@@ -697,7 +697,7 @@ class AgentClient:
             host='0.0.0.0', port=actual_port,
         )
         self._proxy_server = _proxy_server
-        logger.info(f"CDP proxy listening on 0.0.0.0:{_proxy_port} → 127.0.0.1:{actual_port}")
+        logger.info(f"CDP proxy listening on 0.0.0.0:{actual_port} → 127.0.0.1:{actual_port}")
 
         # Poll /json/version for the full WS URL using async HTTP
         import httpx
