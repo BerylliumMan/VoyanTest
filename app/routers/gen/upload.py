@@ -129,13 +129,14 @@ async def upload_and_analyze(
             async with _lock:
                 if result.get("error"):
                     session.status = "failed"
-                    session.error_message = "; ".join(result.get("warnings", ["分析失败"]))
+                    error_parts = list(result.get("warnings", [])) + list(warnings)
+                    session.error_message = "; ".join(error_parts or ["分析失败"])
                 else:
                     session.functional_points = result["functional_points"]
                     session.test_cases = result["test_cases"]
                     session.status = "completed"
-                    if result.get("warnings"):
-                        session.error_message = "; ".join(result["warnings"])
+                    combined_warnings = (result.get("warnings") or []) + warnings
+                    session.error_message = "; ".join(combined_warnings)
 
             if result.get("error"):
                 await _update_db(session_id, "failed", session.error_message, 0, 0)
