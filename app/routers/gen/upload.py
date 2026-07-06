@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 import os
-import threading
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -26,6 +25,9 @@ from app.gen.constants import ALLOWED_EXTENSIONS
 from .state import _lock, _sessions
 
 logger = logging.getLogger(__name__)
+
+# 跟踪后台分析 task，防止被 GC 回收
+_gen_tasks: set = set()
 
 router = APIRouter()
 
@@ -100,80 +102,77 @@ async def upload_and_analyze(
         project_description=project_description,
     )
 
-    def _run_full_analysis() -> None:
+    async def _run_full_analysis() -> None:
         try:
             from app.gen.analyzer import extract_multi_file_content, two_phase_analyze, get_default_prompts
             from app.database import AsyncSessionLocal
 
-            combined_text, _, warnings = extract_multi_file_content(
+            combined_text, _, warnings = await extract_multi_file_content(
                 file_contents, filenames
             )
 
-            async def _load_prompts() -> dict:
-                async with AsyncSessionLocal() as thread_db:
-                    defaults = get_default_prompts()
-                    prompt_rows = await crud.list_prompt_templates(thread_db)
-                    prompts: dict = {}
-                    for row in prompt_rows:
-                        if row.is_custom and row.template_key in defaults:
-                            prompts[row.template_key] = {"content": row.template_content}
-                    return prompts
+            # 异步 DB 查询（在正确的 event loop 中）
+            async with AsyncSessionLocal() as db:
+                defaults = get_default_prompts()
+                prompt_rows = await crud.list_prompt_templates(db)
+                prompts: dict = {}
+                for row in prompt_rows:
+                    if row.is_custom and row.template_key in defaults:
+                        prompts[row.template_key] = {"content": row.template_content}
 
-            prompts = asyncio.run(_load_prompts())
-
-            result = two_phase_analyze(
+            result = await two_phase_analyze(
                 combined_text,
                 project_description=project_description,
                 prompts=prompts,
             )
+
+            async with _lock:
+                if result.get("error"):
+                    session.status = "failed"
+                    session.error_message = "; ".join(result.get("warnings", ["分析失败"]))
+                else:
+                    session.functional_points = result["functional_points"]
+                    session.test_cases = result["test_cases"]
+                    session.status = "completed"
+                    if result.get("warnings"):
+                        session.error_message = "; ".join(result["warnings"])
+
             if result.get("error"):
-                session.status = "failed"
-                session.error_message = "; ".join(result.get("warnings", ["分析失败"]))
-                _update_db_session(session_id, "failed", session.error_message, 0, 0)
+                await _update_db(session_id, "failed", session.error_message, 0, 0)
             else:
-                session.functional_points = result["functional_points"]
-                session.test_cases = result["test_cases"]
-                session.status = "completed"
-                if result.get("warnings"):
-                    session.error_message = "; ".join(result["warnings"])
-                _update_db_session(
-                    session_id,
-                    "completed",
-                    session.error_message,
-                    len(result["functional_points"]),
-                    len(result["test_cases"]),
+                await _update_db(
+                    session_id, "completed", session.error_message,
+                    len(result["functional_points"]), len(result["test_cases"]),
                     functional_points=result["functional_points"],
                     test_cases=result["test_cases"],
                 )
-        except Exception as e:  # noqa: BLE001 - daemon thread outermost guard; must catch any error to persist failed status
+        except Exception as e:
             logger.exception("Analysis failed")
-            session.status = "failed"
-            session.error_message = str(e)
-            _update_db_session(session_id, "failed", str(e), 0, 0)
+            async with _lock:
+                session.status = "failed"
+                session.error_message = str(e)
+            await _update_db(session_id, "failed", str(e), 0, 0)
 
-    thread = threading.Thread(target=_run_full_analysis, daemon=True)
-    thread.start()
+    # 用 async task 替代 threading.Thread，避免 event loop 冲突
+    task = asyncio.create_task(_run_full_analysis())
+    _gen_tasks.add(task)
+    task.add_done_callback(_gen_tasks.discard)
 
     return {"session_id": session_id, "status": "analyzing"}
 
 
-def _update_db_session(session_id: str, status: str, error_msg: str, fp_count: int, tc_count: int,
-                       functional_points: list = None, test_cases: list = None) -> None:
-    """Update GenSession DB record after analysis completes, and persist results."""
+async def _update_db(session_id: str, status: str, error_msg: str, fp_count: int, tc_count: int,
+                     functional_points: list = None, test_cases: list = None) -> None:
+    """异步更新 GenSession DB 记录。"""
     from app.database import AsyncSessionLocal
-
-    async def _work() -> None:
-        async with AsyncSessionLocal() as db:
-            await crud.persist_gen_session_results(
-                db,
-                session_id,
-                status=status,
-                error_message=error_msg,
-                functional_points_count=fp_count,
-                test_cases_count=tc_count,
-                completed_at=datetime.now() if status in ("completed", "failed") else None,
-                functional_points=functional_points,
-                test_cases=test_cases,
-            )
-
-    asyncio.run(_work())
+    async with AsyncSessionLocal() as db:
+        await crud.persist_gen_session_results(
+            db, session_id,
+            status=status,
+            error_message=error_msg,
+            functional_points_count=fp_count,
+            test_cases_count=tc_count,
+            completed_at=datetime.now() if status in ("completed", "failed") else None,
+            functional_points=functional_points,
+            test_cases=test_cases,
+        )

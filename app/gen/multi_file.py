@@ -11,7 +11,6 @@ import asyncio
 import json as _json
 import logging
 import os
-import time
 
 import openai
 
@@ -29,7 +28,7 @@ from app.gen.pdf_parser import (
 logger = logging.getLogger(__name__)
 
 
-def extract_multi_file_content(files, filenames, progress_callback=None) -> tuple[str, list[str], list[str]]:
+async def extract_multi_file_content(files, filenames, progress_callback=None) -> tuple[str, list[str], list[str]]:
     """从多个文件中提取内容并拼接为一个大文本。
 
     Args:
@@ -98,7 +97,7 @@ def extract_multi_file_content(files, filenames, progress_callback=None) -> tupl
                         page_images = render_pdf_pages_to_images(file)
                         if page_images:
                             for page_idx, (pext, pb64) in enumerate(page_images):
-                                fps = extract_functional_points(
+                                fps = await extract_functional_points(
                                     image_data=(pext, pb64),
                                     progress_callback=progress_callback,
                                 )
@@ -119,7 +118,7 @@ def extract_multi_file_content(files, filenames, progress_callback=None) -> tupl
                         warnings.append(f"PDF文件 {filename} 无有效页面，已跳过")
                         continue
                     for page_idx, (pext, pb64) in enumerate(page_images):
-                        fps = extract_functional_points(
+                        fps = await extract_functional_points(
                             image_data=(pext, pb64),
                             progress_callback=progress_callback,
                         )
@@ -137,7 +136,7 @@ def extract_multi_file_content(files, filenames, progress_callback=None) -> tupl
                 fps = []
                 for attempt in range(MAX_RETRIES):
                     try:
-                        fps = extract_functional_points(
+                        fps = await extract_functional_points(
                             image_data=(suffix, b64),
                             progress_callback=progress_callback,
                         )
@@ -145,7 +144,7 @@ def extract_multi_file_content(files, filenames, progress_callback=None) -> tupl
                     except Exception as e:  # noqa: BLE001 - 重试判定依赖 str(e)，需吞掉所有异常
                         if "timed out" in str(e).lower() and attempt < MAX_RETRIES - 1:
                             logger.warning("图片 %s 分析超时，第 %d 次重试...", filename, attempt + 1)
-                            time.sleep(RETRY_DELAY * (attempt + 1))
+                            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                         else:
                             raise
                 fp_text = "\n".join(
