@@ -257,7 +257,7 @@ class AgentClient:
         import sys as _sys
         proc_kwargs = dict(
             stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         if _sys.platform != 'win32':
