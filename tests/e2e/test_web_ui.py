@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -185,6 +186,14 @@ def click_visible(page, label: str):
     """点击可见菜单项。"""
     page.locator(f".arco-menu-item:has-text('{label}')").first.click()
     page.wait_for_timeout(1500)
+
+
+# Shared helpers
+def _make_project(h, name):
+    suffix = uuid.uuid4().hex[:6]
+    r = h.post("/api/projects/", json={"name": f"{name}-{suffix}"})
+    assert r.status_code == 200, f"create project failed: {r.text}"
+    return r.json()["id"]
 
 
 class TestLogin:
@@ -394,8 +403,7 @@ class TestEnvironmentAPI:
 
     def test_update_environment(self, server):
         h = self._api(server)
-        r = h.post("/api/projects/", json={"name":"环境更新","base_url":"https://envup.com"})
-        pid = r.json()["id"]
+        pid = _make_project(h, "环境更新")
         r = h.post(f"/api/projects/{pid}/environments", json={
             "project_id":pid, "name":"旧环境", "base_url":"https://old.com",
         })
@@ -466,8 +474,9 @@ class TestCaseAPI:
         return h
 
     def _make_project(self, h, name):
-        r = h.post("/api/projects/", json={"name":name, "base_url":"https://tc.com"})
-        assert r.status_code == 200
+        suffix = uuid.uuid4().hex[:6]
+        r = h.post("/api/projects/", json={"name": f"{name}-{suffix}"})
+        assert r.status_code == 200, f"create project failed: {r.text}"
         return r.json()["id"]
 
     def _make_module(self, h, pid, name):

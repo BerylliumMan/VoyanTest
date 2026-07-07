@@ -9,6 +9,7 @@ from app.config import get_settings
 import json
 import logging
 import os
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,11 @@ async def init_db_engine(db_url: str | None = None) -> bool:
                 return False
             old_engine = engine
             engine = new_engine
-            AsyncSessionLocal.configure(new_maker)
+            # Configure session maker (handles both _LazySessionMaker and test's async_sessionmaker)
+            if hasattr(AsyncSessionLocal, '_maker'):
+                AsyncSessionLocal._maker = new_maker
+            else:
+                AsyncSessionLocal.configure(bind=new_engine)
             if old_engine:
                 await old_engine.dispose()
             masked = url.split("://")[0] + "://***@" + url.split("@")[-1] if "@" in url else url
