@@ -58,7 +58,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    agents = agent_manager.get_online_agents()
+    agents = await agent_manager.get_online_agents()
     if not agents:
         raise HTTPException(status_code=400, detail="No client agents available")
 
@@ -138,7 +138,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         if _all_success:
             try:
                 from agent.models import WSMessage, WSMessageType
-                session = agent_manager.get_session(agent.id)
+                session = await agent_manager.get_session(agent.id)
                 if session:
                     await session.send(WSMessage(
                         type=WSMessageType.SHUTDOWN, agent_id=agent.id,
@@ -282,7 +282,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         if _all_success:
             try:
                 from agent.models import WSMessage, WSMessageType
-                session = agent_manager.get_session(agent.id)
+                session = await agent_manager.get_session(agent.id)
                 if session:
                     await session.send(WSMessage(
                         type=WSMessageType.SHUTDOWN, agent_id=agent.id,
