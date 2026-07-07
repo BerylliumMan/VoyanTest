@@ -182,7 +182,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     """Run multiple test cases sequentially on a connected client agent."""
     from agent.manager import agent_manager
 
-    agents = agent_manager.get_online_agents()
+    agents = await agent_manager.get_online_agents()
     if not agents:
         raise HTTPException(status_code=400, detail="No client agents available")
 
