@@ -277,7 +277,12 @@ class CDPRecordingSession:
                 f"CDPRecordingSession[{self._session_id}]: disable domains failed: {exc}"
             )
 
-        await self._safe_detach()
+        try:
+            await self._safe_detach()
+        except Exception as exc:
+            logger.warning(
+                f"CDPRecordingSession[{self._session_id}]: detach failed: {exc}"
+            )
 
         self._recording = False
         logger.info(
@@ -417,7 +422,10 @@ class CDPRecordingSession:
                     self._last_page_url = target.url or ""
                     self._last_page_title = await target.title() or ""
                 except Exception:  # noqa: BLE001 - 首次 URL/title 抓取失败时静默回退
-                    pass
+                    logger.debug(
+                        f"CDPRecordingSession[{self._session_id}]: "
+                        f"failed to capture initial URL/title"
+                    )
                 return True
             except Exception as exc:  # noqa: BLE001 - Playwright Page CDP 会话创建可能抛任何错误
                 logger.error(

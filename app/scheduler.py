@@ -79,7 +79,8 @@ class TaskScheduler:
                         next_run=t.next_run_at,
                         run_count=t.run_count or 0,
                     )
-                    self.tasks[task.id] = task
+                    async with self._lock:
+                        self.tasks[task.id] = task
                     logger.info("从 DB 加载定时任务: %s (cron: %s)", task.name, task.cron_expression)
         except Exception as e:
             logger.warning("从 DB 加载定时任务失败: %s", e)
@@ -112,7 +113,8 @@ class TaskScheduler:
         # 计算下次执行时间
         task.next_run = task.calculate_next_run()
         
-        self.tasks[task_id] = task
+        async with self._lock:
+            self.tasks[task_id] = task
         logger.info("添加定时任务: %s (%s), 下次执行: %s", name, cron_expression, task.next_run)
         
         return task
@@ -195,9 +197,17 @@ class TaskScheduler:
             handle = asyncio.create_task(self._schedule_task(task), name=f"sched-{task.id}")
             self._task_handles[task.id] = handle
         
-        # 后台检查循环（不阻塞 start() 返回）
+        # 后台检查循环：清理已完成的任务句柄
         async def _check_loop():
             while self._running:
+                try:
+                    async with self._lock:
+                        stale = [tid for tid, h in self._task_handles.items()
+                                 if h.done()]
+                        for tid in stale:
+                            self._task_handles.pop(tid, None)
+                except Exception:
+                    pass
                 await asyncio.sleep(self._check_interval)
         asyncio.create_task(_check_loop())
     

@@ -64,38 +64,41 @@ def _resolve_database_url() -> str | None:
             logger.warning("读取数据库配置失败: %s", e)
     return get_settings().database_url
 
+_engine_init_lock = asyncio.Lock()
+
 
 async def init_db_engine(db_url: str | None = None) -> bool:
     """初始化数据库引擎。成功返回 True。会测试连接是否可用。"""
-    global engine
-    url = db_url or _resolve_database_url()
-    if not url:
-        engine = None
-        return False
-    try:
-        new_engine = create_async_engine(url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
-        new_maker = async_sessionmaker(new_engine, expire_on_commit=False, class_=AsyncSession)
-        # 测试连接是否可用
-        try:
-            async with new_maker() as sess:
-                await sess.execute(__import__("sqlalchemy").text("SELECT 1"))
-        except Exception as conn_err:
-            logger.warning("数据库连接测试失败，进入配置模式: %s", conn_err)
-            await new_engine.dispose()
+    async with _engine_init_lock:
+        global engine
+        url = db_url or _resolve_database_url()
+        if not url:
             engine = None
             return False
-        old_engine = engine
-        engine = new_engine
-        AsyncSessionLocal.configure(new_maker)
-        if old_engine:
-            await old_engine.dispose()
-        masked = url.split("://")[0] + "://***@" + url.split("@")[-1] if "@" in url else url
-        logger.info("数据库引擎已初始化: %s", masked)
-        return True
-    except Exception as e:
-        logger.error("数据库引擎初始化失败: %s", e)
-        engine = None
-        return False
+        try:
+            new_engine = create_async_engine(url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
+            new_maker = async_sessionmaker(new_engine, expire_on_commit=False, class_=AsyncSession)
+            # 测试连接是否可用
+            try:
+                async with new_maker() as sess:
+                    await sess.execute(__import__("sqlalchemy").text("SELECT 1"))
+            except Exception as conn_err:
+                logger.warning("数据库连接测试失败，进入配置模式: %s", conn_err)
+                await new_engine.dispose()
+                engine = None
+                return False
+            old_engine = engine
+            engine = new_engine
+            AsyncSessionLocal.configure(new_maker)
+            if old_engine:
+                await old_engine.dispose()
+            masked = url.split("://")[0] + "://***@" + url.split("@")[-1] if "@" in url else url
+            logger.info("数据库引擎已初始化: %s", masked)
+            return True
+        except Exception as e:
+            logger.error("数据库引擎初始化失败: %s", e)
+            engine = None
+            return False
 
 
 async def get_async_db() -> AsyncIterator[AsyncSession]:

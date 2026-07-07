@@ -98,6 +98,7 @@ class AgentClient:
         # CDP Chrome recording state
         self._chrome_process = None
         self._chrome_user_data_dir = None
+        self._proxy_server = None
         self._cdp_url = None
         self._is_recording = False
 
@@ -257,7 +258,7 @@ class AgentClient:
         proc_kwargs = dict(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
         if _sys.platform != 'win32':
             proc_kwargs['preexec_fn'] = os.setsid
@@ -692,50 +693,64 @@ class AgentClient:
 
         # Chrome only listens on 127.0.0.1 (--remote-debugging-address often ignored on Windows).
         # Start a local TCP proxy on 0.0.0.0 so the server can connect across subnets.
+        _proxy_port = actual_port + 1
         _proxy_server = await asyncio.start_server(
             lambda r, w: _pipe(r, w, '127.0.0.1', actual_port),
-            host='0.0.0.0', port=actual_port,
+            host='0.0.0.0', port=_proxy_port,
         )
         self._proxy_server = _proxy_server
-        logger.info(f"CDP proxy listening on 0.0.0.0:{actual_port} → 127.0.0.1:{actual_port}")
+        logger.info(f"CDP proxy listening on 0.0.0.0:{_proxy_port} → 127.0.0.1:{actual_port}")
 
-        # Poll /json/version for the full WS URL using async HTTP
-        import httpx
-        async with httpx.AsyncClient() as client:
-            for _attempt in range(20):
-                await asyncio.sleep(0.5)
+        try:
+            # Poll /json/version for the full WS URL using async HTTP
+            import httpx
+            async with httpx.AsyncClient() as client:
+                for _attempt in range(20):
+                    await asyncio.sleep(0.5)
+                    try:
+                        resp = await client.get(f'http://127.0.0.1:{actual_port}/json/version', timeout=2)
+                        data = resp.json()
+                        ws_url = data.get('webSocketDebuggerUrl')
+                        if ws_url:
+                            logger.info(f"Chrome CDP ready (browser): {ws_url}")
+                            break
+                    except Exception:
+                        continue
+                else:
+                    raise RuntimeError("Chrome CDP endpoint did not start in time")
+
+                # Create a page target via CDP and get the page-level WS URL
+                import websockets as _ws
                 try:
-                    resp = await client.get(f'http://127.0.0.1:{actual_port}/json/version', timeout=2)
-                    data = resp.json()
-                    ws_url = data.get('webSocketDebuggerUrl')
-                    if ws_url:
-                        logger.info(f"Chrome CDP ready (browser): {ws_url}")
-                        break
+                    async with _ws.connect(ws_url) as _cdp:
+                        await _cdp.send(json.dumps({
+                            "id": 1, "method": "Target.createTarget",
+                            "params": {"url": target_url or "about:blank"},
+                        }))
+                        resp_msg = json.loads(await _cdp.recv())
+                        target_id = resp_msg.get("result", {}).get("targetId")
+                        if target_id:
+                            page_ws = f"ws://127.0.0.1:{_proxy_port}/devtools/page/{target_id}"
+                            logger.info(f"Page target created: {page_ws}")
+                            ws_url = page_ws
+                except Exception as exc:
+                    logger.warning(f"Failed to create page target via CDP: {exc}")
+
+                ws_url = ws_url.replace('127.0.0.1', self.ip_address)
+                logger.info(f"CDP page WS URL: {ws_url}")
+                return ws_url
+        except Exception:
+            # Clean up Chrome and proxy on failure
+            if self._chrome_process:
+                self._chrome_process.kill()
+                try:
+                    await asyncio.wait_for(self._chrome_process.wait(), timeout=5)
                 except Exception:
-                    continue
-            else:
-                raise RuntimeError("Chrome CDP endpoint did not start in time")
-
-            # Create a page target via CDP and get the page-level WS URL
-            import websockets as _ws
-            try:
-                async with _ws.connect(ws_url) as _cdp:
-                    await _cdp.send(json.dumps({
-                        "id": 1, "method": "Target.createTarget",
-                        "params": {"url": target_url or "about:blank"},
-                    }))
-                    resp_msg = json.loads(await _cdp.recv())
-                    target_id = resp_msg.get("result", {}).get("targetId")
-                    if target_id:
-                        page_ws = f"ws://127.0.0.1:{actual_port}/devtools/page/{target_id}"
-                        logger.info(f"Page target created: {page_ws}")
-                        ws_url = page_ws
-            except Exception as exc:
-                logger.warning(f"Failed to create page target via CDP: {exc}")
-
-            ws_url = ws_url.replace('127.0.0.1', self.ip_address)
-            logger.info(f"CDP page WS URL: {ws_url}")
-            return ws_url
+                    pass
+            if self._proxy_server:
+                self._proxy_server.close()
+                self._proxy_server = None
+            raise
 
     async def _handle_recording_start(self, msg: WSMessage):
         """Start Chrome with CDP for recording. Returns CDP URL to server."""
@@ -762,9 +777,12 @@ class AgentClient:
         """Kill the CDP Chrome process. Events were already captured server-side."""
         logger.info("Recording stop — killing CDP Chrome")
         self._is_recording = False
-        if hasattr(self, '_chrome_process') and self._chrome_process:
+        if self._chrome_process:
             try:
-                self._chrome_process.kill()
+                if sys.platform != 'win32' and self._chrome_process.pid:
+                    os.killpg(os.getpgid(self._chrome_process.pid), 9)
+                else:
+                    self._chrome_process.kill()
                 await asyncio.wait_for(self._chrome_process.wait(), timeout=5)
             except Exception:
                 try:

@@ -62,6 +62,13 @@ async def _run_startup_init():
     if os.getenv("DISABLE_CREATE_ALL", "false").lower() != "true":
         async with engine.begin() as conn:
             await conn.run_sync(db_mod.Base.metadata.create_all)
+        # 字段迁移：确保 nickname/email 列存在（兼容已有数据库）
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
+        except Exception:
+            logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
     else:
         logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（请确保已执行 alembic upgrade head）")
 
@@ -157,6 +164,11 @@ async def _periodic_session_cleanup():
                 logger.info("周期性过期会话清理完成")
         except SQLAlchemyError as e:
             logger.warning("周期性过期会话清理失败: %s", e, exc_info=True)
+        try:
+            from app.routers.recordings.state import cleanup_stale_sessions
+            await cleanup_stale_sessions()
+        except Exception:
+            pass
 
 
 @asynccontextmanager

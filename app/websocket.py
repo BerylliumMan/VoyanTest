@@ -151,9 +151,11 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
             
     except WebSocketDisconnect:
         await log_manager.disconnect(websocket, run_id)
+        await LogBroadcaster.remove_pause_event(run_id)
     except (RuntimeError, ConnectionError) as e:
         logger.exception("WebSocket 错误: %s", e)
         await log_manager.disconnect(websocket, run_id)
+        await LogBroadcaster.remove_pause_event(run_id)
 
 
 class LogBroadcaster:
