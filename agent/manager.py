@@ -45,6 +45,9 @@ class AgentSession:
         except asyncio.TimeoutError:
             self._pending.pop(key, None)
             raise
+        except asyncio.CancelledError:
+            self._pending.pop(key, None)
+            raise
 
     def resolve(self, msg: WSMessage):
         key = msg.run_id
@@ -58,10 +61,11 @@ class AgentManager:
 
     def __init__(self):
         self.sessions: Dict[str, AgentSession] = {}
+        self._lock = asyncio.Lock()
 
     # ---- session management ----
 
-    def register(self, agent_id: str, info: AgentRegistration, send_fn) -> AgentInfo:
+    async def register(self, agent_id: str, info: AgentRegistration, send_fn) -> AgentInfo:
         agent = AgentInfo(
             id=agent_id or info.name,
             name=info.name,
@@ -71,30 +75,35 @@ class AgentManager:
             status=AgentStatus.ONLINE,
             last_seen=tz_now(),
         )
-        self.sessions[agent.id] = AgentSession(agent, send_fn)
+        async with self._lock:
+            self.sessions[agent.id] = AgentSession(agent, send_fn)
         logger.info(f"Agent registered: {agent.name} ({agent.id})")
         return agent
 
-    def unregister(self, agent_id: str):
-        self.sessions.pop(agent_id, None)
+    async def unregister(self, agent_id: str):
+        async with self._lock:
+            self.sessions.pop(agent_id, None)
         logger.info(f"Agent unregistered: {agent_id}")
 
-    def heartbeat(self, agent_id: str):
-        if agent_id in self.sessions:
-            self.sessions[agent_id].agent.last_seen = tz_now()
+    async def heartbeat(self, agent_id: str):
+        async with self._lock:
+            if agent_id in self.sessions:
+                self.sessions[agent_id].agent.last_seen = tz_now()
 
-    def get_online_agents(self) -> List[AgentInfo]:
+    async def get_online_agents(self) -> List[AgentInfo]:
         now = tz_now()
         result = []
-        for s in self.sessions.values():
-            if s.agent.last_seen is None:
-                continue
-            if (now - s.agent.last_seen).total_seconds() < 120:
-                result.append(s.agent)
+        async with self._lock:
+            for s in self.sessions.values():
+                if s.agent.last_seen is None:
+                    continue
+                if (now - s.agent.last_seen).total_seconds() < 120:
+                    result.append(s.agent)
         return result
 
-    def get_session(self, agent_id: str) -> Optional[AgentSession]:
-        return self.sessions.get(agent_id)
+    async def get_session(self, agent_id: str) -> Optional[AgentSession]:
+        async with self._lock:
+            return self.sessions.get(agent_id)
 
     # ---- recording (agent-side browser, server-side CDP capture) ----
 
@@ -103,26 +112,29 @@ class AgentManager:
 
         Returns the CDP WebSocket URL that the server can connect to.
         """
-        session = self.sessions.get(agent_id)
+        session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
         session.agent.status = AgentStatus.BUSY
-        run_id = f"rec-{os.urandom(4).hex()}"
-        payload = await session.request(WSMessage(
-            type=WSMessageType.RECORDING_START, agent_id=agent_id,
-            run_id=run_id,
-            payload={"url": url, "headless": headless},
-        ))
-        payload = payload or {}
-        status = payload.get("status")
-        cdp_url = payload.get("cdp_url")
-        if status != "ready" or not cdp_url:
-            raise RuntimeError(f"Agent failed to start recording: status={status} has_url={bool(cdp_url)}")
-        return cdp_url
+        try:
+            run_id = f"rec-{os.urandom(4).hex()}"
+            payload = await session.request(WSMessage(
+                type=WSMessageType.RECORDING_START, agent_id=agent_id,
+                run_id=run_id,
+                payload={"url": url, "headless": headless},
+            ))
+            payload = payload or {}
+            status = payload.get("status")
+            cdp_url = payload.get("cdp_url")
+            if status != "ready" or not cdp_url:
+                raise RuntimeError(f"Agent failed to start recording: status={status} has_url={bool(cdp_url)}")
+            return cdp_url
+        finally:
+            session.agent.status = AgentStatus.ONLINE
 
     async def stop_agent_recording(self, agent_id: str) -> None:
         """Tell agent to stop recording (browser stays alive)."""
-        session = self.sessions.get(agent_id)
+        session = await self.get_session(agent_id)
         if not session:
             return
         run_id = f"rec-stop-{os.urandom(4).hex()}"
@@ -133,7 +145,8 @@ class AgentManager:
             ))
         except (asyncio.TimeoutError, ValueError):
             pass
-        session.agent.status = AgentStatus.ONLINE
+        finally:
+            session.agent.status = AgentStatus.ONLINE
 
     # ---- step-by-step execution (server-side LLM, agent-side browser) ----
 

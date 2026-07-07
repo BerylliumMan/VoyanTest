@@ -118,7 +118,7 @@ async def start_recording(
     # 3) 根据是否指定 agent_name 选择浏览器获取方式
     if req.agent_name:
         from agent.manager import agent_manager
-        agents = agent_manager.get_online_agents()
+        agents = await agent_manager.get_online_agents()
         matched = [a for a in agents if a.name == req.agent_name]
         if not matched:
             raise HTTPException(status_code=400, detail=f"Agent '{req.agent_name}' 不在线或不存在")

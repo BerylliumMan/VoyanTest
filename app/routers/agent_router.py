@@ -47,7 +47,7 @@ async def list_agents(user=Depends(get_current_user), db: AsyncSession = Depends
     for a in db_agents:
         a.status = "online" if _is_online(a.name, a.last_heartbeat) else "offline"
 
-    ws_agents = agent_manager.get_online_agents()
+    ws_agents = await agent_manager.get_online_agents()
     for ws_a in ws_agents:
         if ws_a.name not in db_names:
             db_agents.append(models.Agent(

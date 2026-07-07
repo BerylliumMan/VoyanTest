@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 MODEL_MAX_TOKENS = 8192
 
 
-def two_phase_analyze(
+async def two_phase_analyze(
     text: str,
     progress_callback=None,
     project_description: str = "",
@@ -74,7 +74,7 @@ def two_phase_analyze(
         progress_callback(0, 0, "正在提取功能点清单")
 
     try:
-        fps = extract_functional_points(text=text, project_description=project_description, fp_prompt=fp_prompt)
+        fps = await extract_functional_points(text=text, project_description=project_description, fp_prompt=fp_prompt)
         if not fps:
             warnings.append("No functional points extracted from document")
         logger.info("Phase 1: extracted %d functional points", len(fps))
@@ -87,7 +87,7 @@ def two_phase_analyze(
     if fps:
         num_batches = max(1, (len(fps) + FP_BATCH_SIZE - 1) // FP_BATCH_SIZE)
         total_steps = 1 + num_batches  # 1 for Phase 1 + N batches
-        result = generate_test_cases_for_fps(
+        result = await generate_test_cases_for_fps(
             fps, project_description, progress_callback,
             phase1_offset=1, total_steps=total_steps, tc_prompt=tc_prompt,
         )
@@ -103,7 +103,7 @@ def two_phase_analyze(
     }
 
 
-def _analyze_image_two_phase(file, progress_callback, project_description) -> dict:
+async def _analyze_image_two_phase(file, progress_callback, project_description) -> dict:
     """Two-phase analysis for image files: extract FPs from image then generate TCs."""
     warnings: list[str] = []
     suffix = os.path.splitext(file.filename)[1].lstrip(".")
@@ -114,7 +114,7 @@ def _analyze_image_two_phase(file, progress_callback, project_description) -> di
         progress_callback(0, 0, "正在从图片提取功能点")
 
     try:
-        fps = extract_functional_points(image_data=image_data, project_description=project_description)
+        fps = await extract_functional_points(image_data=image_data, project_description=project_description)
         if not fps:
             warnings.append("No functional points extracted from image")
         logger.info("Phase 1 (image): extracted %d functional points", len(fps))
@@ -127,7 +127,7 @@ def _analyze_image_two_phase(file, progress_callback, project_description) -> di
     if fps:
         num_batches = max(1, (len(fps) + FP_BATCH_SIZE - 1) // FP_BATCH_SIZE)
         total_steps = 1 + num_batches
-        result = generate_test_cases_for_fps(
+        result = await generate_test_cases_for_fps(
             fps, project_description, progress_callback,
             phase1_offset=1, total_steps=total_steps,
         )
@@ -143,7 +143,7 @@ def _analyze_image_two_phase(file, progress_callback, project_description) -> di
     }
 
 
-def _analyze_pdf_two_phase(file, progress_callback, project_description) -> dict:
+async def _analyze_pdf_two_phase(file, progress_callback, project_description) -> dict:
     """Two-phase analysis for PDF files: auto-detect dual-layer vs scan-only."""
     warnings: list[str] = []
 
@@ -160,7 +160,7 @@ def _analyze_pdf_two_phase(file, progress_callback, project_description) -> dict
         text = extract_text_from_pdf(file)
         if not text.strip():
             return {"functional_points": [], "test_cases": [], "warnings": ["PDF文件中无有效文字内容"], "error": True}
-        return two_phase_analyze(text, progress_callback, project_description)
+        return await two_phase_analyze(text, progress_callback, project_description)
     else:
         # Scan-only: render pages to images, extract FPs per page
         if progress_callback:
@@ -176,7 +176,7 @@ def _analyze_pdf_two_phase(file, progress_callback, project_description) -> dict
             if progress_callback:
                 progress_callback(idx, total_pages, f"正在分析第 {idx + 1}/{total_pages} 页")
             try:
-                fps = extract_functional_points(
+                fps = await extract_functional_points(
                     image_data=(ext, b64),
                     project_description=project_description,
                     progress_callback=progress_callback,
@@ -198,7 +198,7 @@ def _analyze_pdf_two_phase(file, progress_callback, project_description) -> dict
         if all_fps:
             num_batches = max(1, (len(all_fps) + FP_BATCH_SIZE - 1) // FP_BATCH_SIZE)
             total_steps = total_pages + num_batches
-            result = generate_test_cases_for_fps(
+            result = await generate_test_cases_for_fps(
                 all_fps, project_description, progress_callback,
                 phase1_offset=total_pages, total_steps=total_steps,
             )

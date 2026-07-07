@@ -95,6 +95,7 @@ log_manager = LogWebSocketManager()
 _pause_events: dict[int, asyncio.Event] = {}
 # per-run_id 用户决策存储 {decision: str, new_description: str|None}
 _pause_decisions: dict[int, dict] = {}
+_pause_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def websocket_logs(websocket: WebSocket, run_id: int):
@@ -133,12 +134,12 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
                 elif message.get('type') == 'control':
                     action = message.get('action', '')
                     if action in ('retry', 'skip', 'abort'):
-                        LogBroadcaster.set_pause_decision(run_id, action)
+                        await LogBroadcaster.set_pause_decision(run_id, action)
                         await LogBroadcaster.log_execution_resumed(
                             run_id, step_id=None, decision=action)
                     elif action == 'edit':
                         new_desc = message.get('new_description', '')
-                        LogBroadcaster.set_pause_decision(
+                        await LogBroadcaster.set_pause_decision(
                             run_id, 'edit', new_description=new_desc)
                         await LogBroadcaster.log_execution_resumed(
                             run_id, step_id=None, decision='edit',
@@ -149,10 +150,10 @@ async def websocket_logs(websocket: WebSocket, run_id: int):
                 logger.warning("收到来自 WebSocket 客户端的非法 JSON 消息")
             
     except WebSocketDisconnect:
-        log_manager.disconnect(websocket, run_id)
+        await log_manager.disconnect(websocket, run_id)
     except (RuntimeError, ConnectionError) as e:
         logger.exception("WebSocket 错误: %s", e)
-        log_manager.disconnect(websocket, run_id)
+        await log_manager.disconnect(websocket, run_id)
 
 
 class LogBroadcaster:
@@ -269,21 +270,47 @@ class LogBroadcaster:
         })
 
     @staticmethod
-    def get_pause_event(run_id: int) -> asyncio.Event:
-        """获取或创建 per-run_id 暂停事件"""
-        if run_id not in _pause_events:
-            _pause_events[run_id] = asyncio.Event()
-        return _pause_events[run_id]
+    async def get_pause_event(run_id: int) -> asyncio.Event:
+        """获取或创建 per-run_id 暂停事件（线程安全）"""
+        async with _pause_lock:
+            if run_id not in _pause_events:
+                _pause_events[run_id] = asyncio.Event()
+            return _pause_events[run_id]
 
     @staticmethod
-    def set_pause_decision(run_id: int, decision: str, new_description: str = None):
-        """存储用户决策并触发暂停事件"""
-        _pause_decisions[run_id] = {
-            "decision": decision,
-            "new_description": new_description,
-        }
-        if run_id in _pause_events:
-            _pause_events[run_id].set()
+    async def set_pause_decision(run_id: int, decision: str, new_description: str = None):
+        """存储用户决策并触发暂停事件（线程安全）"""
+        async with _pause_lock:
+            _pause_decisions[run_id] = {
+                "decision": decision,
+                "new_description": new_description,
+            }
+            if run_id in _pause_events:
+                _pause_events[run_id].set()
+
+    @staticmethod
+    async def read_pause_decision(run_id: int) -> dict | None:
+        """线程安全读取并删除 pause_decision"""
+        async with _pause_lock:
+            return _pause_decisions.pop(run_id, None)
+
+    @staticmethod
+    async def peek_pause_decision(run_id: int) -> dict | None:
+        """线程安全读取（不删除）pause_decision"""
+        async with _pause_lock:
+            return _pause_decisions.get(run_id)
+
+    @staticmethod
+    async def reset_pause_event(run_id: int):
+        """线程安全替换 pause_event（清空旧状态）"""
+        async with _pause_lock:
+            _pause_events[run_id] = asyncio.Event()
+
+    @staticmethod
+    async def remove_pause_event(run_id: int):
+        """线程安全删除 pause_event"""
+        async with _pause_lock:
+            _pause_events.pop(run_id, None)
 
 
 # 便捷函数

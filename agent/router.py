@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/agents", tags=["Agents"])
 
 @router.get("/", response_model=List[AgentInfo])
 async def list_agents():
-    return agent_manager.get_online_agents()
+    return await agent_manager.get_online_agents()
 
 
 # ---- WebSocket: Agent communication ----
@@ -81,15 +81,15 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
             if msg.type == WSMessageType.REGISTERED:
                 reg = AgentRegistration(**msg.payload)
                 agent_id = agent_name
-                agent = agent_manager.register(agent_id, reg, _send)
-                session = agent_manager.get_session(agent_id)
+                agent = await agent_manager.register(agent_id, reg, _send)
+                session = await agent_manager.get_session(agent_id)
                 await _sync_to_db(agent_name, reg.ip_address, reg.hostname)
                 ack = WSMessage(type=WSMessageType.REGISTERED, agent_id=agent_id,
                                 payload={"status": "ok", "message": f"Registered as {agent_id}"})
                 await session.send(ack) if session else None
 
             elif msg.type == WSMessageType.HEARTBEAT:
-                agent_manager.heartbeat(agent_id)
+                await agent_manager.heartbeat(agent_id)
                 await _sync_to_db(agent_name, "", "")
 
             elif msg.type in (WSMessageType.STEP_RESULT, WSMessageType.SNAPSHOT_RESULT,
@@ -108,4 +108,4 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
     except Exception as e:
         logger.error(f"Agent {agent_id} error: {e}")
     finally:
-        agent_manager.unregister(agent_id)
+        await agent_manager.unregister(agent_id)
