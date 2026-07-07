@@ -327,8 +327,12 @@ class AgentClient:
 
     async def _pipe_stderr(self):
         try:
+            stderr = self._mcp_process.stderr
+            if stderr is None:
+                logger.debug("MCP stderr not available")
+                return
             while True:
-                line = await self._mcp_process.stderr.readline()
+                line = await stderr.readline()
                 if not line:
                     break
                 text = line.decode(errors='replace').rstrip()
