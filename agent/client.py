@@ -720,18 +720,32 @@ class AgentClient:
                     raise RuntimeError("Chrome CDP endpoint did not start in time")
 
                 # Create a page target via CDP and get the page-level WS URL
+                # Prefer reusing existing blank page to avoid extra tab
                 import websockets as _ws
                 try:
                     async with _ws.connect(ws_url) as _cdp:
+                        # 先查已有页面，避免创建多余标签页
                         await _cdp.send(json.dumps({
-                            "id": 1, "method": "Target.createTarget",
-                            "params": {"url": target_url or "about:blank"},
+                            "id": 1, "method": "Target.getTargets",
                         }))
                         resp_msg = json.loads(await _cdp.recv())
-                        target_id = resp_msg.get("result", {}).get("targetId")
+                        targets = resp_msg.get("result", {}).get("targetInfos", [])
+                        target_id = None
+                        for t in targets:
+                            if t.get("type") == "page":
+                                target_id = t["targetId"]
+                                break
+                        # 无已有页面时才创建新页面
+                        if not target_id:
+                            await _cdp.send(json.dumps({
+                                "id": 2, "method": "Target.createTarget",
+                                "params": {"url": target_url or "about:blank"},
+                            }))
+                            resp_msg = json.loads(await _cdp.recv())
+                            target_id = resp_msg.get("result", {}).get("targetId")
                         if target_id:
                             page_ws = f"ws://127.0.0.1:{_proxy_port}/devtools/page/{target_id}"
-                            logger.info(f"Page target created: {page_ws}")
+                            logger.info(f"Page target acquired: {page_ws}")
                             ws_url = page_ws
                 except Exception as exc:
                     logger.warning(f"Failed to create page target via CDP: {exc}")
