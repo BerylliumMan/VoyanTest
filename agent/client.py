@@ -277,7 +277,14 @@ class AgentClient:
         })
         init_resp = await self._mcp_recv(timeout=60)
         if not init_resp:
-            logger.error("MCP initialize failed — no response")
+            # Try to capture stderr for diagnosis
+            stderr_text = ""
+            try:
+                if self._mcp_process.stderr:
+                    stderr_text = (await asyncio.wait_for(self._mcp_process.stderr.read(), timeout=2)).decode(errors='replace')
+            except Exception:
+                pass
+            logger.error(f"MCP initialize failed — no response. stderr: {stderr_text[:500]}")
             raise RuntimeError("MCP subprocess failed to initialize")
         logger.info("MCP initialized")
 
