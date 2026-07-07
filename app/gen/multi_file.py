@@ -74,14 +74,14 @@ async def extract_multi_file_content(files, filenames, progress_callback=None) -
         try:
             file.seek(0)
             if ext == ".docx":
-                text = extract_text(file)
+                text = await asyncio.to_thread(extract_text, file)
                 if not text.strip():
                     warnings.append(f"文件 {filename} 为空，已跳过")
                     continue
                 text_parts.append(f"===== 文件{idx + 1}: {filename} =====\n{text}")
 
             elif ext == ".md":
-                text = extract_text_from_md(file)
+                text = await asyncio.to_thread(extract_text_from_md, file)
                 if not text.strip():
                     warnings.append(f"文件 {filename} 为空，已跳过")
                     continue
@@ -89,12 +89,12 @@ async def extract_multi_file_content(files, filenames, progress_callback=None) -
 
             elif ext == ".pdf":
                 # 双层 PDF 提取文本，扫描 PDF 提取图片功能点
-                if is_pdf_dual_layer(file):
-                    text = extract_text_from_pdf(file)
+                if await asyncio.to_thread(is_pdf_dual_layer, file):
+                    text = await asyncio.to_thread(extract_text_from_pdf, file)
                     if not text.strip():
                         warnings.append(f"PDF 文件 {filename} 无有效文字，尝试图片模式")
                         file.seek(0)
-                        page_images = render_pdf_pages_to_images(file)
+                        page_images = await asyncio.to_thread(render_pdf_pages_to_images, file)
                         if page_images:
                             for page_idx, (pext, pb64) in enumerate(page_images):
                                 fps = await extract_functional_points(
@@ -113,7 +113,7 @@ async def extract_multi_file_content(files, filenames, progress_callback=None) -
                         continue
                     text_parts.append(f"===== 文件{idx + 1}: {filename} =====\n{text}")
                 else:
-                    page_images = render_pdf_pages_to_images(file)
+                    page_images = await asyncio.to_thread(render_pdf_pages_to_images, file)
                     if not page_images:
                         warnings.append(f"PDF文件 {filename} 无有效页面，已跳过")
                         continue
@@ -132,7 +132,7 @@ async def extract_multi_file_content(files, filenames, progress_callback=None) -
 
             elif ext in (".png", ".jpg", ".jpeg"):
                 suffix = ext.lstrip(".")
-                b64 = encode_image(file)
+                b64 = await asyncio.to_thread(encode_image, file)
                 fps = []
                 for attempt in range(MAX_RETRIES):
                     try:

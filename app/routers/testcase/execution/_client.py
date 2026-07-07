@@ -25,13 +25,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
 from app.auth import get_current_user
-from app.database import AsyncSessionLocal, get_async_db
+from app import database as db_mod
+from app.database import get_async_db
 from app.tz import now as tz_now
 from core.runner import save_run_results
 
 from ._schemas import BatchCaseIdsRequest
 
 logger = logging.getLogger(__name__)
+
+
+def _write_json(path: str, data: dict) -> None:
+    """同步写入 JSON 文件 — 供 asyncio.to_thread 调用。"""
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _ensure_dir(path: str) -> None:
+    """同步创建目录 — 供 asyncio.to_thread 调用。"""
+    _os.makedirs(path, exist_ok=True)
+
 
 router = APIRouter()
 
@@ -72,7 +85,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
     async def _run() -> None:
         start_time = tz_now()
         output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
-        _os.makedirs(output_dir, exist_ok=True)
+        await _asyncio.to_thread(_ensure_dir, output_dir)
 
         _all_success = True
         try:
@@ -94,8 +107,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
                 "steps": step_results,
             }
             report_path = _os.path.join(output_dir, "report.json")
-            with open(report_path, "w", encoding="utf-8") as f:
-                _json.dump(report, f, ensure_ascii=False, indent=2)
+            await _asyncio.to_thread(_write_json, report_path, report)
 
             await save_run_results(
                 case_id, status, start_time, tz_now(),
@@ -114,7 +126,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
                 batch_id=batch.id,
             )
 
-        async with AsyncSessionLocal() as _db:
+        async with db_mod.AsyncSessionLocal() as _db:
             _result = await _db.execute(
                 select(db_models.RunBatch).where(db_models.RunBatch.id == batch.id)
             )
@@ -143,9 +155,9 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         if exc:
             logger.error("Client agent run task failed: %s", exc)
             try:
-                from app.database import AsyncSessionLocal as _ASL
+                
                 from app import db_models as _dm
-                async with _ASL() as _db:
+                async with db_mod.AsyncSessionLocal() as _db:
                     _result = await _db.execute(
                         select(_dm.RunBatch).where(_dm.RunBatch.id == batch.id)
                     )
@@ -216,7 +228,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             run_id = uuid.uuid4().hex[:12]
             start_time = tz_now()
             output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
-            _os.makedirs(output_dir, exist_ok=True)
+            await _asyncio.to_thread(_ensure_dir, output_dir)
 
             try:
                 step_results = await agent_manager.execute_on_agent(
@@ -237,8 +249,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     "steps": step_results,
                 }
                 report_path = _os.path.join(output_dir, "report.json")
-                with open(report_path, "w", encoding="utf-8") as f:
-                    _json.dump(report, f, ensure_ascii=False, indent=2)
+                await _asyncio.to_thread(_write_json, report_path, report)
 
                 await save_run_results(
                     case_id, status, start_time, tz_now(),
@@ -259,7 +270,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     is_init=info.get("is_init", False),
                 )
 
-        async with AsyncSessionLocal() as _db:
+        async with db_mod.AsyncSessionLocal() as _db:
             _result = await _db.execute(
                 select(db_models.RunBatch).where(db_models.RunBatch.id == batch.id)
             )
@@ -288,9 +299,9 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         if exc:
             logger.error("Client agent batch-run task failed: %s", exc)
             try:
-                from app.database import AsyncSessionLocal as _ASL
+                
                 from app import db_models as _dm
-                async with _ASL() as _db:
+                async with db_mod.AsyncSessionLocal() as _db:
                     _result = await _db.execute(
                         select(_dm.RunBatch).where(_dm.RunBatch.id == batch.id)
                     )

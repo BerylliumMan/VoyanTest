@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -34,6 +35,12 @@ class BatchUpdate(BaseModel):
 
 # 允许的报告根目录（路径穿越防护）
 _REPORTS_ROOT = Path(os.path.abspath("reports"))
+
+
+def _read_json(path: Path) -> dict:
+    """同步读取并解析 JSON 文件，供 asyncio.to_thread 使用。"""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _safe_report_path(report_path: str | None) -> Path | None:
@@ -219,8 +226,7 @@ async def get_run_detail(run_id: int, user=Depends(get_current_user), db: AsyncS
     safe_path = _safe_report_path(run.report_path)
     if safe_path:
         try:
-            with open(safe_path, "r", encoding="utf-8") as f:
-                report_data = json.load(f)
+            report_data = await asyncio.to_thread(_read_json, safe_path)
             response["steps"] = report_data.get("steps", [])
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             # 文件 I/O / JSON 损坏 / 编码错误都降级为空 steps
@@ -332,8 +338,7 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
         safe_path = _safe_report_path(run.report_path)
         if safe_path:
             try:
-                with open(safe_path, "r", encoding="utf-8") as f:
-                    report_data = json.load(f)
+                report_data = await asyncio.to_thread(_read_json, safe_path)
                 run_info["steps"] = report_data.get("steps", [])
             except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                 # 文件 I/O / JSON 损坏 / 编码错误都降级为空 steps

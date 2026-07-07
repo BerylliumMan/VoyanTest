@@ -107,7 +107,7 @@ async def _analyze_image_two_phase(file, progress_callback, project_description)
     """Two-phase analysis for image files: extract FPs from image then generate TCs."""
     warnings: list[str] = []
     suffix = os.path.splitext(file.filename)[1].lstrip(".")
-    b64 = encode_image(file)
+    b64 = await asyncio.to_thread(encode_image, file)
     image_data = (suffix, b64)
 
     if progress_callback:
@@ -148,16 +148,16 @@ async def _analyze_pdf_two_phase(file, progress_callback, project_description) -
     warnings: list[str] = []
 
     # Validate PDF
-    is_valid, error_msg = validate_pdf(file)
+    is_valid, error_msg = await asyncio.to_thread(validate_pdf, file)
     if not is_valid:
         return {"functional_points": [], "test_cases": [], "warnings": [error_msg], "error": True}
 
     # Detect dual-layer
-    if is_pdf_dual_layer(file):
+    if await asyncio.to_thread(is_pdf_dual_layer, file):
         # Dual-layer: extract text and use text pipeline
         if progress_callback:
             progress_callback(0, 0, "正在从PDF提取文字")
-        text = extract_text_from_pdf(file)
+        text = await asyncio.to_thread(extract_text_from_pdf, file)
         if not text.strip():
             return {"functional_points": [], "test_cases": [], "warnings": ["PDF文件中无有效文字内容"], "error": True}
         return await two_phase_analyze(text, progress_callback, project_description)
@@ -165,7 +165,7 @@ async def _analyze_pdf_two_phase(file, progress_callback, project_description) -
         # Scan-only: render pages to images, extract FPs per page
         if progress_callback:
             progress_callback(0, 0, "正在将PDF页面转为图片")
-        page_images = render_pdf_pages_to_images(file)
+        page_images = await asyncio.to_thread(render_pdf_pages_to_images, file)
         if not page_images:
             return {"functional_points": [], "test_cases": [], "warnings": ["PDF文件中无有效页面"], "error": True}
 

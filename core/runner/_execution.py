@@ -27,7 +27,7 @@ from core.step_executor import execute_step_mcp
 
 # 暂停 / 决策字典直接来自 app.websocket —— 不在 _state.py 中转，
 # 避免 core.runner 包内出现间接依赖循环。
-from app.websocket import _pause_events, _pause_decisions
+from app.websocket import LogBroadcaster
 from core.runner._state import _is_healable_error
 from core.runner._validators import _validate_nav_url, _resolve_env_cookies, _inject_auth_cookies
 from core.runner._persistence import (
@@ -37,6 +37,12 @@ from core.runner._persistence import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _write_report_sync(path: str, report: dict) -> None:
+    """同步写报告 JSON 到磁盘（供 asyncio.to_thread 包装）。"""
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(report, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +168,10 @@ async def _run_test_case_in_browser_impl(
 
         run_uid = uuid.uuid4().hex[:12]
         output_dir = os.path.join("reports", f"run_{case_id}_{run_uid}")
-        os.makedirs(output_dir, exist_ok=True)
+        await asyncio.to_thread(os.makedirs, output_dir, exist_ok=True)
 
         log_file_path = os.path.join(output_dir, "run.log")
-        file_handler = logging.FileHandler(log_file_path)
+        file_handler = await asyncio.to_thread(logging.FileHandler, log_file_path)
         file_handler.setFormatter(
             logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         )
@@ -214,7 +220,7 @@ async def _run_test_case_in_browser_impl(
         max_failures = 1
 
         screenshot_dir = os.path.join(output_dir, "screenshots")
-        os.makedirs(screenshot_dir, exist_ok=True)
+        await asyncio.to_thread(os.makedirs, screenshot_dir, exist_ok=True)
 
         should_abort = False
         for idx, (step_obj, step_dict) in enumerate(zip(steps_raw, step_list)):
@@ -262,8 +268,7 @@ async def _run_test_case_in_browser_impl(
                     logger.info("  重试第 %s/%s 次...", attempt, retry_max)
                     await asyncio.sleep(retry_delay)
                     # 清除上次暂停事件，确保全新等待
-                    if run_id in _pause_events:
-                        _pause_events[run_id] = asyncio.Event()
+                    await LogBroadcaster.reset_pause_event(run_id)
 
                 try:
                     result = await execute_step_mcp(
@@ -365,10 +370,11 @@ async def _run_test_case_in_browser_impl(
                         step_description=step_obj.description,
                         reason=last_result.get('error', '未知错误') if last_result else '未知错误',
                     )
-                    pause_ev = LogBroadcaster.get_pause_event(run_id)
+                    pause_ev = await LogBroadcaster.get_pause_event(run_id)
                     await pause_ev.wait()
 
-                    decision = _pause_decisions.get(run_id, {}).get("decision", "abort")
+                    decision_data = await LogBroadcaster.read_pause_decision(run_id)
+                    decision = decision_data.get("decision", "abort") if decision_data else "abort"
 
                     if decision == "retry":
                         logger.info("  用户选择重试步骤 %s", step_obj.step_order)
@@ -426,7 +432,8 @@ async def _run_test_case_in_browser_impl(
                             last_result['error'] = (last_result.get('error') or '') + ' (用户跳过)'
                         step_success = True  # 用户已确认跳过，不计入连续失败
                     elif decision == "edit":
-                        new_desc = _pause_decisions.get(run_id, {}).get("new_description", "")
+                        decision_data = await LogBroadcaster.peek_pause_decision(run_id)
+                        new_desc = decision_data.get("new_description", "") if decision_data else ""
                         if new_desc:
                             logger.info("  用户编辑步骤描述: %s", new_desc)
                             # 更新 DB 和本地 step_dict
@@ -486,10 +493,9 @@ async def _run_test_case_in_browser_impl(
                         should_abort = True
 
                     # 清除本次决策，避免污染下次
-                    _pause_decisions.pop(run_id, None)
+                    await LogBroadcaster.read_pause_decision(run_id)
                     # 重置暂停事件，确保下次 pause 使用全新 Event
-                    if run_id in _pause_events:
-                        _pause_events[run_id] = asyncio.Event()
+                    await LogBroadcaster.reset_pause_event(run_id)
 
                 # 如果 abort 被触发，跳出主循环
                 if should_abort:
@@ -558,16 +564,15 @@ async def _run_test_case_in_browser_impl(
                                     step_description=step_obj.description,
                                     reason="断言验证失败",
                                 )
-                                pause_ev = LogBroadcaster.get_pause_event(run_id)
+                                pause_ev = await LogBroadcaster.get_pause_event(run_id)
                                 await pause_ev.wait()
-                                decision = _pause_decisions.get(run_id, {}).get("decision", "abort")
-                                _pause_decisions.pop(run_id, None)
+                                decision_data = await LogBroadcaster.read_pause_decision(run_id)
+                                decision = decision_data.get("decision", "abort") if decision_data else "abort"
                                 if decision == "abort":
                                     should_abort = True
                                     break
                                 # 重置暂停事件，确保下次 pause 使用全新 Event
-                                if run_id in _pause_events:
-                                    _pause_events[run_id] = asyncio.Event()
+                                await LogBroadcaster.reset_pause_event(run_id)
                                 # skip / retry / edit 对断言失败也适用
                                 # 简化处理：skip → 继续，其他 → 继续（断言失败不致命）
                             consecutive_failures += 1
@@ -629,8 +634,7 @@ async def _run_test_case_in_browser_impl(
         }
 
         case_report_path = os.path.join(output_dir, "report.json")
-        with open(case_report_path, "w", encoding="utf-8") as f:
-            _json.dump(report, f, ensure_ascii=False, indent=2)
+        await asyncio.to_thread(_write_report_sync, case_report_path, report)
         logger.info("Report saved: %s", case_report_path)
 
     except Exception as exc:  # noqa: BLE001 - 见下方注释
@@ -667,7 +671,7 @@ async def _run_test_case_in_browser_impl(
 
         if file_handler:
             case_logger.removeHandler(file_handler)
-            file_handler.close()
+            await asyncio.to_thread(file_handler.close)
 
     return {
         "case_id": case_id,

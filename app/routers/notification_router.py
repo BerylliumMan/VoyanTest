@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db_models
@@ -28,7 +28,7 @@ async def list_notifications(
         .limit(size)
     )
     total = await db.execute(
-        select(db_models.Notification).where(db_models.Notification.user_id == user.id)
+        select(func.count()).select_from(db_models.Notification).where(db_models.Notification.user_id == user.id)
     )
     return {
         "items": [{
@@ -37,7 +37,7 @@ async def list_notifications(
             "batch_id": n.batch_id,
             "created_at": n.created_at.isoformat() if n.created_at else None,
         } for n in items.scalars().all()],
-        "total": len(total.scalars().all()),
+        "total": total.scalar() or 0,
     }
 
 
@@ -48,12 +48,12 @@ async def unread_count(
 ) -> dict:
     """获取未读通知数。"""
     result = await db.execute(
-        select(db_models.Notification).where(
+        select(func.count()).select_from(db_models.Notification).where(
             db_models.Notification.user_id == user.id,
             db_models.Notification.read == False,
         )
     )
-    return {"count": len(result.scalars().all())}
+    return {"count": result.scalar() or 0}
 
 
 @router.put("/{notification_id}/read")
