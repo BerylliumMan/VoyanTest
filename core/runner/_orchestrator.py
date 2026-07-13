@@ -73,7 +73,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
                 env = await crud.get_environment(_db, environment_id)
                 if env:
                     browser_type = env.browser
-                    headless = env.headless
+                    headless = True  # 服务端始终用 headless 模式
                     base_url_override = env.base_url
             except SQLAlchemyError as exc:
                 logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
@@ -184,12 +184,12 @@ async def run_batch_test_cases(
                 env = await crud.get_environment(batch_db, environment_id)
                 if env:
                     browser_type = env.browser
-                    headless = env.headless
+                    headless = True  # 服务端始终用 headless 模式
                     base_url_override = env.base_url
                 else:
                     project_data = await crud.get_project(batch_db, project_id)
                     browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
-                    headless = project_data.headless if project_data and project_data.headless is not None else True
+                    headless = True  # 服务端始终用 headless 模式
             else:
                 project_data = await crud.get_project(batch_db, project_id)
                 browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
