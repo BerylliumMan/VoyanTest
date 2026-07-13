@@ -50,7 +50,7 @@ router = APIRouter()
 
 
 @router.post("/{case_id}/run-client")
-async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), agent_name: Optional[str] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
+async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), agent_name: Optional[str] = None, environment_id: Optional[int] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
     """Run a test case on a connected client agent via WebSocket."""
     from agent.manager import agent_manager
 
@@ -80,6 +80,16 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
     if not steps:
         raise HTTPException(status_code=400, detail="Test case has no steps")
 
+    # 解析环境配置中的 base_url
+    base_url_override = None
+    if environment_id:
+        from app.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _env_db:
+            from app.crud.environment import get_environment
+            env = await get_environment(_env_db, environment_id)
+            if env:
+                base_url_override = env.base_url
+
     batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
 
     async def _run() -> None:
@@ -91,6 +101,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         try:
             step_results = await agent_manager.execute_on_agent(
                 agent.id, run_id, db_case.name, steps, output_dir=output_dir,
+                base_url_override=base_url_override,
             )
             all_passed = all(r["success"] for r in step_results)
             status = "passed" if all_passed else "failed"

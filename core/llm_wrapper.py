@@ -80,6 +80,7 @@ SYSTEM_PROMPT = """You are a precise browser automation agent using Playwright M
 INPUT you will receive:
 1. A natural language step description (what the user wants to do)
 2. An accessibility snapshot of the current page (shows page structure with refs for each element)
+3. The BASE URL for the target application (for navigation steps)
 
 Your job: find the best matching element from the accessibility snapshot and output a single
 action to accomplish the step. Each element in the snapshot has a ref (e.g., e12, e45).
@@ -103,7 +104,7 @@ RULES:
 - For buttons, match by role="button" and accessible name.
 - For links, match by role="link" and text content.
 - If no matching element found, use action="error" with explanation in value.
-- If navigation step, use action="goto".
+- If navigation step, use action="goto" with the BASE URL as the value, or a full URL if the step explicitly specifies one.
 
 OUTPUT SCHEMA (exact JSON):
 {
@@ -202,6 +203,7 @@ async def generate_tool_call(
     dom_snapshot: str,
     *,
     expected_result: str | None = None,
+    base_url: str | None = None,
     model: str | None = None,
     temperature: float = 0.1,
     client: AsyncOpenAI | None = None,
@@ -233,6 +235,8 @@ async def generate_tool_call(
         f"PAGE CONTENT (visible text):\n"
         f"{dom_snapshot or '(empty page / no text available)'}\n\n"
     )
+    if base_url:
+        user_message += f"BASE URL (use this for navigation if the step requires opening a page):\n{base_url}\n\n"
     if expected_result:
         user_message += (
             f"EXPECTED RESULT:\n"

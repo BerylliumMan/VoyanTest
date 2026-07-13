@@ -152,7 +152,8 @@ class AgentManager:
 
     async def execute_on_agent(self, agent_id: str, run_id: str,
                                 case_name: str, steps: List[dict],
-                                output_dir: Optional[str] = None) -> dict:
+                                output_dir: Optional[str] = None,
+                                base_url_override: Optional[str] = None) -> dict:
         """Execute all steps via the agent. Server handles LLM, agent handles browser.
 
         Returns a full step results list compatible with the existing report format.
@@ -173,7 +174,8 @@ class AgentManager:
                 type=WSMessageType.RUN_START, agent_id=agent_id,
                 run_id=run_id,
                 payload={"case_id": run_id, "case_name": case_name,
-                         "steps": steps},
+                         "steps": steps,
+                         "base_url": base_url_override or ""},
             ))
 
             llm_client = await create_openai_client()
@@ -205,7 +207,7 @@ class AgentManager:
                 snap = await self._get_snapshot(session, agent_id, run_id)
 
                 # 2. LLM generates tool call from step description + snapshot + expected result
-                tool_call = await generate_tool_call(desc, snap, expected_result=expected_result, client=llm_client, model=model)
+                tool_call = await generate_tool_call(desc, snap, expected_result=expected_result, client=llm_client, model=model, base_url=base_url_override or None)
 
                 # 3. Send tool call to agent for execution
                 result = await self._execute_step(
