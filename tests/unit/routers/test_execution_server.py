@@ -63,7 +63,6 @@ class TestBatchRun:
         )
         assert resp.status_code == 400
 
-    @pytest.mark.xfail(reason="fixture session污染，单独跑通过")
     async def test_success(self, client, admin_cookies, sample_testcase):
         resp = client.post(
             "/api/testcases/batch-run",
