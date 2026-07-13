@@ -1,6 +1,5 @@
 # core/runner/_validators.py
 """URL 校验 / 环境 Cookie 解析 / Auth Cookie 注入。"""
-import ipaddress
 import logging
 from urllib.parse import urlparse
 
@@ -9,23 +8,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# SSRF 防护 — 禁止导航到内网地址
-# ---------------------------------------------------------------------------
-
-_PRIVATE_NETS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-]
+# 导航 URL 校验 — 本工具为内部测试工具，不设 IP 限制
 
 
 def _validate_nav_url(url: str | None) -> str | None:
-    """校验导航 URL，阻止 SSRF 到内网地址。返回 None 表示拒绝"""
+    """校验导航 URL。内部测试工具不做 IP 限制"""
     if not url:
         return None
     try:
@@ -33,18 +20,6 @@ def _validate_nav_url(url: str | None) -> str | None:
         host = parsed.hostname
         if not host:
             return url
-        # 阻止空主机名、localhost 变体
-        if host in ("localhost", "localhost.localdomain", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
-            logger.warning("SSRF 防护: 拒绝 localhost URL: %s", url)
-            return None
-        try:
-            addr = ipaddress.ip_address(host)
-            for net in _PRIVATE_NETS:
-                if addr in net:
-                    logger.warning("SSRF 防护: 拒绝内网地址: %s", url)
-                    return None
-        except ValueError:
-            pass  # 域名，不做 IP 检查
         return url
     except (ValueError, TypeError, AttributeError) as exc:
         logger.warning("URL 校验异常: %s -> %s", url, exc, exc_info=True)
