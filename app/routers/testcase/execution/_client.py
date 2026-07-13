@@ -220,6 +220,16 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         ]
         return {"id": tc.id, "name": tc.name, "project_id": tc.project_id, "steps": steps, "is_init": cid in init_case_ids}
 
+    # 解析环境配置中的 base_url（批量路径，所有用例共用）
+    base_url_override = None
+    if body.environment_id:
+        from app.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _env_db:
+            from app.crud.environment import get_environment
+            env = await get_environment(_env_db, body.environment_id)
+            if env:
+                base_url_override = env.base_url
+
     all_case_ids = init_case_ids + case_ids
     case_infos = [await _load_case_info(cid) for cid in all_case_ids]
     case_infos = [c for c in case_infos if c]
@@ -244,6 +254,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             try:
                 step_results = await agent_manager.execute_on_agent(
                     agent.id, run_id, info["name"], steps, output_dir=output_dir,
+                    base_url_override=base_url_override,
                 )
                 all_passed = all(r["success"] for r in step_results)
                 status = "passed" if all_passed else "failed"

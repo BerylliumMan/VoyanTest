@@ -19,6 +19,7 @@ class BatchCaseIdsRequest(BaseModel):
     case_ids: List[int]
     agent_name: Optional[str] = None
     init_case_ids: List[int] = []
+    environment_id: Optional[int] = None
 
 
 class DebugRunRequest(BaseModel):
