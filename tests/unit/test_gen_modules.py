@@ -71,7 +71,7 @@ class TestPdfParserExtractText:
         """Garbage bytes should raise an exception from fitz.open."""
         from app.gen.pdf_parser import extract_text_from_pdf
         with pytest.raises(Exception):
-            await extract_text_from_pdf(io.BytesIO(b"not a pdf at all"))
+            extract_text_from_pdf(io.BytesIO(b"not a pdf at all"))
 
 
 class TestPdfParserIsDualLayer:
@@ -1075,7 +1075,7 @@ class TestFeatureExtractorGenerateTCs:
         ]
 
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(side_effect=responses)), \
-             patch("app.gen.feature_extractor.time.sleep"):  # skip retry sleep
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):  # skip retry sleep
             result = await generate_test_cases_for_fps(fps, "")
 
         assert len(result["test_cases"]) >= 1
@@ -1087,7 +1087,7 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(1)
         # Always empty
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="no markers")), \
-             patch("app.gen.feature_extractor.time.sleep"):
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
             result = await generate_test_cases_for_fps(fps, "")
 
         # Should add a warning
@@ -1101,7 +1101,7 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(1)
         # All attempts raise
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(side_effect=RuntimeError("api down"))), \
-             patch("app.gen.feature_extractor.time.sleep"):
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
             result = await generate_test_cases_for_fps(fps, "")
 
         # After MAX_RETRIES, should add warning
@@ -1117,7 +1117,7 @@ class TestFeatureExtractorGenerateTCs:
             progress_calls.append((cur, total, msg))
 
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
-             patch("app.gen.feature_extractor.time.sleep"):
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
             await generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=3,
@@ -1131,7 +1131,7 @@ class TestFeatureExtractorGenerateTCs:
 
         fps = self._make_fps(1)
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")) as mcall, \
-             patch("app.gen.feature_extractor.time.sleep"):
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
             await generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
 
         # Check that custom prompt was used
@@ -1149,7 +1149,7 @@ class TestFeatureExtractorGenerateTCs:
             progress_calls.append(msg)
 
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
-             patch("app.gen.feature_extractor.time.sleep"):
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
             await generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=2,
@@ -1165,7 +1165,7 @@ class TestFeatureExtractorGenerateTCs:
 
         fps = self._make_fps(1)
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
-             patch("app.gen.feature_extractor.time.sleep"), \
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()), \
              patch.object(logging.getLogger("app.gen.feature_extractor"), "info") as minfo:
             await generate_test_cases_for_fps(fps, "")
         # INFO log was called for successful batch
