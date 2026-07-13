@@ -71,7 +71,7 @@ class TestPdfParserExtractText:
         """Garbage bytes should raise an exception from fitz.open."""
         from app.gen.pdf_parser import extract_text_from_pdf
         with pytest.raises(Exception):
-            extract_text_from_pdf(io.BytesIO(b"not a pdf at all"))
+            await extract_text_from_pdf(io.BytesIO(b"not a pdf at all"))
 
 
 class TestPdfParserIsDualLayer:
@@ -377,7 +377,10 @@ class TestModelClientLoadConfig:
         assert result["temperature"] == 0.5
 
     @pytest.mark.asyncio
-    async def test_load_ai_config_not_found(self):
+    async def test_load_ai_config_not_found(self, monkeypatch):
+        from app.gen import model_client
+        # 清除缓存，模拟首次加载场景
+        monkeypatch.setattr(model_client, "_ai_config_cache", None)
         from app.gen.model_client import _load_ai_config
 
         mock_db = MagicMock()
@@ -408,25 +411,39 @@ class TestModelClientCallModel:
         }
         return patch("app.gen.model_client._load_ai_config", new=AsyncMock(return_value=cfg))
 
+    def _make_mock_client(self, response_data=None, http_error=None):
+        """创建 mock httpx.AsyncClient 用于测试 call_model（非流式模式）。
+
+        返回 (mock_client, mock_response, patch_context_manager)。
+        """
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        if response_data is not None:
+            mock_response.json.return_value = response_data
+        mock_response.raise_for_status = MagicMock()
+        if http_error is not None:
+            mock_response.raise_for_status.side_effect = http_error
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client, mock_response, patch("app.gen.model_client.httpx.AsyncClient", return_value=mock_client)
+
     @pytest.mark.asyncio
     async def test_call_model_successful_post(self):
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "Hello world"}, "finish_reason": "stop"}]
-        }
-        with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
+        })
+        with self._patch_config() as p, patch_client:
             result = await call_model([{"role": "user", "content": "hi"}], temperature=0.7)
 
         assert result == "Hello world"
-        assert mpost.call_args.args[0].endswith("/chat/completions")
-        payload = mpost.call_args.kwargs["json"]
+        assert mock_client.post.call_args.args[0].endswith("/chat/completions")
+        payload = mock_client.post.call_args.kwargs["json"]
         assert payload["messages"] == [{"role": "user", "content": "hi"}]
         assert payload["temperature"] == 0.7
-        assert "Authorization" in mpost.call_args.kwargs["headers"]
+        assert "Authorization" in mock_client.post.call_args.kwargs["headers"]
 
     @pytest.mark.asyncio
     async def test_call_model_truncation_warning(self, caplog):
@@ -434,13 +451,10 @@ class TestModelClientCallModel:
         import logging
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "X" * 100}, "finish_reason": "length"}]
-        }
-        with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp), \
+        })
+        with self._patch_config() as p, patch_client, \
              caplog.at_level(logging.WARNING, logger="app.gen.model_client"):
             result = await call_model([{"role": "user", "content": "x"}])
         assert "X" in result
@@ -449,13 +463,10 @@ class TestModelClientCallModel:
     async def test_call_model_no_auth_when_no_api_key(self):
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
-        }
-        with self._patch_config(api_key="") as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
+        })
+        with self._patch_config(api_key="") as p, patch_client:
             result = await call_model([{"role": "user", "content": "x"}])
         # When api_key is empty, no Authorization header
         assert result == "ok"
@@ -465,31 +476,25 @@ class TestModelClientCallModel:
         """api_base without /chat/completions should have it appended."""
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
-        }
-        with self._patch_config(api_base="https://api.example.com/v1") as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
+        })
+        with self._patch_config(api_base="https://api.example.com/v1") as p, patch_client:
             await call_model([{"role": "user", "content": "x"}])
         # Verify URL ends with /chat/completions
-        called_url = mpost.call_args.args[0]
+        called_url = mock_client.post.call_args.args[0]
         assert called_url.endswith("/chat/completions")
 
     @pytest.mark.asyncio
     async def test_call_model_keeps_existing_chat_completions_path(self):
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
-        }
-        with self._patch_config(api_base="https://api.example.com/v1/chat/completions") as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
+        })
+        with self._patch_config(api_base="https://api.example.com/v1/chat/completions") as p, patch_client:
             await call_model([{"role": "user", "content": "x"}])
-        called_url = mpost.call_args.args[0]
+        called_url = mock_client.post.call_args.args[0]
         # Should not double-append
         assert called_url.count("/chat/completions") == 1
 
@@ -505,42 +510,37 @@ class TestModelClientCallModel:
     async def test_call_model_temperature_default_from_config(self):
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
-        }
-        with self._patch_config(temperature=0.42) as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp) as mpost:
+        })
+        with self._patch_config(temperature=0.42) as p, patch_client:
             # No temperature passed
             await call_model([{"role": "user", "content": "x"}])
         # The payload should include temperature=0.42
-        payload = mpost.call_args.kwargs["json"]
+        payload = mock_client.post.call_args.kwargs["json"]
         assert payload["temperature"] == 0.42
 
     @pytest.mark.asyncio
     async def test_call_model_http_error_raises(self):
         from app.gen.model_client import call_model
-        import requests
+        import httpx
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = requests.HTTPError("500")
-        with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp):
-            with pytest.raises(requests.HTTPError):
+        mock_client, mock_resp, patch_client = self._make_mock_client(
+            response_data={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+            http_error=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock()),
+        )
+        with self._patch_config() as p, patch_client:
+            with pytest.raises(httpx.HTTPStatusError):
                 await call_model([{"role": "user", "content": "x"}])
 
     @pytest.mark.asyncio
     async def test_call_model_strips_br_in_response(self):
         from app.gen.model_client import call_model
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        mock_client, mock_resp, patch_client = self._make_mock_client(response_data={
             "choices": [{"message": {"content": "line1<br>line2"}, "finish_reason": "stop"}]
-        }
-        with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp):
+        })
+        with self._patch_config() as p, patch_client:
             result = await call_model([{"role": "user", "content": "x"}])
         assert "<br>" not in result
         assert "line1 line2" == result
@@ -556,19 +556,32 @@ class TestModelClientCallModel:
             'data: [DONE]',
         ]
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.iter_lines.return_value = lines
-        # Make mock work as context manager
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        # Build mock client
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        # Build streaming response
+        mock_stream_resp = AsyncMock()
+        mock_stream_resp.raise_for_status = MagicMock()
+
+        async def _mock_aiter_lines():
+            for line in lines:
+                yield line
+        mock_stream_resp.aiter_lines = _mock_aiter_lines
+
+        # Build stream context manager
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_resp)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_client.stream = MagicMock(return_value=mock_stream_ctx)
 
         chunks_received = []
         def cb(chunk):
             chunks_received.append(chunk)
 
         with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp):
+             patch("app.gen.model_client.httpx.AsyncClient", return_value=mock_client):
             result = await call_model(
                 [{"role": "user", "content": "x"}],
                 stream_callback=cb,
@@ -589,14 +602,25 @@ class TestModelClientCallModel:
             'data: [DONE]',
         ]
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.iter_lines.return_value = lines
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        mock_stream_resp = AsyncMock()
+        mock_stream_resp.raise_for_status = MagicMock()
+
+        async def _mock_aiter_lines():
+            for line in lines:
+                yield line
+        mock_stream_resp.aiter_lines = _mock_aiter_lines
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_resp)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_client.stream = MagicMock(return_value=mock_stream_ctx)
 
         with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp):
+             patch("app.gen.model_client.httpx.AsyncClient", return_value=mock_client):
             result = await call_model(
                 [{"role": "user", "content": "x"}],
                 stream_callback=lambda c: None,
@@ -615,14 +639,25 @@ class TestModelClientCallModel:
             'data: [DONE]',
         ]
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.iter_lines.return_value = lines
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        mock_stream_resp = AsyncMock()
+        mock_stream_resp.raise_for_status = MagicMock()
+
+        async def _mock_aiter_lines():
+            for line in lines:
+                yield line
+        mock_stream_resp.aiter_lines = _mock_aiter_lines
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_resp)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_client.stream = MagicMock(return_value=mock_stream_ctx)
 
         with self._patch_config() as p, \
-             patch("app.gen.model_client.requests.post", return_value=mock_resp):
+             patch("app.gen.model_client.httpx.AsyncClient", return_value=mock_client):
             result = await call_model(
                 [{"role": "user", "content": "x"}],
                 stream_callback=lambda c: None,
@@ -891,8 +926,8 @@ class TestFeatureExtractorExtractFPs:
 ## 测试用例
 | TC-001 | M | T | P | S | R | 高 |
 """
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)):
-            fps = extract_functional_points(text="Some document text")
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)):
+            fps = await extract_functional_points(text="Some document text")
 
         assert len(fps) == 1
         assert isinstance(fps[0], FunctionalPoint)
@@ -904,8 +939,8 @@ class TestFeatureExtractorExtractFPs:
         mock_response = """## 功能点清单
 - **【UI】按钮(cat)**: desc
 """
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)) as mcall:
-            fps = extract_functional_points(image_data=("png", "fakebase64"))
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)) as mcall:
+            fps = await extract_functional_points(image_data=("png", "fakebase64"))
 
         assert len(fps) == 1
         messages = mcall.call_args.args[0]
@@ -919,8 +954,8 @@ class TestFeatureExtractorExtractFPs:
         from app.gen.feature_extractor import extract_functional_points
 
         mock_response = "## 功能点清单\n"
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)) as mcall:
-            fps = extract_functional_points(
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)) as mcall:
+            fps = await extract_functional_points(
                 text="doc",
                 project_description="This is a banking app"
             )
@@ -937,8 +972,8 @@ class TestFeatureExtractorExtractFPs:
         def cb(cur, total, msg):
             progress_calls.append((cur, total, msg))
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="## 功能点清单\n")):
-            extract_functional_points(text="x", progress_callback=cb)
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")):
+            await extract_functional_points(text="x", progress_callback=cb)
 
         # At least one progress call
         assert len(progress_calls) >= 2
@@ -951,8 +986,8 @@ class TestFeatureExtractorExtractFPs:
         def cb(cur, total, msg):
             progress_calls.append(msg)
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="## 功能点清单\n")):
-            extract_functional_points(image_data=("jpg", "b64"), progress_callback=cb)
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")):
+            await extract_functional_points(image_data=("jpg", "b64"), progress_callback=cb)
 
         # Should have called with "正在分析图片提取功能点"
         assert any("图片" in m for m in progress_calls)
@@ -961,8 +996,8 @@ class TestFeatureExtractorExtractFPs:
     async def test_extract_fps_custom_prompt(self):
         from app.gen.feature_extractor import extract_functional_points
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="## 功能点清单\n")) as mcall:
-            extract_functional_points(text="x", fp_prompt="CUSTOM FP PROMPT")
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")) as mcall:
+            await extract_functional_points(text="x", fp_prompt="CUSTOM FP PROMPT")
         sys_msg = mcall.call_args.args[0][0]["content"]
         assert "CUSTOM FP PROMPT" in sys_msg
 
@@ -970,8 +1005,8 @@ class TestFeatureExtractorExtractFPs:
     async def test_extract_fps_no_fps_in_response(self):
         from app.gen.feature_extractor import extract_functional_points
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="no markers at all")):
-            fps = extract_functional_points(text="x")
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="no markers at all")):
+            fps = await extract_functional_points(text="x")
         assert fps == []
 
 
@@ -993,8 +1028,8 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(3)
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)):
-            result = generate_test_cases_for_fps(fps, "")
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)):
+            result = await generate_test_cases_for_fps(fps, "")
 
         assert "test_cases" in result
         assert "warnings" in result
@@ -1008,8 +1043,8 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(16)  # 2 batches of 8 (FP_BATCH_SIZE=8)
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)):
-            result = generate_test_cases_for_fps(fps, "")
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)):
+            result = await generate_test_cases_for_fps(fps, "")
 
         # Should have generated TCs for both batches
         assert len(result["test_cases"]) >= 2
@@ -1021,8 +1056,8 @@ class TestFeatureExtractorGenerateTCs:
         fps = self._make_fps(2)
         mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value=mock_response)) as mcall:
-            generate_test_cases_for_fps(fps, "My project context")
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)) as mcall:
+            await generate_test_cases_for_fps(fps, "My project context")
 
         # System prompt should include project context
         sys_msg = mcall.call_args.args[0][0]["content"]
@@ -1039,9 +1074,9 @@ class TestFeatureExtractorGenerateTCs:
             "| TC-1 | M | T | P | S | R | 高 |",  # success
         ]
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(side_effect=responses)), \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(side_effect=responses)), \
              patch("app.gen.feature_extractor.time.sleep"):  # skip retry sleep
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         assert len(result["test_cases"]) >= 1
 
@@ -1051,9 +1086,9 @@ class TestFeatureExtractorGenerateTCs:
 
         fps = self._make_fps(1)
         # Always empty
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="no markers")), \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="no markers")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         # Should add a warning
         assert len(result["warnings"]) >= 1
@@ -1065,9 +1100,9 @@ class TestFeatureExtractorGenerateTCs:
 
         fps = self._make_fps(1)
         # All attempts raise
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(side_effect=RuntimeError("api down"))), \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(side_effect=RuntimeError("api down"))), \
              patch("app.gen.feature_extractor.time.sleep"):
-            result = generate_test_cases_for_fps(fps, "")
+            result = await generate_test_cases_for_fps(fps, "")
 
         # After MAX_RETRIES, should add warning
         assert len(result["warnings"]) >= 1
@@ -1081,9 +1116,9 @@ class TestFeatureExtractorGenerateTCs:
         def cb(cur, total, msg):
             progress_calls.append((cur, total, msg))
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            generate_test_cases_for_fps(
+            await generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=3,
             )
@@ -1095,9 +1130,9 @@ class TestFeatureExtractorGenerateTCs:
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
         fps = self._make_fps(1)
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")) as mcall, \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")) as mcall, \
              patch("app.gen.feature_extractor.time.sleep"):
-            generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
+            await generate_test_cases_for_fps(fps, "", tc_prompt="CUSTOM TC {fp_descriptions} {csv_header}")
 
         # Check that custom prompt was used
         sys_msg = mcall.call_args.args[0][0]["content"]
@@ -1113,9 +1148,9 @@ class TestFeatureExtractorGenerateTCs:
         def cb(cur, total, msg):
             progress_calls.append(msg)
 
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
              patch("app.gen.feature_extractor.time.sleep"):
-            generate_test_cases_for_fps(
+            await generate_test_cases_for_fps(
                 fps, "", progress_callback=cb,
                 phase1_offset=1, total_steps=2,
             )
@@ -1129,10 +1164,10 @@ class TestFeatureExtractorGenerateTCs:
         import logging
 
         fps = self._make_fps(1)
-        with patch("app.gen.feature_extractor.call_model", new=MagicMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
              patch("app.gen.feature_extractor.time.sleep"), \
              patch.object(logging.getLogger("app.gen.feature_extractor"), "info") as minfo:
-            generate_test_cases_for_fps(fps, "")
+            await generate_test_cases_for_fps(fps, "")
         # INFO log was called for successful batch
         assert any("generated" in str(c) for c in minfo.call_args_list)
 
@@ -1175,7 +1210,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=mock_fps), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": mock_tcs, "warnings": []}):
-            result = two_phase_analyze("Some document text")
+            result = await two_phase_analyze("Some document text")
 
         assert "functional_points" in result
         assert "test_cases" in result
@@ -1193,7 +1228,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]) as mext, \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
-            result = two_phase_analyze(long_text)
+            result = await two_phase_analyze(long_text)
 
         # The text passed to extract_functional_points should be truncated
         called_text = mext.call_args.kwargs.get("text", "")
@@ -1206,7 +1241,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
-            result = two_phase_analyze("short text")
+            result = await two_phase_analyze("short text")
 
         # Should warn about no FPs
         assert any("No functional points" in w for w in result["warnings"])
@@ -1217,7 +1252,7 @@ class TestOrchestratorTwoPhaseAnalyze:
 
         with patch("app.gen.orchestrator.extract_functional_points",
                    side_effect=RuntimeError("llm down")):
-            result = two_phase_analyze("text")
+            result = await two_phase_analyze("text")
 
         assert result.get("error") is True
         assert "FP extraction failed" in result["warnings"][0]
@@ -1235,7 +1270,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
-            two_phase_analyze("text", progress_callback=cb)
+            await two_phase_analyze("text", progress_callback=cb)
 
         assert any("提取功能点" in m for m in progress_calls)
 
@@ -1246,7 +1281,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[]) as mext, \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
-            two_phase_analyze("text", project_description="Banking context")
+            await two_phase_analyze("text", project_description="Banking context")
 
         # Project description forwarded
         assert mext.call_args.kwargs.get("project_description") == "Banking context"
@@ -1264,7 +1299,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[mock_fp]) as mext, \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}) as mgen:
-            two_phase_analyze("text", prompts=prompts)
+            await two_phase_analyze("text", prompts=prompts)
 
         assert mext.call_args.kwargs.get("fp_prompt") == "CUSTOM FP PROMPT"
         assert mgen.call_args.kwargs.get("tc_prompt") == "CUSTOM TC PROMPT"
@@ -1283,7 +1318,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[mock_fp]) as mext, \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}) as mgen:
-            two_phase_analyze("text", prompts=prompts)
+            await two_phase_analyze("text", prompts=prompts)
 
         assert mext.call_args.kwargs.get("fp_prompt") == "STR FP"
         assert mgen.call_args.kwargs.get("tc_prompt") == "STR TC"
@@ -1295,7 +1330,7 @@ class TestOrchestratorTwoPhaseAnalyze:
         with patch("app.gen.orchestrator.extract_functional_points", return_value=[MagicMock()]), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": ["batch failed"]}):
-            result = two_phase_analyze("text")
+            result = await two_phase_analyze("text")
         assert "batch failed" in result["warnings"]
 
 
@@ -1313,7 +1348,7 @@ class TestOrchestratorImageAnalyze:
              patch("app.gen.orchestrator.extract_functional_points", return_value=[MagicMock()]) as mext, \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
-            result = _analyze_image_two_phase(mock_file, None, "")
+            result = await _analyze_image_two_phase(mock_file, None, "")
 
         assert result["functional_points"]
         # encode_image was called
@@ -1328,7 +1363,7 @@ class TestOrchestratorImageAnalyze:
 
         with patch("app.gen.orchestrator.encode_image", return_value="b64"), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[]):
-            result = _analyze_image_two_phase(mock_file, None, "")
+            result = await _analyze_image_two_phase(mock_file, None, "")
 
         assert "No functional points" in str(result["warnings"])
 
@@ -1342,7 +1377,7 @@ class TestOrchestratorImageAnalyze:
         with patch("app.gen.orchestrator.encode_image", return_value="b64"), \
              patch("app.gen.orchestrator.extract_functional_points",
                    side_effect=RuntimeError("llm fail")):
-            result = _analyze_image_two_phase(mock_file, None, "")
+            result = await _analyze_image_two_phase(mock_file, None, "")
 
         assert result.get("error") is True
         assert "Image FP extraction failed" in str(result["warnings"])
@@ -1359,7 +1394,7 @@ class TestOrchestratorImageAnalyze:
 
         with patch("app.gen.orchestrator.encode_image", return_value="b64"), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[]):
-            _analyze_image_two_phase(mock_file, cb, "")
+            await _analyze_image_two_phase(mock_file, cb, "")
 
         assert any("图片" in m for m in progress)
 
@@ -1373,7 +1408,7 @@ class TestOrchestratorPdfAnalyze:
 
         mock_file = MagicMock()
         with patch("app.gen.orchestrator.validate_pdf", return_value=(False, "PDF文件损坏")):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
         assert result.get("error") is True
         assert "PDF文件损坏" in result["warnings"]
 
@@ -1388,7 +1423,7 @@ class TestOrchestratorPdfAnalyze:
              patch("app.gen.orchestrator.extract_text_from_pdf", return_value="Some text"), \
              patch("app.gen.orchestrator.two_phase_analyze",
                    return_value={"functional_points": [MagicMock()], "test_cases": [MagicMock()], "warnings": []}):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
 
         assert result["functional_points"]
 
@@ -1401,7 +1436,7 @@ class TestOrchestratorPdfAnalyze:
         with patch("app.gen.orchestrator.validate_pdf", return_value=(True, None)), \
              patch("app.gen.orchestrator.is_pdf_dual_layer", return_value=True), \
              patch("app.gen.orchestrator.extract_text_from_pdf", return_value="   "):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
 
         assert result.get("error") is True
         assert "无有效文字" in str(result["warnings"])
@@ -1424,7 +1459,7 @@ class TestOrchestratorPdfAnalyze:
                    side_effect=[[fp1], [fp2]]), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
 
         # Both pages' FPs are merged
         assert len(result["functional_points"]) == 2
@@ -1441,7 +1476,7 @@ class TestOrchestratorPdfAnalyze:
         with patch("app.gen.orchestrator.validate_pdf", return_value=(True, None)), \
              patch("app.gen.orchestrator.is_pdf_dual_layer", return_value=False), \
              patch("app.gen.orchestrator.render_pdf_pages_to_images", return_value=[]):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
 
         assert result.get("error") is True
         assert "无有效页面" in str(result["warnings"])
@@ -1463,7 +1498,7 @@ class TestOrchestratorPdfAnalyze:
                    side_effect=[[fp], RuntimeError("llm timeout")]), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [], "warnings": []}):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
 
         assert len(result["functional_points"]) == 1
         # Page 2 failure → warning
@@ -1484,7 +1519,7 @@ class TestOrchestratorPdfAnalyze:
              patch("app.gen.orchestrator.extract_text_from_pdf", return_value="Some text"), \
              patch("app.gen.orchestrator.two_phase_analyze",
                    return_value={"functional_points": [], "test_cases": [], "warnings": []}):
-            _analyze_pdf_two_phase(mock_file, cb, "")
+            await _analyze_pdf_two_phase(mock_file, cb, "")
 
         assert any("正在从PDF提取文字" in m for m in progress)
 
@@ -1507,7 +1542,7 @@ class TestOrchestratorPdfAnalyze:
              patch("app.gen.orchestrator.extract_functional_points", return_value=[fp]), \
              patch("app.gen.orchestrator.generate_test_cases_for_fps",
                    return_value={"test_cases": [MagicMock()], "warnings": []}):
-            _analyze_pdf_two_phase(mock_file, cb, "")
+            await _analyze_pdf_two_phase(mock_file, cb, "")
 
         assert any("正在将PDF页面转为图片" in m for m in progress)
         assert any("正在分析第 1" in m for m in progress)
@@ -1525,7 +1560,7 @@ class TestOrchestratorPdfAnalyze:
              patch("app.gen.orchestrator.render_pdf_pages_to_images",
                    return_value=[("png", "b64")]), \
              patch("app.gen.orchestrator.extract_functional_points", return_value=[]):
-            result = _analyze_pdf_two_phase(mock_file, None, "")
+            result = await _analyze_pdf_two_phase(mock_file, None, "")
 
         # No FPs extracted, so all_fps is empty → else branch hit
         assert len(result["functional_points"]) == 0
@@ -1548,21 +1583,21 @@ class TestMultiFileExtractContent:
     async def test_extract_empty_files_raises(self):
         from app.gen.multi_file import extract_multi_file_content
         with pytest.raises(ValueError):
-            extract_multi_file_content([], [])
+            await extract_multi_file_content([], [])
 
     @pytest.mark.asyncio
     async def test_extract_too_many_files_raises(self):
         from app.gen.multi_file import extract_multi_file_content
         files = [self._make_file(b"x", f"f{i}.md") for i in range(15)]
         with pytest.raises(ValueError, match="最多上传"):
-            extract_multi_file_content(files, [f.name for f in files])
+            await extract_multi_file_content(files, [f.name for f in files])
 
     @pytest.mark.asyncio
     async def test_extract_unsupported_extension_raises(self):
         from app.gen.multi_file import extract_multi_file_content
         files = [self._make_file(b"x", "f.exe")]
         with pytest.raises(ValueError, match="不支持的文件类型"):
-            extract_multi_file_content(files, ["f.exe"])
+            await extract_multi_file_content(files, ["f.exe"])
 
     @pytest.mark.asyncio
     async def test_extract_total_size_too_big_raises(self):
@@ -1570,7 +1605,7 @@ class TestMultiFileExtractContent:
         # 50MB+1
         files = [self._make_file(b"x" * (50 * 1024 * 1024 + 1), "f.md")]
         with pytest.raises(ValueError, match="50MB"):
-            extract_multi_file_content(files, ["f.md"])
+            await extract_multi_file_content(files, ["f.md"])
 
     @pytest.mark.asyncio
     async def test_extract_docx_success(self):
@@ -1585,7 +1620,7 @@ class TestMultiFileExtractContent:
         buf.name = "test.docx"
         files = [buf]
 
-        result = extract_multi_file_content(files, ["test.docx"])
+        result = await extract_multi_file_content(files, ["test.docx"])
         text, names, warnings = result
         assert "Hello DOCX" in text
         assert names == ["test.docx"]
@@ -1599,7 +1634,7 @@ class TestMultiFileExtractContent:
         buf.name = "test.md"
         files = [buf]
 
-        text, names, warnings = extract_multi_file_content(files, ["test.md"])
+        text, names, warnings = await extract_multi_file_content(files, ["test.md"])
         assert "Markdown" in text or "Title" in text
 
     @pytest.mark.asyncio
@@ -1615,7 +1650,7 @@ class TestMultiFileExtractContent:
         files = [buf]
 
         with pytest.raises(ValueError, match="所有文件均未提取到有效内容"):
-            extract_multi_file_content(files, ["empty.docx"])
+            await extract_multi_file_content(files, ["empty.docx"])
 
     @pytest.mark.asyncio
     async def test_extract_empty_md_warns(self):
@@ -1626,7 +1661,7 @@ class TestMultiFileExtractContent:
         files = [buf]
 
         with pytest.raises(ValueError, match="所有文件均未提取到有效内容"):
-            extract_multi_file_content(files, ["empty.md"])
+            await extract_multi_file_content(files, ["empty.md"])
 
     @pytest.mark.asyncio
     async def test_extract_pdf_dual_layer(self):
@@ -1646,7 +1681,7 @@ class TestMultiFileExtractContent:
         buf.name = "test.pdf"
         files = [buf]
 
-        text, names, warnings = extract_multi_file_content(files, ["test.pdf"])
+        text, names, warnings = await extract_multi_file_content(files, ["test.pdf"])
         assert "PDF text content" in text or "PDF" in text
 
     @pytest.mark.asyncio
@@ -1671,7 +1706,7 @@ class TestMultiFileExtractContent:
         with patch("app.gen.multi_file.extract_functional_points", return_value=[mock_fp]):
             buf = io.BytesIO(pdf_bytes)
             buf.name = "scan.pdf"
-            text, names, warnings = extract_multi_file_content([buf], ["scan.pdf"])
+            text, names, warnings = await extract_multi_file_content([buf], ["scan.pdf"])
         # FP-based extraction occurred
         assert text is not None
 
@@ -1694,7 +1729,7 @@ class TestMultiFileExtractContent:
         mock_fp.description = "D"
 
         with patch("app.gen.multi_file.extract_functional_points", return_value=[mock_fp]):
-            text, names, warnings = extract_multi_file_content(files, ["test.png"])
+            text, names, warnings = await extract_multi_file_content(files, ["test.png"])
         # Image FP-based extraction occurred
         assert text is not None
 
@@ -1719,8 +1754,8 @@ class TestMultiFileExtractContent:
             [mock_fp],
         ]
         with patch("app.gen.multi_file.extract_functional_points", side_effect=side_effects), \
-             patch("app.gen.multi_file.time.sleep"):
-            text, names, warnings = extract_multi_file_content(files, ["test.png"])
+             patch("app.gen.multi_file.asyncio.sleep", new=AsyncMock()):
+            text, names, warnings = await extract_multi_file_content(files, ["test.png"])
         assert text is not None
 
     @pytest.mark.asyncio
@@ -1738,9 +1773,9 @@ class TestMultiFileExtractContent:
 
         with patch("app.gen.multi_file.extract_functional_points",
                    side_effect=RuntimeError("api error")), \
-             patch("app.gen.multi_file.time.sleep") as msleep:
+             patch("app.gen.multi_file.asyncio.sleep", new=AsyncMock()) as msleep:
             with pytest.raises(ValueError, match="所有文件均未提取到有效内容"):
-                extract_multi_file_content(files, ["test.png"])
+                await extract_multi_file_content(files, ["test.png"])
         # No retry sleep
         assert msleep.call_count == 0
 
@@ -1760,7 +1795,7 @@ class TestMultiFileExtractContent:
         files = [buf]
 
         with pytest.raises(ValueError, match="所有文件均未提取到有效内容"):
-            extract_multi_file_content(files, ["bad.docx"])
+            await extract_multi_file_content(files, ["bad.docx"])
 
     @pytest.mark.asyncio
     async def test_extract_with_progress_callback(self):
@@ -1774,7 +1809,7 @@ class TestMultiFileExtractContent:
         def cb(cur, total, msg):
             progress.append((cur, total, msg))
 
-        text, names, warnings = extract_multi_file_content(
+        text, names, warnings = await extract_multi_file_content(
             files, ["test.md"], progress_callback=cb
         )
         assert len(progress) >= 1
@@ -1790,7 +1825,7 @@ class TestMultiFileExtractContent:
         b2.name = "b.md"
         files = [b1, b2]
 
-        text, names, warnings = extract_multi_file_content(files, ["a.md", "b.md"])
+        text, names, warnings = await extract_multi_file_content(files, ["a.md", "b.md"])
         assert "Content1" in text
         assert "Content2" in text
         # Files concatenated with section headers
@@ -1823,7 +1858,7 @@ class TestMultiFileExtractContent:
              patch("app.gen.multi_file.extract_functional_points", return_value=[mock_fp]):
             buf = io.BytesIO(pdf_bytes)
             buf.name = "weird.pdf"
-            text, names, warnings = extract_multi_file_content([buf], ["weird.pdf"])
+            text, names, warnings = await extract_multi_file_content([buf], ["weird.pdf"])
         assert any("无有效文字" in w for w in warnings) or "===== 图片" in text
 
     @pytest.mark.asyncio
@@ -1837,7 +1872,7 @@ class TestMultiFileExtractContent:
             buf = io.BytesIO(b"fake pdf content")
             buf.name = "empty.pdf"
             with pytest.raises(ValueError, match="所有文件均未提取到有效内容"):
-                extract_multi_file_content([buf], ["empty.pdf"])
+                await extract_multi_file_content([buf], ["empty.pdf"])
 
     @pytest.mark.asyncio
     async def test_extract_pdf_no_pages_scan_mode(self):
@@ -1849,7 +1884,7 @@ class TestMultiFileExtractContent:
             buf = io.BytesIO(b"fake")
             buf.name = "x.pdf"
             with pytest.raises(ValueError, match="所有文件均未提取到有效内容"):
-                extract_multi_file_content([buf], ["x.pdf"])
+                await extract_multi_file_content([buf], ["x.pdf"])
 
     @pytest.mark.asyncio
     async def test_extract_image_with_empty_fps(self):
@@ -1865,7 +1900,7 @@ class TestMultiFileExtractContent:
         files = [buf]
 
         with patch("app.gen.multi_file.extract_functional_points", return_value=[]):
-            text, names, warnings = extract_multi_file_content(files, ["test.png"])
+            text, names, warnings = await extract_multi_file_content(files, ["test.png"])
         # Should still produce some output (with "（未提取到功能点）")
         assert "未提取到功能点" in text
 
@@ -1884,4 +1919,4 @@ class TestMultiFileExtractContent:
         b1.name = "a.md"
         files = [b1]
         with pytest.raises(ValueError, match="不支持的文件类型"):
-            extract_multi_file_content(files, [])
+            await extract_multi_file_content(files, [])
