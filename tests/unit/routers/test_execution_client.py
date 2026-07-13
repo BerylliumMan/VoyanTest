@@ -62,7 +62,7 @@ class TestRunClient:
     async def test_success_returns_batch_id(self, client, admin_cookies, sample_testcase):
         mock_agent = MagicMock(id=1, name="test-agent")
         mock_agent_manager = MagicMock()
-        mock_agent_manager.get_online_agents.return_value = [mock_agent]
+        mock_agent_manager.get_online_agents = AsyncMock(return_value=[mock_agent])
         mock_agent_manager.execute_on_agent = AsyncMock(return_value=[{"success": True}])
 
         with patch("agent.manager.agent_manager", mock_agent_manager):

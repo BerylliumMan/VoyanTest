@@ -117,10 +117,11 @@ class TestRunProject:
         assert resp.status_code == 404
 
     async def test_success(self, client, admin_cookies, sample_project, sample_testcase):
-        resp = client.post(
-            f"/api/testcases/project/{sample_project['id']}/run",
-            cookies=admin_cookies,
-        )
+        with patch("app.routers.testcase.execution.run_batch_test_cases", new=AsyncMock()):
+            resp = client.post(
+                f"/api/testcases/project/{sample_project['id']}/run",
+                cookies=admin_cookies,
+            )
         assert resp.status_code == 200
         data = resp.json()
         assert "batch_id" in data

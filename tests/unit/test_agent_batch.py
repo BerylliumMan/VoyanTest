@@ -7,6 +7,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import pytest
+import pytest_asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from app.tz import now as tz_now
@@ -83,8 +84,8 @@ def _mock_llm_config():
         yield
 
 
-@pytest.fixture
-def registered_agent():
+@pytest_asyncio.fixture
+async def registered_agent():
     """注册一个 mock agent 到 agent_manager，清理后注销。"""
     agent_id = "test-mock-agent"
     reg = AgentRegistration(
@@ -94,12 +95,12 @@ def registered_agent():
         capabilities=["playwright", "ui_testing"],
     )
     session = MockRequestSession(agent_info=None)
-    agent = agent_manager.register(agent_id, reg, session._send)
+    agent = await agent_manager.register(agent_id, reg, session._send)
     session.agent = agent
     # 替换 session 为 mock
     agent_manager.sessions[agent_id] = session
     yield agent_id, session
-    agent_manager.unregister(agent_id)
+    await agent_manager.unregister(agent_id)
 
 
 @pytest.mark.asyncio
@@ -146,7 +147,7 @@ async def test_execute_on_agent_sequential_cases(registered_agent):
             assert r["success"] is True, f"{case['name']} 步骤 {r['step_number']} 失败"
 
     # 验证 agent 状态恢复为 ONLINE
-    final_agent = agent_manager.get_online_agents()
+    final_agent = await agent_manager.get_online_agents()
     assert len(final_agent) == 1
     assert final_agent[0].status.value == "online"
 
