@@ -167,6 +167,17 @@ class AgentClient:
                 await self._send_registration()
                 logger.info(f"Connected as {self.agent_name}")
 
+                # 定期心跳任务（独立于消息接收，确保执行中也能保持在线）
+                async def _periodic_heartbeat():
+                    while self.running:
+                        await asyncio.sleep(30)
+                        try:
+                            await self._send_heartbeat()
+                        except Exception:
+                            break
+
+                hb_task = asyncio.create_task(_periodic_heartbeat())
+
                 while self.running:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=120)
@@ -182,6 +193,8 @@ class AgentClient:
         except Exception as e:
             logger.error(f"Connection failed: {e}")
         finally:
+            if hb_task is not None:
+                hb_task.cancel()
             await self._stop_mcp()
             self.running = False
 
@@ -209,12 +222,18 @@ class AgentClient:
         if not os.path.isfile(_node_exe):
             _node_exe = 'node'  # fallback to system PATH
 
-        # 查找捆绑的 @playwright/mcp 入口
-        _cli_js = os.path.join(_pkg_root, 'node_modules', '@playwright', 'mcp', 'cli.js')
-        if not os.path.isfile(_cli_js):
-            # fallback: try local node_modules relative to project
-            _base = os.path.dirname(os.path.dirname(__file__))
-            _cli_js = os.path.join(_base, 'node_modules', '@playwright', 'mcp', 'cli.js')
+        # 查找捆绑的 @playwright/mcp 入口（搜索全部根目录，与 node.exe 一致）
+        _cli_js = ""
+        for _root in _search_roots:
+            _candidate = os.path.join(_root, 'node_modules', '@playwright', 'mcp', 'cli.js')
+            if os.path.isfile(_candidate):
+                _cli_js = _candidate
+                break
+        if not _cli_js or not os.path.isfile(_cli_js):
+            raise RuntimeError(
+                f"@playwright/mcp CLI not found. "
+                f"Searched in: {[os.path.join(r, 'node_modules', '@playwright', 'mcp', 'cli.js') for r in _search_roots]}"
+            )
 
         args = [_node_exe, _cli_js, '--browser=chromium']
 
