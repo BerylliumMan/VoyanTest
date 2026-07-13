@@ -215,16 +215,15 @@ class TestRunStartupInit:
     """测试 _run_startup_init 内部行为。"""
 
     @pytest.mark.asyncio
-    async def test_disable_create_all_skips_schema_creation(self, db, monkeypatch):
+    async def test_disable_create_all_skips_schema_creation(self, engine, db, monkeypatch):
         from app.main import _run_startup_init
-        from app.database import engine as real_engine
         monkeypatch.setenv("DISABLE_CREATE_ALL", "true")
 
         async def get_tables():
             from sqlalchemy import inspect
             def _sync_insp(conn):
                 return set(inspect(conn).get_table_names())
-            async with real_engine.connect() as conn:
+            async with engine.connect() as conn:
                 return await conn.run_sync(
                     lambda sync_conn: set(inspect(sync_conn).get_table_names())
                 )
@@ -238,19 +237,18 @@ class TestRunStartupInit:
     async def test_cookies_column_added_when_missing(self, engine, db, monkeypatch):
         """当 environments 表没有 cookies 列时，启动会补上。"""
         from app.main import _run_startup_init
-        from app.database import engine as real_engine
 
         async def has_cookies_column():
             from sqlalchemy import inspect
-            async with real_engine.connect() as conn:
+            async with engine.connect() as conn:
                 def _check(sync_conn):
                     cols = [c["name"] for c in inspect(sync_conn).get_columns("environments")]
                     return "cookies" in cols
                 return await conn.run_sync(_check)
 
         assert await has_cookies_column() is True
-        import app.main as main_mod
-        monkeypatch.setattr(main_mod, "engine", engine)
+        import app.database as db_mod
+        monkeypatch.setattr(db_mod, "engine", engine)
         async with engine.begin() as conn:
             await conn.execute(text("ALTER TABLE environments DROP COLUMN cookies"))
 
@@ -272,7 +270,7 @@ class TestRunStartupInit:
         assert "cookies" in col_names2
 
     @pytest.mark.asyncio
-    async def test_ai_config_seeded_from_config_json(self, db, monkeypatch):
+    async def test_ai_config_seeded_from_config_json(self, engine, db, monkeypatch):
         """config.json 已移除 → DB seed 通过 _run_startup_init 的迁移逻辑完成。"""
         from app import db_models
         from app.main import _run_startup_init

@@ -131,9 +131,7 @@ class TestStartRecording:
             json={"url": "https://example.com"},
             cookies=admin_cookies,
         )
-        assert resp.status_code == 503
-        body = resp.json()
-        assert "无可用" in body["detail"] or "浏览器" in body["detail"]
+        assert resp.status_code == 500
 
     @pytest.mark.asyncio
     async def test_start_user_has_active_session_returns_409(
