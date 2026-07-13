@@ -193,7 +193,7 @@ async def run_batch_test_cases(
             else:
                 project_data = await crud.get_project(batch_db, project_id)
                 browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
-                headless = project_data.headless if project_data and project_data.headless is not None else True
+                headless = True  # 服务端始终用 headless 模式
         except SQLAlchemyError:
             logger.warning("Failed to load environment/project settings; falling back to defaults", exc_info=True)
             browser_type = 'chromium'
