@@ -73,8 +73,8 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
             data={[
               { label: t['status'], value: getStatusTag(run.status) },
               { label: t['duration'], value: run.duration ? `${run.duration.toFixed(1)}s` : '--' },
-              { label: t['start.time'], value: run.started_at ? new Date(run.started_at).toLocaleString() : '--' },
-              { label: t['end.time'], value: run.finished_at ? new Date(run.finished_at).toLocaleString() : '--' },
+              { label: t['start.time'], value: run.started_at ? new Date(run.started_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--' },
+              { label: t['end.time'], value: run.finished_at ? new Date(run.finished_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--' },
             ]}
             className={styles.descriptionsMarginLarge}
           />

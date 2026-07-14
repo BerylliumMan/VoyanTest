@@ -275,7 +275,7 @@ const Reports: React.FC = () => {
       ),
     },
     { title: t['exec.time'], dataIndex: 'created_at', width: 180,
-      render: (v: string) => v ? new Date(v).toLocaleString() : '--' },
+      render: (v: string) => v ? new Date(v).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--' },
     {
       title: t['actions'], width: 280,
       render: (_: unknown, r: BatchItem) => (
@@ -337,7 +337,7 @@ const Reports: React.FC = () => {
                   { label: t['case.count'], value: detail.total_cases },
                   { label: t['passed'], value: detail.passed },
                   { label: t['failed'], value: detail.failed },
-                  { label: t['start.time'], value: detail.started_at ? new Date(detail.started_at).toLocaleString() : '--' },
+                  { label: t['start.time'], value: detail.started_at ? new Date(detail.started_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--' },
                 ]}
                 className={styles.descriptionsMargin}
               />
