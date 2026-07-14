@@ -1,18 +1,29 @@
 """对称加密工具，用于敏感字段静态加密（Fernet / AES-128-CBC + HMAC-SHA256）。"""
 
+import base64
+import hashlib
 import os
 import warnings
 from pathlib import Path
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
-# 加密密钥优先级：env DB_ENCRYPTION_KEY > 项目根目录 .db_encryption_key > 首次启动自动生成
+# 加密密钥优先级：env DB_ENCRYPTION_KEY > SESSION_SECRET_KEY 派生 > 项目根目录 .db_encryption_key > 首次启动自动生成
 KEY_FILE = Path(__file__).resolve().parent.parent.parent / ".db_encryption_key"
+
+
+def _derive_key_from_secret(secret: str) -> bytes:
+    """从 SESSION_SECRET_KEY 派生 32 字节 Fernet 密钥。"""
+    return base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
 
 
 def get_fernet() -> Fernet:
     """获取 Fernet 实例。生产环境必须通过 env 注入密钥；dev 自动生成并落盘。"""
     key = os.getenv("DB_ENCRYPTION_KEY")
+    if not key:
+        session_secret = os.getenv("SESSION_SECRET_KEY")
+        if session_secret:
+            return Fernet(_derive_key_from_secret(session_secret))
     if not key and KEY_FILE.exists():
         key = KEY_FILE.read_text().strip()
     if not key:
@@ -36,5 +47,9 @@ def encrypt_value(plaintext: str) -> str:
 def decrypt_value(ciphertext: str) -> str:
     """解密 Fernet token。已为明文的输入会原样返回（迁移期兼容）。"""
     if ciphertext and ciphertext.startswith("gAAAAA"):
-        return get_fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+        try:
+            return get_fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+        except InvalidToken:
+            warnings.warn("AI 配置加密密钥已变更，请重新保存 AI 配置", RuntimeWarning)
+            return ciphertext
     return ciphertext

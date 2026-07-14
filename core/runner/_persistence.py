@@ -23,8 +23,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud
-from app.database import AsyncSessionLocal
+from app import crud, database as db_mod
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ async def save_run_results(
     run_id: Optional[int] = None,
     is_init: bool = False,
 ) -> int | None:
-    async with AsyncSessionLocal() as db:
+    async with db_mod.AsyncSessionLocal() as db:
         try:
             from app import db_models
 

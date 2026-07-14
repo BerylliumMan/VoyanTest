@@ -62,20 +62,31 @@ async def _run_startup_init():
     if os.getenv("DISABLE_CREATE_ALL", "false").lower() != "true":
         async with engine.begin() as conn:
             await conn.run_sync(db_mod.Base.metadata.create_all)
-        # 字段迁移：确保 nickname/email 列存在（兼容已有数据库）
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
-                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
-        except Exception:
-            logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)"))
-        except Exception:
-            logger.warning("run_batches 表 triggered_by 列迁移失败（非关键错误，继续）")
     else:
         logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（请确保已执行 alembic upgrade head）")
+
+    # 字段迁移（始终执行，不与 DISABLE_CREATE_ALL 关联）
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
+    except Exception:
+        logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)"))
+    except Exception:
+        logger.warning("run_batches 表 triggered_by 列迁移失败（非关键错误，继续）")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT"))
+    except Exception:
+        logger.warning("recording_sessions 表 events_data 列迁移失败（非关键错误，继续）")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL"))
+    except Exception:
+        logger.warning("test_runs 表 case_id 列 NOT NULL 约束迁移失败（非关键错误，继续）")
 
     from app.auth import hash_password
 

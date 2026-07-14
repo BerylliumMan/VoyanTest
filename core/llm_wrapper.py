@@ -69,6 +69,36 @@ class PlaywrightMCPToolCall(BaseModel):
         None,
         description="What the agent plans to do after this step",
     )
+    needs_verification: bool = Field(
+        default=False,
+        description="是否需要在执行完成后再次验证页面状态。"
+        "设为 true 的场景：操作会影响页面状态（点击按钮后弹窗出现、提交后页面跳转、等待某元素出现等），"
+        "需要 LLM 再次检查页面快照确认预期结果是否达成。"
+        "设为 false 的场景：操作本身的效果就是预期结果（输入文字到输入框、勾选复选框、选择下拉项等），"
+        "MCP 调用的返回就足以判断成功与否。",
+    )
+
+
+class VerificationCondition(BaseModel):
+    """A single deterministic check condition parsed from natural-language expected_result.
+
+    Level 1 of the tiered verification cascade — these conditions can be evaluated
+    deterministically by the browser without needing further LLM calls.
+    """
+
+    check: str = Field(
+        ...,
+        description="检查类型: text_contains, text_matches, url_contains, url_matches, "
+        "element_visible, element_count, page_title, js_expression",
+    )
+    target: str = Field(
+        ...,
+        description="检查目标值: 要搜索的字符串、正则表达式、选择器、计数值或 JS 表达式",
+    )
+    location: Optional[str] = Field(
+        None,
+        description="可选的位置提示: header, sidebar, main_content, right_sidebar, footer, modal 等",
+    )
 
 
 # ------------------------------------------------------------------
@@ -445,3 +475,159 @@ async def verify_expected_result(
     except Exception as exc:  # noqa: BLE001 - 验证 LLM 调用：吞掉所有异常并返回 passed=False
         logger.exception("Verification LLM call failed")
         return VerificationResult(passed=False, reason=f"Verification failed: {exc}")
+
+
+# ------------------------------------------------------------------
+# Tiered verification: Level 1 — structured conditions from NL
+# ------------------------------------------------------------------
+
+VERIFY_CONDITIONS_PROMPT = """You are a test condition extractor. Your job is to translate a natural-language expected result description into a list of structured, deterministic check conditions that can be evaluated by a browser without further LLM calls.
+
+INPUT:
+- EXPECTED RESULT: A natural-language description of what should be true after a test step executes.
+
+OUTPUT: A JSON array of condition objects, each with:
+- "check": string — one of: text_contains, text_matches, url_contains, url_matches, element_visible, element_count, page_title, js_expression
+- "target": string — the value to check against (text substring, regex pattern, CSS selector, expected count as string, or JS expression)
+- "location": string (optional) — a hint about where on the page to look: header, sidebar, main_content, right_sidebar, footer, modal, dialog, dropdown, toast, breadcrumb, table, form, navigation
+
+CHECK TYPE GUIDE:
+- text_contains — page text contains the target string (substring match, case-insensitive)
+- text_matches — page text matches the target regex pattern
+- url_contains — current browser URL contains the target substring
+- url_matches — current browser URL matches the target regex pattern
+- element_visible — an element matching the target CSS selector is visible on the page
+- element_count — count of elements matching target CSS selector equals (or matches) the expected count; format target as "selector|count" or "selector|>=count"
+- page_title — the browser page title contains the target string
+- js_expression — evaluate the target as a JavaScript expression in the browser context; truthy = pass
+
+RULES:
+- Break down compound expectations into multiple conditions (e.g. "should be on dashboard page showing user stats" → url_contains + text_contains)
+- Use specific, searchable substrings for text_contains (not vague descriptions)
+- Use "location" to scope the check when the expected result mentions a specific area (sidebar, header, modal, etc.)
+- For element_visible, target should be a valid CSS selector (e.g. ".user-menu", "[data-testid='logout']")
+- If the expected result cannot be decomposed into deterministic checks, return an empty array []
+- Output ONLY the JSON array, no markdown fences, no explanation text
+
+EXAMPLES:
+Input: "页面跳转到仪表盘，右侧边栏显示 super admin"
+Output: [{"check": "url_contains", "target": "/dashboard"}, {"check": "text_contains", "target": "super admin", "location": "right_sidebar"}]
+
+Input: "弹出登录成功提示"
+Output: [{"check": "text_contains", "target": "登录成功", "location": "toast"}]
+
+Input: "商品列表中应该有 5 个商品"
+Output: [{"check": "element_count", "target": ".product-card|5"}]
+
+Input: "页面标题包含'用户管理'"
+Output: [{"check": "page_title", "target": "用户管理"}]
+
+Input: "结果显示在表格中"
+Output: [{"check": "element_visible", "target": "table", "location": "main_content"}]
+
+Input: "这是一个模糊的预期结果"
+Output: []
+"""
+
+
+async def generate_verification_conditions(
+    expected_result: str,
+    *,
+    client: AsyncOpenAI | None = None,
+    model: str | None = None,
+    temperature: float = 0.1,
+) -> list[VerificationCondition]:
+    """从自然语言预期结果生成结构化验证条件（层级 1）。
+
+    层级验证级联的第一层：LLM 将自然语言 expected_result 翻译为
+    结构化 JSON 条件列表，可由浏览器确定性评估，无需进一步 LLM 调用。
+
+    Args:
+        expected_result: 预期结果的自然语言描述
+        client: 预配置的 OpenAI 客户端（未提供则自动创建）
+        model: 覆盖默认模型
+        temperature: LLM 温度参数
+
+    Returns:
+        list[VerificationCondition]: 验证条件列表；任何失败返回空列表（永不抛异常）
+    """
+    if not expected_result or not expected_result.strip():
+        return []
+
+    if client is None:
+        try:
+            client = await create_openai_client()
+        except Exception as exc:  # noqa: BLE001 - 配置缺失时吞异常返回空列表
+            logger.warning("Failed to create OpenAI client for verification conditions: %s", exc)
+            return []
+
+    try:
+        _, _, resolved_model = await _resolve_config(explicit_model=model)
+    except Exception as exc:  # noqa: BLE001 - 配置解析失败吞异常
+        logger.warning("Failed to resolve config for verification conditions: %s", exc)
+        return []
+
+    user_message = (
+        f"EXPECTED RESULT:\n{expected_result}\n\n"
+        f"Translate this into structured verification conditions. Output JSON array now."
+    )
+
+    messages: list[dict] = [
+        {'role': 'system', 'content': VERIFY_CONDITIONS_PROMPT},
+        {'role': 'user', 'content': user_message},
+    ]
+
+    try:
+        response = await client.chat.completions.create(
+            model=resolved_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001 - LLM API 调用失败吞异常
+        logger.exception("Verification conditions LLM call failed")
+        return []
+
+    content = response.choices[0].message.content or ''
+    content = content.strip()
+
+    # Strip markdown fences
+    content = re.sub(r'^```(?:json)?\s*', '', content)
+    content = re.sub(r'\s*```$', '', content)
+
+    # Try to parse & repair JSON — same pattern as generate_tool_call()
+    try:
+        parsed = _json.loads(content)
+    except _json.JSONDecodeError:
+        # Attempt repair: find first [ and last ]
+        match = re.search(r'\[.*]', content, re.DOTALL)
+        if match:
+            content = match.group(0)
+        content = content.replace("'", '"')
+        content = re.sub(r':\s*None\b', ': null', content)
+        content = re.sub(r':\s*True\b', ': true', content)
+        content = re.sub(r':\s*False\b', ': false', content)
+        content = re.sub(r',\s*}', '}', content)
+        content = re.sub(r',\s*]', ']', content)
+        try:
+            parsed = _json.loads(content)
+        except _json.JSONDecodeError as e:
+            logger.warning("Verification conditions LLM output not valid JSON: %s", content[:200])
+            return []
+
+    # parsed must be a list
+    if not isinstance(parsed, list):
+        logger.warning("Verification conditions output not a list: %s", type(parsed).__name__)
+        return []
+
+    conditions: list[VerificationCondition] = []
+    for idx, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            logger.warning("Verification condition item %d is not a dict, skipping", idx)
+            continue
+        try:
+            conditions.append(VerificationCondition.model_validate(item))
+        except PydanticValidationError as e:
+            logger.warning("Verification condition item %d failed validation: %s", idx, e)
+
+    return conditions

@@ -36,7 +36,7 @@ async def get_status(session_id: str, user=Depends(get_current_user)) -> GenStat
 @router.get("/preview/{session_id}", response_model=GenPreviewResponse)
 async def preview_results(session_id: str, user=Depends(get_current_user)) -> GenPreviewResponse:
     """Preview generated functional points and test cases."""
-    with _lock:
+    async with _lock:
         session = _sessions.get(session_id)
     if not session:
         raise HTTPException(404, "Session not found")

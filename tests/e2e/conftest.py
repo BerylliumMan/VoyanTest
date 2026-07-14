@@ -13,10 +13,16 @@ os.environ["DATABASE_URL"] = E2E_DB_URL
 @pytest.fixture(scope="session", autouse=True)
 def e2e_init_db():
     """在所有 E2E 测试开始前初始化真实数据库结构。"""
-    from app.database import engine, Base
+    import asyncio
+    from app.database import init_db_engine, Base
     from app.main import _run_startup_init
 
     async def _init():
+        # 初始化数据库引擎
+        ok = await init_db_engine()
+        if not ok:
+            raise RuntimeError("E2E 数据库引擎初始化失败")
+        from app.database import engine
         # 1) 删除旧表 + 建新表
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)

@@ -773,6 +773,22 @@ class AgentClient:
                             }))
                             resp_msg = json.loads(await _cdp.recv())
                             target_id = resp_msg.get("result", {}).get("targetId")
+                        elif target_url:
+                            # 复用已有空白页面 - 连接到页面级 WS 后导航
+                            page_ws_url = f"ws://127.0.0.1:{_proxy_port}/devtools/page/{target_id}"
+                            try:
+                                async with _ws.connect(page_ws_url) as page_cdp:
+                                    await page_cdp.send(json.dumps({
+                                        "id": 1, "method": "Page.navigate",
+                                        "params": {"url": target_url},
+                                    }))
+                                    # 等待导航开始响应
+                                    try:
+                                        await asyncio.wait_for(page_cdp.recv(), timeout=10)
+                                    except asyncio.TimeoutError:
+                                        logger.warning("Page.navigate response timeout, continuing anyway")
+                            except Exception as e:
+                                logger.warning(f"Failed to navigate on reused page: {e}
                         if target_id:
                             page_ws = f"ws://127.0.0.1:{_proxy_port}/devtools/page/{target_id}"
                             logger.info(f"Page target acquired: {page_ws}")
