@@ -244,8 +244,12 @@ async def _run_test_case_in_browser_impl(
                 f"--- Step {step_dict['step_order']}: {step_dict['description']} ---"
             )
 
-            # 获取重试配置（兼容旧字段，默认无重试）
-            retry_max = getattr(step_obj, 'retry_max', 0) or 0
+            # 获取重试配置 — 优先使用运行时全局配置，兼容旧字段
+            try:
+                from app.runtime_config import healing_config as _rt_healing
+                retry_max = _rt_healing.max_retries if _rt_healing.enabled else 0
+            except (ImportError, AttributeError):
+                retry_max = getattr(step_obj, 'retry_max', 0) or 0
             retry_delay = getattr(step_obj, 'retry_delay', 1.0) or 1.0
 
             step_success = False

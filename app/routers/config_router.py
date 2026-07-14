@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import openai
 from openai import AsyncOpenAI
 
@@ -36,6 +36,12 @@ class AIConfigRequest(BaseModel):
     api_key: Optional[str] = Field(None, min_length=1)
     api_base: str = Field(..., pattern=r"^https?://")
     temperature: float = Field(..., ge=0.0, le=2.0)
+
+    @classmethod
+    def model_validate(cls, obj):
+        if isinstance(obj, dict):
+            obj = {k: v.strip() if isinstance(v, str) else v for k, v in obj.items()}
+        return super().model_validate(obj)
 
     model_config = {'extra': 'allow'}
 
@@ -82,6 +88,10 @@ async def update_ai_config(
         logger.exception("AI 配置保存失败")
         raise HTTPException(status_code=500, detail=f"AI 配置保存失败: {exc}")
 
+    # 清除 AI 配置缓存，确保下次调用加载新配置
+    from app.gen.model_client import invalidate_ai_config_cache
+    invalidate_ai_config_cache()
+
     return AIConfigResponse(
         model=row.model,
         api_key_masked=_mask_key(row.api_key),
@@ -94,6 +104,13 @@ class AIConfigTestRequest(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     api_base: Optional[str] = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def _trim_strings(cls, data):
+        if isinstance(data, dict):
+            return {k: v.strip() if isinstance(v, str) else v for k, v in data.items()}
+        return data
 
 
 @router.post("/ai/test")
@@ -134,7 +151,8 @@ async def test_ai_config(
             ),
             timeout=30,
         )
-        reply = resp.choices[0].message.content.strip() if resp.choices else ""
+        reply_raw = resp.choices[0].message.content
+        reply = reply_raw.strip() if reply_raw else ""
         if "OK" in reply.upper():
             return {"success": True, "message": f"连接成功，模型回复: {reply}"}
         return {"success": True, "message": f"连接成功（回复: {reply}）"}
@@ -268,13 +286,7 @@ async def restore_prompt(
     )
 
 
-class HealingConfig(BaseModel):
-    enabled: bool = True
-    max_retries: int = 3
-    threshold: float = 0.8
-
-
-_healing_config = HealingConfig()
+from app.runtime_config import HealingConfig, healing_config as _healing_config
 
 
 @router.get("/healing", response_model=HealingConfig)
