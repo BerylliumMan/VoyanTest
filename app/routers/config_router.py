@@ -298,6 +298,8 @@ async def get_healing_config(admin=Depends(require_admin)) -> HealingConfig:
 @router.put("/healing", response_model=HealingConfig)
 async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)) -> HealingConfig:
     """更新自愈选择器配置。"""
-    global _healing_config
-    _healing_config = cfg
-    return _healing_config
+    from app.runtime_config import healing_config as _rt
+    _rt.enabled = cfg.enabled
+    _rt.max_retries = cfg.max_retries
+    _rt.threshold = cfg.threshold
+    return _rt
