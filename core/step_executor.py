@@ -16,6 +16,8 @@ import re
 import time
 from typing import Any
 
+from core.verification_strategy import VERIFICATION_STRATEGY as strategy
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,107 @@ async def _capture_screenshot(
     except (OSError, RuntimeError) as exc:
         # OSError: 写文件失败；RuntimeError: MCP / Playwright 截图调用失败
         logger.warning("Failed to capture screenshot: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Tiered verification helpers (Level 0 & Level 1)
+# ---------------------------------------------------------------------------
+
+
+async def _level0_verify(mcp_manager, tool_call) -> bool:
+    """Level 0: cheap deterministic checks before involving LLM.
+
+    goto → compare browser URL against tool_call.value
+    fill → check if any input/textarea/select holds the expected value
+    """
+    action = tool_call.action
+    try:
+        if action == 'goto':
+            url = tool_call.value or ''
+            if not url:
+                return False
+            result = await mcp_manager.call_tool('browser_evaluate', {
+                'function': 'window.location.href',
+            })
+            if result.get('success'):
+                current = result.get('text', '')
+                return url.rstrip('/') in current or current.rstrip('/') in url
+        elif action == 'fill':
+            value = tool_call.value or ''
+            if not value:
+                return False
+            escaped = value.replace('\\', '\\\\').replace("'", "\\'")
+            result = await mcp_manager.call_tool('browser_evaluate', {
+                'function': (
+                    f"Array.from(document.querySelectorAll('input,textarea,select'))"
+                    f".some(el => el.value === '{escaped}')"
+                ),
+            })
+            if result.get('success'):
+                return result.get('text', '').strip().lower() == 'true'
+    except Exception as exc:
+        logger.debug("Level 0 验证异常 (非致命): %s", exc)
+    return False
+
+
+def _condition_to_js(condition) -> str:
+    """Translate a VerificationCondition into a browser_evaluate JS expression."""
+    check = condition.check
+    target = condition.target.replace('\\', '\\\\').replace("'", "\\'")
+    if check == 'text_contains':
+        return f"document.body.innerText.includes('{target}')"
+    if check == 'text_matches':
+        return f"new RegExp('{target}').test(document.body.innerText)"
+    if check == 'url_contains':
+        return f"window.location.href.includes('{target}')"
+    if check == 'url_matches':
+        return f"new RegExp('{target}').test(window.location.href)"
+    if check == 'element_visible':
+        return (
+            f"(function(){{var el=document.querySelector('{target}');"
+            f"return el!==null&&window.getComputedStyle(el).display!=='none'}})()"
+        )
+    if check == 'element_count':
+        parts = target.split('|', 1)
+        sel = parts[0].replace("'", "\\'")
+        expected = parts[1] if len(parts) > 1 else '1'
+        if expected.startswith('>='):
+            n = int(expected[2:])
+            return f"document.querySelectorAll('{sel}').length>={n}"
+        if expected.startswith('<='):
+            n = int(expected[2:])
+            return f"document.querySelectorAll('{sel}').length<={n}"
+        if expected.startswith('>'):
+            n = int(expected[1:])
+            return f"document.querySelectorAll('{sel}').length>{n}"
+        if expected.startswith('<'):
+            n = int(expected[1:])
+            return f"document.querySelectorAll('{sel}').length<{n}"
+        return f"document.querySelectorAll('{sel}').length==={expected}"
+    if check == 'page_title':
+        return f"document.title.includes('{target}')"
+    if check == 'js_expression':
+        return target
+    return 'false'
+
+
+async def _level1_verify(mcp_manager, conditions: list) -> bool:
+    """Level 1: evaluate each VerificationCondition via browser_evaluate."""
+    if not conditions:
+        return False
+    for condition in conditions:
+        try:
+            js = _condition_to_js(condition)
+            result = await mcp_manager.call_tool('browser_evaluate', {'function': js})
+            if not result.get('success'):
+                return False
+            text = result.get('text', '').strip().lower()
+            if text in ('false', 'null', 'undefined', ''):
+                return False
+        except Exception as exc:
+            logger.debug("Level 1 条件评估失败: %s", exc)
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +211,7 @@ async def execute_step_mcp(
             tool_call = None
 
         if tool_call is None:
-            result['error'] = 'LLM tool call generation timed out'
+            result['error'] = 'LLM 生成操作指令超时'
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
             return result
 
@@ -121,7 +224,7 @@ async def execute_step_mcp(
         result['next_goal'] = tool_call.next_goal or ''
 
         if tool_call.action == 'error':
-            result['error'] = f"LLM could not determine action: {tool_call.value}"
+            result['error'] = f"LLM 无法确定操作: {tool_call.value}"
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
             return result
 
@@ -139,31 +242,67 @@ async def execute_step_mcp(
 
         result['success'] = exec_result['success']
         if not exec_result['success']:
-            result['error'] = exec_result.get('error', 'Unknown error')
+            result['error'] = exec_result.get('error', '未知错误')
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
         elif expected_result:
-            # Verify expected result against post-execution page state
-            try:
-                post_snapshot = await mcp_manager.get_dom_snapshot()
-                from core.llm_wrapper import verify_expected_result
-                verification = await asyncio.wait_for(
-                    verify_expected_result(expected_result, post_snapshot, step_description=desc, client=llm_client, model=model),
-                    timeout=30,
-                )
-                if not verification.passed:
-                    result['success'] = False
-                    result['error'] = f"预期结果验证失败: {verification.reason}"
-                    await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
-                else:
-                    result['verification'] = verification.reason
-            except asyncio.TimeoutError:
-                logger.warning("Step %s verification timed out", step_number)
-            except Exception as exc:  # noqa: BLE001 - 断言失败只记录 warning，不中断步骤流程
-                logger.warning("Step %s verification failed: %s", step_number, exc, exc_info=True)
+            # 3层级联验证：Level 0 确定性检查 → Level 1 结构化条件 → Level 2 LLM 比对
+            mcp_error = exec_result.get('error')
+            action_type = tool_call.action
 
-    except Exception as exc:  # noqa: BLE001 - 步骤执行涉及 MCP / LLM / asyncio / DOM，需统一兜底
-        result['error'] = str(exc)
-        logger.warning("Step %s exception: %s", step_number, exc, exc_info=True)
+            if strategy.should_verify(action_type, mcp_error):
+                verified = False
+
+                # Level 0: 确定性廉价检查（goto URL 比对 / fill 值比对）
+                try:
+                    level0_pass = await _level0_verify(mcp_manager, tool_call)
+                    if level0_pass:
+                        verified = True
+                        result['verification'] = 'Level 0: deterministic check passed'
+                except Exception as exc:
+                    logger.debug("Level 0 verification error (non-fatal): %s", exc)
+
+                # Level 1: LLM 生成结构化验证条件 → 浏览器确定性评估
+                if not verified:
+                    try:
+                        from core.llm_wrapper import generate_verification_conditions
+                        conditions = await asyncio.wait_for(
+                            generate_verification_conditions(expected_result, client=llm_client, model=model),
+                            timeout=15,
+                        )
+                        if conditions:
+                            level1_pass = await _level1_verify(mcp_manager, conditions)
+                            if level1_pass:
+                                verified = True
+                                result['verification'] = 'Level 1: structured conditions passed'
+                    except asyncio.TimeoutError:
+                        logger.debug("Level 1 验证条件生成超时")
+                    except Exception as exc:
+                        logger.debug("Level 1 验证跳过: %s", exc)
+
+                # Level 2: 完整 LLM 比对 —— 仅当 Level 0+1 均未通过时回退
+                if not verified:
+                    try:
+                        post_snapshot = await mcp_manager.get_dom_snapshot()
+                        from core.llm_wrapper import verify_expected_result
+                        verification = await asyncio.wait_for(
+                            verify_expected_result(expected_result, post_snapshot, step_description=desc, client=llm_client, model=model),
+                            timeout=30,
+                        )
+                        if not verification.passed:
+                            result['success'] = False
+                            result['error'] = f"预期结果验证失败: {verification.reason}"
+                            await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+                        else:
+                            result['verification'] = verification.reason
+                    except asyncio.TimeoutError:
+                        logger.warning("步骤 %s 预期结果验证超时", step_number)
+                    except Exception as exc:
+                        logger.warning("步骤 %s 预期结果验证异常: %s", step_number, exc, exc_info=True)
+            # else: should_verify 返回 False —— 信任 MCP 执行结果，跳过验证
+
+    except Exception as exc:
+        result['error'] = f'步骤执行异常: {exc}'
+        logger.warning("步骤 %s 异常: %s", step_number, exc, exc_info=True)
 
     result['duration_ms'] = (time.monotonic() - t_start) * 1000
     return result

@@ -90,7 +90,29 @@ _INJECT_RECORDER_SCRIPT = r"""
 
   document.addEventListener("click", function (ev) {
     var el = ev.target;
-    report("click", {selector: describe(el), tag: el && el.tagName, text: (el && el.textContent || "").trim().slice(0, 80)});
+    // 向上查找有意义的父元素（按钮、链接、带明显文本的元素），避免点击到内部 img/span/svg
+    var target = el;
+    while (target && target !== document.body) {
+      var tTag = (target.tagName || "").toLowerCase();
+      var tText = (target.textContent || "").trim();
+      if (["button", "a", "input", "select", "textarea", "label", "li"].indexOf(tTag) !== -1 ||
+          (target.getAttribute("role") || "").indexOf("button") !== -1 ||
+          target.getAttribute("onclick")) {
+        break;
+      }
+      // img/span/svg/i 等是常见的图标包裹元素，继续向上查找
+      if (["img", "span", "svg", "i", "em", "b", "strong"].indexOf(tTag) !== -1) {
+        target = target.parentElement;
+        continue;
+      }
+      // 非图标元素且有文本 → 可能是有意义的容器
+      if (tText.length > 0) {
+        break;
+      }
+      target = target.parentElement;
+    }
+    if (target === document.body || !target) target = el;
+    report("click", {selector: describe(target), tag: target && target.tagName, text: (target && target.textContent || "").trim().slice(0, 80)});
   }, true);
 
   document.addEventListener("input", function (ev) {

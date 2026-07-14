@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -21,6 +21,7 @@ class RecordingSession(Base):
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
     events_count = Column(Integer, default=0)
+    events_data = Column(Text, nullable=True)
     converted = Column(Boolean, default=False)
 
     project = relationship("Project", backref="recording_sessions")

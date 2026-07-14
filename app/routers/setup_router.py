@@ -28,7 +28,7 @@ def _get_db_url(cfg: DBConfigRequest) -> str:
 
 
 def _is_setup_done() -> bool:
-    """检查是否已完成 PG 配置。"""
+    """检查是否已完成 PG 配置（配置文件存在 或 环境变量已设）。"""
     if os.path.exists(SETUP_CONFIG_FILE):
         try:
             with open(SETUP_CONFIG_FILE) as f:
@@ -36,6 +36,9 @@ def _is_setup_done() -> bool:
             return data.get("configured", False)
         except Exception:
             return False
+    # 环境变量直接设置 DATABASE_URL 也算已配置（E2E 测试场景）
+    if os.getenv("DATABASE_URL"):
+        return True
     return False
 
 
@@ -92,6 +95,13 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         engine = create_async_engine(db_url, pool_size=5, max_overflow=10)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        # 字段迁移：确保 nickname/email 列存在（兼容重试或旧版本表）
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(__import__("sqlalchemy").text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
+                await conn.execute(__import__("sqlalchemy").text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
+        except Exception:
+            logger.warning("users 表 nickname/email 列迁移失败（非关键，继续）")
 
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.ext.asyncio import AsyncSession

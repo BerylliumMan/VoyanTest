@@ -1,0 +1,8 @@
+{
+  "configured": true,
+  "database_url": "postgresql+asyncpg://postgres:postgres@127.0.0.1:15435/uitest_final",
+  "host": "127.0.0.1",
+  "port": 15435,
+  "user": "postgres",
+  "database": "uitest_final"
+}

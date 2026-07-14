@@ -10,6 +10,8 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --prefer-offline
 
 # Copy frontend source and build
+ARG BUILD_DATE
+RUN test -z "$BUILD_DATE" || echo "Build: $BUILD_DATE"
 COPY frontend/ .
 RUN npm run build && \
     mkdir -p /build/static && \
@@ -61,11 +63,12 @@ COPY alembic.ini voyan_cli.py ./
 COPY --from=frontend-builder /build/static/ app/static/
 
 # Create required directories
-RUN mkdir -p reports logs
+RUN mkdir -p data reports logs
 
 # Environment defaults — DATABASE_URL 通过 docker-compose 或 /setup 页面配置
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=8002 \
+    APP_WORKERS=2 \
     SESSION_SECRET_KEY= \
     DISABLE_CREATE_ALL=false \
     TZ=Asia/Shanghai
@@ -79,5 +82,5 @@ EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8002/health || exit 1
 
-# Run with uvicorn
-CMD ["sh", "-c", "python -m uvicorn app.main:app --host $APP_HOST --port $APP_PORT --log-level info"]
+# Run with uvicorn（多 worker + 生产参数）
+CMD ["sh", "-c", "python -m uvicorn app.main:app --host $APP_HOST --port $APP_PORT --workers $APP_WORKERS --timeout-keep-alive 65 --backlog 2048 --limit-max-requests 10000 --log-level info"]

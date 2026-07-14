@@ -33,8 +33,11 @@ async def list_gen_sessions(
 
     返回 dict: ``{items: list[GenSession], total: int}``
     """
+    from sqlalchemy.orm import selectinload
+
     items_stmt = (
         select(db_models.GenSession)
+        .options(selectinload(db_models.GenSession.project))
         .order_by(db_models.GenSession.created_at.desc())
     )
     if project_id is not None:

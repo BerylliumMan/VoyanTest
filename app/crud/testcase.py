@@ -1,8 +1,9 @@
 # app/crud/testcase.py - 测试步骤 + 测试用例 CRUD
 import logging
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app import db_models, models
 
@@ -93,7 +94,9 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
 async def get_test_case(db: AsyncSession, case_id: int) -> db_models.TestCase | None:
     """通过ID获取测试用例"""
     result = await db.execute(
-        select(db_models.TestCase).where(db_models.TestCase.id == case_id)
+        select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
+        .where(db_models.TestCase.id == case_id)
     )
     return result.scalar_one_or_none()
 
@@ -101,6 +104,7 @@ async def get_all_test_cases_for_project(db: AsyncSession, project_id: int) -> l
     """获取项目的所有测试用例"""
     result = await db.execute(
         select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
         .where(db_models.TestCase.project_id == project_id)
         .order_by(db_models.TestCase.created_at.desc())
     )
@@ -116,6 +120,7 @@ async def get_all_test_cases_for_project_paginated(db: AsyncSession, project_id:
     offset = (page - 1) * size
     items_result = await db.execute(
         select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
         .where(db_models.TestCase.project_id == project_id)
         .order_by(db_models.TestCase.id.asc())
         .offset(offset)
@@ -128,6 +133,7 @@ async def get_all_test_cases_for_module(db: AsyncSession, module_id: int) -> lis
     """获取模块的所有测试用例"""
     result = await db.execute(
         select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
         .where(db_models.TestCase.module_id == module_id)
         .order_by(db_models.TestCase.id.asc())
     )
@@ -143,6 +149,7 @@ async def get_all_test_cases_for_module_paginated(db: AsyncSession, module_id: i
     offset = (page - 1) * size
     items_result = await db.execute(
         select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
         .where(db_models.TestCase.module_id == module_id)
         .order_by(db_models.TestCase.id.asc())
         .offset(offset)
@@ -167,6 +174,7 @@ async def search_test_cases(db: AsyncSession, project_id: int, query: str, page:
 
     items_result = await db.execute(
         select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
         .where(*conditions)
         .order_by(db_models.TestCase.id.asc())
         .offset((page - 1) * size)
@@ -217,6 +225,7 @@ async def get_init_test_cases(db: AsyncSession, project_id: int) -> list[db_mode
     """获取项目下所有标记为初始化的测试用例"""
     result = await db.execute(
         select(db_models.TestCase)
+        .options(selectinload(db_models.TestCase.steps))
         .where(
             db_models.TestCase.project_id == project_id,
             db_models.TestCase.is_init == True,
@@ -227,13 +236,16 @@ async def get_init_test_cases(db: AsyncSession, project_id: int) -> list[db_mode
 
 
 async def delete_test_case(db: AsyncSession, case_id: int) -> dict[str, str] | None:
-    """删除测试用例"""
+    """删除测试用例（步骤一起删，运行记录保留但解除关联）"""
     db_case = await get_test_case(db, case_id)
     if not db_case:
         return None
 
     # 删除关联的步骤
     await delete_steps_for_case(db, case_id)
+
+    # 解除运行记录的外键关联（保留报告记录）
+    await db.execute(text("UPDATE test_runs SET case_id = NULL WHERE case_id = :cid"), {"cid": case_id})
 
     await db.delete(db_case)
     await db.commit()

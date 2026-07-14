@@ -90,7 +90,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
             if env:
                 base_url_override = env.base_url
 
-    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=None)
+    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
 
     async def _run() -> None:
         start_time = tz_now()
@@ -236,7 +236,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
 
-    batch = await crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos), triggered_by=None)
+    batch = await crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
 
     async def _run_batch() -> None:
         _all_success = True

@@ -74,11 +74,13 @@ def _load_report_steps(report_path: str | None) -> list[Any]:
 
 
 def _batch_display_name(batch: db_models.RunBatch) -> str:
-    """批次的对外显示名：优先使用自定义名称，否则使用创建时间。"""
+    """批次的对外显示名：优先使用自定义名称，否则使用创建时间（CST/UTC+8）。"""
     if batch.name:
         return batch.name
     if batch.created_at:
-        return batch.created_at.strftime("%Y-%m-%d %H:%M")
+        from app.tz import CST
+        cst_time = batch.created_at.astimezone(CST)
+        return cst_time.strftime("%Y-%m-%d %H:%M")
     return ""
 
 

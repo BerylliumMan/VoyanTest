@@ -20,6 +20,7 @@ services:
 
   app:
     build: .
+    container_name: voyantest
     ports:
       - "8002:8002"
     environment:

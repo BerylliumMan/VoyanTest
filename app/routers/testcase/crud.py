@@ -59,6 +59,42 @@ async def list_init_test_cases(project_id: int, user=Depends(get_current_user), 
     return await crud.get_init_test_cases(db, project_id)
 
 
+@router.get("/export")
+async def export_test_cases(
+    project_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """导出项目测试用例为 xlsx。"""
+    from openpyxl import Workbook
+
+    cases = await crud.get_all_test_cases_for_project(db, project_id)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "测试用例"
+    ws.append(["用例名称", "模块", "步骤序号", "步骤描述", "预期结果", "优先级", "标签"])
+
+    for tc in cases:
+        mn = (await crud.get_module(db, tc.module_id)).name if tc.module_id else ""
+        steps = await crud.get_steps_for_case(db, tc.id)
+        if steps:
+            for s in steps:
+                ws.append([tc.name, mn, s.step_order, s.description, s.parsed_result, tc.priority or "medium", tc.tags or ""])
+        else:
+            ws.append([tc.name, mn, "", "", "", tc.priority or "medium", tc.tags or ""])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=testcases_project_{project_id}.xlsx"},
+    )
+
+
 @router.get("/{case_id}", response_model=models.TestCase)
 async def get_test_case(case_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     """
@@ -157,42 +193,6 @@ async def get_project_test_cases(project_id: int, page: int = 1, size: int = 20,
         "page": page,
         "size": size,
     }
-
-
-@router.get("/export")
-async def export_test_cases(
-    project_id: int,
-    user=Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_db),
-):
-    """导出项目测试用例为 xlsx。"""
-    from openpyxl import Workbook
-
-    cases = await crud.get_all_test_cases_for_project(db, project_id)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "测试用例"
-    ws.append(["用例名称", "模块", "步骤序号", "步骤描述", "预期结果", "优先级", "标签"])
-
-    for tc in cases:
-        mn = (await crud.get_module(db, tc.module_id)).name if tc.module_id else ""
-        steps = await crud.get_steps_for_case(db, tc.id)
-        if steps:
-            for s in steps:
-                ws.append([tc.name, mn, s.step_order, s.description, s.parsed_result, tc.priority or "medium", tc.tags or ""])
-        else:
-            ws.append([tc.name, mn, "", "", "", tc.priority or "medium", tc.tags or ""])
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=testcases_project_{project_id}.xlsx"},
-    )
 
 
 @router.post("/import")

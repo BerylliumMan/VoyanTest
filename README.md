@@ -53,39 +53,55 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 ### 方式一：Docker Compose（推荐）
 
 ```bash
-git clone <仓库地址>
 cd VoyanTest
 docker compose up -d
 ```
 
 浏览器打开 `http://localhost:8002/`，首次使用需通过 `/setup` 页面配置 PostgreSQL 数据库。
 
+> Docker Compose 已自动配置持久化卷，数据位于：
+> - `voyantest-data` — 数据库配置
+> - `voyantest-reports` — 测试报告与截图
+> - `voyantest-logs` — 应用日志
+
 ### 方式二：Docker 镜像
 
 ```bash
-# 加载镜像
+# 1. 加载镜像
 gunzip -c voyantest-docker.tar.gz | docker load
 
-# 启动（需要先有 PG 数据库）
+# 2a. 创建持久化卷（推荐）——数据不会随容器删除而丢失
+docker volume create voyantest-data  # 数据库配置
+docker volume create voyantest-reports  # 测试报告与截图
+docker volume create voyantest-logs  # 应用日志
+
+# 3a. 启动（使用持久化卷）
 docker run -d -p 8002:8002 \
   --name voyantest \
-  -e DATABASE_URL="postgresql+asyncpg://user:pass@host:5432/dbname" \
   -e SESSION_SECRET_KEY="your-secret-key" \
   -v voyantest-data:/app/data \
   -v voyantest-reports:/app/reports \
   -v voyantest-logs:/app/logs \
   voyantest:latest
 
-# 或通过 /setup 页面配置 PG（无需预设 DATABASE_URL）
+# 访问 http://localhost:8002/setup 填写 PG 连接
+
+# --- 或者使用绑定挂载（无需先创建卷）---
+# 2b. 创建本地目录
+mkdir -p ./voyantest-data ./voyantest-reports ./voyantest-logs
+
+# 3b. 启动（使用绑定挂载）
 docker run -d -p 8002:8002 \
   --name voyantest \
   -e SESSION_SECRET_KEY="your-secret-key" \
-  -v voyantest-data:/app/data \
-  -v voyantest-reports:/app/reports \
-  -v voyantest-logs:/app/logs \
+  -v $(pwd)/voyantest-data:/app/data \
+  -v $(pwd)/voyantest-reports:/app/reports \
+  -v $(pwd)/voyantest-logs:/app/logs \
   voyantest:latest
-# 浏览器访问 http://localhost:8002/setup 填写 PG 连接
 ```
+
+> **持久化说明**：容器删除后，持久化卷或本地目录中的数据仍会保留。
+> 重新创建容器时挂载相同卷/目录即可恢复配置、报告和日志。
 
 ### 方式三：源码启动
 

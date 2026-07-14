@@ -588,7 +588,7 @@ const GenPage: React.FC = () => {
             }}
           >
             <Collapse.Item header="提示词配置" name="prompt-config">
-              <Space className={styles.fullWidth} align="start">
+              <div className={styles.promptConfigRow}>
                 <div className={styles.promptListWrapper}>
                   {promptLoading ? (
                     <Spin className={styles.spinCentered} />
@@ -623,7 +623,7 @@ const GenPage: React.FC = () => {
                     />
                   )}
                 </div>
-                <div className={styles.flexGrow}>
+                <div className={styles.promptConfigEditor}>
                   {selectedPrompt ? (
                     <>
                       <Space className={styles.promptHeaderSpace}>
@@ -663,7 +663,7 @@ const GenPage: React.FC = () => {
                     </div>
                   )}
                 </div>
-              </Space>
+              </div>
             </Collapse.Item>
           </Collapse>
         </Space>

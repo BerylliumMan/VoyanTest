@@ -85,7 +85,7 @@ async def get_current_recording(
         status=state.status,
         url=state.url or "",
         page_title=state.page_title or "",
-        elapsed_seconds=time.time() - (state.started_at or time.time()),
+        elapsed_seconds=time.time() - (state.start_time or time.time()),
         events_count=state.events_count or 0,
     )
 
@@ -103,13 +103,19 @@ async def start_recording(
     If ``req.agent_name`` is provided, the recording browser runs on the
     specified agent instead of on the server.
     """
-    # 1) 一个用户同时只能有一个 active 录制会话。
+    # 1) 一个用户同时只能有一个 active 录制会话。如果有残留的脏会话，自动清理。
     existing = await get_session_for_user(user.id)
     if existing is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"用户已有进行中的录制会话: {existing.session_id}",
-        )
+        # 检查是否真的是活跃会话（有 CDP session 引用且状态为 recording）
+        cdp_ref = getattr(existing, 'cdp_session_ref', None)
+        if cdp_ref is not None and existing.status == 'recording':
+            raise HTTPException(
+                status_code=409,
+                detail=f"用户已有进行中的录制会话: {existing.session_id}",
+            )
+        # 否则是脏会话，自动清理
+        from .state import remove_session
+        await remove_session(existing.session_id)
 
     # 2) 分配 session_id 并构造 orchestrator。
     session_id = f"rec-{uuid.uuid4().hex[:12]}"
@@ -247,6 +253,14 @@ async def stop_recording(
                 _rec.status = "stopped"
                 _rec.ended_at = datetime.utcnow()
                 _rec.events_count = int(getattr(cdp_session, "events_count", 0) or 0)
+                # 持久化事件数据（供历史查看）
+                if cdp_session is not None:
+                    import json
+                    get_events = getattr(cdp_session, "get_events", None)
+                    if get_events:
+                        raw = get_events()
+                        if raw:
+                            _rec.events_data = json.dumps([e.to_dict() for e in raw], ensure_ascii=False)
                 await _db.commit()
     except Exception:
         logger.warning("无法更新录制会话历史", exc_info=True)
@@ -323,18 +337,27 @@ async def delete_recording_history(
 async def get_recorded_events(
     session_id: str,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
 ) -> list[RecordedEventResponse]:
     """Return the recorded events **without** clearing the in-memory buffer.
 
     The endpoint reads via ``CDPRecordingSession.get_events()`` when the
-    orchestrator exposes one; otherwise it returns an empty list rather than
-    consuming the buffer (so :func:`convert` can still see the events later).
+    orchestrator exposes one; otherwise it reads from DB (historical).
     """
     state = await get_session(session_id)
     if state is None:
-        raise HTTPException(
-            status_code=404, detail=f"录制会话不存在: {session_id}"
-        )
+        # 历史录制：从 DB 读
+        _rec = (await db.execute(
+            select(db_models.RecordingSession).where(
+                db_models.RecordingSession.session_id == session_id
+            )
+        )).scalar_one_or_none()
+        if _rec is None or not _rec.events_data:
+            raise HTTPException(
+                status_code=404, detail=f"录制会话不存在或无可录制事件: {session_id}"
+            )
+        import json
+        return [RecordedEventResponse(**e) for e in json.loads(_rec.events_data)]
 
     cdp_session = state.cdp_session_ref
     get_events = getattr(cdp_session, "get_events", None) if cdp_session else None

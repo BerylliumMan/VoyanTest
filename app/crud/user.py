@@ -83,6 +83,8 @@ async def update_user_fields(
     login_attempts: int | None = None,
     locked_until = None,
     last_login_at = None,
+    nickname: str | None = None,
+    email: str | None = None,
 ) -> db_models.User | None:
     """部分更新 User 字段（仅更新非 None 的入参字段）。
 
@@ -109,6 +111,10 @@ async def update_user_fields(
         user.locked_until = locked_until
     if last_login_at is not None:
         user.last_login_at = last_login_at
+    if nickname is not None:
+        user.nickname = nickname
+    if email is not None:
+        user.email = email
 
     await db.commit()
     await db.refresh(user)

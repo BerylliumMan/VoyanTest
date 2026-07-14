@@ -20,6 +20,8 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), default=tz_now)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     project_ids = Column(JSON, nullable=True, default=None)
+    nickname = Column(String(255), nullable=True, default=None)
+    email = Column(String(255), nullable=True, default=None)
 
 
 class Session(Base):
