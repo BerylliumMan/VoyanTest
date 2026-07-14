@@ -69,7 +69,7 @@ async def create_run_log(db: AsyncSession, run_id: int, level: str, message: str
 # 运行批次 CRUD
 # ----------------------------
 
-async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0) -> db_models.RunBatch:
+async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0, triggered_by: str | None = None) -> db_models.RunBatch:
     """创建运行批次"""
     batch = db_models.RunBatch(
         project_id=project_id,
@@ -79,6 +79,7 @@ async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", to
         passed=0,
         failed=0,
         started_at=tz_now(),
+        triggered_by=triggered_by,
     )
     db.add(batch)
     await db.commit()

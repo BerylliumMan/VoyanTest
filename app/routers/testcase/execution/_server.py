@@ -45,7 +45,7 @@ async def run_test_case_endpoint(
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
+    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
 
     from core.browser_pool import BrowserPool
 
@@ -90,7 +90,7 @@ async def run_test_case_debug(
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1)
+    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
 
     run = await crud.create_test_run(
         db, case_id, "running",
@@ -125,8 +125,8 @@ async def _run_debug_mode(case_id: int, batch_id: int, run_id: int, environment_
             environment_id=environment_id,
             debug_mode=True,
         )
-        from app.websocket import _pause_events
-        _pause_events.pop(run_id, None)
+        from app.websocket import LogBroadcaster
+        await LogBroadcaster.remove_pause_event(run_id)
     except Exception as exc:
         logger.exception("Debug run failed")
         try:
@@ -166,7 +166,7 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
                 raise HTTPException(status_code=400, detail=f"Init case {tc.id} is not in the same project")
 
     total = len(case_ids) + len(init_case_ids)
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total)
+    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total, triggered_by=getattr(user, 'username', None))
     from app.routers.testcase import execution as _exec
     background_tasks.add_task(
         _exec.run_batch_test_cases,
@@ -204,7 +204,7 @@ async def run_module_test_cases(
     case_ids = [c.id for c in test_cases]
     project_id = db_module.project_id
 
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids))
+    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids), triggered_by=getattr(user, 'username', None))
 
     from app.routers.testcase import execution as _exec
     background_tasks.add_task(
@@ -237,7 +237,7 @@ async def run_project_test_cases(
 
     case_ids = [c.id for c in test_cases]
 
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids))
+    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids), triggered_by=getattr(user, 'username', None))
 
     from app.routers.testcase import execution as _exec
     background_tasks.add_task(

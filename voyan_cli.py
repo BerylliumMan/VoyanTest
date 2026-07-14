@@ -156,6 +156,7 @@ async def _execute_and_report(
         case_ids=case_ids,
         project_id=project_id,
         environment_id=env_id,
+        triggered_by=None,
     )
 
     if results is None:

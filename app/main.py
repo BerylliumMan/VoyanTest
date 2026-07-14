@@ -69,6 +69,11 @@ async def _run_startup_init():
                 await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
         except Exception:
             logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)"))
+        except Exception:
+            logger.warning("run_batches 表 triggered_by 列迁移失败（非关键错误，继续）")
     else:
         logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（请确保已执行 alembic upgrade head）")
 

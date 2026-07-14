@@ -21,6 +21,7 @@ class RunBatch(Base):
     created_at = Column(DateTime(timezone=True), default=tz_now)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
+    triggered_by = Column(String(255), nullable=True)
 
     runs = relationship("TestRun", backref="batch")
 

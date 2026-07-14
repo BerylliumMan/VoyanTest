@@ -135,6 +135,7 @@ async def run_batch_test_cases(
     environment_id: int | None = None,
     init_case_ids: list[int] | None = None,
     debug_mode: bool = False,
+    triggered_by: str | None = None,
 ):
     """Execute multiple test cases sequentially in a single browser.
 
@@ -171,7 +172,7 @@ async def run_batch_test_cases(
     # 创建批次（如果未提供 batch_id）
     if batch_id is None:
         async with AsyncSessionLocal() as _db:
-            batch = await crud.create_run_batch(_db, project_id, total_cases=total_cases)
+            batch = await crud.create_run_batch(_db, project_id, total_cases=total_cases, triggered_by=triggered_by)
             batch_id = batch.id
 
     mcp_manager = None

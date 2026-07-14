@@ -477,7 +477,7 @@ async def replay_recording(
     from app.routers.testcase import execution as _exec
     from core.runner import save_run_results
 
-    batch = await crud.create_run_batch(db, project_id=0, total_cases=1)
+    batch = await crud.create_run_batch(db, project_id=0, total_cases=1, triggered_by=getattr(user, 'username', None))
     _ = await save_run_results(
         case_id=0, status="running",
         start_time=datetime.utcnow(), end_time=datetime.utcnow(),

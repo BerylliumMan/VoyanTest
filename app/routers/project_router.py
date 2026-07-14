@@ -110,7 +110,7 @@ async def run_project_test_cases(
     case_ids = [c.id for c in test_cases]
     from core.runner import run_batch_test_cases
 
-    background_tasks.add_task(run_batch_test_cases, case_ids, project_id, environment_id=environment_id)
+    background_tasks.add_task(run_batch_test_cases, case_ids, project_id, environment_id=environment_id, triggered_by=getattr(admin, 'username', None))
 
     return {"detail": f"已为项目 {project_id} 中的 {len(test_cases)} 个测试用例触发顺序运行。"}
 

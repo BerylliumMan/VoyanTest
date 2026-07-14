@@ -283,6 +283,7 @@ class ReportService:
                     "created_at": batch.created_at.isoformat() if batch.created_at else None,
                     "started_at": batch.started_at.isoformat() if batch.started_at else None,
                     "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
+                    "triggered_by": batch.triggered_by,
                 }
             )
 

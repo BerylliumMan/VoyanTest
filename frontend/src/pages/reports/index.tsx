@@ -13,6 +13,7 @@ interface BatchItem {
   id: number; name: string; project_id: number; project_name: string;
   status: string; total_cases: number; passed: number; failed: number;
   created_at: string; started_at: string; finished_at: string;
+  triggered_by?: string;
 }
 
 interface StepDetail {
@@ -276,6 +277,8 @@ const Reports: React.FC = () => {
     },
     { title: t['exec.time'], dataIndex: 'created_at', width: 180,
       render: (v: string) => v ? new Date(v).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--' },
+    { title: t['executor'], dataIndex: 'triggered_by', width: 120, ellipsis: true,
+      render: (v: string | undefined) => v || '--' },
     {
       title: t['actions'], width: 280,
       render: (_: unknown, r: BatchItem) => (

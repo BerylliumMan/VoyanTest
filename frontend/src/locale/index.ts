@@ -137,6 +137,7 @@ const i18n = {
     'export.failed': 'Export failed',
     'result': 'Result',
     'exec.time': 'Exec Time',
+    'executor': 'Executor',
     'screenshot': 'Step {num} Screenshot',
 
     'project.mgmt': 'Project Management',
@@ -503,6 +504,7 @@ const i18n = {
     'export.failed': '导出失败',
     'result': '结果',
     'exec.time': '执行时间',
+    'executor': '执行用户',
     'screenshot': '步骤 {num} 截图',
 
     'project.mgmt': '项目管理',
