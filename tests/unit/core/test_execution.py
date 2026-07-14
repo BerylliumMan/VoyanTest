@@ -435,9 +435,15 @@ class TestRunTestCaseInBrowserRetry:
                 _executor_result(False, 1, error="p2"),
                 _executor_result(False, 1, error="p3"),
             ]
-            result = await run_test_case_in_browser(
-                case_id, mcp, db=db, batch_id=batch_id,
-            )
+            # 自愈配置不干扰重试次数
+            import app.runtime_config as _rtcfg
+            _rtcfg.healing_config.max_retries = 2
+            try:
+                result = await run_test_case_in_browser(
+                    case_id, mcp, db=db, batch_id=batch_id,
+                )
+            finally:
+                _rtcfg.healing_config.max_retries = 3
 
         assert result["status"] == "failed"
         assert patches.executor.await_count == 3
