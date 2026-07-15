@@ -121,7 +121,18 @@ const TestCases: React.FC = () => {
   const handleBatchAction = async () => { if (!targetProjectId) { Message.error(t['select.project']); return; } setBatchSubmitting(true); try { const url = batchAction === 'move' ? '/api/testcases/batch-move' : '/api/testcases/batch-copy'; await axios.post(url, { case_ids: selectedRowKeys, project_id: targetProjectId, module_id: targetModuleId }); Message.success(batchAction === 'move' ? t['update.success'] : t['create.success']); setBatchModalVisible(false); setSelectedRowKeys([]); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } finally { setBatchSubmitting(false); } };
   const openModuleModal = (mod?: Module) => { setEditingModule(mod || null); moduleForm.resetFields(); if (mod) moduleForm.setFieldsValue(mod); setModuleVisible(true); };
   const handleModuleSubmit = async () => { const values = await moduleForm.validate(); try { if (editingModule) { await axios.put(`/api/modules/${editingModule.id}`, values); Message.success(t['update.success']); } else { await axios.post(`/api/projects/${selectedProject}/modules`, { ...values, project_id: selectedProject }); Message.success(t['create.success']); } setModuleVisible(false); fetchModules(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
-  const handleModuleDelete = async (id: number) => { try { await axios.delete(`/api/modules/${id}`); Message.success(t['deleted']); if (selectedModuleId === id) setSelectedModuleId(null); fetchModules(); } catch (e: unknown) { const err = e as { response?: { status?: number; data?: { detail?: string } } }; if (err.response?.status === 409) { Message.error(err.response.data?.detail || t['cannot.delete.module']); } else { Message.error(t['delete.failed']); } } };
+  const handleModuleDelete = useCallback(async (id: number) => {
+    try {
+      await axios.delete(`/api/modules/${id}`);
+      Message.success(t['deleted']);
+      if (selectedModuleId === id) setSelectedModuleId(null);
+      fetchModules();
+    } catch (e: unknown) {
+      const err = e as { response?: { status?: number; data?: { detail?: string } } };
+      if (err.response?.status === 409) { Message.error(err.response.data?.detail || t['cannot.delete.module']); }
+      else { Message.error(t['delete.failed']); }
+    }
+  }, [selectedModuleId, t]);
   const handleRunModule = async (id: number) => { try { const params: { environment_id?: number } = {}; if (selectedEnvironment) params.environment_id = selectedEnvironment; await axios.post(`/api/testcases/module/${id}/run`, null, { params }); Message.success(t['run.triggered']); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
   const handleRunAll = async () => { if (!selectedProject) return; try { const params: { environment_id?: number } = {}; if (selectedEnvironment) params.environment_id = selectedEnvironment; await axios.post(`/api/testcases/project/${selectedProject}/run`, null, { params }); Message.success(t['run.triggered']); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
 

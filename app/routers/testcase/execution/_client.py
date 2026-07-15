@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
-from app.auth import get_current_user
+from app.auth import get_current_user, get_user_project_filter
 from app import database as db_mod
 from app.database import get_async_db
 from app.tz import now as tz_now
@@ -56,6 +56,10 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
 
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Test case not found")
 
     agents = await agent_manager.get_online_agents()
@@ -236,7 +240,12 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
 
-    batch = await crud.create_run_batch(db, project_id=case_infos[0]["project_id"], total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
+    allowed_ids = get_user_project_filter(user)
+    project_id = case_infos[0]["project_id"]
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="No valid test cases found")
+
+    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
 
     async def _run_batch() -> None:
         _all_success = True

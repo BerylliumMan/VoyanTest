@@ -20,7 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
-from app.auth import get_current_user
+from app.auth import get_current_user, get_user_project_filter
 from app.database import AsyncSessionLocal, get_async_db
 from app.tz import now as tz_now
 from app.services.notifications import notify_batch_completed
@@ -43,6 +43,10 @@ async def run_test_case_endpoint(
     """运行单个测试用例 - 创建单用例批次"""
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Test case not found")
 
     batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
@@ -88,6 +92,10 @@ async def run_test_case_debug(
     """启动调试运行——打开 WebSocket 桥接和暂停模式。"""
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Test case not found")
 
     batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
@@ -155,7 +163,11 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     if not test_cases:
         raise HTTPException(status_code=404, detail="No valid test cases found")
 
+    allowed_ids = get_user_project_filter(user)
     project_id = test_cases[0].project_id
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="No valid test cases found")
+
     case_ids = [c.id for c in test_cases]
     init_case_ids = req.init_case_ids or []
 
@@ -197,6 +209,10 @@ async def run_module_test_cases(
     if db_module is None:
         raise HTTPException(status_code=404, detail="Module not found")
 
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_module.project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Module not found")
+
     test_cases = await crud.get_all_test_cases_for_module(db, module_id)
     if not test_cases:
         return {"message": f"No test cases found for module {module_id} to run."}
@@ -229,6 +245,10 @@ async def run_project_test_cases(
     """运行项目下所有测试用例 - 创建批次"""
     db_project = await crud.get_project(db, project_id)
     if db_project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
 
     test_cases = await crud.get_all_test_cases_for_project(db, project_id)

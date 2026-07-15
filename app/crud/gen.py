@@ -28,8 +28,9 @@ async def list_gen_sessions(
     page: int,
     page_size: int,
     project_id: int | None = None,
+    user_id_filter: int | None = None,
 ) -> dict:
-    """分页获取生成会话列表（按 ``created_at`` 倒序，可按项目筛选）。
+    """分页获取生成会话列表（按 ``created_at`` 倒序，可按项目筛选、用户隔离）。
 
     返回 dict: ``{items: list[GenSession], total: int}``
     """
@@ -42,10 +43,14 @@ async def list_gen_sessions(
     )
     if project_id is not None:
         items_stmt = items_stmt.where(db_models.GenSession.project_id == project_id)
+    if user_id_filter is not None:
+        items_stmt = items_stmt.where(db_models.GenSession.user_id == user_id_filter)
 
     count_stmt = select(func.count()).select_from(db_models.GenSession)
     if project_id is not None:
         count_stmt = count_stmt.where(db_models.GenSession.project_id == project_id)
+    if user_id_filter is not None:
+        count_stmt = count_stmt.where(db_models.GenSession.user_id == user_id_filter)
     total = (await db.execute(count_stmt)).scalar()
 
     items_stmt = items_stmt.offset((page - 1) * page_size).limit(page_size)
@@ -69,6 +74,7 @@ async def create_gen_session(
     project_id: int | None,
     project_description: str,
     status: str = "analyzing",
+    user_id: int | None = None,
 ) -> db_models.GenSession:
     """创建一条 GenSession 行（路由层 upload 用）。
 
@@ -79,6 +85,7 @@ async def create_gen_session(
         filename=filename,
         filenames=filenames,
         project_id=project_id,
+        user_id=user_id,
         project_description=project_description,
         status=status,
     )
