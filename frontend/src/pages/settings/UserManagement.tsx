@@ -127,7 +127,7 @@ function UserManagement() {
             <Input placeholder={t['username']} disabled={!!editingUser} />
           </Form.Item>
           {!editingUser && (
-            <Form.Item field="password" label={t['password']} rules={[{ required: true, minLength: 6 }]}>
+            <Form.Item field="password" label={t['password']} rules={[{ required: true, minLength: 8, message: '密码至少8位，需包含字母、数字和特殊字符' }]}>
               <Input.Password placeholder={t['password.placeholder']} />
             </Form.Item>
           )}

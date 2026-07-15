@@ -12,7 +12,7 @@ import qs from 'query-string';
 import NProgress from 'nprogress';
 import Navbar from './components/NavBar';
 import Footer from './components/Footer';
-import useRoute, { IRoute } from '@/routes';
+import useRoute, { generatePermission, IRoute } from '@/routes';
 import { getIconFromKey, getFlattenRoutes } from './layout-utils';
 import useLocale from './utils/useLocale';
 import getUrlParams from './utils/getUrlParams';
@@ -43,7 +43,7 @@ function PageLayout() {
     }
   }, [userInfo]);
 
-  const [routes, defaultRoute] = useRoute(userInfo?.permissions ?? {});
+  const [routes, defaultRoute] = useRoute(generatePermission(userInfo?.role ?? ''));
   const defaultSelectedKeys = [currentComponent || defaultRoute];
   const paths = (currentComponent || defaultRoute).split('/');
   const defaultOpenKeys = paths.slice(0, paths.length - 1);
