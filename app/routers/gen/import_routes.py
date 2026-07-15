@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ... import crud
-from ...auth import get_current_user
+from ...auth import get_current_user, get_user_project_filter
 from ...database import get_async_db
 from .schemas import GenImportRequest, GenImportResponse
 from .state import _lock, _sessions
@@ -58,6 +58,11 @@ async def import_test_cases(
     project = await crud.get_project(db, body.project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
+
+    # 项目权限检查
+    allowed_project_ids = get_user_project_filter(user)
+    if allowed_project_ids is not None and body.project_id not in allowed_project_ids:
+        raise HTTPException(403, "无权限操作该项目")
 
     from app.gen.adapter import import_test_cases as do_import
     created = await do_import(db, body.project_id, test_cases_data, body.selected_ids)

@@ -97,10 +97,17 @@ async def create_module(
 async def update_module(
     module_id: int,
     module: models.ModuleUpdate,
-    admin=Depends(require_admin),
+    user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db)
 ) -> models.Module:
     """更新模块"""
+    db_module = await crud.get_module(db, module_id)
+    if not db_module:
+        raise HTTPException(status_code=404, detail="Module not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_module.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+
     # 验证 parent_id 不形成循环引用
     if module.parent_id is not None:
         if not await crud.validate_module_parent(db, module_id, module.parent_id):
@@ -113,8 +120,14 @@ async def update_module(
 
 
 @router.delete("/modules/{module_id}", status_code=204)
-async def delete_module(module_id: int, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> Response:
+async def delete_module(module_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> Response:
     """删除模块（含删除保护）"""
+    db_module = await crud.get_module(db, module_id)
+    if not db_module:
+        raise Response(status_code=204)
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_module.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     try:
         result = await crud.delete_module(db, module_id)
     except ValueError:

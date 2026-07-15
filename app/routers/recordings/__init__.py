@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
-from app.auth import get_current_user
+from app.auth import get_current_user, get_user_project_filter
 from app.database import AsyncSessionLocal, get_async_db
 from core.cdp_session import CDPRecordingSession
 from core.cdp_converter import convert_events_to_steps
@@ -210,6 +210,8 @@ async def stop_recording(
         raise HTTPException(
             status_code=404, detail=f"录制会话不存在: {session_id}"
         )
+    if state.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Recording session not found")
 
     if state.status != "recording":
         raise HTTPException(
@@ -250,6 +252,8 @@ async def stop_recording(
                 )
             )).scalar_one_or_none()
             if _rec:
+                if _rec.user_id != user.id:
+                    raise HTTPException(status_code=404, detail="Recording session not found")
                 _rec.status = "stopped"
                 _rec.ended_at = datetime.utcnow()
                 _rec.events_count = int(getattr(cdp_session, "events_count", 0) or 0)
@@ -262,6 +266,8 @@ async def stop_recording(
                         if raw:
                             _rec.events_data = json.dumps([e.to_dict() for e in raw], ensure_ascii=False)
                 await _db.commit()
+    except HTTPException:
+        raise
     except Exception:
         logger.warning("无法更新录制会话历史", exc_info=True)
 
@@ -294,11 +300,15 @@ async def list_recording_history(
     db: AsyncSession = Depends(get_async_db),
 ) -> RecordingListResponse:
     """列出历史录制会话。"""
-    result = await db.execute(
+    allowed_ids = get_user_project_filter(user)
+    stmt = (
         select(db_models.RecordingSession)
         .order_by(db_models.RecordingSession.started_at.desc())
         .limit(50)
     )
+    if allowed_ids is not None:
+        stmt = stmt.where(db_models.RecordingSession.user_id == user.id)
+    result = await db.execute(stmt)
     sessions = result.scalars().all()
     return RecordingListResponse(sessions=[
         RecordingStatusResponse(
@@ -328,6 +338,8 @@ async def delete_recording_history(
     rec = result.scalar_one_or_none()
     if rec is None:
         raise HTTPException(status_code=404, detail="录制会话不存在")
+    if rec.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Recording not found")
     await db.delete(rec)
     await db.commit()
     return {"deleted": True}
@@ -352,6 +364,8 @@ async def get_recorded_events(
                 db_models.RecordingSession.session_id == session_id
             )
         )).scalar_one_or_none()
+        if _rec and _rec.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Recording not found")
         if _rec is None or not _rec.events_data:
             raise HTTPException(
                 status_code=404, detail=f"录制会话不存在或无可录制事件: {session_id}"
@@ -403,6 +417,8 @@ async def convert_to_test_steps(
         raise HTTPException(
             status_code=404, detail=f"录制会话不存在: {session_id}"
         )
+    if state.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     cdp_session = state.cdp_session_ref
     collect_events = getattr(cdp_session, "collect_events", None) if cdp_session else None
@@ -477,6 +493,8 @@ async def replay_recording(
     state = await get_session(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="录制会话不存在")
+    if state.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     cdp_session = state.cdp_session_ref
     collect = getattr(cdp_session, "collect_events", None) if cdp_session else None
@@ -528,6 +546,10 @@ async def save_as_case(
     project = await crud.get_project(db, req.project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and req.project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
 
     tc = db_models.TestCase(
         project_id=req.project_id,
