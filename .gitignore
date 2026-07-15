@@ -159,3 +159,7 @@ myenv/
 # Docker image artifacts
 voyantest-docker.tar
 voyantest-docker.tar.gz
+agent-offline.zip
+VoyanTest-Agent*
+agent-build-windows*
+chromium/

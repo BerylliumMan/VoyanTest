@@ -104,9 +104,9 @@ async def get_all_test_cases_for_project(db: AsyncSession, project_id: int) -> l
     """获取项目的所有测试用例"""
     result = await db.execute(
         select(db_models.TestCase)
-        .options(selectinload(db_models.TestCase.steps))
+        .options(selectinload(db_models.TestCase.steps), selectinload(db_models.TestCase.module))
         .where(db_models.TestCase.project_id == project_id)
-        .order_by(db_models.TestCase.created_at.desc())
+        .order_by(db_models.TestCase.project_case_number.asc())
     )
     return result.scalars().all()
 
