@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  Button, Popover, Space, Modal,
+  Button, Popover, Space,
 } from '@arco-design/web-react';
 import { Module } from './types';
 import styles from './style/components.module.less';
@@ -50,11 +50,11 @@ export function renderTree(
                   const mod = findModule(moduleTree, m.id);
                   if (mod) onEditModule(mod);
                 }}>{t['edit']}</Button>
-                <Button size="mini" status="danger" onClick={() => Modal.confirm({
-                  title: t['confirm.delete'],
-                  content: t['confirm.delete.module'].replace('{name}', m.name),
-                  onOk: () => onDeleteModule(m.id, m.name),
-                })}>{t['delete']}</Button>
+                <Button size="mini" status="danger" onClick={() => {
+                  if (window.confirm(t['confirm.delete.module'].replace('{name}', m.name))) {
+                    onDeleteModule(m.id, m.name);
+                  }
+                }}>{t['delete']}</Button>
                 <Button size="mini" type="primary" onClick={() => onRunModule(m.id)}>{t['run.all']}</Button>
               </Space>
             }

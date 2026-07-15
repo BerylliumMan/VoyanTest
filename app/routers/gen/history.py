@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ... import crud
-from ...auth import get_current_user
+from ...auth import get_current_user, get_user_project_filter
 from ...database import get_async_db
 from .schemas import (
     GenHistoryItem,
@@ -27,6 +27,15 @@ from .state import _lock, _sessions
 router = APIRouter()
 
 
+def _check_session_ownership(record, user):
+    """非管理员只能访问自己创建的会话，返回 None 表示通过；否则返回 HTTPException。"""
+    if user.role == "admin":
+        return None
+    if record.user_id is None or record.user_id != user.id:
+        raise HTTPException(403, "无权限访问该会话")
+    return None
+
+
 @router.get("/history", response_model=GenHistoryListResponse)
 async def get_history(
     page: int = Query(1, ge=1),
@@ -37,7 +46,18 @@ async def get_history(
 ) -> GenHistoryListResponse:
     """Get analysis history list."""
 
-    result = await crud.gen.list_gen_sessions(db, page=page, page_size=page_size, project_id=project_id)
+    # 项目权限检查：非管理员只能查看自己有权限的项目
+    allowed_project_ids = get_user_project_filter(user)
+    if allowed_project_ids is not None and project_id is not None:
+        if project_id not in allowed_project_ids:
+            raise HTTPException(403, "无权限访问该项目")
+
+    # 非管理员只能看到自己的会话
+    user_id_filter = None if user.role == "admin" else user.id
+    result = await crud.gen.list_gen_sessions(
+        db, page=page, page_size=page_size,
+        project_id=project_id, user_id_filter=user_id_filter,
+    )
     items = result["items"]
     total = result["total"]
 
@@ -75,6 +95,7 @@ async def export_gen_test_cases_xlsx(
     record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
     if record.status != "completed":
         raise HTTPException(400, f"分析未完成，状态: {record.status}")
 
@@ -152,6 +173,7 @@ async def get_history_detail(
     record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
     if record.status != "completed":
         raise HTTPException(400, f"分析未完成，状态: {record.status}")
 
@@ -192,6 +214,7 @@ async def delete_history(
     record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
 
     # Also remove from in-memory if present
     async with _lock:
@@ -214,6 +237,7 @@ async def update_gen_test_case(
     record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
 
     tc = await crud.gen.get_gen_test_case(db, session_id, test_case_id)
     if not tc:
@@ -235,6 +259,7 @@ async def delete_gen_test_case(
     record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
 
     tc = await crud.gen.get_gen_test_case(db, session_id, test_case_id)
     if not tc:

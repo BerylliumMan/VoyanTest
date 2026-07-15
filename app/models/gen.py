@@ -15,6 +15,7 @@ class GenSession(Base):
     filename = Column(String(500), nullable=False)
     filenames = Column(Text, nullable=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    user_id = Column(Integer, nullable=True)
     project_description = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="pending")
     error_message = Column(Text, nullable=True)

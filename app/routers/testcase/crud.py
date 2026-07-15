@@ -18,7 +18,10 @@ router = APIRouter()
 
 
 @router.post("/", response_model=models.TestCase)
-async def create_test_case(case: models.TestCaseCreate, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
+async def create_test_case(case: models.TestCaseCreate, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     """
     创建带有步骤的新测试用例。
     """
@@ -111,13 +114,16 @@ async def get_test_case(case_id: int, user=Depends(get_current_user), db: AsyncS
 
 
 @router.delete("/{case_id}")
-async def delete_test_case(case_id: int, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> dict[str, str] | None:
+async def delete_test_case(case_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict[str, str] | None:
     """
     删除测试用例及其步骤。
     """
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
 
     try:
         return await crud.delete_test_case(db, case_id)
@@ -127,13 +133,16 @@ async def delete_test_case(case_id: int, admin=Depends(require_admin), db: Async
 
 
 @router.put("/{case_id}", response_model=models.TestCase)
-async def update_test_case(case_id: int, case: models.TestCaseUpdate, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
+async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     """
     更新测试用例，包括其步骤。
     """
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
 
     try:
         return await crud.update_test_case(db, case_id, case)
@@ -165,8 +174,14 @@ async def get_module_test_cases(module_id: int, page: int = 1, size: int = 20, u
 
 
 @router.put("/{case_id}/toggle-init", response_model=models.TestCase)
-async def toggle_test_case_init(case_id: int, body: Dict[str, Any], admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
+async def toggle_test_case_init(case_id: int, body: Dict[str, Any], user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     """切换测试用例的初始化标记"""
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     is_init = body.get("is_init", False)
     db_case = await crud.update_test_case_is_init(db, case_id, is_init)
     if db_case is None:
@@ -199,10 +214,13 @@ async def get_project_test_cases(project_id: int, page: int = 1, size: int = 20,
 async def import_test_cases(
     project_id: int,
     file: UploadFile = File(...),
-    admin=Depends(require_admin),
+    user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
     """从 xlsx 文件导入测试用例。"""
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
     from openpyxl import load_workbook
 
     if not file.filename or not file.filename.endswith((".xlsx", ".xls")):

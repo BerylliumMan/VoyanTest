@@ -87,6 +87,11 @@ async def _run_startup_init():
             await conn.execute(text("ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL"))
     except Exception:
         logger.warning("test_runs 表 case_id 列 NOT NULL 约束迁移失败（非关键错误，继续）")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER"))
+    except Exception:
+        logger.warning("gen_sessions 表 user_id 列迁移失败（非关键错误，继续）")
 
     from app.auth import hash_password
 

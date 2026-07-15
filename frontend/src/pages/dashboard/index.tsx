@@ -126,8 +126,8 @@ function Dashboard() {
                 echarts={echarts}
                 option={{
                   tooltip: { trigger: 'axis' },
-                  grid: { left: 40, right: 20, top: 20, bottom: 30 },
-                  xAxis: { type: 'category', data: trends.map((d) => d.label || d.date?.slice(5) || ''), axisLabel: { fontSize: 11 } },
+                  grid: { left: 40, right: 20, top: 20, bottom: 50 },
+                  xAxis: { type: 'category', data: trends.map((d) => d.label || d.date?.slice(5) || ''), axisLabel: { fontSize: 11, rotate: 45 } },
                   yAxis: { type: 'value', minInterval: 1 },
                   series: [
                     { name: '通过', type: 'bar', stack: 'total', data: trends.map((d) => d.passed), itemStyle: { color: '#00b42a' } },

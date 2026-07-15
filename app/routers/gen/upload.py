@@ -100,6 +100,7 @@ async def upload_and_analyze(
         filenames=json.dumps(filenames),
         project_id=project_id,
         project_description=project_description,
+        user_id=user.id,
     )
 
     async def _run_full_analysis() -> None:
