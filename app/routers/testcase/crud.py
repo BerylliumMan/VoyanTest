@@ -68,24 +68,67 @@ async def export_test_cases(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """导出项目测试用例为 xlsx。"""
+    """导出项目测试用例为 xlsx（格式对齐 AI 生成下载格式）。"""
     from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
     cases = await crud.get_all_test_cases_for_project(db, project_id)
 
     wb = Workbook()
     ws = wb.active
     ws.title = "测试用例"
-    ws.append(["用例名称", "模块", "步骤序号", "步骤描述", "预期结果", "优先级", "标签"])
 
-    for tc in cases:
-        mn = (await crud.get_module(db, tc.module_id)).name if tc.module_id else ""
-        steps = await crud.get_steps_for_case(db, tc.id)
-        if steps:
-            for s in steps:
-                ws.append([tc.name, mn, s.step_order, s.description, s.parsed_result, tc.priority or "medium", tc.tags or ""])
-        else:
-            ws.append([tc.name, mn, "", "", "", tc.priority or "medium", tc.tags or ""])
+    # 表头样式（对齐 gen/history.py 格式）
+    header_font = Font(name="微软雅黑", bold=True, size=11, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    cell_align = Alignment(vertical="top", wrap_text=True)
+
+    headers = ["用例ID", "所属模块", "标题", "前置条件", "测试步骤", "预期结果", "优先级"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = thin_border
+
+    for row_idx, tc in enumerate(cases, 2):
+        # 步骤合并为文本块（每行 "序号. 描述 → 预期结果"）
+        steps_str = ""
+        expected_str = ""
+        if tc.steps:
+            lines = []
+            exp_lines = []
+            for s in tc.steps:
+                lines.append(f"{s.step_order}. {s.description}")
+                exp_lines.append(f"{s.step_order}. {s.parsed_result or ''}")
+            steps_str = "\n".join(lines)
+            expected_str = "\n".join(exp_lines)
+
+        module_name = tc.module.name if tc.module else ""
+
+        values = [
+            tc.project_case_number,
+            module_name,
+            tc.name,
+            tc.description or "",
+            steps_str,
+            expected_str,
+            tc.priority or "medium",
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.alignment = cell_align
+            cell.border = thin_border
+
+    # 列宽（对齐 gen/history.py 格式）
+    widths = [10, 16, 30, 24, 40, 40, 10]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -236,22 +279,70 @@ async def import_test_cases(
     created = 0
     errors = []
 
+    # 从表头判断格式（新格式含"测试步骤"/"前置条件"，旧格式含"步骤序号"/"步骤描述"）
+    header_cells = list(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+    has_header = header_cells and any(str(c or "").strip() in ("前置条件", "测试步骤") for c in header_cells[0])
+
     for row in rows:
-        name, _module, _so, desc, expected, priority, tags = [str(c or "") for c in row]
-        if not name:
+        if not any(str(c or "").strip() for c in row):
             continue
-        try:
-            steps_payload = []
-            if desc:
-                steps_payload.append(models.TestStepCreatePayload(
-                    step_order=1, description=desc, expected_result=expected,
+
+        if has_header:
+            # 新格式：用例ID, 所属模块, 标题, 前置条件, 测试步骤, 预期结果, 优先级
+            cells = [str(c or "").strip() for c in row]
+            case_id, module_name, title, preconditions, steps_text, expected_text, priority = (
+                (cells + [""] * 7)[:7]
+            )
+            if not title:
+                continue
+
+            try:
+                # 解析合并的步骤文本
+                steps_payload = []
+                if steps_text:
+                    for line in steps_text.split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        desc = line
+                        exp = ""
+                        if " → " in line:
+                            desc, exp = line.split(" → ", 1)
+                        # 去掉序号前缀 "1. "
+                        if ". " in desc and desc[0].isdigit():
+                            desc = desc.split(". ", 1)[1]
+                        steps_payload.append(models.TestStepCreatePayload(
+                            step_order=len(steps_payload) + 1,
+                            description=desc.strip(),
+                            parsed_result=exp.strip() or None,
+                        ))
+
+                await crud.create_test_case(db, models.TestCaseCreate(
+                    project_id=project_id, name=title,
+                    description=preconditions or "",
+                    steps=steps_payload, priority=priority or "medium",
                 ))
-            await crud.create_test_case(db, models.TestCaseCreate(
-                project_id=project_id, name=name,
-                steps=steps_payload, priority=priority or "medium", tags=tags or "",
-            ))
-            created += 1
-        except Exception as e:
-            errors.append(f"创建用例「{name}」失败: {e}")
+                created += 1
+            except Exception as e:
+                errors.append(f"创建用例「{title}」失败: {e}")
+        else:
+            # 旧格式（向后兼容）：用例名称, 模块, 步骤序号, 步骤描述, 预期结果, 优先级, 标签
+            cells = [str(c or "").strip() for c in row]
+            name, _module, _so, desc, expected, priority, tags = (cells + [""] * 7)[:7]
+            if not name:
+                continue
+            try:
+                steps_payload = []
+                if desc:
+                    steps_payload.append(models.TestStepCreatePayload(
+                        step_order=1, description=desc, parsed_result=expected or None,
+                    ))
+                await crud.create_test_case(db, models.TestCaseCreate(
+                    project_id=project_id, name=name,
+                    steps=steps_payload, priority=priority or "medium", tags=tags or "",
+                ))
+                created += 1
+            except Exception as e:
+                errors.append(f"创建用例「{name}」失败: {e}")
 
     return {"created": created, "errors": errors}
