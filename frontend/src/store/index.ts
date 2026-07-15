@@ -8,6 +8,7 @@ export interface GlobalState {
     organization?: string;
     location?: string;
     email?: string;
+    role?: string;
     permissions: Record<string, string[]>;
     must_change_password?: boolean;
   };

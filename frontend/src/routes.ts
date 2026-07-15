@@ -79,6 +79,7 @@ export const routes: IRoute[] = [
   {
     name: 'menu.audit_logs',
     key: 'audit-logs',
+    requiredPermissions: [{ resource: 'menu.audit_logs', actions: ['admin'] }],
   },
   {
     name: 'menu.recordings',
@@ -87,6 +88,7 @@ export const routes: IRoute[] = [
   {
     name: 'menu.settings',
     key: 'settings',
+    requiredPermissions: [{ resource: 'menu.settings', actions: ['admin'] }],
   },
 ];
 
@@ -156,7 +158,7 @@ const useRoute = (userPermission: UserPermission): [IRoute[], string] => {
   }, [JSON.stringify(userPermission)]);
 
   const defaultRoute = useMemo(() => {
-    const first = permissionRoute[0];
+    const first = permissionRoute.find(r => !r.ignore);
     if (first) {
       return first.children?.[0]?.key || first.key;
     }
