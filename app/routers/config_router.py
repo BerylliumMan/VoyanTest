@@ -36,6 +36,7 @@ class AIConfigRequest(BaseModel):
     api_key: Optional[str] = Field(None, min_length=1)
     api_base: str = Field(..., pattern=r"^https?://")
     temperature: float = Field(..., ge=0.0, le=2.0)
+    max_context_tokens: int = Field(131072, ge=4096, le=1048576)
 
     @classmethod
     def model_validate(cls, obj):
@@ -51,6 +52,7 @@ class AIConfigResponse(BaseModel):
     api_key_masked: str
     api_base: str
     temperature: float
+    max_context_tokens: int
 
 
 # --- Routes ---
@@ -70,6 +72,7 @@ async def get_ai_config(db: AsyncSession = Depends(get_async_db), user = Depends
         api_key_masked=_mask_key(row.api_key),
         api_base=row.api_base,
         temperature=row.temperature,
+        max_context_tokens=row.max_context_tokens,
     )
 
 
@@ -82,7 +85,10 @@ async def update_ai_config(
     # 在 router 层做加密：CRUD 层只接受已加密/可存储的值
     encrypted_key = encrypt_value(body.api_key) if body.api_key else None
     try:
-        row = await crud.upsert_ai_config(db, body.model, encrypted_key, body.api_base, body.temperature)
+        row = await crud.upsert_ai_config(
+            db, body.model, encrypted_key, body.api_base,
+            body.temperature, body.max_context_tokens,
+        )
     except SQLAlchemyError as exc:
         await db.rollback()
         logger.exception("AI 配置保存失败")
@@ -97,6 +103,7 @@ async def update_ai_config(
         api_key_masked=_mask_key(row.api_key),
         api_base=row.api_base,
         temperature=row.temperature,
+        max_context_tokens=row.max_context_tokens,
     )
 
 

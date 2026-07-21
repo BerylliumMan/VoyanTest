@@ -69,21 +69,200 @@ _INJECT_RECORDER_SCRIPT = r"""
     } catch (e) { /* ignore serialization errors */ }
   }
 
+  /**
+   * 多层级元素选择器生成策略
+   *
+   * 五层优先级（从高到低）：
+   *   L1 唯一标识符：id / data-testid / name / aria-label
+   *   L2 组合属性：   tag.class / tag[type] / tag[aria-label]
+   *   L3 结构上下文： parent > child (2-3层) / nth-of-type
+   *   L4 文本匹配：   tag:has-text("精确") / tag:has-text("部分")
+   *   L5 兜底：      tag
+   *
+   * 每一层生成 selector 后，能通过 querySelectorAll 验证的会验证唯一性，
+   * :has-text() 是 Playwright 扩展，无法用 querySelectorAll 验证，但
+   * 回放时 Playwright 原生支持。
+   */
+
+  // ---- CSS.escape 轻量 polyfill ----
+  function _cssEscape(val) {
+    if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(val);
+    // 简单实现：对常见特殊字符转义，足够处理 id/class 值
+    return ('' + val).replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g, '\\$&');
+  }
+
+  // ---- 判断 CSS 选择器是否唯一 ----
+  function _isUnique(sel) {
+    try { return document.querySelectorAll(sel).length === 1; }
+    catch (e) { return false; }
+  }
+
+  // ---- 过滤有意义的 class 名（跳过自动生成 / 哈希 / 工具类） ----
+  function _usefulClasses(el) {
+    var all = [];
+    try {
+      // IE/老旧浏览器 classList 可能不存在
+      if (!el.classList) return all;
+      all = Array.prototype.slice.call(el.classList);
+    } catch (e) { return all; }
+    return all.filter(function (c) {
+      if (typeof c !== 'string' || c.length < 2 || c.length > 36) return false;
+      if (/^\d/.test(c)) return false;       // 以数字开头
+      if (/^css-/.test(c)) return false;      // CSS Module
+      if (/^_[a-zA-Z]/.test(c)) return false; // _private
+      if (/[a-f0-9]{5,}/i.test(c)) return false; // 含长哈希片段
+      return true;
+    });
+  }
+
+  // ---- 返回 nth-of-type 描述符（如 "button:nth-of-type(2)"） ----
+  function _nthOfType(el) {
+    var tag = (el.tagName || '').toLowerCase();
+    if (!tag) return '*';
+    var parent = el.parentElement;
+    if (!parent || !parent.children) return tag;
+    var idx = 1;
+    for (var i = 0; i < parent.children.length; i++) {
+      if (parent.children[i] === el) break;
+      if ((parent.children[i].tagName || '').toLowerCase() === tag) idx++;
+    }
+    return tag + ':nth-of-type(' + idx + ')';
+  }
+
+  // ---- 构建祖先链（最多 depth 层，遇 id / body 提前停） ----
+  function _parentChain(el, depth) {
+    var parts = [];
+    var cur = el;
+    for (var d = 0; d < depth; d++) {
+      parts.unshift(_nthOfType(cur));
+      cur = cur.parentElement;
+      if (!cur || cur === document.body) {
+        // body 或到顶了，不继续拼接
+        break;
+      }
+      if (cur.id) {
+        // 遇到 id 祖先，直接用它作为锚点然后停止
+        parts.unshift('#' + _cssEscape(cur.id));
+        break;
+      }
+    }
+    return parts.join(' > ');
+  }
+
+  // ---- 主函数 ----
   function describe(el) {
     if (!el || el.nodeType !== 1) return null;
-    if (el.id) return "#" + el.id;
-    var name = el.getAttribute("name");
-    if (name) return "[name=\"" + name + "\"]";
-    if (el.dataset && el.dataset.testid) return "[data-testid=\"" + el.dataset.testid + "\"]";
-    var role = el.getAttribute("role");
-    if (role) {
-      var label = el.getAttribute("aria-label") || (el.textContent || "").trim().slice(0, 40);
-      return "[role=\"" + role + "\"]:has-text(\"" + (label || "").replace(/"/g, '\\"') + "\")";
-    }
-    var tag = (el.tagName || "").toLowerCase();
+
+    var tag = (el.tagName || '').toLowerCase();
     if (!tag) return null;
-    var text = (el.textContent || "").trim().slice(0, 40);
-    return text ? tag + ":has-text(\"" + text.replace(/"/g, '\\"') + "\")" : tag;
+
+    // ==================================================================
+    // L1: 唯一标识符层
+    // ==================================================================
+
+    if (el.id) {
+      return '#' + _cssEscape(el.id);
+    }
+
+    var testId = (el.dataset && el.dataset.testid) || el.getAttribute('data-testid');
+    if (testId) {
+      return '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+    }
+
+    var elName = el.getAttribute('name');
+    if (elName) {
+      var nameSel = tag + '[name="' + elName.replace(/"/g, '\\"') + '"]';
+      if (_isUnique(nameSel)) return nameSel;
+    }
+
+    var ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) {
+      var ariaSel = tag + '[aria-label="' + ariaLabel.replace(/"/g, '\\"') + '"]';
+      if (_isUnique(ariaSel)) return ariaSel;
+    }
+
+    // ==================================================================
+    // L2: 组合属性层
+    // ==================================================================
+
+    var classes = _usefulClasses(el);
+
+    // 2a: 单 class
+    for (var ci = 0; ci < classes.length; ci++) {
+      var singleClsSel = tag + '.' + classes[ci];
+      if (_isUnique(singleClsSel)) return singleClsSel;
+    }
+
+    // 2b: tag[type=xxx] — 适用于 input/button
+    var elType = el.getAttribute('type');
+    if (elType && (tag === 'input' || tag === 'button')) {
+      var typeSel = tag + '[type="' + elType.replace(/"/g, '\\"') + '"]';
+      if (_isUnique(typeSel)) return typeSel;
+    }
+
+    // 2c: 双 class 组合（优先语义化的两个）
+    if (classes.length >= 2) {
+      for (var i = 0; i < Math.min(classes.length, 4); i++) {
+        for (var j = i + 1; j < Math.min(classes.length, 4); j++) {
+          var pairClsSel = tag + '.' + classes[i] + '.' + classes[j];
+          if (_isUnique(pairClsSel)) return pairClsSel;
+        }
+      }
+    }
+
+    // 2d: aria-label 可能已在 L1 失败（不唯一），这里作为兜底组合尝试
+    if (ariaLabel) {
+      var ariaLblCombo = tag + '[aria-label="' + ariaLabel.replace(/"/g, '\\"') + '"]';
+      if (_isUnique(ariaLblCombo)) return ariaLblCombo;
+    }
+
+    // ==================================================================
+    // L3: 结构上下文层
+    // ==================================================================
+
+    // 3a: 若有 class，尝试 parent > tag.class 快速路径
+    if (classes.length > 0) {
+      var parent = el.parentElement;
+      if (parent && parent !== document.body && parent.nodeType === 1) {
+        var pTag = (parent.tagName || '').toLowerCase();
+        if (pTag) {
+          var childDesc = tag + '.' + classes[0];
+          var pSel = (parent.id) ? '#' + _cssEscape(parent.id) : _nthOfType(parent);
+          var pcSel = pSel + ' > ' + childDesc;
+          if (_isUnique(pcSel)) return pcSel;
+          // 带 class 对的 parent > child
+          if (classes.length >= 2) {
+            var childDesc2 = tag + '.' + classes[0] + '.' + classes[1];
+            var pcSel2 = pSel + ' > ' + childDesc2;
+            if (_isUnique(pcSel2)) return pcSel2;
+          }
+        }
+      }
+    }
+
+    // 3b: 递增祖先链 2→3 层（遇 id 锚点会提前停止）
+    for (var depth = 2; depth <= 3; depth++) {
+      var chain = _parentChain(el, depth);
+      if (_isUnique(chain)) return chain;
+    }
+
+    // ==================================================================
+    // L4: 文本层（Playwright :has-text() 扩展选择器）
+    // ==================================================================
+
+    var text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text && text.length > 0) {
+      var maxLen = 50;
+      var shortText = text.length > maxLen ? text.slice(0, maxLen - 3) + '...' : text;
+      var escaped = shortText.replace(/"/g, '\\"');
+      return tag + ':has-text("' + escaped + '")';
+    }
+
+    // ==================================================================
+    // L5: 兜底层 — 仅 tag
+    // ==================================================================
+
+    return tag;
   }
 
   var _input_timers = {};

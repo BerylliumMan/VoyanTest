@@ -17,6 +17,12 @@ _ai_config_cache: dict | None = None
 _ai_config_lock = asyncio.Lock()
 
 
+async def get_context_budget() -> int:
+    """获取已配置的上下文窗口大小（tokens），用于请求分片预算。"""
+    config = await _load_ai_config()
+    return config.get('max_context_tokens', 131072)
+
+
 def invalidate_ai_config_cache():
     """清除 AI 配置缓存，下次调用 call_model 时重新从 DB 加载。"""
     global _ai_config_cache
@@ -48,6 +54,7 @@ async def _load_ai_config(force_refresh: bool = False) -> dict:
             'api_key': decrypt_value(row.api_key),
             'api_base': row.api_base,
             'temperature': row.temperature,
+            'max_context_tokens': row.max_context_tokens or 131072,
         }
     _ai_config_cache = config
     return config
@@ -78,7 +85,7 @@ async def call_model(messages: list, temperature: float | None = None, stream_ca
         "model": model_name,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": 8192,
+        "max_tokens": min(config.get('max_context_tokens', 131072) // 5, 8192),
     }
 
     if stream_callback:

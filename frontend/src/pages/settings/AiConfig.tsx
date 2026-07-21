@@ -71,6 +71,9 @@ function AiConfig() {
           <Form.Item field="temperature" label={t['temperature']}>
             <Input type="number" step={0.1} min={0} max={2} />
           </Form.Item>
+          <Form.Item field="max_context_tokens" label="上下文窗口 (tokens)">
+            <Input type="number" min={4096} max={1048576} placeholder="默认 131072" />
+          </Form.Item>
           <Form.Item>
             <Space>
               <Button type="primary" htmlType="submit" loading={saving}>

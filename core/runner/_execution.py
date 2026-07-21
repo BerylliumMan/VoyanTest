@@ -210,7 +210,7 @@ async def _run_test_case_in_browser_impl(
                 logger.info("Navigated to %s", nav_url)
 
         llm_client = await create_openai_client()
-        resolved_model = await _resolve_llm_config()
+        _, _, resolved_model = await _resolve_llm_config()
 
         # ------------------------------------------------------------------
         # Execute steps

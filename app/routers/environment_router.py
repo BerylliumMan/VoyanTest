@@ -19,9 +19,14 @@ router = APIRouter(
 
 @router.get("/projects/{project_id}/environments", response_model=List[models.Environment])
 async def list_environments(
-    project_id: int, db: AsyncSession = Depends(get_async_db)
+    project_id: int, db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
 ) -> list[models.Environment]:
     """获取项目下的所有环境，若无则自动迁移"""
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     db_project = await crud.get_project(db, project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")

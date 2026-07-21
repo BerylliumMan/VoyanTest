@@ -105,13 +105,23 @@ async def run_test_case_debug(
         start_time=tz_now(),
         end_time=tz_now(),
         duration=0,
+        batch_id=batch.id,
     )
 
     await db.commit()
 
-    _ = _asyncio.create_task(
-        _run_debug_mode(case_id, batch.id, run.id, req.environment_id)
-    )
+    # H-6 修复：保持 Task 引用防止 GC 回收
+    _debug_tasks = set()
+
+    async def _run_debug():
+        try:
+            await _run_debug_mode(case_id, batch.id, run.id, req.environment_id)
+        finally:
+            _debug_tasks.discard(_run_debug)
+
+    task = _asyncio.create_task(_run_debug())
+    _debug_tasks.add(task)
+    task.add_done_callback(_debug_tasks.discard)
 
     return {
         "batch_id": batch.id,

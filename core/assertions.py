@@ -103,10 +103,10 @@ async def _assert_text_exists(mcp_manager: Any, value: str) -> dict[str, Any]:
             'actual': actual,
         }
     except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
-        logger.warning("_assert_text_exists 异常: %s", exc)
+        logger.warning("_assert_element_visible 异常: %s", exc)
         return {
             'passed': False,
-            'type': 'text_exists',
+            'type': 'element_visible',
             'expected': value,
             'actual': None,
             'error': str(exc),
@@ -227,11 +227,11 @@ async def _assert_input_value(mcp_manager: Any, value: str) -> dict[str, Any]:
             'actual': actual_val,
         }
     except Exception as exc:  # noqa: BLE001 - 断言 handler 必须吞掉所有异常，避免单条失败中断整批
-        logger.warning("_assert_input_value 异常: %s", exc)
+        logger.warning("_assert_element_count 异常: %s", exc)
         return {
             'passed': False,
-            'type': 'input_value',
-            'expected': expected_val,
+            'type': 'element_count',
+            'expected': value,
             'actual': None,
             'error': str(exc),
         }

@@ -158,7 +158,7 @@ class AgentManager:
 
         Returns a full step results list compatible with the existing report format.
         """
-        session = self.sessions.get(agent_id)
+        session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
 
