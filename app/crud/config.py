@@ -31,6 +31,7 @@ async def upsert_ai_config(
     api_key: Optional[str],
     api_base: str,
     temperature: float,
+    max_context_tokens: int = 131072,
 ) -> db_models.AIConfig:
     """创建或更新单行 AI 配置（id=1 约定）。
 
@@ -47,6 +48,7 @@ async def upsert_ai_config(
         row.api_key = api_key
     row.api_base = api_base
     row.temperature = temperature
+    row.max_context_tokens = max_context_tokens
 
     await db.commit()
     await db.refresh(row)

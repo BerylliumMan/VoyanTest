@@ -514,11 +514,15 @@ async def replay_recording(
     if not raw_steps:
         raise HTTPException(status_code=400, detail="转换后步骤为空")
 
-    # 查找第一个可用项目（没有项目则创建临时 batch）
-    from app.routers.testcase import execution as _exec
+    # 查找用户第一个可用项目作为录制回放的项目归属
+    from app.crud import project as project_crud
+    user_projects = await project_crud.get_projects_for_user(db, user.id)
+    if not user_projects:
+        raise HTTPException(status_code=400, detail="当前用户没有可用的项目，无法回放录制")
+    target_project = user_projects[0]
     from core.runner import save_run_results
 
-    batch = await crud.create_run_batch(db, project_id=0, total_cases=1, triggered_by=getattr(user, 'username', None))
+    batch = await crud.create_run_batch(db, project_id=target_project.id, total_cases=1, triggered_by=getattr(user, 'username', None))
     _ = await save_run_results(
         case_id=0, status="running",
         start_time=datetime.utcnow(), end_time=datetime.utcnow(),

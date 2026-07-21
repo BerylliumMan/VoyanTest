@@ -23,7 +23,6 @@ from app.gen.feature_extractor import (
 from app.gen.models import AnalysisSession, FunctionalPoint, TestCase
 from app.gen.multi_file import extract_multi_file_content
 from app.gen.orchestrator import (
-    MODEL_MAX_TOKENS,
     two_phase_analyze,
 )
 from app.gen.prompts import (
@@ -42,7 +41,6 @@ from app.gen.response_parser import (
 
 __all__ = [
     # Constants
-    "MODEL_MAX_TOKENS",
     "FP_BATCH_SIZE",
     "FP_EXTRACT_PROMPT",
     "TC_GENERATE_PROMPT",

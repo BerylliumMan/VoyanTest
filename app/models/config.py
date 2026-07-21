@@ -19,6 +19,7 @@ class AIConfig(Base):
     api_key = Column(String(500), nullable=False)
     api_base = Column(String(500), nullable=False)
     temperature = Column(Float, nullable=False, default=0.1)
+    max_context_tokens = Column(Integer, nullable=False, default=131072)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 
 

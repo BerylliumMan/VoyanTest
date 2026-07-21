@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # 测试运行CRUD
 # ----------------------------
 
-async def create_test_run(db: AsyncSession, case_id: int, status: str, start_time, end_time, duration: float = None, report_path: str = None, log_path: str = None) -> db_models.TestRun:
+async def create_test_run(db: AsyncSession, case_id: int, status: str, start_time, end_time, duration: float = None, report_path: str = None, log_path: str = None, batch_id: int = None) -> db_models.TestRun:
     """创建测试运行记录"""
     db_run = db_models.TestRun(
         case_id=case_id,
@@ -24,7 +24,8 @@ async def create_test_run(db: AsyncSession, case_id: int, status: str, start_tim
         end_time=end_time,
         duration=duration,
         report_path=report_path,
-        log_path=log_path
+        log_path=log_path,
+        batch_id=batch_id,
     )
     db.add(db_run)
     await db.commit()

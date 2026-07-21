@@ -25,12 +25,10 @@ from app.gen.pdf_parser import (
     render_pdf_pages_to_images,
     validate_pdf,
 )
+from app.gen.model_client import get_context_budget
 from app.gen.prompts import FP_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
-
-# Model token budget (kept in sync with model_client's hard cap).
-MODEL_MAX_TOKENS = 8192
 
 
 async def two_phase_analyze(
@@ -60,7 +58,7 @@ async def two_phase_analyze(
 
     # Truncate text if it exceeds model's token budget
     total_tokens = int(len(text) * 1.5)
-    max_tokens = 8192
+    max_tokens = await get_context_budget()
     chunk_token_budget = int(max_tokens * 0.8)
     if total_tokens > chunk_token_budget:
         max_chars = int(chunk_token_budget / 1.5)
@@ -215,7 +213,6 @@ async def _analyze_pdf_two_phase(file, progress_callback, project_description) -
 
 
 __all__ = [
-    "MODEL_MAX_TOKENS",
     "two_phase_analyze",
     "_analyze_image_two_phase",
     "_analyze_pdf_two_phase",

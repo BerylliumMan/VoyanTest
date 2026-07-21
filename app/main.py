@@ -7,7 +7,7 @@ import os
 import uuid
 
 from fastapi import FastAPI, Request, Response
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
@@ -65,33 +65,54 @@ async def _run_startup_init():
     else:
         logger.info("DISABLE_CREATE_ALL=true，跳过 create_all（请确保已执行 alembic upgrade head）")
 
-    # 字段迁移（始终执行，不与 DISABLE_CREATE_ALL 关联）
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
-            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
-    except Exception:
-        logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)"))
-    except Exception:
-        logger.warning("run_batches 表 triggered_by 列迁移失败（非关键错误，继续）")
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT"))
-    except Exception:
-        logger.warning("recording_sessions 表 events_data 列迁移失败（非关键错误，继续）")
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL"))
-    except Exception:
-        logger.warning("test_runs 表 case_id 列 NOT NULL 约束迁移失败（非关键错误，继续）")
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER"))
-    except Exception:
-        logger.warning("gen_sessions 表 user_id 列迁移失败（非关键错误，继续）")
+    # ========== 数据库字段迁移 ==========
+    # 这些迁移在引擎就绪后始终执行（不与 DISABLE_CREATE_ALL 关联）
+    engine = db_mod.engine
+    if engine is None:
+        # 防御：引擎仍未就绪时直接读取配置创建独立连接
+        url = db_mod._resolve_database_url()
+        if url:
+            _tmp_engine = None
+            try:
+                from sqlalchemy.ext.asyncio import create_async_engine
+                _tmp_engine = create_async_engine(url)
+                engine = _tmp_engine
+            except Exception:
+                pass
+    if engine is None:
+        logger.warning("数据库引擎不可用，跳过字段迁移")
+    else:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
+        except Exception:
+            logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)"))
+        except Exception:
+            logger.warning("run_batches 表 triggered_by 列迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT"))
+        except Exception:
+            logger.warning("recording_sessions 表 events_data 列迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL"))
+        except Exception:
+            logger.warning("test_runs 表 case_id 列 NOT NULL 约束迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER"))
+        except Exception:
+            logger.warning("gen_sessions 表 user_id 列迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT 131072"))
+        except Exception:
+            logger.warning("ai_configs 表 max_context_tokens 列迁移失败（非关键错误，继续）")
 
     from app.auth import hash_password
 
