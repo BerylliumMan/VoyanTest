@@ -105,7 +105,7 @@ async def upload_and_analyze(
 
     async def _run_full_analysis() -> None:
         # 等待原 API session 的 cleanup(_close_impl) 完成，避免连接池冲突
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
         try:
             from app.gen.analyzer import extract_multi_file_content, two_phase_analyze
             from app.database import AsyncSessionLocal

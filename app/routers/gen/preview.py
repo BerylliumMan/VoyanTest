@@ -8,8 +8,11 @@ preview endpoint serializes in full.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 
 from ...auth import get_current_user
+from ...database import get_async_db
+from ...db_models import GenSession
 from .schemas import GenPreviewItem, GenPreviewResponse, GenStatusResponse
 from .state import _lock, _sessions
 
@@ -17,12 +20,25 @@ router = APIRouter()
 
 
 @router.get("/status/{session_id}", response_model=GenStatusResponse)
-async def get_status(session_id: str, user=Depends(get_current_user)) -> GenStatusResponse:
+async def get_status(session_id: str, user=Depends(get_current_user),
+                     db=Depends(get_async_db)) -> GenStatusResponse:
     """Check analysis progress."""
     async with _lock:
         session = _sessions.get(session_id)
     if not session:
-        raise HTTPException(404, "Session not found")
+        stmt = select(GenSession).where(GenSession.id == session_id)
+        result = await db.execute(stmt)
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(404, "Session not found")
+        return GenStatusResponse(
+            session_id=session_id,
+            status=row.status or "analyzing",
+            filename=row.filename or "",
+            error_message=row.error_message or "",
+            functional_points_count=row.functional_points_count or 0,
+            test_cases_count=row.test_cases_count or 0,
+        )
     return GenStatusResponse(
         session_id=session.session_id,
         status=session.status,
