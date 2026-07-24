@@ -533,6 +533,8 @@ class AgentBridge:
                 dom_snapshot=snapshot,
                 client=llm_client,
                 system_prompt=system_prompt or None,
+                agent_type="execution",
+                db=self.db,
             )
         except Exception:
             logger.exception("LLM decision failed at turn %d", turn)

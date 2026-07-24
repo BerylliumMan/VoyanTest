@@ -23,4 +23,5 @@ class FPAnalyzer(BaseAgent[str, list[dict]]):
             project_description=self.config.get("project_description", ""),
             fp_prompt=fp_prompt,
         )
-        return [fp.model_dump() for fp in result]
+        # 直接返回 FunctionalPoint 对象（pipeline/tc_generator/报告均使用 dataclass 属性访问）
+        return result
