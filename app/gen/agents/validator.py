@@ -83,10 +83,11 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     else:
         result.pass_check("module_required")
 
-    # Check 6: Priority is valid
+    # Check 6: Priority is valid — 支持中文（高/中/低）和英文（P0-P3）格式
     priority = tc.get("priority") or "P2"
-    if priority not in ("P0", "P1", "P2", "P3"):
-        result.fail("priority_invalid", f"优先级 '{priority}' 不是有效值（P0/P1/P2/P3）")
+    valid_priorities = ("P0", "P1", "P2", "P3", "高", "中", "低", "HIGH", "MEDIUM", "LOW")
+    if priority.upper() not in {p.upper() for p in valid_priorities}:
+        result.fail("priority_invalid", f"优先级 '{priority}' 不是有效值（P0/P1/P2/P3 或 高/中/低）")
     else:
         result.pass_check("priority_invalid")
 
