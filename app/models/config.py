@@ -21,18 +21,3 @@ class AIConfig(Base):
     temperature = Column(Float, nullable=False, default=0.1)
     max_context_tokens = Column(Integer, nullable=False, default=131072)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
-
-
-class PromptTemplate(Base):
-    """提示词模板 — AI 生成功能点和测试用例的 prompt。
-
-    on first startup, 从 analyzer.py 代码常量和 seed 数据创建默认行。
-    """
-    __tablename__ = "prompt_templates"
-
-    id = Column(Integer, primary_key=True, index=True)
-    template_key = Column(String(100), unique=True, nullable=False, index=True)  # fp_extract, tc_generate
-    label = Column(String(200), nullable=False)  # display name
-    template_content = Column(Text, nullable=False)
-    is_custom = Column(Boolean, default=False)  # True if user modified it
-    updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)

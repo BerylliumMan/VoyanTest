@@ -36,69 +36,12 @@ async def two_phase_analyze(
     progress_callback=None,
     project_description: str = "",
     prompts: dict = None,
+    db = None,
 ) -> dict:
-    """Orchestrate two-phase analysis: extract FPs then generate TCs per batch.
-
-    Phase 1: Extract all functional points from the full document.
-    Phase 2: Generate test cases for FPs in batches using FP descriptions
-        as context (no longer sends the full document).
-
-    Args:
-        text: the extracted document text.
-        progress_callback: optional callable(current, total, message).
-        project_description: user-supplied project background context.
-
-    Returns:
-        dict with 'functional_points', 'test_cases', 'warnings'.
-    """
-    prompts = prompts or {}
-    fp_prompt = prompts.get("fp_extract", {}).get("content") if isinstance(prompts.get("fp_extract"), dict) else prompts.get("fp_extract")
-    tc_prompt = prompts.get("tc_generate", {}).get("content") if isinstance(prompts.get("tc_generate"), dict) else prompts.get("tc_generate")
-    warnings: list[str] = []
-
-    # Truncate text if it exceeds model's token budget
-    total_tokens = int(len(text) * 1.5)
-    max_tokens = await get_context_budget()
-    chunk_token_budget = int(max_tokens * 0.8)
-    if total_tokens > chunk_token_budget:
-        max_chars = int(chunk_token_budget / 1.5)
-        logger.info("Doc too long (%d tokens > %d budget), truncating to %d chars",
-                     total_tokens, chunk_token_budget, max_chars)
-        text = text[:max_chars]
-
-    if progress_callback:
-        # Phase 1 = step 0. We don't know total yet (need FPs to know batch count).
-        # Send with total=0 to indicate indeterminate progress for Phase 1.
-        progress_callback(0, 0, "正在提取功能点清单")
-
-    try:
-        fps = await extract_functional_points(text=text, project_description=project_description, fp_prompt=fp_prompt)
-        if not fps:
-            warnings.append("No functional points extracted from document")
-        logger.info("Phase 1: extracted %d functional points", len(fps))
-    except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError, ValueError, RuntimeError) as e:
-        # OpenAI SDK 错误 / 异步超时 / JSON 解析错误 / Pydantic 校验错误 / MCP 运行时错误
-        logger.exception("Phase 1 (FP extraction) failed")
-        return {"functional_points": [], "test_cases": [], "warnings": [f"FP extraction failed: {e}"], "error": True}
-
-    # Phase 2: Generate test cases per FP batch
-    if fps:
-        num_batches = max(1, (len(fps) + FP_BATCH_SIZE - 1) // FP_BATCH_SIZE)
-        total_steps = 1 + num_batches  # 1 for Phase 1 + N batches
-        result = await generate_test_cases_for_fps(
-            fps, project_description, progress_callback,
-            phase1_offset=1, total_steps=total_steps, tc_prompt=tc_prompt,
-        )
-        warnings.extend(result.get("warnings", []))
-        all_tcs = result["test_cases"]
-    else:
-        all_tcs = []
-
-    return {
-        "functional_points": fps,
-        "test_cases": all_tcs,
-        "warnings": warnings,
-    }
+    """Two-phase analysis using Pipeline (backward compatible with old interface)."""
+    from app.gen.agents.pipeline import Pipeline
+    pipeline = Pipeline({"project_description": project_description, "db": db})
+    return await pipeline.run(text)
 
 
 async def _analyze_image_two_phase(file, progress_callback, project_description) -> dict:
@@ -205,7 +148,15 @@ async def _analyze_pdf_two_phase(file, progress_callback, project_description) -
         else:
             all_tcs = []
 
-        return {
+    # ── 质量校验 ──────────────────────────────────────────────────────────
+    from app.gen.agents.validator import validate_test_cases
+    v_result = validate_test_cases(all_tcs, all_fps)
+    warnings.extend(v_result["warnings"])
+    if not v_result["passed"]:
+        warnings.append(f"质量校验: {v_result['valid_count']}/{len(all_tcs)} 个用例通过")
+    all_tcs = v_result["valid_cases"]
+
+    return {
             "functional_points": all_fps,
             "test_cases": all_tcs,
             "warnings": warnings,

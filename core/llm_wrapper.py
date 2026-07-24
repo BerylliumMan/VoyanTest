@@ -184,12 +184,38 @@ async def _resolve_config(
     explicit_key: str | None = None,
     explicit_base: str | None = None,
     explicit_model: str | None = None,
+    agent_type: str | None = None,
 ) -> tuple[str, str, str]:
     """Resolve LLM config from the database (single source of truth).
+
+    When `agent_type` is provided, try AgentDefinition's llm_config first;
+    fall back to the global AIConfig if the lookup fails or returns no config.
 
     Explicit params override DB values. No environment, no Claude settings,
     no hardcoded defaults. Raises if DB row is missing — fail fast.
     """
+    # 尝试 AgentDefinition 级别的 llm_config（通过 agent_resolver 缓存）
+    if agent_type:
+        try:
+            from app.agent_resolver import resolve_agent_config
+            from app.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as db:
+                agent_cfg = await resolve_agent_config(db, agent_type)
+            if agent_cfg:
+                key = explicit_key or agent_cfg.get('api_key', '')
+                base = explicit_base or agent_cfg.get('api_base', '')
+                model = explicit_model or agent_cfg.get('model', '')
+                if key:
+                    return key, base or '', model or ''
+        except Exception:
+            logger.debug(
+                "AgentDefinition lookup failed for agent_type=%s, "
+                "falling back to global AIConfig",
+                agent_type,
+            )
+
+    # 回退：全局 AIConfig
     cfg = await _load_db_config()
 
     missing = [k for k in ('api_key', 'api_base', 'model') if not cfg.get(k)]
@@ -214,11 +240,13 @@ async def _resolve_config(
 async def create_openai_client(
     api_key: str | None = None,
     api_base: str | None = None,
+    agent_type: str | None = None,
 ) -> AsyncOpenAI:
     """Create an OpenAI-compatible async client with resolved configuration."""
     key, base, _ = await _resolve_config(
         explicit_key=api_key,
         explicit_base=api_base,
+        agent_type=agent_type,
     )
     if not key:
         raise ValueError(
@@ -237,6 +265,7 @@ async def generate_tool_call(
     model: str | None = None,
     temperature: float = 0.1,
     client: AsyncOpenAI | None = None,
+    system_prompt: str | None = None,
 ) -> PlaywrightMCPToolCall:
     """Generate a single PlaywrightMCPToolCall from a NL step description.
 
@@ -275,7 +304,7 @@ async def generate_tool_call(
     user_message += f"Generate the browser action JSON now."
 
     messages: list[dict] = [
-        {'role': 'system', 'content': SYSTEM_PROMPT},
+        {'role': 'system', 'content': system_prompt if system_prompt else SYSTEM_PROMPT},
         {'role': 'user', 'content': user_message},
     ]
 

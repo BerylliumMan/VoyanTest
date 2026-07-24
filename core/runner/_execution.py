@@ -209,8 +209,16 @@ async def _run_test_case_in_browser_impl(
             else:
                 logger.info("Navigated to %s", nav_url)
 
-        llm_client = await create_openai_client()
+        llm_client = await create_openai_client(agent_type="execution")
         _, _, resolved_model = await _resolve_llm_config()
+
+        # Resolve execution system prompt via AgentDefinition priority chain
+        system_prompt_override = None
+        try:
+            from app.runtime_config import resolve_prompt_for_agent
+            system_prompt_override = await resolve_prompt_for_agent(db, "execution", "execution_system")
+        except Exception:
+            logger.debug("Failed to resolve execution system prompt, using default", exc_info=True)
 
         # ------------------------------------------------------------------
         # Execute steps
@@ -282,6 +290,7 @@ async def _run_test_case_in_browser_impl(
                         model=resolved_model,
                         step_timeout_ms=120000,
                         screenshot_dir=screenshot_dir,
+                        system_prompt_override=system_prompt_override,
                     )
                 except Exception as step_exc:  # noqa: BLE001 - 见下方注释
                     # Broad catch is necessary: execute_step_mcp touches MCP stdio,
@@ -395,6 +404,7 @@ async def _run_test_case_in_browser_impl(
                                     model=resolved_model,
                                     step_timeout_ms=120000,
                                     screenshot_dir=screenshot_dir,
+                                    system_prompt_override=system_prompt_override,
                                 )
                             except Exception as step_exc:  # noqa: BLE001 - 同上 execute_step_mcp 调用兜底
                                 # Broad catch is necessary: execute_step_mcp touches MCP stdio,
@@ -460,6 +470,7 @@ async def _run_test_case_in_browser_impl(
                                         model=resolved_model,
                                         step_timeout_ms=120000,
                                         screenshot_dir=screenshot_dir,
+                                        system_prompt_override=system_prompt_override,
                                     )
                                 except Exception as step_exc:  # noqa: BLE001 - 同上 execute_step_mcp 调用兜底
                                     # Broad catch is necessary: execute_step_mcp touches MCP stdio,

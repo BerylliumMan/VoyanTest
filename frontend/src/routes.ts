@@ -7,6 +7,7 @@ export type IRoute = AuthParams & {
   breadcrumb?: boolean;
   children?: IRoute[];
   ignore?: boolean;
+  exact?: boolean;
   component?: React.ComponentType<any> & { preload(): Promise<void> };
   path?: string;
 };
@@ -71,10 +72,14 @@ export const routes: IRoute[] = [
     key: 'agents',
   },
   {
-    name: 'Agent 详情',
+    name: '客户端详情',
     key: 'agent-detail',
     path: '/agents/:id',
     ignore: true,
+  },
+  {
+    name: 'menu.agent_definitions',
+    key: 'agent_definitions',
   },
   {
     name: 'menu.audit_logs',
@@ -84,6 +89,17 @@ export const routes: IRoute[] = [
   {
     name: 'menu.recordings',
     key: 'recordings',
+  },
+  {
+    name: 'menu.agent_runs',
+    key: 'agent-runs',
+    exact: true,
+  },
+  {
+    name: 'Agent 运行详情',
+    key: 'agent-run-detail',
+    path: '/agent-runs/:runId',
+    ignore: true,
   },
   {
     name: 'menu.settings',

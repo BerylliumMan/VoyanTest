@@ -2,7 +2,7 @@
 # Pydantic request/response schemas (moved verbatim from the former app/models.py
 # to allow app/models/ to exist as a package alongside the SQLAlchemy ORM models).
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime
 
 
@@ -337,3 +337,98 @@ class AuditLogPage(BaseModel):
     total: int
     page: int
     size: int
+
+
+# ==================== AgentDefinition 模型 (021-agent-definition) ====================
+
+class AgentDefinitionCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    agent_type: str = Field(..., pattern=r"^(generation|execution|recording)$")
+    description: str = ""
+    skills: list[str] = Field(default_factory=list)
+    llm_config: dict = Field(default_factory=dict)
+    prompt_overrides: dict[str, str] = Field(default_factory=dict)
+    system_prompt: str = ""
+    tools: list[dict] = Field(default_factory=list)
+    goal: str = ""
+    constraints: list[dict] = Field(default_factory=list)
+    thinking_config: dict = Field(default_factory=dict)
+    is_active: bool = False
+
+
+class AgentDefinitionUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    agent_type: Optional[str] = Field(default=None, pattern=r"^(generation|execution|recording)$")
+    description: Optional[str] = None
+    skills: Optional[list[str]] = None
+    llm_config: Optional[dict] = None
+    prompt_overrides: Optional[dict[str, str]] = None
+    system_prompt: Optional[str] = None
+    tools: Optional[list[dict]] = None
+    goal: Optional[str] = None
+    constraints: Optional[list[dict]] = None
+    thinking_config: Optional[dict] = None
+    is_active: Optional[bool] = None
+
+
+class AgentDefinitionResponse(BaseModel):
+    id: int
+    name: str
+    agent_type: str
+    description: str
+    skills: list[str]
+    llm_config: dict
+    prompt_overrides: dict
+    system_prompt: str = ""
+    tools: list[dict] = Field(default_factory=list)
+    goal: str = ""
+    constraints: list[dict] = Field(default_factory=list)
+    thinking_config: dict = Field(default_factory=dict)
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    @field_validator("system_prompt", mode="before")
+    @classmethod
+    def coerce_none_to_empty(cls, v: str | None) -> str:
+        return v if v is not None else ""
+
+    model_config = {"from_attributes": True}
+
+
+# ==================== Agent 运行模型 (023-true-agent) ====================
+
+class AgentRunCreate(BaseModel):
+    agent_definition_id: int
+    case_id: Optional[int] = None
+    goal: dict = Field(default_factory=dict)
+
+
+class AgentRunResponse(BaseModel):
+    id: int
+    agent_definition_id: int
+    agent_definition_name: str = ""
+    case_id: Optional[int] = None
+    status: str = "pending"
+    goal: dict = Field(default_factory=dict)
+    result: Optional[Any] = None
+    turns_used: int = 0
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    duration_ms: Optional[int] = None
+    error: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class AgentMessageResponse(BaseModel):
+    id: int
+    run_id: int
+    turn_number: int
+    role: str
+    content: str
+    tool_calls: Optional[list] = None
+    token_count: int = 0
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}

@@ -9,3 +9,158 @@
 .actionsRow {
   margin-bottom: 16px;
 }
+
+/* ===== 提示词管理 ===== */
+
+.promptManager {
+  display: flex;
+  gap: 24px;
+  min-height: 500px;
+}
+
+.promptSidebar {
+  width: 200px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-border-2, #e5e6eb);
+  padding-right: 16px;
+}
+
+.promptSidebarTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-1);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-2, #e5e6eb);
+}
+
+.promptKeyItem {
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-2);
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+
+  &:hover {
+    background: var(--color-fill-2);
+    color: var(--color-text-1);
+  }
+}
+
+.promptKeyItemActive {
+  background: var(--color-primary-light-1);
+  color: var(--color-primary-6);
+  font-weight: 500;
+}
+
+.promptEditorArea {
+  flex: 1;
+  min-width: 0;
+}
+
+.promptEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.promptEmpty {
+  color: var(--color-text-3);
+  text-align: center;
+  padding: 80px 0;
+  font-size: 14px;
+}
+
+.promptInfo {
+  margin-bottom: 4px;
+}
+
+.promptContent {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.promptDesc {
+  font-size: 13px;
+}
+
+.promptActions {
+  margin-top: 4px;
+}
+
+/* 变量高亮 */
+.variableHighlight {
+  background: var(--color-primary-light-2);
+  color: var(--color-primary-6);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-weight: 500;
+}
+
+.variableList {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.variableLabel {
+  font-size: 13px;
+  color: var(--color-text-3);
+  margin-right: 2px;
+}
+
+.variableTag {
+  cursor: default;
+}
+
+/* 内容预览 */
+.promptPreviewBox {
+  margin-top: 8px;
+  border: 1px solid var(--color-border-2, #e5e6eb);
+  border-radius: 6px;
+  background: var(--color-fill-1);
+  overflow: hidden;
+}
+
+.promptPreviewLabel {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-text-3);
+  background: var(--color-fill-2);
+  border-bottom: 1px solid var(--color-border-2, #e5e6eb);
+}
+
+.promptPreviewText {
+  margin: 0;
+  padding: 12px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-2);
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* 预览弹窗 */
+.previewContent {
+  margin: 0;
+  padding: 16px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-fill-1);
+  border-radius: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+}

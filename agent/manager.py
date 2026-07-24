@@ -2,12 +2,14 @@
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import sys
 from datetime import datetime, timedelta
 from app.tz import now as tz_now
 from typing import Dict, List, Optional, Callable, Awaitable
+from sqlalchemy import select, text
 
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, _project_root)
@@ -61,6 +63,7 @@ class AgentManager:
 
     def __init__(self):
         self.sessions: Dict[str, AgentSession] = {}
+        self._pending: Dict[str, asyncio.Future] = {}
         self._lock = asyncio.Lock()
 
     # ---- session management ----
@@ -343,6 +346,146 @@ class AgentManager:
             return payload
         except asyncio.TimeoutError:
             return {"success": False, "error": "Step timeout", "action": "", "duration_ms": 0}
+
+    # ---- bridge: AI Agent observe/act 指令 ----
+
+    async def send(self, agent_id: str, message: dict) -> None:
+        """将 raw dict 包装为 WSMessage 并通过 Agent 会话发送"""
+        session = await self.get_session(agent_id)
+        if not session:
+            raise ValueError(f"Agent {agent_id} not connected")
+        msg_type = WSMessageType(message.get("type", "step_execute"))
+        run_id = message.get("run_id", "")
+        ws_msg = WSMessage(type=msg_type, agent_id=agent_id, run_id=run_id, payload=message)
+        await session.send(ws_msg)
+
+    async def _send_and_wait(self, agent_id: str, message: dict, timeout: int = 60) -> dict:
+        """通过 WS 发送消息并等待 agent 响应，使用 _pending future 机制"""
+        run_id = message.get("run_id", "")
+        if not run_id:
+            return {"success": False, "error": "No run_id"}
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._pending[run_id] = future
+        try:
+            await self.send(agent_id, message)
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(run_id, None)
+            return {"success": False, "error": "Bridge timeout"}
+        except Exception:
+            self._pending.pop(run_id, None)
+            raise
+
+    def resolve_pending(self, run_id: str, result: dict) -> None:
+        """解析 _pending 中与 run_id 匹配的 future"""
+        fut = self._pending.pop(run_id, None)
+        if fut and not fut.done():
+            fut.set_result(result)
+
+    async def send_observe(self, agent_id: str, run_id: str) -> dict:
+        """通过 WS 向 Agent 发送 observe 指令，等待快照结果"""
+        return await self._send_and_wait(agent_id, {
+            "type": "step_execute",
+            "run_id": run_id,
+            "action": "observe",
+            "timeout": 15000
+        }, timeout=60)
+
+    async def send_act(self, agent_id: str, run_id: str, tool_call: dict) -> dict:
+        """通过 WS 向 Agent 发送操作指令"""
+        return await self._send_and_wait(agent_id, {
+            "type": "step_execute",
+            "run_id": run_id,
+            "action": tool_call.get("name", tool_call.get("tool")),
+            "selector": tool_call.get("args", {}).get("selector"),
+            "value": tool_call.get("args", {}).get("value"),
+            "url": tool_call.get("args", {}).get("url"),
+            "timeout": 120000
+        }, timeout=120)
+
+
+    # ---- cross-worker pending execution polling ----
+
+    async def start_poller(self):
+        """后台任务：轮询 DB 中待执行的 agent 任务（跨 worker）。"""
+        while True:
+            try:
+                await self._poll_once()
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+    async def _poll_once(self):
+        """检查一次待执行队列，取回属于本 worker 的 agent 的任务。"""
+        from app.database import AsyncSessionLocal
+        from app.db_models import AgentRun
+        async with AsyncSessionLocal() as db:
+            for agent_id in list(self.sessions.keys()):
+                result = await db.execute(
+                    text("SELECT id, goal FROM agent_runs WHERE status='pending' AND goal->>'type'='client_exec' AND (goal->>'agent_name')=:name LIMIT 1 FOR UPDATE SKIP LOCKED"),
+                    {"name": agent_id},
+                )
+                row = result.first()
+                if row:
+                    run_id = str(row[0])
+                    goal = row[1] or {}
+                    case_id = goal.get("case_id")
+                    if case_id:
+                        run_row_id = row[0]
+                        await db.execute(
+                            text("UPDATE agent_runs SET status='running' WHERE id=:id"),
+                            {"id": row[0]},
+                        )
+                        await db.commit()
+                        logger.info("Poller picked up pending exec: run=%s case=%s agent=%s", run_id, case_id, agent_id)
+
+                        # 检查是否有 AI Agent（AgentDefinition）配置
+                        try:
+                            from app.crud import agent_definition as _cad
+                            _def = await _cad.get_active_by_type(db, "execution")
+                            if _def and _def.tools:
+                                from core.agent_bridge import AgentBridge
+                                bridge = AgentBridge(self, db, _def)
+                                _batch_id = goal.get("batch_id") if isinstance(goal, dict) else None
+                                await bridge.orchestrate(
+                                    case_id=int(case_id), agent_id=agent_id, goal=goal,
+                                    existing_run_id=run_row_id,
+                                    existing_batch_id=_batch_id,
+                                )
+                                return
+                        except Exception as _abe:
+                            logger.warning("Poller AgentBridge attempt failed, falling back: %s", _abe)
+
+                        # 回退：传统 execute_on_agent 路径
+                        from app import crud
+                        from app.models import TestCase as _TC
+                        tc = await crud.get_test_case(db, int(case_id))
+                        if tc:
+                            steps_db = await crud.get_steps_for_case(db, int(case_id))
+                            steps = [{"step_order": s.step_order, "description": s.description, "expected_result": getattr(s, 'parsed_result', '')} for s in steps_db]
+                            async def _run_with_fallback():
+                                try:
+                                    result = await self.execute_on_agent(
+                                        agent_id, run_id,
+                                        tc.name or f"Case #{case_id}", steps,
+                                    )
+                                    async with AsyncSessionLocal() as _edb:
+                                        await _edb.execute(
+                                            text("UPDATE agent_runs SET status='completed', result=:res WHERE id=:id"),
+                                            {"res": json.dumps(result), "id": run_row_id},
+                                        )
+                                        await _edb.commit()
+                                except Exception as exc:
+                                    logger.error("Poller execute_on_agent failed: %s", exc)
+                                    async with AsyncSessionLocal() as _edb:
+                                        await _edb.execute(
+                                            text("UPDATE agent_runs SET status='failed', error=:err WHERE id=:id"),
+                                            {"err": str(exc), "id": run_row_id},
+                                        )
+                                        await _edb.commit()
+                            asyncio.create_task(_run_with_fallback())
+                        self.sessions[agent_id].agent.status = AgentStatus.ONLINE
 
 
 # Global singleton

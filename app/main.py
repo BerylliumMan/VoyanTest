@@ -6,8 +6,9 @@ import logging
 import os
 import uuid
 
-from fastapi import FastAPI, Request, Response
-from sqlalchemy import select, text
+from fastapi import FastAPI, Request, Response, WebSocket
+from fastapi import WebSocketDisconnect
+from sqlalchemy import select, text, func
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
@@ -22,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .routers import project_router, testcase_router, module_router, report_router, config_router, environment_router, scheduler_router, agent_router
-from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router
+from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router, agent_definition_router, agent_run_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -46,6 +47,82 @@ try:
 except ImportError:
     AGENT_SUPPORT = False
     logger.warning("Agent support not available")
+
+
+# ── Agent Run WebSocket 管理器（T012）────────────────────────────────────────
+
+
+class AgentRunWSManager:
+    """Agent 运行实时观察 WebSocket 管理器。
+
+    与 LogWebSocketManager 模式一致，但专门用于 agent_runs：
+    - 客户端通过 /ws/agent-runs/{run_id} 连接
+    - 后端通过 send_status() 推送状态更新
+    """
+
+    def __init__(self):
+        self._connections: dict[int, set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket, run_id: int) -> None:
+        await websocket.accept()
+        async with self._lock:
+            if run_id not in self._connections:
+                self._connections[run_id] = set()
+            self._connections[run_id].add(websocket)
+        await self._send_to(websocket, {"type": "connected", "run_id": run_id})
+
+    async def disconnect(self, websocket: WebSocket, run_id: int) -> None:
+        async with self._lock:
+            s = self._connections.get(run_id)
+            if s:
+                s.discard(websocket)
+                if not s:
+                    del self._connections[run_id]
+
+    async def send_status(self, run_id: int, data: dict) -> None:
+        async with self._lock:
+            conns = list(self._connections.get(run_id, set()))
+        for ws in conns:
+            await self._send_to(ws, data)
+
+    async def _send_to(self, ws: WebSocket, data: dict) -> None:
+        try:
+            await ws.send_text(_json.dumps(data, ensure_ascii=False))
+        except (RuntimeError, ConnectionError):
+            await self.disconnect(ws, data.get("run_id", 0))
+
+
+agent_run_ws = AgentRunWSManager()
+
+
+async def _recover_orphaned_agent_runs():
+    """启动时恢复孤儿 agent_runs：将卡在 'running' 状态的记录标记为 'failed'。
+
+    该函数在 _run_startup_init 中调用，确保服务重启后不会遗留假 running 状态的记录。
+    """
+    try:
+        from app.database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import update as sa_update
+            from app import db_models
+            result = await db.execute(
+                sa_update(db_models.AgentRun)
+                .where(db_models.AgentRun.status == "running")
+                .values(
+                    status="failed",
+                    error="服务重启，运行被中断",
+                    completed_at=func.now(),
+                )
+            )
+            await db.commit()
+            count = result.rowcount
+            if count:
+                logger.info("已恢复 %d 条孤儿 agent_run 记录（running → failed）", count)
+    except Exception as exc:
+        logger.warning("孤儿 agent_run 恢复失败: %s", exc, exc_info=True)
 
 
 async def _run_startup_init():
@@ -113,6 +190,191 @@ async def _run_startup_init():
                 await conn.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT 131072"))
         except Exception:
             logger.warning("ai_configs 表 max_context_tokens 列迁移失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS prompt_templates (
+                        id              SERIAL PRIMARY KEY,
+                        key             VARCHAR(100) NOT NULL,
+                        name            VARCHAR(200) NOT NULL,
+                        category        VARCHAR(50) NOT NULL,
+                        content         TEXT NOT NULL,
+                        variables       JSONB NOT NULL DEFAULT '[]',
+                        version         INTEGER NOT NULL DEFAULT 1,
+                        is_active       BOOLEAN NOT NULL DEFAULT false,
+                        description     TEXT,
+                        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE(key, version)
+                    )
+                """))
+        except Exception:
+            logger.warning("prompt_templates 表创建失败（非关键错误，继续）")
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS agent_definitions (
+                        id              SERIAL PRIMARY KEY,
+                        name            VARCHAR(100) NOT NULL UNIQUE,
+                        agent_type      VARCHAR(50) NOT NULL,
+                        description     TEXT DEFAULT '',
+                        skills          JSONB NOT NULL DEFAULT '[]',
+                        llm_config      JSONB NOT NULL DEFAULT '{}',
+                        prompt_overrides JSONB NOT NULL DEFAULT '{}',
+                        is_active       INTEGER NOT NULL DEFAULT 0,
+                        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """))
+        except Exception:
+            logger.warning("agent_definitions 表创建失败（非关键错误，继续）")
+
+        # ── agent_definitions 列迁移 ────────────────────────────────────────
+        try:
+            await conn.execute(text(
+                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS system_prompt TEXT"
+            ))
+        except Exception:
+            logger.warning("agent_definitions.system_prompt 列迁移失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text(
+                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS tools JSONB DEFAULT '[]'"
+            ))
+        except Exception:
+            logger.warning("agent_definitions.tools 列迁移失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text(
+                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS goal TEXT DEFAULT ''"
+            ))
+        except Exception:
+            logger.warning("agent_definitions.goal 列迁移失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text(
+                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS constraints JSONB DEFAULT '[]'"
+            ))
+        except Exception:
+            logger.warning("agent_definitions.constraints 列迁移失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text(
+                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS thinking_config JSONB DEFAULT '{}'"
+            ))
+        except Exception:
+            logger.warning("agent_definitions.thinking_config 列迁移失败（非关键错误，继续）")
+
+        # ── agent_runs 相关表创建 ────────────────────────────────────────────
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id                  SERIAL PRIMARY KEY,
+                    agent_definition_id INTEGER NOT NULL REFERENCES agent_definitions(id) ON DELETE CASCADE,
+                    case_id             INTEGER REFERENCES test_cases(id) ON DELETE SET NULL,
+                    status              VARCHAR(50) NOT NULL DEFAULT 'pending',
+                    goal                JSONB NOT NULL DEFAULT '{}',
+                    result              JSONB,
+                    partial_results     JSONB NOT NULL DEFAULT '[]',
+                    turns_used          INTEGER NOT NULL DEFAULT 0,
+                    started_at          TIMESTAMPTZ,
+                    completed_at        TIMESTAMPTZ,
+                    duration_ms         INTEGER,
+                    error               TEXT,
+                    idempotency_key     VARCHAR(255) UNIQUE,
+                    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.warning("agent_runs 表创建失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS agent_messages (
+                    id              SERIAL PRIMARY KEY,
+                    run_id          INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    turn_number     INTEGER NOT NULL,
+                    role            VARCHAR(20) NOT NULL,
+                    content         TEXT NOT NULL,
+                    tool_calls      JSONB,
+                    token_count     INTEGER DEFAULT 0,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.warning("agent_messages 表创建失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS agent_tool_calls (
+                    id              SERIAL PRIMARY KEY,
+                    run_id          INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    turn_number     INTEGER NOT NULL,
+                    tool_name       VARCHAR(200) NOT NULL,
+                    tool_args       JSONB NOT NULL DEFAULT '{}',
+                    tool_result     JSONB,
+                    success         INTEGER NOT NULL DEFAULT 1,
+                    error_message   TEXT,
+                    duration_ms     INTEGER,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.warning("agent_tool_calls 表创建失败（非关键错误，继续）")
+
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS agent_run_snapshots (
+                    id              SERIAL PRIMARY KEY,
+                    run_id          INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    turn_number     INTEGER NOT NULL,
+                    context_json    JSONB NOT NULL,
+                    compressed_count INTEGER DEFAULT 0,
+                    token_count     INTEGER DEFAULT 0,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.warning("agent_run_snapshots 表创建失败（非关键错误，继续）")
+
+        # ── 种子提示词数据 ────────────────────────────────────────────────────
+        try:
+            async with AsyncSessionLocal() as _prompt_db:
+                from app.models.prompt_template import PromptTemplate
+                existing = await _prompt_db.execute(
+                    select(PromptTemplate).limit(1)
+                )
+                if not existing.scalar_one_or_none():
+                    _seeds = [
+                        PromptTemplate(
+                            key="fp_extract", name="功能点提取", category="generation",
+                            content="你是一个测试用例分析专家。\n请根据以下需求文档提取功能点列表。\n每个功能点包含：标题、描述、优先级(P0/P1/P2)。\n\n需求文档：\n{text}",
+                            variables=["text"], version=1, is_active=True,
+                            description="从需求文档提取功能点",
+                        ),
+                        PromptTemplate(
+                            key="tc_generate", name="测试用例生成", category="generation",
+                            content="你是一个测试用例设计专家。\n基于以下功能点生成详细的测试用例。\n每个用例需包含：标题、所属模块、前置条件、测试步骤、预期结果、优先级。\n\n功能点：\n{fps}",
+                            variables=["fps"], version=1, is_active=True,
+                            description="根据功能点生成测试用例",
+                        ),
+                        PromptTemplate(
+                            key="operation_translate", name="操作指令翻译", category="execution",
+                            content="你将用户描述的自然语言测试步骤转换为浏览器操作。\n可用的操作类型：click, fill, goto, select, hover, scroll, wait, assert(url_contains|element_visible|text_present)。\n\n用户步骤：\n{step}\n\n页面 URL：{url}\n\n输出 JSON 格式的操作指令。",
+                            variables=["step", "url"], version=1, is_active=True,
+                            description="将自然语言步骤转换为 MCP 浏览器操作",
+                        ),
+                        PromptTemplate(
+                            key="verify_expected", name="预期结果验证", category="verification",
+                            content="验证以下测试步骤的执行结果是否符合预期。\n\n操作：{action}\n预期结果：{expected}\n\n请判断预期结果是否达成，返回 pass/fail 及原因。",
+                            variables=["action", "expected"], version=1, is_active=True,
+                            description="验证测试步骤的预期结果",
+                        ),
+                    ]
+                    _prompt_db.add_all(_seeds)
+                    await _prompt_db.commit()
+                    logger.info("种子提示词数据写入完成")
+        except Exception:
+            logger.warning("种子提示词数据写入失败（非关键错误，继续）")
 
     from app.auth import hash_password
 
@@ -194,6 +456,9 @@ async def _run_startup_init():
         except SQLAlchemyError as _e:
             logger.warning("过期会话清理失败: %s", _e, exc_info=True)
 
+    # 恢复孤儿 agent_runs（服务重启后清理假 running 状态）
+    await _recover_orphaned_agent_runs()
+
 
 async def _periodic_session_cleanup():
     """后台周期任务：每 900 秒清理一次过期会话。"""
@@ -221,6 +486,15 @@ async def lifespan(app: FastAPI):
         logger.warning("数据库初始化失败，进入配置模式: %s", e)
         logger.warning("请通过 /setup 页面配置 PostgreSQL 数据库后重启")
     cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+
+    # ── 启动 agent 待执行轮询（跨 worker 调度） ──
+    try:
+        from agent.manager import agent_manager
+        asyncio.create_task(agent_manager.start_poller())
+        logger.info("Agent Mgmt: cross-worker pending execution poller started")
+    except Exception:
+        pass
+
     try:
         from app.scheduler import start_scheduler
         await start_scheduler()
@@ -383,11 +657,41 @@ app.include_router(gen_router.router)
 app.include_router(recordings_router.router)
 app.include_router(notification_router.router)
 app.include_router(setup_router.router)
+app.include_router(agent_definition_router.router)
+app.include_router(agent_run_router.router)
 
 if AGENT_SUPPORT:
     app.include_router(agent_router)
 
 app.websocket("/ws/logs/{run_id}")(websocket_logs)
+
+
+async def _agent_run_websocket(websocket: WebSocket, run_id: int):
+    """Agent 运行实时观察 WebSocket 端点。
+
+    与 /ws/logs/{run_id} 模式一致：
+    - 客户端连接后持续接收 agent_run 的状态推送
+    - 支持 ping/pong 心跳保持连接
+    """
+    await agent_run_ws.connect(websocket, run_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = _json.loads(data)
+                if msg.get("type") == "ping":
+                    await websocket.send_text(_json.dumps({"type": "pong"}))
+            except _json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        await agent_run_ws.disconnect(websocket, run_id)
+    except (RuntimeError, ConnectionError) as exc:
+        logger.warning("Agent run WebSocket 错误 (run_id=%s): %s", run_id, exc)
+        await agent_run_ws.disconnect(websocket, run_id)
+
+
+app.websocket("/ws/agent-runs/{run_id}")(_agent_run_websocket)
+
 
 _SPA_INDEX = os.path.join(_root, "app", "static", "index.html")
 

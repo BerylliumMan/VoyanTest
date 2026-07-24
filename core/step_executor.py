@@ -170,6 +170,7 @@ async def execute_step_mcp(
     model: str | None = None,
     step_timeout_ms: int = 120000,
     screenshot_dir: str | None = None,
+    system_prompt_override: str | None = None,
 ) -> dict:
     """Execute a single NL test step via Playwright MCP.
 
@@ -204,7 +205,7 @@ async def execute_step_mcp(
 
         try:
             tool_call = await asyncio.wait_for(
-                generate_tool_call(desc, snapshot, expected_result=expected_result, client=llm_client, model=model),
+                generate_tool_call(desc, snapshot, expected_result=expected_result, client=llm_client, model=model, system_prompt=system_prompt_override),
                 timeout=100,
             )
         except asyncio.TimeoutError:

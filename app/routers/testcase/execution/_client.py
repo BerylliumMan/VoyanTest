@@ -20,10 +20,11 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
+from app.crud import agent_definition as crud_agent_definition
 from app.auth import get_current_user, get_user_project_filter
 from app import database as db_mod
 from app.database import get_async_db
@@ -49,6 +50,75 @@ def _ensure_dir(path: str) -> None:
 router = APIRouter()
 
 
+async def _find_online_agent_in_db(db: AsyncSession, agent_name: str | None) -> dict | None:
+    """跨 worker 兜底：查 DB 中最近 120s 内有心跳或 status=online 的 Agent。"""
+    try:
+        result = await db.execute(
+            text("SELECT id, name FROM agents WHERE (last_heartbeat > NOW() - INTERVAL '120 seconds' OR (status='online' AND last_heartbeat IS NULL))"
+                 + (" AND name=:name" if agent_name else "")),
+            {"name": agent_name} if agent_name else {},
+        )
+        row = result.first()
+        if row:
+            return {"id": row[0], "name": row[1]}
+    except Exception:
+        pass
+    return None
+
+
+async def _ensure_agent_def_id(db: AsyncSession) -> int:
+    """返回一个有效的 agent_definition_id，用于 client 执行的 AgentRun 记录。"""
+    try:
+        r = await db.execute(select(db_models.AgentDefinition).limit(1))
+        first = r.scalar_one_or_none()
+        if first:
+            return first.id
+    except Exception:
+        pass
+    return 1
+
+
+async def _create_pending_execution(
+    db: AsyncSession, case_id: int, agent_name: str | None, db_case, batch_id: int | None = None,
+) -> dict:
+    """在 DB 中创建待执行记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
+    from app.db_models import AgentRun
+    from app.models.schemas import AgentRunCreate
+    agent_name_text = agent_name or "unknown"
+
+    # 取一个有效的 agent_definition_id 作为队列标识
+    dummy_def_id = 1
+    try:
+        from app.db_models import AgentDefinition as _AD
+        r = await db.execute(select(_AD).limit(1))
+        first = r.scalar_one_or_none()
+        if first:
+            dummy_def_id = first.id
+    except Exception:
+        pass
+
+    goal = {"type": "client_exec", "case_id": case_id, "agent_name": agent_name_text}
+    if batch_id:
+        goal["batch_id"] = batch_id
+
+    ar = AgentRun(
+        agent_definition_id=dummy_def_id,
+        goal=goal,
+        status="pending",
+    )
+    db.add(ar)
+    await db.commit()
+    await db.refresh(ar)
+
+    return {
+        "id": ar.id,
+        "case_id": case_id,
+        "status": "queued",
+        "agent_name": agent_name_text,
+        "message": f"用例已排队，等待 {agent_name_text} 执行",
+    }
+
+
 @router.post("/{case_id}/run-client")
 async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), agent_name: Optional[str] = None, environment_id: Optional[int] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
     """Run a test case on a connected client agent via WebSocket."""
@@ -62,10 +132,20 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Test case not found")
 
+    # 检查是否有活跃 execution AgentDefinition — 跨 worker 创建 pending run，由 poller 接管
+    active_agent_def = await crud_agent_definition.get_active_by_type(db, "execution")
+    if active_agent_def and active_agent_def.tools and agent_name and (await _find_online_agent_in_db(db, agent_name)):
+        # 在 DB 中创建 AgentRun（status=pending），poller 会在有 WS 连接的 worker 上调起 OTA
+        from core.agent_bridge import create_pending_agent_run
+        arun = await create_pending_agent_run(db, active_agent_def, db_case.id, agent_name, environment_id)
+        return {"message": f"Agent #{arun.id} queued via AI Agent", "agent_run_id": arun.id}
+
     agents = await agent_manager.get_online_agents()
     if not agents:
-        raise HTTPException(status_code=400, detail="No client agents available")
-
+        db_agent = await _find_online_agent_in_db(db, agent_name)
+        if not db_agent:
+            raise HTTPException(status_code=400, detail="No client agents available")
+        return await _create_pending_execution(db, case_id, agent_name, db_case)
     if agent_name:
         matched = [a for a in agents if a.name == agent_name]
         if not matched:
@@ -73,6 +153,20 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         agent = matched[0]
     else:
         agent = agents[0]
+
+    # 同 worker 路径：直接执行 AgentBridge OTA
+    active_agent_def_same = active_agent_def or (await crud_agent_definition.get_active_by_type(db, "execution"))
+    if active_agent_def_same and active_agent_def_same.tools and agent_name:
+        from core.agent_bridge import AgentBridge
+        bridge = AgentBridge(agent_manager, db, active_agent_def_same)
+        arun = await bridge.orchestrate(
+            case_id=db_case.id,
+            agent_id=agent_name,
+            goal={"type": "client_exec", "case_id": db_case.id, "agent_name": agent_name},
+            environment_id=environment_id,
+        )
+        return {"message": f"Agent #{arun.id} executing via AI Agent", "agent_run_id": arun.id}
+
     run_id = uuid.uuid4().hex[:12]
 
     steps_raw = await crud.get_steps_for_case(db, case_id)
@@ -102,6 +196,26 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         await _asyncio.to_thread(_ensure_dir, output_dir)
 
         _all_success = True
+        agent_run_id = None
+
+        # 创建 AgentRun 记录
+        try:
+            async with db_mod.AsyncSessionLocal() as _ar_db:
+                def_id = await _ensure_agent_def_id(_ar_db)
+                ar = db_models.AgentRun(
+                    agent_definition_id=def_id,
+                    case_id=case_id,
+                    goal={"type": "client_exec", "case_id": case_id, "agent_name": agent.name},
+                    status="running",
+                    started_at=start_time,
+                )
+                _ar_db.add(ar)
+                await _ar_db.commit()
+                await _ar_db.refresh(ar)
+                agent_run_id = ar.id
+        except Exception:
+            logger.exception("Failed to create AgentRun record")
+
         try:
             step_results = await agent_manager.execute_on_agent(
                 agent.id, run_id, db_case.name, steps, output_dir=output_dir,
@@ -129,10 +243,27 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
                 (tz_now() - start_time).total_seconds(),
                 report_path, None, [], batch_id=batch.id,
             )
+
+            # 更新 AgentRun 状态
+            if agent_run_id:
+                try:
+                    async with db_mod.AsyncSessionLocal() as _ar_db:
+                        await crud.update_agent_run_status(_ar_db, agent_run_id, status)
+                except Exception:
+                    pass
         except Exception:
             logger.exception("Client execution failed")
             _all_success = False
             end_time = tz_now()
+
+            # 更新 AgentRun 状态为失败
+            if agent_run_id:
+                try:
+                    async with db_mod.AsyncSessionLocal() as _ar_db:
+                        await crud.update_agent_run_status(_ar_db, agent_run_id, "failed")
+                except Exception:
+                    pass
+
             await save_run_results(
                 case_id, "failed", start_time, end_time,
                 (end_time - start_time).total_seconds(),
@@ -199,8 +330,31 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
 
     agents = await agent_manager.get_online_agents()
     if not agents:
-        raise HTTPException(status_code=400, detail="No client agents available")
-
+        db_agent = await _find_online_agent_in_db(db, body.agent_name)
+        if not db_agent:
+            raise HTTPException(status_code=400, detail="No client agents available")
+        # 跨 worker：创建统一 RunBatch，为每个用例创建待执行记录
+        from app.db_models import RunBatch
+        queued = []
+        tc0 = None
+        for cid in (body.case_ids or []):
+            tc = await crud.get_test_case(db, cid)
+            if tc and tc0 is None:
+                tc0 = tc
+        batch = RunBatch(status="running", project_id=tc0.project_id if tc0 else 0,
+                         total_cases=len(body.case_ids or []), triggered_by=body.agent_name)
+        db.add(batch)
+        await db.commit()
+        await db.refresh(batch)
+        for cid in (body.case_ids or []):
+            tc = await crud.get_test_case(db, cid)
+            if tc:
+                pend = await _create_pending_execution(db, cid, body.agent_name, tc, batch_id=batch.id)
+                queued.append(cid)
+        if queued:
+            return {"status": "queued", "case_ids": queued, "agent_name": body.agent_name, "message": f"{len(queued)} cases queued for batch #{batch.id}"}
+        raise HTTPException(status_code=400, detail="No test cases to queue")
+    
     if body.agent_name:
         matched = [a for a in agents if a.name == body.agent_name]
         if not matched:
@@ -260,6 +414,43 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
             await _asyncio.to_thread(_ensure_dir, output_dir)
 
+            # 检查是否有活跃 execution AgentDefinition — 走 AI Agent 桥接路径
+            try:
+                async with db_mod.AsyncSessionLocal() as _ad_db:
+                    active_agent_def = await crud_agent_definition.get_active_by_type(_ad_db, "execution")
+                    if active_agent_def and active_agent_def.tools and body.agent_name:
+                        from core.agent_bridge import AgentBridge
+                        bridge = AgentBridge(agent_manager, _ad_db, active_agent_def)
+                        await bridge.orchestrate(
+                            case_id=case_id,
+                            agent_id=body.agent_name,
+                            goal={"type": "client_exec", "case_id": case_id, "agent_name": body.agent_name},
+                            environment_id=body.environment_id,
+                            existing_batch_id=batch.id,
+                        )
+                        continue
+            except Exception:
+                logger.exception("AgentDefinition check failed for batch case %s", case_id)
+
+            # 创建 AgentRun 记录
+            agent_run_id = None
+            try:
+                async with db_mod.AsyncSessionLocal() as _ar_db:
+                    def_id = await _ensure_agent_def_id(_ar_db)
+                    ar = db_models.AgentRun(
+                        agent_definition_id=def_id,
+                        case_id=case_id,
+                        goal={"type": "client_exec", "case_id": case_id, "agent_name": agent.name},
+                        status="running",
+                        started_at=start_time,
+                    )
+                    _ar_db.add(ar)
+                    await _ar_db.commit()
+                    await _ar_db.refresh(ar)
+                    agent_run_id = ar.id
+            except Exception:
+                logger.exception("Failed to create AgentRun record for batch case %s", case_id)
+
             try:
                 step_results = await agent_manager.execute_on_agent(
                     agent.id, run_id, info["name"], steps, output_dir=output_dir,
@@ -288,10 +479,27 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     report_path, None, [], batch_id=batch.id,
                     is_init=info.get("is_init", False),
                 )
+
+                # 更新 AgentRun 状态
+                if agent_run_id:
+                    try:
+                        async with db_mod.AsyncSessionLocal() as _ar_db:
+                            await crud.update_agent_run_status(_ar_db, agent_run_id, status)
+                    except Exception:
+                        pass
             except Exception:
                 logger.exception("Agent run failed for case %s", case_id)
                 _all_success = False
                 end_time = tz_now()
+
+                # 更新 AgentRun 状态为失败
+                if agent_run_id:
+                    try:
+                        async with db_mod.AsyncSessionLocal() as _ar_db:
+                            await crud.update_agent_run_status(_ar_db, agent_run_id, "failed")
+                    except Exception:
+                        pass
+
                 await save_run_results(
                     case_id, "failed", start_time, end_time,
                     (end_time - start_time).total_seconds(),

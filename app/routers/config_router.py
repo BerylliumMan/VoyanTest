@@ -15,7 +15,6 @@ from .. import crud
 from ..auth import require_admin
 from ..database import get_async_db
 from ..security.encryption import encrypt_value, decrypt_value
-from app.gen.analyzer import get_default_prompts
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config", tags=["配置"])
@@ -167,129 +166,159 @@ async def test_ai_config(
         # OpenAI SDK 抛出的所有错误（APIError / APIConnectionError / RateLimitError 等）
         # 加上网络层 OSError 与 asyncio.TimeoutError
         logger.warning("AI config test failed: %s", exc, exc_info=True)
-        raise HTTPException(400, detail=f"连接失败: {exc}")
+        err_msg = str(exc)
+        # 过滤掉 LLM API 返回的 HTML 页面，只保留可读信息
+        if "<!DOCTYPE" in err_msg or "<html" in err_msg or err_msg.count(">") > 5:
+            err_msg = "API 返回了非 JSON 响应（请检查 API Base URL 和 API Key 是否正确）"
+        raise HTTPException(400, detail=f"连接失败: {err_msg}")
 
 
-# --- Prompt Template Management ---
+# --- Prompt Template Management (Versioned) ---
+
+from typing import Any
 
 class PromptTemplateResponse(BaseModel):
-    template_key: str
-    label: str
-    template_content: str
-    is_custom: bool
-    default_content: str
+    id: int
+    key: str
+    name: str
+    category: str
+    content: str
+    variables: list[str] = []
+    version: int
+    is_active: bool
+    description: str | None = None
+    created_at: str | None = None
     updated_at: str | None = None
 
 
-class PromptTemplateUpdate(BaseModel):
-    template_content: str = Field(..., min_length=1)
+class PromptCreateRequest(BaseModel):
+    key: str = Field(..., min_length=1, max_length=100, pattern=r'^[a-z_]+$')
+    name: str = Field(..., min_length=1, max_length=200)
+    category: str = Field(..., pattern=r'^(generation|execution|verification)$')
+    content: str = Field(..., min_length=10, max_length=10000)
+    variables: list[str] = []
+    description: str | None = None
+
+
+class PromptActivateRequest(BaseModel):
+    version: int = Field(..., ge=1)
+
+
+class PromptPreviewResponse(BaseModel):
+    rendered: str
+    variables: dict[str, str]
+    version: int
+    token_estimate: int
 
 
 @router.get("/prompts")
-async def list_prompts(db: AsyncSession = Depends(get_async_db), user=Depends(require_admin)) -> list[PromptTemplateResponse]:
-    """列出所有提示词模板（含默认内容）。"""
+async def list_prompts(
+    db: AsyncSession = Depends(get_async_db),
+    admin = Depends(require_admin),
+) -> list[PromptTemplateResponse]:
+    """列出所有提示词模板的最新版本。"""
     rows = await crud.list_prompt_templates(db)
-    defaults = get_default_prompts()
-    result = []
-    for row in rows:
-        default = defaults.get(row.template_key, {}).get("content", "")
-        result.append(PromptTemplateResponse(
-            template_key=row.template_key,
-            label=row.label,
-            template_content=row.template_content,
-            is_custom=row.is_custom,
-            default_content=default,
-            updated_at=row.updated_at.isoformat() if row.updated_at else None,
-        ))
-    db_keys = {r.template_key for r in rows}
-    for key, d in defaults.items():
-        if key not in db_keys:
-            result.append(PromptTemplateResponse(
-                template_key=key,
-                label=d["label"],
-                template_content=d["content"],
-                is_custom=False,
-                default_content=d["content"],
-            ))
-    return result
+    return [_pt_to_response(r) for r in rows]
 
 
 @router.get("/prompts/{key}")
-async def get_prompt(key: str, db: AsyncSession = Depends(get_async_db), user=Depends(require_admin)) -> PromptTemplateResponse:
-    """获取单个提示词模板。"""
-    defaults = get_default_prompts()
-    if key not in defaults:
-        raise HTTPException(404, f"未知的提示词模板: {key}")
-    default = defaults[key]["content"]
+async def get_prompt(
+    key: str,
+    db: AsyncSession = Depends(get_async_db),
+    admin = Depends(require_admin),
+) -> PromptTemplateResponse:
+    """获取指定 key 的活跃版本。"""
     row = await crud.get_prompt_template_by_key(db, key)
-    if row:
-        return PromptTemplateResponse(
-            template_key=row.template_key,
-            label=row.label,
-            template_content=row.template_content,
-            is_custom=row.is_custom,
-            default_content=default,
-            updated_at=row.updated_at.isoformat() if row.updated_at else None,
-        )
-    return PromptTemplateResponse(
-        template_key=key,
-        label=defaults[key]["label"],
-        template_content=default,
-        is_custom=False,
-        default_content=default,
-    )
+    if not row:
+        raise HTTPException(404, f"提示词模板不存在: {key}")
+    return _pt_to_response(row)
 
 
-@router.put("/prompts/{key}")
-async def update_prompt(
-    key: str,
-    body: PromptTemplateUpdate,
-    db: AsyncSession = Depends(get_async_db),
-    user=Depends(require_admin),
-) -> PromptTemplateResponse:
-    """保存（覆盖）提示词模板内容。"""
-    defaults = get_default_prompts()
-    if key not in defaults:
-        raise HTTPException(404, f"未知的提示词模板: {key}")
-    row = await crud.upsert_prompt_template(
-        db, key, defaults[key]["label"], body.template_content, True
-    )
-    return PromptTemplateResponse(
-        template_key=row.template_key,
-        label=row.label,
-        template_content=row.template_content,
-        is_custom=row.is_custom,
-        default_content=defaults[key]["content"],
-        updated_at=row.updated_at.isoformat() if row.updated_at else None,
-    )
-
-
-@router.post("/prompts/{key}/restore")
-async def restore_prompt(
+@router.get("/prompts/{key}/versions")
+async def get_prompt_versions(
     key: str,
     db: AsyncSession = Depends(get_async_db),
-    user=Depends(require_admin),
+    admin = Depends(require_admin),
+) -> list[PromptTemplateResponse]:
+    """获取指定 key 的所有版本历史。"""
+    rows = await crud.get_prompt_versions(db, key)
+    if not rows:
+        raise HTTPException(404, f"提示词模板不存在: {key}")
+    return [_pt_to_response(r) for r in rows]
+
+
+@router.post("/prompts", status_code=201)
+async def create_prompt(
+    body: PromptCreateRequest,
+    db: AsyncSession = Depends(get_async_db),
+    admin = Depends(require_admin),
 ) -> PromptTemplateResponse:
-    """恢复提示词模板为默认内容。"""
-    defaults = get_default_prompts()
-    if key not in defaults:
-        raise HTTPException(404, f"未知的提示词模板: {key}")
-    row = await crud.restore_prompt_template(db, key, defaults[key]["content"])
-    if row:
-        return PromptTemplateResponse(
-            template_key=row.template_key,
-            label=row.label,
-            template_content=row.template_content,
-            is_custom=row.is_custom,
-            default_content=defaults[key]["content"],
-            updated_at=row.updated_at.isoformat() if row.updated_at else None,
+    """创建提示词模板的新版本（版本号自动递增）。"""
+    try:
+        row = await crud.create_prompt_template(
+            db,
+            key=body.key,
+            name=body.name,
+            category=body.category,
+            content=body.content,
+            variables=body.variables,
+            description=body.description,
         )
+    except Exception as exc:
+        logger.exception("创建提示词模板失败")
+        raise HTTPException(400, detail=str(exc))
+    return _pt_to_response(row)
+
+
+@router.put("/prompts/{key}/activate")
+async def activate_prompt(
+    key: str,
+    body: PromptActivateRequest,
+    db: AsyncSession = Depends(get_async_db),
+    admin = Depends(require_admin),
+) -> dict:
+    """切换指定 key 的活跃版本。"""
+    row = await crud.activate_prompt_version(db, key, body.version)
+    if not row:
+        raise HTTPException(404, f"版本 {body.version} 不存在")
+    return {"message": f"{key} 已切换到 version {body.version}"}
+
+
+@router.get("/prompts/{key}/preview")
+async def preview_prompt(
+    key: str,
+    version: int | None = None,
+    sample: str = "",
+    db: AsyncSession = Depends(get_async_db),
+    admin = Depends(require_admin),
+) -> PromptPreviewResponse:
+    """预览提示词模板（渲染变量）。"""
+    row = await crud.get_prompt_template_by_key(db, key, version=version or None)
+    if not row:
+        raise HTTPException(404, f"提示词模板不存在: {key}")
+    rendered = row.content.replace("{text}", sample) if sample else row.content
+    return PromptPreviewResponse(
+        rendered=rendered,
+        variables={"text": sample} if sample else {},
+        version=row.version,
+        token_estimate=len(rendered) * 2,
+    )
+
+
+def _pt_to_response(pt: Any) -> PromptTemplateResponse:
+    from datetime import timezone
     return PromptTemplateResponse(
-        template_key=key,
-        label=defaults[key]["label"],
-        template_content=defaults[key]["content"],
-        is_custom=False,
-        default_content=defaults[key]["content"],
+        id=pt.id,
+        key=pt.key,
+        name=pt.name,
+        category=pt.category,
+        content=pt.content,
+        variables=pt.variables or [],
+        version=pt.version,
+        is_active=pt.is_active,
+        description=pt.description,
+        created_at=pt.created_at.astimezone(timezone.utc).isoformat() if pt.created_at else None,
+        updated_at=pt.updated_at.astimezone(timezone.utc).isoformat() if pt.updated_at else None,
     )
 
 

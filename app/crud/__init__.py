@@ -98,10 +98,14 @@ from app.crud.user import (
 from app.crud.config import (
     get_ai_config,
     upsert_ai_config,
+)
+from app.crud.prompt_template import (
     list_prompt_templates,
     get_prompt_template_by_key,
-    upsert_prompt_template,
-    restore_prompt_template,
+    get_prompt_versions,
+    create_prompt_template,
+    activate_prompt_version,
+    delete_prompt_template,
 )
 from app.crud.audit import (
     list_audit_logs,
@@ -113,6 +117,23 @@ from app.crud.schedule import (
     update_scheduled_task,
     delete_scheduled_task,
     toggle_scheduled_task,
+)
+from app.crud.agent_definition import (
+    list_agent_definitions,
+    get_agent_definition,
+    create_agent_definition,
+    update_agent_definition,
+    delete_agent_definition,
+    get_active_by_type,
+)
+from app.crud.agent_run import (
+    list_agent_runs,
+    get_agent_run,
+    get_agent_run_messages,
+    create_agent_run,
+    create_message,
+    create_tool_call,
+    update_agent_run_status,
 )
 
 __all__ = [
@@ -208,10 +229,13 @@ __all__ = [
     # config
     "get_ai_config",
     "upsert_ai_config",
+    # prompt templates
     "list_prompt_templates",
     "get_prompt_template_by_key",
-    "upsert_prompt_template",
-    "restore_prompt_template",
+    "get_prompt_versions",
+    "create_prompt_template",
+    "activate_prompt_version",
+    "delete_prompt_template",
     # audit
     "list_audit_logs",
     # schedule
@@ -221,4 +245,19 @@ __all__ = [
     "update_scheduled_task",
     "delete_scheduled_task",
     "toggle_scheduled_task",
+    # agent_definition
+    "list_agent_definitions",
+    "get_agent_definition",
+    "create_agent_definition",
+    "update_agent_definition",
+    "delete_agent_definition",
+    "get_active_by_type",
+# agent_run
+"list_agent_runs",
+"get_agent_run",
+"get_agent_run_messages",
+"create_agent_run",
+"create_message",
+"create_tool_call",
+"update_agent_run_status",
 ]  # noqa: E501

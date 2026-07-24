@@ -243,13 +243,14 @@ function PageLayout() {
                   >
                     <Switch location={location}>
                       {flattenRoutes.map((route, index) => {
-                        return (
-                          <Route
-                            key={index}
-                            path={route.path || `/${route.key}`}
-                            component={route.component}
-                          />
-                        );
+                         return (
+                            <Route
+                              key={index}
+                              exact={route.exact}
+                              path={route.path || `/${route.key}`}
+                              component={route.component}
+                            />
+                          );
                       })}
                       <Route exact path="/">
                         <Redirect to="/dashboard" />

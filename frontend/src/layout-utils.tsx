@@ -10,6 +10,7 @@ import {
   IconThunderbolt,
   IconHistory,
   IconCamera,
+  IconCode,
 } from '@arco-design/web-react/icon';
 import lazyload from '@/utils/lazyload';
 import { IRoute } from '@/routes';
@@ -34,6 +35,10 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconRobot className={styles.icon} />;
     case 'recordings':
       return <IconCamera className={styles.icon} />;
+    case 'agent_definitions':
+      return <IconCode className={styles.icon} />;
+    case 'agent-runs':
+      return <IconHistory className={styles.icon} />;
     case 'audit-logs':
       return <IconSafe className={styles.icon} />;
     case 'settings':

@@ -58,6 +58,13 @@ export async function apiRequest<T = unknown>(
     if (showSuccess && successMessage) {
       Message.success(successMessage);
     }
+    if (typeof response.data === 'string' && response.data.startsWith('<!DOCTYPE')) {
+      if (window.location.pathname === '/login') {
+        throw new ApiError('登录已过期', 401);
+      }
+      window.location.href = '/login';
+      return {} as T;
+    }
     return response.data as T;
   } catch (e: unknown) {
     const err = e as {

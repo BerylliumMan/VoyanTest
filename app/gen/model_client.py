@@ -29,8 +29,28 @@ def invalidate_ai_config_cache():
     _ai_config_cache = None
 
 
-async def _load_ai_config(force_refresh: bool = False) -> dict:
-    """Load AI config from DB（首次加载后缓存，避免跨事件循环访问 AsyncSessionLocal）。"""
+async def _load_ai_config(force_refresh: bool = False, agent_type: str | None = None) -> dict:
+    """Load AI config from DB（首次加载后缓存，避免跨事件循环访问 AsyncSessionLocal）。
+
+    若指定 agent_type，优先从 AgentDefinition 获取 overrides。
+    """
+    if agent_type:
+        try:
+            from app.agent_resolver import resolve_agent_config
+            from app.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                agent_cfg = await resolve_agent_config(db, agent_type)
+            if agent_cfg and agent_cfg.get('api_key'):
+                return {
+                    'model': agent_cfg.get('model', ''),
+                    'api_key': agent_cfg.get('api_key', ''),
+                    'api_base': agent_cfg.get('api_base', ''),
+                    'temperature': agent_cfg.get('temperature', 0.1),
+                    'max_context_tokens': agent_cfg.get('max_context_tokens', 131072),
+                }
+        except Exception:
+            logger.debug("AgentDefinition lookup failed for %s, falling back to global config", agent_type)
+
     global _ai_config_cache
     if _ai_config_cache and not force_refresh:
         return _ai_config_cache
@@ -60,9 +80,9 @@ async def _load_ai_config(force_refresh: bool = False) -> dict:
     return config
 
 
-async def call_model(messages: list, temperature: float | None = None, stream_callback=None) -> str:
+async def call_model(messages: list, temperature: float | None = None, stream_callback=None, agent_type: str | None = None) -> str:
     """Call the AI model using uitest-work's AI config."""
-    config = await _load_ai_config()
+    config = await _load_ai_config(agent_type=agent_type)
 
     api_url = config['api_base'].rstrip('/')
     # Ensure URL includes /chat/completions path (some proxies like OneAPI store base URL without it)
