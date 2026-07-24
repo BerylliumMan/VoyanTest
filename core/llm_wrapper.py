@@ -116,24 +116,44 @@ Your job: find the best matching element from the accessibility snapshot and out
 action to accomplish the step. Each element in the snapshot has a ref (e.g., e12, e45).
 Use these refs as the "selector" field to target elements precisely.
 
+--- THINKING CHAIN (follow before every action) ---
+1. 分析当前页面状态 — What is visible? Any popups/dialogs blocking the page?
+2. 确定目标元素位置 — Match using the progressive selector strategy below.
+3. 选择最合适的工具 — Pick the action that matches element type and interaction intent.
+
 ACTIONS available (maps to Playwright MCP tools):
 - "goto": Navigate to a URL. selector=null, value=URL.
 - "click": Click an element by its ref. selector=ref, value=null.
 - "fill": Type text into an input field by ref. selector=ref, value=text.
 - "select": Select dropdown option by ref. selector=ref, value=option value/text.
+- "hover": Mouse hover over an element. selector=ref, value=null.
+- "scroll": Scroll page by pixels or scroll element into view. selector=null (page), selector=ref (element), value=px count or "up"/"down".
+- "press_key": Send keyboard key or shortcut. selector=null, value=key name (e.g. "Enter", "Tab", "Escape", "Control+A").
 - "wait": Wait for text to appear. selector=null, value=text to wait for.
 - "screenshot": Take a full-page screenshot. selector=null, value=filename.
 - "assert_text": Wait for text to be visible. selector=null, value=text.
 - "snapshot": Refresh page snapshot (no action). selector=null, value=null.
 
+PROGRESSIVE SELECTOR MATCHING (try in this order):
+1. Exact match — element text/name equals the step description exactly.
+2. Partial match — element text/name CONTAINS the keyword from step description.
+3. aria-label match — if no text match exists, use the element's aria-label attribute.
+4. Placeholder match — for input fields, match by placeholder attribute text.
+
+EDGE CASE HANDLING:
+- Timeout: If element not found within 30s, retry once with a refreshed snapshot, then abort with action="error".
+- Popup/Dialog: If an unexpected popup/dialog/modal blocks the page, dismiss it first — look for 取消/关闭/Cancel/Close buttons or press Escape — before proceeding.
+- Stale Element: If an element reference becomes detached from the DOM, re-query the snapshot to find a fresh ref for the same element, then retry.
+- Iframe: If the target element is inside an iframe, note the iframe boundary from the snapshot and switch context to that iframe first.
+
 RULES:
 - Use element refs from the snapshot (e.g., "e12") as selectors — do NOT invent CSS selectors.
 - Output ONLY the JSON object. No markdown fences, no explanation text.
-- Always include "thinking" explaining why you chose this action and element.
-- For text input fields, match by role="textbox" and accessible name.
-- For buttons, match by role="button" and accessible name.
+- Always include "thinking" referencing the thinking chain stages.
+- For text input fields, match by role="textbox" and accessible name, aria-label, or placeholder.
+- For buttons, match by role="button" and accessible name or aria-label.
 - For links, match by role="link" and text content.
-- If no matching element found, use action="error" with explanation in value.
+- If no matching element found after exhausting all matching strategies, use action="error" with explanation in value.
 - If navigation step, use action="goto" with the BASE URL as the value, or a full URL if the step explicitly specifies one.
 
 OUTPUT SCHEMA (exact JSON):
@@ -266,6 +286,8 @@ async def generate_tool_call(
     temperature: float = 0.1,
     client: AsyncOpenAI | None = None,
     system_prompt: str | None = None,
+    agent_type: str | None = None,
+    db: Any = None,
 ) -> PlaywrightMCPToolCall:
     """Generate a single PlaywrightMCPToolCall from a NL step description.
 
@@ -303,8 +325,25 @@ async def generate_tool_call(
         )
     user_message += f"Generate the browser action JSON now."
 
+    # 解析 system_prompt：显式参数 > DB 查找 > 硬编码常量
+    resolved_system_prompt: str | None = system_prompt
+    if resolved_system_prompt is None and agent_type and db is not None:
+        try:
+            from app.runtime_config import resolve_prompt_for_agent
+            resolved_system_prompt = await resolve_prompt_for_agent(
+                db, agent_type, "operation_translate",
+            )
+        except Exception:
+            logger.debug(
+                "DB prompt resolution failed for operation_translate "
+                "(agent_type=%s), falling back to hardcoded SYSTEM_PROMPT",
+                agent_type, exc_info=True,
+            )
+    if resolved_system_prompt is None:
+        resolved_system_prompt = SYSTEM_PROMPT
+
     messages: list[dict] = [
-        {'role': 'system', 'content': system_prompt if system_prompt else SYSTEM_PROMPT},
+        {'role': 'system', 'content': resolved_system_prompt},
         {'role': 'user', 'content': user_message},
     ]
 
@@ -403,27 +442,56 @@ async def create_wrapped_llm(
 # Expected result verification
 # ------------------------------------------------------------------
 
-VERIFY_PROMPT = """You are a test result verifier. Your job is to check whether the current page state matches the expected result.
+VERIFY_PROMPT = """You are a precise test result verifier. Your job is to check whether the current page state matches the expected result using tiered verification.
 
 INPUT:
 1. STEP EXECUTED (optional): The action that was just performed
 2. EXPECTED RESULT: What should be true after the step executes
 3. PAGE CONTENT: Current accessibility snapshot of the page
 
-OUTPUT: A JSON object with:
-- "passed": true if the expected result is clearly met, false otherwise
-- "reason": brief explanation (1-2 sentences)
+--- THREE-TIER VERIFICATION ---
 
-RULES:
-- If STEP EXECUTED describes an input/typing action and EXPECTED RESULT says the input was successful (e.g. "输入成功", "输入完成"), check whether the text appears in the input field — do NOT require a submission or confirmation message
-- If the expected result mentions specific text/elements, they must be visible in the snapshot
-- If the snapshot is empty or unavailable, return passed=false
-- Output ONLY the JSON object, no markdown fences
+Level 1 — Exact Match: Text or element exactly equals the expected value.
+  Examples: text "保存成功" appears verbatim, element ref=e25 is visible, URL contains "/dashboard".
 
-EXAMPLE OUTPUTS:
-{"passed": true, "reason": "Search box contains 'berylliumman' as expected"}
-{"passed": false, "reason": "Expected success message not visible on page"}
-"""
+Level 2 — Semantic Match: The meaning is equivalent even if wording differs.
+  Examples: "保存成功" ≈ "Data saved successfully ✓", "登录完成" ≈ page shows user avatar + username.
+  Use this when the intent is clearly satisfied but the exact wording varies.
+
+Level 3 — Presence/Absence Check: Element exists or does not exist in the DOM.
+  Examples: error toast exists, loading spinner is gone, modal dialog is not present.
+  Use this for visibility/state checks that don't require specific text matching.
+
+--- SPECIAL TOLERANCE RULES ---
+- Timestamp/Dynamic Data: If the expected result references time, dates, IDs, or real-time data, check format/structure only — NOT the exact value. Example: "order ID shown" → verify any order ID exists, not a specific number.
+- Input Success: If STEP EXECUTED describes an input/typing action and EXPECTED RESULT says it was successful (e.g. "输入成功"), check that the text appears in the input field — do NOT require a submission or confirmation message.
+
+--- MULTI-ASSERTION RULE ---
+If the expected result requires multiple checks (e.g. "URL changed to /dashboard AND success toast appears"), ALL checks must pass. If any single check fails, the entire verification returns passed=false.
+
+--- CHINESE VERIFICATION EXAMPLES ---
+Input: EXPECTED "页面包含'保存成功'文字" → Level 1: check exact text "保存成功" in snapshot.
+Input: EXPECTED "弹出提示应该显示错误信息" → Level 2: check any error/warning message exists semantically.
+Input: EXPECTED "登录后跳转到主页，右上角显示用户名" → Multi-assertion: both URL change AND username visible must pass.
+Input: EXPECTED "订单创建成功，显示订单编号" → Level 3: order ID field exists (timestamp tolerance on value).
+
+--- RULES ---
+- If the snapshot is empty or unavailable, return passed=false with reason "Page snapshot is empty".
+- Output ONLY the JSON object, no markdown fences.
+- Always include specific evidence from the snapshot to justify your judgment.
+
+OUTPUT FORMAT:
+{
+  "passed": true,
+  "reason": "Page contains '保存成功' text at line 15 of snapshot",
+  "evidence": "Snapshot line 15: '✓ 保存成功 — Data saved successfully'"
+}
+
+{
+  "passed": false,
+  "reason": "Expected success message not visible; snapshot shows only login page content",
+  "evidence": "Snapshot lines 1-3 show login form, no success message found"
+}"""
 
 
 async def verify_expected_result(
@@ -434,6 +502,8 @@ async def verify_expected_result(
     model: str | None = None,
     temperature: float = 0.1,
     client: AsyncOpenAI | None = None,
+    agent_type: str | None = None,
+    db: Any = None,
 ) -> VerificationResult:
     """Verify if the current page state matches the expected result.
 
@@ -461,8 +531,23 @@ async def verify_expected_result(
         f"Verify if the expected result is met. Output JSON now."
     )
 
+    # 解析 system_prompt：DB 查找 > 硬编码常量
+    verify_prompt: str = VERIFY_PROMPT
+    if agent_type and db is not None:
+        try:
+            from app.runtime_config import resolve_prompt_for_agent
+            verify_prompt = await resolve_prompt_for_agent(
+                db, agent_type, "verify_expected",
+            )
+        except Exception:
+            logger.debug(
+                "DB prompt resolution failed for verify_expected "
+                "(agent_type=%s), falling back to hardcoded VERIFY_PROMPT",
+                agent_type, exc_info=True,
+            )
+
     messages: list[dict] = [
-        {'role': 'system', 'content': VERIFY_PROMPT},
+        {'role': 'system', 'content': verify_prompt},
         {'role': 'user', 'content': user_message},
     ]
 

@@ -347,27 +347,256 @@ async def _run_startup_init():
                     _seeds = [
                         PromptTemplate(
                             key="fp_extract", name="功能点提取", category="generation",
-                            content="你是一个测试用例分析专家。\n请根据以下需求文档提取功能点列表。\n每个功能点包含：标题、描述、优先级(P0/P1/P2)。\n\n需求文档：\n{text}",
+                            content=(
+                                "你是一个资深测试分析专家。请按照以下分步推理流程，从需求文档中提取功能点：\n"
+                                "\n"
+                                "【推理流程】\n"
+                                "步骤1：扫描需求全文，识别所有显式和隐式功能描述。\n"
+                                "步骤2：将每个功能抽象为可独立测试的最小单元，合并语义相同的描述。\n"
+                                "步骤3：按业务模块归类（如：登录注册、订单管理、数据报表）。\n"
+                                "步骤4：为每个功能点评定优先级并输出结构化JSON。\n"
+                                "\n"
+                                "【优先级标注规则】\n"
+                                "P0：核心业务流程，缺失将导致系统不可用。\n"
+                                "P1：重要功能，影响主要用户场景但不阻塞核心流程。\n"
+                                "P2：辅助功能或体验优化，可在后续版本实现。\n"
+                                "\n"
+                                "【输出格式 — 严格JSON】\n"
+                                "{\n"
+                                '  "functional_points": [\n'
+                                "    {\n"
+                                '      "module": "所属业务模块名称",\n'
+                                '      "name": "功能点名称（简洁、可测试）",\n'
+                                '      "category": "功能分类（如：增删改查 | 校验规则 | 交互反馈 | 权限控制 | 数据展示）",\n'
+                                '      "desc": "功能的简明描述（1-2句话）",\n'
+                                '      "priority": "P0 | P1 | P2"\n'
+                                "    }\n"
+                                "  ]\n"
+                                "}\n"
+                                "\n"
+                                "【示例1 — 登录功能需求】\n"
+                                "输入：\"用户可通过手机号+验证码或邮箱+密码两种方式登录，密码错误超过5次锁定30分钟。\"\n"
+                                "输出：\n"
+                                "{\n"
+                                '  "functional_points": [\n'
+                                '    {"module":"登录注册","name":"手机号验证码登录","category":"增删改查","desc":"用户输入手机号和短信验证码完成登录","priority":"P0"},\n'
+                                '    {"module":"登录注册","name":"邮箱密码登录","category":"增删改查","desc":"用户输入邮箱和密码完成登录","priority":"P0"},\n'
+                                '    {"module":"登录注册","name":"登录失败锁定","category":"校验规则","desc":"同一账号密码错误超过5次后锁定30分钟","priority":"P0"}\n'
+                                "  ]\n"
+                                "}\n"
+                                "\n"
+                                "【示例2 — 模糊需求处理】\n"
+                                "输入：\"需要做一个列表页面，可以增删改查。\"\n"
+                                "输出：\n"
+                                "{\n"
+                                '  "functional_points": [\n'
+                                '    {"module":"数据管理","name":"列表数据展示","category":"数据展示","desc":"以表格形式分页展示数据列表，包含排序和筛选","priority":"P1"},\n'
+                                '    {"module":"数据管理","name":"新增数据","category":"增删改查","desc":"通过表单新增一条数据记录","priority":"P0"},\n'
+                                '    {"module":"数据管理","name":"编辑数据","category":"增删改查","desc":"点击编辑按钮修改已有数据","priority":"P0"},\n'
+                                '    {"module":"数据管理","name":"删除数据","category":"增删改查","desc":"删除单条或多条数据，需二次确认","priority":"P0"}\n'
+                                "  ]\n"
+                                "}\n"
+                                "\n"
+                                "【边界情况处理】\n"
+                                "- 需求模糊时：根据常见业务场景合理推断并标注，不要返回空列表。\n"
+                                "- 需求跨多子系统时：在module字段中保留子系统前缀如\"订单系统-退款\"。\n"
+                                "- 需求仅包含UI描述时：同时提取背后的数据和交互逻辑。\n"
+                                "- 需求文档为空或无法理解时：返回{\"functional_points\":[],\"warning\":\"无法从输入中提取功能点，请提供更详细的需求描述。\"}\n"
+                                "\n"
+                                "需求文档：\n"
+                                "{text}"
+                            ),
                             variables=["text"], version=1, is_active=True,
-                            description="从需求文档提取功能点",
+                            description="从需求文档提取功能点列表并结构化输出",
                         ),
                         PromptTemplate(
                             key="tc_generate", name="测试用例生成", category="generation",
-                            content="你是一个测试用例设计专家。\n基于以下功能点生成详细的测试用例。\n每个用例需包含：标题、所属模块、前置条件、测试步骤、预期结果、优先级。\n\n功能点：\n{fps}",
+                            content=(
+                                "你是一个测试用例设计专家，严格遵循等价类划分和边界值分析原则。请按以下分步推理流程生成测试用例：\n"
+                                "\n"
+                                "【推理流程】\n"
+                                "步骤1：逐一分析每个功能点，识别所有可能的输入域和状态组合。\n"
+                                "步骤2：对每个输入域应用等价类划分（有效等价类/无效等价类）推导测试场景。\n"
+                                "步骤3：对数值/长度类输入应用边界值分析（最小值、最小值-1、最大值、最大值+1、中间值）。\n"
+                                "步骤4：设计每个场景的具体操作步骤和断言点，输出结构化JSON。\n"
+                                "\n"
+                                "【设计约束】\n"
+                                "- 每个功能点至少覆盖：1个正常流程 + 1个异常流程 + 1个边界场景。\n"
+                                "- 步骤描述必须使用可执行的客观语言（\"在输入框中输入\" 而非 \"正常输入\"）。\n"
+                                "- 预期结果必须可验证（\"页面跳转到首页\" 而非 \"系统正常响应\"）。\n"
+                                "- P0功能点至少生成3条用例，P1至少2条，P2至少1条。\n"
+                                "\n"
+                                "【输出格式 — 严格JSON数组】\n"
+                                "[\n"
+                                "  {\n"
+                                '    "title": "用例标题（简洁，如：登录成功-正确用户名密码）",\n'
+                                '    "module": "所属业务模块",\n'
+                                '    "priority": "P0 | P1 | P2",\n'
+                                '    "precondition": "前置条件（如：已注册账号 admin/admin123）",\n'
+                                '    "steps": ["步骤1：打开登录页", "步骤2：输入用户名admin", "步骤3：输入密码admin123", "步骤4：点击登录按钮"],\n'
+                                '    "expected": ["预期1：页面跳转到首页", "预期2：右上角显示用户名"],\n'
+                                '    "scenario_type": "正常流程 | 异常流程 | 边界场景"\n'
+                                "  }\n"
+                                "]\n"
+                                "\n"
+                                "【示例1 — 登录表单（正常+异常+边界）】\n"
+                                "功能点：\"邮箱密码登录，用户名6-20字符，密码8-16字符\"\n"
+                                "输出：\n"
+                                "[\n"
+                                '  {"title":"登录成功-正确用户名密码","module":"登录注册","priority":"P0","precondition":"已注册账号 test@mail.com / Pass1234","steps":["打开登录页","输入邮箱test@mail.com","输入密码Pass1234","点击登录"],"expected":["页面跳转到首页","右上角显示用户头像"],"scenario_type":"正常流程"},\n'
+                                '  {"title":"登录失败-密码错误","module":"登录注册","priority":"P0","precondition":"同上账号","steps":["打开登录页","输入邮箱test@mail.com","输入错误密码WrongPass1","点击登录"],"expected":["页面显示\"密码错误\"提示","停留在登录页","密码输入框清空"],"scenario_type":"异常流程"},\n'
+                                '  {"title":"登录失败-用户名为空","module":"登录注册","priority":"P1","precondition":"无","steps":["打开登录页","不输入任何用户名","输入密码Pass1234","点击登录"],"expected":["用户名输入框下方显示\"用户名不能为空\""],"scenario_type":"异常流程"},\n'
+                                '  {"title":"用户名边界-6字符最小值","module":"登录注册","priority":"P1","precondition":"已注册6字符账号 a@b.co","steps":["打开登录页","输入用户名a@b.co","输入密码Pass1234","点击登录"],"expected":["登录成功，跳转到首页"],"scenario_type":"边界场景"},\n'
+                                '  {"title":"用户名边界-5字符无效","module":"登录注册","priority":"P1","precondition":"无","steps":["打开登录页","输入用户名a@b.c","点击登录"],"expected":["显示\"用户名至少6个字符\""],"scenario_type":"边界场景"}\n'
+                                "]\n"
+                                "\n"
+                                "【示例2 — 数值输入边界值分析】\n"
+                                "功能点：\"商品数量输入框，允许1-999的整数\"\n"
+                                "输出：\n"
+                                "[\n"
+                                '  {"title":"数量输入-正常值50","module":"订单管理","priority":"P1","precondition":"进入商品详情页","steps":["在数量输入框输入50","点击加入购物车"],"expected":["购物车显示该商品数量为50"],"scenario_type":"正常流程"},\n'
+                                '  {"title":"数量输入-最小值1","module":"订单管理","priority":"P1","precondition":"进入商品详情页","steps":["在数量输入框输入1","点击加入购物车"],"expected":["购物车显示该商品数量为1"],"scenario_type":"边界场景"},\n'
+                                '  {"title":"数量输入-最大值999","module":"订单管理","priority":"P1","precondition":"进入商品详情页","steps":["在数量输入框输入999","点击加入购物车"],"expected":["购物车显示该商品数量为999"],"scenario_type":"边界场景"},\n'
+                                '  {"title":"数量输入-超上限1000","module":"订单管理","priority":"P1","precondition":"进入商品详情页","steps":["在数量输入框输入1000","点击加入购物车"],"expected":["显示\"数量不能超过999\"提示","购物车不更新"],"scenario_type":"边界场景"},\n'
+                                '  {"title":"数量输入-下边界0","module":"订单管理","priority":"P1","precondition":"进入商品详情页","steps":["在数量输入框输入0","点击加入购物车"],"expected":["显示\"数量至少为1\"提示"],"scenario_type":"边界场景"}\n'
+                                "]\n"
+                                "\n"
+                                "功能点：\n"
+                                "{fps}"
+                            ),
                             variables=["fps"], version=1, is_active=True,
-                            description="根据功能点生成测试用例",
+                            description="根据功能点生成结构化测试用例（含等价类/边界值覆盖）",
                         ),
                         PromptTemplate(
                             key="operation_translate", name="操作指令翻译", category="execution",
-                            content="你将用户描述的自然语言测试步骤转换为浏览器操作。\n可用的操作类型：click, fill, goto, select, hover, scroll, wait, assert(url_contains|element_visible|text_present)。\n\n用户步骤：\n{step}\n\n页面 URL：{url}\n\n输出 JSON 格式的操作指令。",
+                            content=(
+                                "你是一个浏览器自动化操作翻译器。将自然语言测试步骤翻译为精确的浏览器操作指令。\n"
+                                "\n"
+                                "【可用操作类型】\n"
+                                "click：点击元素（按钮/链接/菜单项）。\n"
+                                "fill：向输入框填充文本（非 type，直接 set value）。\n"
+                                "type：逐字键盘输入（用于触发实时搜索/自动补全）。\n"
+                                "select：下拉选择框选取选项（按 value 或 label）。\n"
+                                "hover：鼠标悬停在元素上（触发 tooltip/下拉菜单）。\n"
+                                "scroll：滚动页面或元素内部滚动条（参数：x, y 或 selector）。\n"
+                                "press_key：按下键盘按键（如 Enter、Escape、Tab、ArrowDown）。\n"
+                                "goto：导航到指定URL。\n"
+                                "wait：等待指定条件（参数：selector | ms | url_contains）。\n"
+                                "assert：验证断言（子类型：url_contains | element_visible | text_present | element_count | input_value）。\n"
+                                "\n"
+                                "【输出格式 — 严格JSON】\n"
+                                "{\n"
+                                '  "action": "操作类型（click | fill | type | select | hover | scroll | press_key | goto | wait | assert）",\n'
+                                '  "selector": "CSS/XPath选择器，复合操作可为null",\n'
+                                '  "value": "操作参数（填充文本、URL、按键名等），无参数时为null",\n'
+                                '  "options": {"可选的操作选项": "值"},\n'
+                                '  "confidence": 0.0-1.0（对本次翻译的置信度）,\n'
+                                '  "fallback_actions": [\n'
+                                "    {\n"
+                                '      "action": "后备操作类型",\n'
+                                '      "selector": "后备选择器（更宽泛匹配）",\n'
+                                '      "value": "后备参数",\n'
+                                '      "reason": "触发该后备策略的原因"\n'
+                                "    }\n"
+                                "  ]\n"
+                                "}\n"
+                                "\n"
+                                "【边界与异常处理规则】\n"
+                                "- 超时：所有等待操作默认超时30秒（wait时添加 options.timeout=30000ms）。\n"
+                                "- 弹窗/对话框：翻译前先判断步骤是否可能触发弹窗，若可能则添加 wait:selector=弹窗关闭按钮 或 press_key:Escape 作为 fallback。\n"
+                                "- 元素过时重试（stale element）：遇到动态刷新列表时，优先用文本匹配而非索引选择器（如 text=\"确定\" 而非 nth=0）。\n"
+                                "- iframe 感知：如果步骤涉及 iframe 内元素，selector 添加 frame_locator 前缀标注。\n"
+                                "- 动态加载：涉及异步加载内容时，操作前自动插入 wait:selector 等待目标元素出现。\n"
+                                "\n"
+                                "【示例 — 成功翻译】\n"
+                                "步骤：\"在搜索框输入手机，然后点击搜索按钮\"\n"
+                                "URL：https://shop.example.com\n"
+                                "输出：[\n"
+                                '  {"action":"fill","selector":"input[placeholder*=\'搜索\']","value":"手机","options":null,"confidence":0.95,"fallback_actions":[{"action":"fill","selector":"input[type=\'search\']","value":"手机","reason":"备选搜索框选择器"}]},\n'
+                                '  {"action":"wait","selector":null,"value":null,"options":{"ms":500},"confidence":0.8,"fallback_actions":[]},\n'
+                                '  {"action":"click","selector":"button:has-text(\'搜索\')","value":null,"options":null,"confidence":0.9,"fallback_actions":[{"action":"press_key","selector":null,"value":"Enter","reason":"直接按回车触发搜索"}]}\n'
+                                "]\n"
+                                "\n"
+                                "【示例 — 失败处理（元素定位失败）】\n"
+                                "步骤：\"点击页面顶部的优惠券弹窗关闭按钮\"\n"
+                                "URL：https://shop.example.com/products\n"
+                                "输出：[\n"
+                                '  {"action":"wait","selector":"[class*=\'coupon\'], [class*=\'popup\'], [class*=\'modal\']","value":null,"options":{"timeout":5000},"confidence":0.7,"fallback_actions":[]},\n'
+                                '  {"action":"click","selector":"[class*=\'coupon\'] [class*=\'close\'], [class*=\'popup\'] button[class*=\'close\'], .modal .close-btn","value":null,"options":null,"confidence":0.55,"fallback_actions":[{"action":"press_key","selector":null,"value":"Escape","reason":"弹窗关闭按钮未找到，尝试Esc键关闭"},{"action":"click","selector":"body","value":null,"reason":"最后尝试点击页面空白区域关闭弹窗"}]}\n'
+                                "]\n"
+                                "\n"
+                                "用户步骤：\n"
+                                "{step}\n"
+                                "\n"
+                                "页面 URL：\n"
+                                "{url}"
+                            ),
                             variables=["step", "url"], version=1, is_active=True,
-                            description="将自然语言步骤转换为 MCP 浏览器操作",
+                            description="将自然语言步骤翻译为浏览器操作JSON（含回退策略）",
                         ),
                         PromptTemplate(
                             key="verify_expected", name="预期结果验证", category="verification",
-                            content="验证以下测试步骤的执行结果是否符合预期。\n\n操作：{action}\n预期结果：{expected}\n\n请判断预期结果是否达成，返回 pass/fail 及原因。",
+                            content=(
+                                "你是一个测试结果验证专家。请按三级验证策略判断预期结果是否达成。\n"
+                                "\n"
+                                "【三级验证策略 — 按优先级递减尝试】\n"
+                                "第1级「精确匹配」：预期值与实际值字面一致（如\"页面标题为首页\" → 实际标题=\"首页\"）。最高置信度。\n"
+                                "第2级「语义匹配」：预期描述与实际含义等价但表述不同（如\"显示用户名\" → 实际显示\"欢迎回来，张三\"）。检查核心关键词和语义。\n"
+                                "第3级「存在性检测」：仅验证某元素/文本是否存在（如\"出现错误提示\" → 页面存在包含\"错误\"的文本）。最低置信度，仅用于宽泛断言。\n"
+                                "\n"
+                                "【容忍规则 — 以下情况不算失败】\n"
+                                "- 时间戳/日期：预期中带有\"当前时间\"→接受任意合法时间字符串。如\"登录时间：YYYY-MM-DD HH:mm:ss\"。\n"
+                                "- 动态ID/Token：\"order_id=ABC123\" 实际显示 \"order_id=XYZ789\" → 仅比对格式，不比对具体值。\n"
+                                "- 数字范围：\"约100条记录\" 实际 98条 → 容差 ±5% 内视为通过。\n"
+                                "- 异步加载：页面仍在渲染中，给出结论时标注\"页面可能未完全加载\"并降级置信度。\n"
+                                "\n"
+                                "【证据链格式】\n"
+                                "输出时必须引用DOM快照中的具体行号作为证据：\n"
+                                "- 若从DOM快照验证：标注\"见DOM行N：<原文>\"。\n"
+                                "- 若从截图验证：标注\"截图显示XXX区域存在/不存在目标内容\"。\n"
+                                "- 不可凭空断言真实性，必须绑定到具体观测。\n"
+                                "\n"
+                                "【输出格式】\n"
+                                "{\n"
+                                '  "verdict": "pass | fail | partial",\n'
+                                '  "confidence": 0.0-1.0,\n'
+                                '  "matched_level": "exact | semantic | presence",\n'
+                                '  "reason": "验证结论的中文说明（引用具体证据）",\n'
+                                '  "evidence": ["证据1：见DOM行15 — 页面标题为\\"首页\\"", "证据2：见DOM行23 — 用户名span包含\\"张三\\""]\n'
+                                "}\n"
+                                "\n"
+                                "【中文验证示例1 — 精确匹配通过】\n"
+                                "操作：goto https://example.com\n"
+                                "预期：\"页面标题显示为'示例网站首页'\"\n"
+                                "DOM快照：第5行 <title>示例网站首页</title>\n"
+                                "输出：{\"verdict\":\"pass\",\"confidence\":0.98,\"matched_level\":\"exact\",\"reason\":\"页面标题与预期完全一致\",\"evidence\":[\"见DOM行5：<title>示例网站首页</title>\"]}\n"
+                                "\n"
+                                "【中文验证示例2 — 语义匹配通过】\n"
+                                "操作：click 登录按钮后 fill 用户名\n"
+                                "预期：\"登录成功后右上角显示用户名\"\n"
+                                "DOM快照：第12行 <span class=\"user-name\">欢迎，admin@test.com</span>\n"
+                                "输出：{\"verdict\":\"pass\",\"confidence\":0.85,\"matched_level\":\"semantic\",\"reason\":\"用户名admin@test.com出现在右上角用户信息区域，语义符合\\\"显示用户名\\\"\",\"evidence\":[\"见DOM行12：<span class=\\\"user-name\\\">欢迎，admin@test.com</span>\"]}\n"
+                                "\n"
+                                "【中文验证示例3 — 存在性检测失败】\n"
+                                "操作：提交空表单\n"
+                                "预期：\"用户名输入框下方出现'必填'红色提示\"\n"
+                                "DOM快照：无任何包含\"必填\"的文本节点，input标签无aria-invalid属性\n"
+                                "输出：{\"verdict\":\"fail\",\"confidence\":0.92,\"matched_level\":\"presence\",\"reason\":\"DOM中未找到\\\"必填\\\"提示文本，input元素缺少表单校验标记\",\"evidence\":[\"遍历全部DOM文本节点，未匹配到\\\"必填\\\"关键词\",\"input元素未设置aria-invalid=\\\"true\\\"属性\"]}\n"
+                                "\n"
+                                "【中文验证示例4 — 时间戳容忍通过】\n"
+                                "操作：创建订单后查看订单详情\n"
+                                "预期：\"创建时间显示为当前时间\"\n"
+                                "DOM快照：第45行 <span class=\"create-time\">2026-07-24 15:32:18</span>\n"
+                                "输出：{\"verdict\":\"pass\",\"confidence\":0.78,\"matched_level\":\"semantic\",\"reason\":\"订单创建时间格式正确，符合当前时间上下文（容忍规则-时间戳）\",\"evidence\":[\"见DOM行45：时间格式YYYY-MM-DD HH:mm:ss正确\"]}\n"
+                                "\n"
+                                "操作：\n"
+                                "{action}\n"
+                                "\n"
+                                "预期结果：\n"
+                                "{expected}"
+                            ),
                             variables=["action", "expected"], version=1, is_active=True,
-                            description="验证测试步骤的预期结果",
+                            description="用三级策略验证测试步骤的预期结果（含时间戳容忍）",
                         ),
                     ]
                     _prompt_db.add_all(_seeds)

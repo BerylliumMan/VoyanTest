@@ -33,6 +33,9 @@ class ValidationResult:
 
 def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     """Validate a single generated test case."""
+    if not isinstance(tc, dict):
+        from dataclasses import asdict as _asdict
+        tc = _asdict(tc)
     result = ValidationResult()
 
     # Check 1: Title exists and is valid

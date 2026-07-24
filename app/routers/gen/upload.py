@@ -104,6 +104,8 @@ async def upload_and_analyze(
     )
 
     async def _run_full_analysis() -> None:
+        # 等待原 API session 的 cleanup(_close_impl) 完成，避免连接池冲突
+        await asyncio.sleep(0.01)
         try:
             from app.gen.analyzer import extract_multi_file_content, two_phase_analyze
             from app.database import AsyncSessionLocal
@@ -112,10 +114,23 @@ async def upload_and_analyze(
                 file_contents, filenames
             )
 
+            # 提前解析提示词（需要 DB），然后关闭 session，避免 AI 分析期间 LLM 调用
+            # 新建 session 时发生连接池冲突（_connection_for_bind vs close）
+            fp_prompt = None
+            tc_prompt = None
+            async with AsyncSessionLocal() as pdb:
+                from app.runtime_config import resolve_prompt_for_agent
+                try:
+                    fp_prompt = await resolve_prompt_for_agent(pdb, "generation", "fp_extract")
+                    tc_prompt = await resolve_prompt_for_agent(pdb, "generation", "tc_generate")
+                except Exception:
+                    logger.debug("resolving prompts from DB failed, using defaults")
+            # pdb 已关闭，AI 分析期间无 DB 连接
             result = await two_phase_analyze(
                 combined_text,
                 project_description=project_description,
-                db=db,
+                db=None,
+                prompts={"fp_extract": fp_prompt, "tc_generate": tc_prompt},
             )
 
             async with _lock:
