@@ -39,12 +39,12 @@ if ctk is not None:
 
             # ── 窗口属性 ─────────────────────────────────────────────
             self.title(self._TITLE)
-            self.resizable(False, False)
+            self.resizable(True, True)
+            self.minsize(self._WINDOW_WIDTH, self._WINDOW_HEIGHT)
             self.geometry(f"{self._WINDOW_WIDTH}x{self._WINDOW_HEIGHT}")
             self._center_window()
 
-            # 模态行为
-            self.grab_set()
+            # wait_window() 已提供模态效果，不设 grab_set 以支持最小化
 
             # ── 布局 ─────────────────────────────────────────────────
             self.grid_columnconfigure(0, weight=0)  # label column

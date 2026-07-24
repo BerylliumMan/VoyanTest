@@ -1,0 +1,111 @@
+# app/agent_resolver.py — Agent 配置 TTL 内存缓存
+#
+# 为 LLM 调用热路径（gen/exec/recording）提供零 DB 查询的 Agent 配置查找。
+# 缓存每 30 秒过期一次；CRUD 操作通过 invalidate_agent_cache 主动失效。
+import logging
+import time
+from typing import Dict, Optional, Tuple
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+# 缓存结构: {agent_type: (cached_at_timestamp, llm_config_dict_or_None)}
+# llm_config 为 None 表示该类型当前无激活 Agent，同样缓存以避免重复 DB 查询。
+_config_cache: Dict[str, Tuple[float, Optional[dict]]] = {}
+
+# 全局 AIConfig 缓存（避免每次 merge 都查库）
+_global_config_cache: Optional[dict] = None
+_global_config_cached_at: float = 0
+_GLOBAL_TTL = 30
+
+TTL_SECONDS = 30
+
+
+async def _load_global_ai_config() -> dict:
+    """加载系统全局 AI 配置（带缓存），用作 Agent 配置的默认值。"""
+    global _global_config_cache, _global_config_cached_at
+    now = time.time()
+    if _global_config_cache is not None and now - _global_config_cached_at < _GLOBAL_TTL:
+        return _global_config_cache
+
+    from app.database import AsyncSessionLocal
+    from sqlalchemy import select
+    from app import db_models
+    from app.security.encryption import decrypt_value
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(db_models.AIConfig).where(db_models.AIConfig.id == 1)
+        )
+        row = result.scalar_one_or_none()
+        if not row:
+            _global_config_cache = {}
+            _global_config_cached_at = now
+            return {}
+
+        config = {
+            'model': row.model or '',
+            'api_key': decrypt_value(row.api_key) if row.api_key else '',
+            'api_base': row.api_base or '',
+            'temperature': row.temperature or 0.1,
+            'max_context_tokens': row.max_context_tokens or 131072,
+        }
+    _global_config_cache = config
+    _global_config_cached_at = now
+    return config
+
+
+async def resolve_agent_config(
+    db: AsyncSession, agent_type: str
+) -> Optional[dict]:
+    """获取指定 agent_type 当前激活 Agent 的 llm_config。
+
+    返回的配置以系统全局 AIConfig 为默认值，Agent 的 llm_config 逐个字段覆盖。
+    例如：Agent 只设了 model，则 api_key/api_base 继承自全局配置。
+
+    优先从内存缓存返回；缓存过期或未命中时查询数据库并回填缓存。
+    返回 None 表示该类型当前无激活的 AgentDefinition。
+    """
+    now = time.time()
+
+    # 缓存命中：在 TTL 窗口内直接返回
+    if agent_type in _config_cache:
+        cached_at, cached_config = _config_cache[agent_type]
+        if now - cached_at < TTL_SECONDS:
+            return cached_config
+
+    # 缓存未命中或已过期：查询数据库
+    # 延迟导入避免循环依赖
+    from app.crud.agent_definition import get_active_by_type
+
+    active_agent = await get_active_by_type(db, agent_type)
+
+    if active_agent is not None:
+        defaults = await _load_global_ai_config()
+        agent_cfg: dict = active_agent.llm_config or {}
+        llm_config = {**defaults, **agent_cfg}
+        logger.debug("Agent 配置缓存回填: agent_type=%s, model=%s (全局默认合并)",
+                     agent_type, llm_config.get("model", "?"))
+    else:
+        llm_config = None
+        logger.debug("Agent 配置缓存回填: agent_type=%s → 无激活 Agent", agent_type)
+
+    # 回填缓存（包括 None，避免频繁 DB 查询）
+    _config_cache[agent_type] = (now, llm_config)
+    return llm_config
+
+
+def invalidate_agent_cache(agent_type: Optional[str] = None) -> None:
+    """显式失效 Agent 配置缓存。
+
+    Args:
+        agent_type: 指定要失效的类型；为 None 时清空全部缓存。
+    """
+    if agent_type is not None:
+        if agent_type in _config_cache:
+            del _config_cache[agent_type]
+            logger.debug("Agent 缓存已失效: agent_type=%s", agent_type)
+    else:
+        _config_cache.clear()
+        logger.debug("Agent 缓存已全部清空")

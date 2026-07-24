@@ -97,11 +97,15 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
                               WSMessageType.RECORDING_READY, WSMessageType.RECORDING_EVENTS):
                 if session:
                     session.resolve(msg)
+                    if msg.run_id:
+                        agent_manager.resolve_pending(msg.run_id, msg.payload or {})
 
             elif msg.type == WSMessageType.ERROR:
                 logger.error(f"Agent {agent_id} error: {msg.payload.get('message')}")
                 if session:
                     session.resolve(msg)
+                    if msg.run_id:
+                        agent_manager.resolve_pending(msg.run_id, msg.payload or {})
 
     except WebSocketDisconnect:
         logger.info(f"Agent {agent_id} disconnected")

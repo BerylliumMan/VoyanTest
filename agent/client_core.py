@@ -28,16 +28,23 @@ from agent.models import (
 
 logger = logging.getLogger("agent.client")
 
-ACTION_TOOL_MAP = {
-    'goto': 'browser_navigate',
-    'click': 'browser_click',
-    'fill': 'browser_type',
-    'select': 'browser_select_option',
-    'wait': 'browser_wait_for',
-    'screenshot': 'browser_take_screenshot',
-    'snapshot': 'browser_snapshot',
-    'assert_text': 'browser_wait_for',
-}
+def _resolve_mcp_tool(action: str) -> str:
+    """将 action 名解析为 MCP 工具名。"""
+    if action.startswith('browser_') or action in ('navigate',):
+        # 已经是 MCP 工具名——直接使用
+        return action if not action.startswith('browser_') else action
+    # 通过映射表翻译简短名称
+    TOOL_MAP = {
+        'goto': 'browser_navigate',
+        'click': 'browser_click',
+        'fill': 'browser_type',
+        'select': 'browser_select_option',
+        'wait': 'browser_wait_for',
+        'screenshot': 'browser_take_screenshot',
+        'snapshot': 'browser_snapshot',
+        'assert_text': 'browser_wait_for',
+    }
+    return TOOL_MAP.get(action, action)
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, target_host: str, target_port: int) -> None:
@@ -262,6 +269,15 @@ class AgentClient:
     # ---- MCP subprocess management ----
 
     async def _start_mcp(self):
+        # 清理可能残留的旧进程
+        try:
+            import subprocess as _sp
+            for _patt in ['playwright', 'chrome', 'chromium']:
+                _out = _sp.run(['pkill', '-f', _patt], capture_output=True, timeout=3)
+                if _out.returncode == 0:
+                    self._log_info(f"Cleaned up stale {_patt} processes")
+        except Exception:
+            pass
         if self._mcp_process:
             self._log_info("Stopping previous MCP before starting new one")
             await self._stop_mcp()
@@ -293,26 +309,44 @@ class AgentClient:
 
         args = [_node_exe, _cli_js, '--browser=chromium']
 
-        # 查找捆绑的 Chromium（多种布局兼容）
+        # 查找 Chromium（Playwright 缓存优先，系统安装次之）
         _chrome_exe = None
-        for _root in _search_roots:
-            _candidate = os.path.join(_root, 'chromium', 'chrome-win64', 'chrome.exe')
-            if os.path.isfile(_candidate):
-                _chrome_exe = _candidate
-                break
-            _candidate = os.path.join(_root, 'chrome-win64', 'chrome.exe')
-            if os.path.isfile(_candidate):
-                _chrome_exe = _candidate
-                break
+        if sys.platform == 'win32':
+            for _root in _search_roots:
+                for _name in ['chromium/chrome-win64/chrome.exe', 'chrome-win64/chrome.exe']:
+                    _candidate = os.path.join(_root, _name)
+                    if os.path.isfile(_candidate):
+                        _chrome_exe = _candidate
+                        break
+                if _chrome_exe:
+                    break
         if not _chrome_exe:
+            # Playwright 缓存中的 Chromium
             playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
             if not playwright_browsers.is_dir():
+                # Linux
+                playwright_browsers = Path.home() / '.cache' / 'ms-playwright'
+            if not playwright_browsers.is_dir():
                 playwright_browsers = Path.home() / 'AppData' / 'Local' / 'ms-playwright'
-            chrome_dirs = sorted(playwright_browsers.glob('chromium-*/chrome-win64/chrome.exe')) if playwright_browsers.is_dir() else []
-            if chrome_dirs:
-                _chrome_exe = str(chrome_dirs[-1])
+            for _pat in ['chrome-linux64/chrome', 'chrome-linux/chrome', 'chrome-win64/chrome.exe']:
+                _cd = sorted(playwright_browsers.glob(f'chromium-*/{_pat}')) if playwright_browsers.is_dir() else []
+                if _cd:
+                    _chrome_exe = str(_cd[-1])
+                    break
         if not _chrome_exe:
-            # 尝试系统已安装的 Chrome
+            # Linux 系统 Chromium
+            for _p in [
+                '/usr/bin/chromium',
+                '/usr/bin/chromium-browser',
+                '/usr/bin/google-chrome',
+                '/usr/bin/google-chrome-stable',
+                '/snap/bin/chromium',
+            ]:
+                if os.path.isfile(_p):
+                    _chrome_exe = _p
+                    break
+        if not _chrome_exe:
+            # Windows 系统路径兜底
             for _p in [
                 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
                 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -456,7 +490,7 @@ class AgentClient:
                 continue
 
     async def _mcp_call_tool(self, action: str, selector: str, value: str) -> dict:
-        mcp_tool = ACTION_TOOL_MAP.get(action)
+        mcp_tool = _resolve_mcp_tool(action)
         if not mcp_tool:
             return {"success": False, "error": f"Unknown action: {action}"}
 
@@ -519,7 +553,7 @@ class AgentClient:
 
     @staticmethod
     def _build_mcp_args(action: str, selector: str, value: str) -> dict:
-        if action == 'goto':
+        if action in ('goto', 'navigate', 'browser_navigate'):
             return {'url': value or 'about:blank'}
         elif action == 'click':
             return {'element': selector or '', 'target': selector or ''}
@@ -560,6 +594,10 @@ class AgentClient:
             capabilities=["mcp", "playwright", "ui_testing", "local_browser"],
         )
         await self._send(WSMessageType.REGISTERED, payload=reg.model_dump())
+
+    async def send_result(self, run_id: str, result: dict) -> None:
+        """发送 observe/act 执行结果回 Server。"""
+        await self._send(WSMessageType.STEP_RESULT, run_id, result)
 
     async def _send_heartbeat(self):
         await self._send(WSMessageType.HEARTBEAT)
@@ -611,7 +649,12 @@ class AgentClient:
             await self._handle_get_screenshot(msg.run_id)
 
         elif msg.type == WSMessageType.STEP_EXECUTE:
-            await self._handle_step_execute(msg)
+            p = msg.payload or {}
+            action = p.get("tool_call", {}).get("action", "") or p.get("action", "")
+            if action == "observe":
+                await self._handle_observe(msg)
+            else:
+                await self._handle_act(msg)
 
         elif msg.type == WSMessageType.SHUTDOWN:
             self._log_info("Shutdown signal received — closing browser")
@@ -644,10 +687,14 @@ class AgentClient:
             text = "(page not available)"
             if self._mcp_process:
                 try:
-                    result = await self._mcp_call_tool("snapshot", "", "")
+                    result = await asyncio.wait_for(
+                        self._mcp_call_tool("snapshot", "", ""), timeout=15
+                    )
                     text = result.get("text", "(empty page)")
                     if len(text) > 8000:
                         text = text[:8000] + "\n\n[... TRUNCATED]"
+                except asyncio.TimeoutError:
+                    text = "(snapshot timeout)"
                 except Exception:
                     text = "(snapshot unavailable)"
             await self._send(
@@ -702,6 +749,88 @@ class AgentClient:
         await self._send(
             WSMessageType.STEP_RESULT, msg.run_id, result.model_dump(),
         )
+
+    async def _handle_observe(self, msg: WSMessage) -> None:
+        """在客户端执行 observe 指令：获取页面 DOM/AX Tree 快照 + 截图。
+
+        通过 self.send_result() 发回 Server，返回格式：
+        {"success": ..., "snapshot": ..., "screenshot_b64": ..., "page_url": ..., "page_title": ...}
+        """
+        run_id = msg.run_id
+        result: dict = {"success": False, "snapshot": "", "screenshot_b64": "", "page_url": "", "page_title": ""}
+
+        try:
+            if not self._mcp_process:
+                raise RuntimeError("MCP subprocess not started")
+
+            # 获取页面快照（15 秒超时保护）
+            snapshot_result = await asyncio.wait_for(
+                self._mcp_call_tool("snapshot", "", ""), timeout=15
+            )
+            snapshot_text = snapshot_result.get("text", "")
+            result["snapshot"] = snapshot_text
+
+            # 从快照文本中提取 page_url / page_title
+            url_match = re.search(r"Page\s+URL:\s*(.+?)(?:\r?\n|$)", snapshot_text, re.IGNORECASE)
+            title_match = re.search(r"Page\s+Title:\s*(.+?)(?:\r?\n|$)", snapshot_text, re.IGNORECASE)
+            result["page_url"] = url_match.group(1).strip() if url_match else ""
+            result["page_title"] = title_match.group(1).strip() if title_match else ""
+
+            # 获取页面截图 base64
+            screenshot_b64 = await self._mcp_screenshot_base64()
+            result["screenshot_b64"] = screenshot_b64 or ""
+
+            result["success"] = True
+        except asyncio.TimeoutError:
+            result["error"] = "Observe snapshot timed out after 15s"
+            self._log_warning(f"Observe timeout for run {run_id}")
+        except Exception as e:
+            result["error"] = str(e)
+            self._log_error(f"Observe failed for run {run_id}: {e}")
+
+        await self.send_result(run_id, result)
+
+    async def _handle_act(self, msg: WSMessage) -> None:
+        """在客户端执行 MCP 操作（click、fill、goto 等）。
+
+        从 msg.payload.tool_call 读取 action / selector / value，
+        通过 self._mcp_call_tool 分发到对应 MCP 方法，执行后截图。
+        通过 self.send_result() 发回 Server，返回格式：
+        {"success": ..., "screenshot_b64": ..., "error": ...}
+        """
+        run_id = msg.run_id
+        p = msg.payload or {}
+        tc = p.get("tool_call", {}) or p
+        action = tc.get("action", "")
+        selector = tc.get("selector") or ""
+        value = tc.get("value")
+
+        result: dict = {"success": False, "screenshot_b64": "", "error": ""}
+
+        try:
+            if not self._mcp_process:
+                raise RuntimeError("MCP subprocess not started")
+
+            mcp_result = await self._mcp_call_tool(action, selector, value)
+            result["success"] = mcp_result.get("success", False)
+            if not result["success"]:
+                result["error"] = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
+
+            # 执行后始终截图
+            ss_b64 = await self._mcp_screenshot_base64()
+            result["screenshot_b64"] = ss_b64 or ""
+        except Exception as e:
+            result["error"] = str(e)
+            result["success"] = False
+            self._log_error(f"Act failed for run {run_id} (action={action}): {e}")
+            # 异常时同样尝试截图
+            try:
+                ss_b64 = await self._mcp_screenshot_base64()
+                result["screenshot_b64"] = ss_b64 or ""
+            except Exception:
+                pass
+
+        await self.send_result(run_id, result)
 
     # ---- Recording handlers ----
 

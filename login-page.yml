@@ -1,0 +1,28 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - img [ref=f1e5]:
+      - generic [ref=f1e12]: VoyanTest
+    - generic [ref=f1e13]: VoyanTest
+  - generic [ref=f1e16]:
+    - generic [ref=f1e17]:
+      - generic [ref=f1e19]:
+        - generic [ref=f1e20]: 智能测试编排
+        - generic [ref=f1e21]: AI 驱动的测试用例生成与执行
+        - img "banner-image" [ref=f1e22]
+      - generic [ref=f1e24]:
+        - generic [ref=f1e25]: 多场景覆盖
+        - generic [ref=f1e26]: 支持多样化测试场景，自动验证执行结果
+      - generic [ref=f1e29]:
+        - generic [ref=f1e30]: 可视化报告分析
+        - generic [ref=f1e31]: 实时测试报告，包含截图与执行洞察
+    - generic:
+      - button [ref=f1e38] [cursor=pointer]
+      - button [ref=f1e41] [cursor=pointer]
+  - generic [ref=f1e44]:
+    - generic [ref=f1e46]:
+      - generic [ref=f1e47]: VoyanTest
+      - generic [ref=f1e49]:
+        - textbox "用户名：admin" [ref=f1e62]
+        - textbox "密码" [ref=f1e75]
+        - button "登录" [ref=f1e82] [cursor=pointer]
+    - contentinfo [ref=f1e84]: VoyanTest

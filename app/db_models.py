@@ -36,10 +36,11 @@ from app.models.batch import (  # noqa: F401
     RunBatch, TestRun, RunLog,
 )
 
-# AI config and prompt templates
-from app.models.config import (  # noqa: F401
-    AIConfig, PromptTemplate,
-)
+# AI config
+from app.models.config import AIConfig  # noqa: F401
+
+# Prompt templates (versioned)
+from app.models.prompt_template import PromptTemplate  # noqa: F401
 
 # Distributed agent and agent log
 from app.models.agent import (  # noqa: F401
@@ -58,3 +59,14 @@ from app.models.recording import RecordingSession  # noqa: F401
 
 # Notifications
 from app.models.notification import Notification  # noqa: F401
+
+# Agent definitions (server-side AI agents)
+from app.models.agent import AgentDefinition  # noqa: F401
+
+# Skills (configurable capability modules)
+from app.models.skill import Skill  # noqa: F401
+
+# Agent runs, messages, tool calls, snapshots
+from app.models.agent_run import (  # noqa: F401
+    AgentRun, AgentMessage, AgentToolCall, AgentRunSnapshot,
+)

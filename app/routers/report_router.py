@@ -336,13 +336,34 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
 
         # 从 report.json 读取步骤数据（含路径穿越防护）
         safe_path = _safe_report_path(run.report_path)
+        steps_loaded = False
         if safe_path:
             try:
                 report_data = await asyncio.to_thread(_read_json, safe_path)
                 run_info["steps"] = report_data.get("steps", [])
+                steps_loaded = bool(run_info["steps"])
             except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                # 文件 I/O / JSON 损坏 / 编码错误都降级为空 steps
                 logger.warning("无法加载批次报告 JSON 文件: %s", run.report_path, exc_info=True)
+
+        # fallback: 从 run_logs 加载步骤（AI Agent 执行路径）
+        if not steps_loaded:
+            try:
+                from sqlalchemy import select as _sl
+                from app.db_models import RunLog
+                r = await db.execute(
+                    _sl(RunLog).where(RunLog.run_id == run.id).order_by(RunLog.id)
+                )
+                for lg in r.scalars().all():
+                    is_success = lg.level in ("info", "success", "passed")
+                    run_info["steps"].append({
+                        "step_number": lg.step_id or len(run_info["steps"]) + 1,
+                        "success": is_success,
+                        "level": lg.level,
+                        "description": lg.message,
+                        "screenshot_path": lg.screenshot_path,
+                    })
+            except Exception:
+                logger.warning("无法从 run_logs 加载步骤: run=%d", run.id, exc_info=True)
 
         runs_data.append(run_info)
 

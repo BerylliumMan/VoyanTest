@@ -26,6 +26,9 @@ from core.runner._persistence import (
     save_run_results,
 )
 
+from core.agent_runner.runner import AgentRunner
+from core.llm_wrapper import create_openai_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +53,134 @@ async def _record_batch_case_failure(
     _run_id = precreated_run_ids.get(case_id)
     if _run_id:
         await mark_run_failed(db, _run_id, message, batch_id=batch_id)
+
+
+# ---------------------------------------------------------------------------
+# AgentRunner 条件分发的辅助函数（T011）
+# ---------------------------------------------------------------------------
+
+
+async def _should_use_agent_runner(agent_def) -> bool:
+    """检查是否满足使用 AgentRunner OTA 循环的条件。
+
+    条件：
+    - agent_def 存在且为非 None
+    - agent_def.tools 为非空列表，且至少包含一个启用的工具
+    """
+    if agent_def is None:
+        return False
+    tools = getattr(agent_def, "tools", None)
+    if not tools:
+        return False
+    # tools 是 list[dict]，检查是否有至少一个 enabled 不为 False 的工具
+    enabled_count = sum(
+        1 for t in tools
+        if isinstance(t, dict) and t.get("enabled", True) is not False
+    )
+    return enabled_count > 0
+
+
+async def run_test_case_via_agent(
+    case_id: int,
+    mcp_manager,
+    db,
+    agent_def,
+    *,
+    llm_client=None,
+    base_url: str | None = None,
+) -> dict | None:
+    """使用 AgentRunner OTA 循环执行单条测试用例。
+
+    该函数替代 run_test_case_in_browser，通过 AgentRunner 让 LLM 自主
+    规划并执行直到目标达成，而非逐步骤翻译执行。
+
+    Args:
+        case_id: 测试用例 ID
+        mcp_manager: 已启动的 PlaywrightMCPManager 实例
+        db: SQLAlchemy AsyncSession（用于查询用例信息并创建 agent_run 记录）
+        agent_def: 已查询到的激活执行 AgentDefinition
+        llm_client: 预创建的 AsyncOpenAI 客户端（批量时可复用，避免重复创建）
+        base_url: 目标应用基础 URL
+
+    Returns:
+        执行结果字典，或 None（表示 AgentRunner 路径不可用）
+    """
+    if not await _should_use_agent_runner(agent_def):
+        return None
+
+    # 获取测试用例信息，构造目标描述
+    goal_text = str(agent_def.goal or "执行测试用例")
+    try:
+        tc = await crud.get_test_case(db, case_id)
+        if tc:
+            goal_text = f"测试用例: {tc.name}"
+            if tc.description:
+                goal_text += f"\n描述: {tc.description}"
+    except Exception as exc:
+        logger.warning("查询测试用例 %s 信息失败: %s", case_id, exc)
+
+    # 创建 LLM 客户端（如未预创建）
+    client_owned = False
+    if llm_client is None:
+        try:
+            llm_client = await create_openai_client(agent_type="execution")
+            client_owned = True
+        except Exception as exc:
+            logger.exception("无法创建 AgentRunner LLM 客户端")
+            return None
+
+    model = agent_def.llm_config.get("model") if agent_def.llm_config else None
+
+    runner = AgentRunner(
+        mcp_manager=mcp_manager,
+        goal=goal_text,
+        llm_client=llm_client,
+        model=model,
+        base_url=base_url,
+    )
+
+    # 创建 agent_run 记录
+    from app.crud.agent_run import create_agent_run, update_agent_run_status
+    from app.models.schemas import AgentRunCreate
+
+    run = await create_agent_run(db, AgentRunCreate(
+        agent_definition_id=agent_def.id,
+        case_id=case_id,
+        goal={"goal": goal_text, "case_id": case_id},
+    ))
+
+    # 更新状态为 running
+    await update_agent_run_status(db, run.id, "running")
+
+    # 执行 OTA 循环
+    try:
+        ota_result = await runner.run()
+    except Exception as exc:  # noqa: BLE001 - AgentRunner 内部已做错误处理，但兜底
+        logger.exception("AgentRunner 执行异常 (case_id=%s)", case_id)
+        ota_result = {
+            "status": "error",
+            "turns_used": 0,
+            "error": str(exc),
+            "result": None,
+        }
+
+    # 更新 agent_run 记录
+    final_status = ota_result.get("status", "failed")
+    await update_agent_run_status(
+        db, run.id, final_status,
+        result=ota_result,
+        turns_used=ota_result.get("turns_used", 0),
+        error=ota_result.get("error"),
+    )
+
+    return {
+        "case_id": case_id,
+        "status": final_status,
+        "agent_run_id": run.id,
+        "turns_used": ota_result.get("turns_used", 0),
+        "result": ota_result.get("result"),
+        "error": ota_result.get("error"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +239,27 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
         return {"case_id": case_id, "status": "failed", "error": str(exc)}
 
     try:
-        await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
+        # ── AgentRunner 分发（T013）─────────────────────────────────────────
+        try:
+            from app.crud.agent_definition import get_active_by_type as _get_active
+        except Exception:
+            _get_active = None
+        _agent_def = None
+        if _get_active is not None:
+            try:
+                async with AsyncSessionLocal() as _agent_db:
+                    _agent_def = await _get_active(_agent_db, "execution")
+            except Exception:
+                pass
+
+        if await _should_use_agent_runner(_agent_def):
+            async with AsyncSessionLocal() as _agent_db:
+                result = await run_test_case_via_agent(case_id, mcp_manager, _agent_db, _agent_def, base_url=base_url_override)
+            logger.info("AgentRunner 完成 case_id=%s status=%s", case_id, (result or {}).get("status", "N/A"))
+            if result is None:
+                await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
+        else:
+            await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
     except Exception:  # noqa: BLE001 - 见下方注释
         # Broad catch is necessary: run_test_case_in_browser touches DB, MCP
         # stdio, LLM HTTP, JSON parsing, and assertions. Any unhandled error
@@ -179,6 +330,26 @@ async def run_batch_test_cases(
     base_url_override = None
 
     async with AsyncSessionLocal() as batch_db:
+        # ── AgentRunner 分发检查（T011）────────────────────────────────────
+        # 在打开浏览器之前，先检查是否有激活的 execution AgentDefinition。
+        # 如果有且配置了工具，则使用 AgentRunner OTA 循环替代传统的
+        # run_test_case_in_browser 逐步骤执行。
+        agent_def = None
+        use_agent_runner = False
+        agent_llm_client = None
+        try:
+            from app.crud.agent_definition import get_active_by_type
+            agent_def = await get_active_by_type(batch_db, "execution")
+            if await _should_use_agent_runner(agent_def):
+                agent_llm_client = await create_openai_client(agent_type="execution")
+                use_agent_runner = True
+                logger.info(
+                    "AgentRunner 模式已激活: agent_def_id=%s, name=%s",
+                    agent_def.id, agent_def.name,
+                )
+        except Exception as exc:
+            logger.warning("AgentRunner 初始化失败，回退传统模式: %s", exc, exc_info=True)
+
         # Get project/environment browser settings
         try:
             if environment_id:
@@ -242,12 +413,27 @@ async def run_batch_test_cases(
         for case_id in (init_case_ids or []):
             _rid = precreated_run_ids.get(case_id)
             try:
-                result = await run_test_case_in_browser(
-                    case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                    batch_id=batch_id, run_id=_rid,
-                    base_url_override=base_url_override,
-                    debug_mode=debug_mode,
-                )
+                if use_agent_runner and agent_def is not None:
+                    result = await run_test_case_via_agent(
+                        case_id, mcp_manager, batch_db, agent_def,
+                        llm_client=agent_llm_client,
+                        base_url=base_url_override,
+                    )
+                    if result is None:
+                        # AgentRunner 返回 None 表示不可用，回退传统模式
+                        result = await run_test_case_in_browser(
+                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                            batch_id=batch_id, run_id=_rid,
+                            base_url_override=base_url_override,
+                            debug_mode=debug_mode,
+                        )
+                else:
+                    result = await run_test_case_in_browser(
+                        case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                        batch_id=batch_id, run_id=_rid,
+                        base_url_override=base_url_override,
+                        debug_mode=debug_mode,
+                    )
                 results.append(result)
                 logger.info("Batch init-case %s finished: %s", case_id, result['status'])
             except Exception as exc:  # noqa: BLE001 - 见下方注释
@@ -266,12 +452,27 @@ async def run_batch_test_cases(
         for case_id in case_ids:
             _rid = precreated_run_ids.get(case_id)
             try:
-                result = await run_test_case_in_browser(
-                    case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                    batch_id=batch_id, run_id=_rid,
-                    base_url_override=base_url_override,
-                    debug_mode=debug_mode,
-                )
+                if use_agent_runner and agent_def is not None:
+                    result = await run_test_case_via_agent(
+                        case_id, mcp_manager, batch_db, agent_def,
+                        llm_client=agent_llm_client,
+                        base_url=base_url_override,
+                    )
+                    if result is None:
+                        # AgentRunner 返回 None 表示不可用，回退传统模式
+                        result = await run_test_case_in_browser(
+                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                            batch_id=batch_id, run_id=_rid,
+                            base_url_override=base_url_override,
+                            debug_mode=debug_mode,
+                        )
+                else:
+                    result = await run_test_case_in_browser(
+                        case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                        batch_id=batch_id, run_id=_rid,
+                        base_url_override=base_url_override,
+                        debug_mode=debug_mode,
+                    )
                 results.append(result)
                 logger.info(
                     f"Batch: case {case_id} finished: {result['status']}"

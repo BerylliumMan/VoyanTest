@@ -17,7 +17,7 @@ import styles from './style/index.module.less';
 const { Title, Text } = Typography;
 
 // Module-level cache to survive Arco Space remounting
-let cachedPrompts: PromptItem[] | null = null;
+
 
 const splitNumberedItems = (text: string): string[] => {
   if (!text) return [];
@@ -69,15 +69,6 @@ interface AnalysisStatus {
   test_cases?: TestCase[];
 }
 
-interface PromptItem {
-  template_key: string;
-  label: string;
-  template_content: string;
-  is_custom: boolean;
-  default_content: string;
-  updated_at?: string;
-}
-
 const GenPage: React.FC = () => {
   const t = useLocale();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -92,13 +83,6 @@ const GenPage: React.FC = () => {
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Prompt config state (init from module-level cache)
-  const [prompts, setPrompts] = useState<PromptItem[]>(cachedPrompts || []);
-  const [selectedPrompt, setSelectedPrompt] = useState<PromptItem | null>(null);
-  const [editedContent, setEditedContent] = useState('');
-  const [promptSaving, setPromptSaving] = useState(false);
-  const [promptLoading, setPromptLoading] = useState(false);
 
   useEffect(() => {
     axios
@@ -229,72 +213,6 @@ const GenPage: React.FC = () => {
       setImporting(false);
     }
   };
-
-  // Prompt config handlers
-  const loadPrompts = async () => {
-    if (cachedPrompts) {
-      setPrompts(cachedPrompts);
-      return;
-    }
-    setPromptLoading(true);
-    try {
-      const res = await axios.get('/api/config/prompts');
-      const list: PromptItem[] = res.data;
-      setPrompts(list);
-      cachedPrompts = list;
-      if (list.length > 0 && !selectedPrompt) {
-        setSelectedPrompt(list[0]);
-        setEditedContent(list[0].template_content);
-      }
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } };
-      Message.error(err.response?.data?.detail || '加载提示词失败');
-    } finally {
-      setPromptLoading(false);
-    }
-  };
-
-  const handlePromptSelect = (item: PromptItem) => {
-    setSelectedPrompt(item);
-    setEditedContent(item.template_content);
-  };
-
-  const handlePromptSave = async () => {
-    if (!selectedPrompt) return;
-    setPromptSaving(true);
-    try {
-      await axios.put(`/api/config/prompts/${selectedPrompt.template_key}`, {
-        template_content: editedContent,
-      });
-      Message.success('保存成功');
-      loadPrompts();
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } };
-      Message.error(err.response?.data?.detail || '保存失败');
-    } finally {
-      setPromptSaving(false);
-    }
-  };
-
-  const handlePromptRestore = async () => {
-    if (!selectedPrompt) return;
-    setPromptSaving(true);
-    try {
-      const res = await axios.post(`/api/config/prompts/${selectedPrompt.template_key}/restore`);
-      const restored: PromptItem = res.data;
-      setSelectedPrompt(restored);
-      setEditedContent(restored.template_content);
-      Message.success('已恢复默认');
-      loadPrompts();
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } };
-      Message.error(err.response?.data?.detail || '恢复失败');
-    } finally {
-      setPromptSaving(false);
-    }
-  };
-
-  const hasPromptChanges = selectedPrompt && editedContent !== selectedPrompt.template_content;
 
   const columns = [
     { title: '用例ID', dataIndex: 'test_case_id', width: 100 },
@@ -581,91 +499,7 @@ const GenPage: React.FC = () => {
 
           <Divider />
 
-          <Collapse
-            defaultActiveKey={[]}
-            onChange={(keys) => {
-              if (keys.includes('prompt-config') && !cachedPrompts) loadPrompts();
-            }}
-          >
-            <Collapse.Item header="提示词配置" name="prompt-config">
-              <div className={styles.promptConfigRow}>
-                <div className={styles.promptListWrapper}>
-                  {promptLoading ? (
-                    <Spin className={styles.spinCentered} />
-                  ) : prompts.length === 0 ? (
-                    <Text className={styles.mutedText}>暂无模板</Text>
-                  ) : (
-                    <List
-                      size="small"
-                      bordered
-                      dataSource={prompts}
-                      render={(item) => (
-                        <List.Item
-                          key={item.template_key}
-                          onClick={() => handlePromptSelect(item)}
-                          style={{
-                            cursor: 'pointer',
-                            background: selectedPrompt?.template_key === item.template_key
-                              ? 'var(--color-primary-light-1)' : undefined,
-                          }}
-                        >
-                          <List.Item.Meta
-                            title={
-                              <Space>
-                                <Text bold={item.is_custom}>{item.label}</Text>
-                                {item.is_custom && <Tag color="blue" size="small">已修改</Tag>}
-                              </Space>
-                            }
-                            description={<Text className={styles.promptItemMeta}>{item.template_key}</Text>}
-                          />
-                        </List.Item>
-                      )}
-                    />
-                  )}
-                </div>
-                <div className={styles.promptConfigEditor}>
-                  {selectedPrompt ? (
-                    <>
-                      <Space className={styles.promptHeaderSpace}>
-                        <Text className={styles.promptLabel}>{selectedPrompt.label}</Text>
-                        {selectedPrompt.is_custom && (
-                          <Tag color="blue" size="small">已自定义</Tag>
-                        )}
-                      </Space>
-                      <Input.TextArea
-                        className={styles.codeArea}
-                        value={editedContent}
-                        onChange={setEditedContent}
-                      />
-                      <Space className={styles.promptActions}>
-                        <Button
-                          type="primary"
-                          icon={<IconSave />}
-                          loading={promptSaving}
-                          disabled={!hasPromptChanges}
-                          onClick={handlePromptSave}
-                        >
-                          保存
-                        </Button>
-                        <Button
-                          icon={<IconHistory />}
-                          loading={promptSaving}
-                          disabled={!selectedPrompt.is_custom}
-                          onClick={handlePromptRestore}
-                        >
-                          恢复默认
-                        </Button>
-                      </Space>
-                    </>
-                  ) : (
-                    <div className={styles.emptyPromptState}>
-                      请从左侧选择一个提示词模板
-                    </div>
-                  )}
-                </div>
-              </div>
-            </Collapse.Item>
-          </Collapse>
+
         </Space>
       </Card>
     </div>

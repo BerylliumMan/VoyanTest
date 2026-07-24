@@ -105,26 +105,17 @@ async def upload_and_analyze(
 
     async def _run_full_analysis() -> None:
         try:
-            from app.gen.analyzer import extract_multi_file_content, two_phase_analyze, get_default_prompts
+            from app.gen.analyzer import extract_multi_file_content, two_phase_analyze
             from app.database import AsyncSessionLocal
 
             combined_text, _, warnings = await extract_multi_file_content(
                 file_contents, filenames
             )
 
-            # 异步 DB 查询（在正确的 event loop 中）
-            async with AsyncSessionLocal() as db:
-                defaults = get_default_prompts()
-                prompt_rows = await crud.list_prompt_templates(db)
-                prompts: dict = {}
-                for row in prompt_rows:
-                    if row.is_custom and row.template_key in defaults:
-                        prompts[row.template_key] = {"content": row.template_content}
-
             result = await two_phase_analyze(
                 combined_text,
                 project_description=project_description,
-                prompts=prompts,
+                db=db,
             )
 
             async with _lock:
