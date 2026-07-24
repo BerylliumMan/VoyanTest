@@ -114,6 +114,13 @@ async def upload_and_analyze(
                 file_contents, filenames
             )
 
+            if not combined_text.strip():
+                async with _lock:
+                    session.status = "failed"
+                    session.error_message = "; ".join(warnings or ["未能从文件中提取到有效文本"])
+                await _update_db(session_id, "failed", session.error_message, 0, 0)
+                return
+
             # 提前解析提示词（需要 DB），然后关闭 session，避免 AI 分析期间 LLM 调用
             # 新建 session 时发生连接池冲突（_connection_for_bind vs close）
             fp_prompt = None

@@ -4,6 +4,7 @@
 
 from typing import Any
 import re
+from dataclasses import asdict as _asdict
 
 VALID_ACTIONS = {
     "click", "fill", "goto", "select", "hover",
@@ -34,7 +35,6 @@ class ValidationResult:
 def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     """Validate a single generated test case."""
     if not isinstance(tc, dict):
-        from dataclasses import asdict as _asdict
         tc = _asdict(tc)
     result = ValidationResult()
 

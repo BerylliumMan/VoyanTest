@@ -13,8 +13,9 @@ class FPAnalyzer(BaseAgent[str, list[dict]]):
 
     async def run(self, input_data: str) -> list[dict]:
         db = self.config.get("db")
-        fp_prompt = None
-        if db is not None:
+        prompts = self.config.get("prompts", {})
+        fp_prompt = prompts.get("fp_extract") if prompts else None
+        if fp_prompt is None and db is not None:
             from app.runtime_config import resolve_prompt_for_agent
             fp_prompt = await resolve_prompt_for_agent(db, "generation", "fp_extract")
         # FP_EXTRACT_PROMPT is used as fallback inside extract_functional_points when fp_prompt is None
