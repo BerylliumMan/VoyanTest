@@ -47,8 +47,13 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     else:
         result.pass_check("title_required")
 
-    # Check 2: At least one step
-    steps = tc.get("steps") or []
+    # Check 2: At least one step（支持 test_steps 字符串字段）
+    steps = tc.get("steps") or tc.get("test_steps") or []
+    if isinstance(steps, str):
+        steps = [s.strip() for s in steps.replace("\\n", "\n").split("\n") if s.strip()]
+        steps = [{"description": s, "action": "", "expected": tc.get("expected_result", "")} for s in steps]
+        if not steps:
+            steps = [{"description": tc.get("test_steps", ""), "action": "", "expected": tc.get("expected_result", "")}]
     if not isinstance(steps, list):
         result.fail("steps_required", "steps 必须是数组")
     elif len(steps) < 1:
@@ -143,7 +148,7 @@ def validate_test_cases(
         covered_fps: set[str] = set()
         for tc, _ in valid_cases:
             # Check if TC references a FP title
-            tc_title = tc.get("title", "")
+            tc_title = getattr(tc, "title", tc.get("title", "") if isinstance(tc, dict) else "")
             for fp_title in fp_titles:
                 if fp_title and (fp_title in tc_title or tc_title in fp_title):
                     covered_fps.add(fp_title)
