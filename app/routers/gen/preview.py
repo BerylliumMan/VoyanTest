@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from ...auth import get_current_user
 from ...database import get_async_db
@@ -50,12 +51,27 @@ async def get_status(session_id: str, user=Depends(get_current_user),
 
 
 @router.get("/preview/{session_id}", response_model=GenPreviewResponse)
-async def preview_results(session_id: str, user=Depends(get_current_user)) -> GenPreviewResponse:
+async def preview_results(session_id: str, user=Depends(get_current_user),
+                          db=Depends(get_async_db)) -> GenPreviewResponse:
     """Preview generated functional points and test cases."""
     async with _lock:
         session = _sessions.get(session_id)
     if not session:
-        raise HTTPException(404, "Session not found")
+        stmt = (select(GenSession).where(GenSession.id == session_id)
+                .options(selectinload(GenSession.functional_points),
+                         selectinload(GenSession.test_cases)))
+        result = await db.execute(stmt)
+        row = result.scalar_one_or_none()
+        if not row or row.status != "completed":
+            raise HTTPException(404, "Session not found or not yet completed")
+        fps = [{"id": fp.id, "module": fp.module, "name": fp.name, "category": fp.category, "description": fp.description}
+               for fp in row.functional_points] if row.functional_points else []
+        tcs = [GenPreviewItem(
+            test_case_id=tc.test_case_id, module=tc.module, title=tc.title,
+            preconditions=tc.preconditions, test_steps=tc.test_steps,
+            expected_result=tc.expected_result, priority=tc.priority,
+        ) for tc in row.test_cases] if row.test_cases else []
+        return GenPreviewResponse(session_id=session_id, functional_points=fps, test_cases=tcs)
     if session.status != "completed":
         raise HTTPException(400, f"分析尚未完成，当前状态: {session.status}")
 

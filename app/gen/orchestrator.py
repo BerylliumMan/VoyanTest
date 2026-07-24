@@ -38,9 +38,12 @@ async def two_phase_analyze(
     prompts: dict = None,
     db = None,
 ) -> dict:
-    """Two-phase analysis using Pipeline (backward compatible with old interface)."""
+    """Two-phase analysis using Pipeline."""
     from app.gen.agents.pipeline import Pipeline
-    pipeline = Pipeline({"project_description": project_description, "db": db})
+    config = {"project_description": project_description, "db": db}
+    if prompts:
+        config["prompts"] = prompts
+    pipeline = Pipeline(config)
     return await pipeline.run(text)
 
 

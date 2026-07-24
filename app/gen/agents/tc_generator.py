@@ -18,8 +18,9 @@ class TCGenerator(BaseAgent[dict, list[dict]]):
         fps = input_data.get("fps", [])
         project_description = input_data.get("project_description", "")
         db = self.config.get("db")
-        tc_prompt = None
-        if db is not None:
+        prompts = self.config.get("prompts", {})
+        tc_prompt = prompts.get("tc_generate") if prompts else None
+        if tc_prompt is None and db is not None:
             from app.runtime_config import resolve_prompt_for_agent
             tc_prompt = await resolve_prompt_for_agent(db, "generation", "tc_generate")
         result = await generate_test_cases_for_fps(
