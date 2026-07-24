@@ -134,7 +134,11 @@ def validate_test_cases(
 
     # FP coverage check (if FPs provided)
     if functional_points:
-        fp_titles = {fp.get("title", "").strip() for fp in functional_points if fp.get("title")}
+        def _fp_title(fp):
+            if not isinstance(fp, dict):
+                return getattr(fp, "name", getattr(fp, "title", "")) or ""
+            return fp.get("name", fp.get("title", "")) or ""
+        fp_titles = {_fp_title(fp).strip() for fp in functional_points if _fp_title(fp)}
         covered_fps: set[str] = set()
         for tc, _ in valid_cases:
             # Check if TC references a FP title
