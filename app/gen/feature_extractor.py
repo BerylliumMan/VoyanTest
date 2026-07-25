@@ -75,6 +75,18 @@ async def extract_functional_points(
     fps = _parse_fps_from_text(content)
     if progress_callback:
         progress_callback(0, 0, f"提取到 {len(fps)} 个功能点")
+    if not fps:
+        logger.warning("FP extraction empty, retrying... raw output: %s", content[:300])
+        await asyncio.sleep(2)
+        content = await call_model([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text},
+        ])
+        fps = _parse_fps_from_text(content)
+        if not fps:
+            logger.warning("FP extraction still empty after retry. Raw: %s", content[:300])
+        if progress_callback:
+            progress_callback(0, 0, f"重试后提取到 {len(fps)} 个功能点")
     return fps
 
 

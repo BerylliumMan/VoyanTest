@@ -175,27 +175,22 @@ async def persist_gen_session_results(
     if completed_at is not None:
         record.completed_at = completed_at
 
-    if status == "completed" and functional_points and test_cases:
-        for fp in functional_points:
-            db.add(db_models.GenFunctionalPoint(
-                session_id=session_id,
-                fp_id=fp.id,
-                module=fp.module,
-                name=fp.name,
-                description=fp.description,
-                category=fp.category,
-            ))
-        for tc in test_cases:
-            db.add(db_models.GenTestCase(
-                session_id=session_id,
-                test_case_id=tc.test_case_id,
-                module=tc.module,
-                title=tc.title,
-                preconditions=tc.preconditions,
-                test_steps=tc.test_steps,
-                expected_result=tc.expected_result,
-                priority=tc.priority,
-            ))
+    if status == "completed":
+        if functional_points:
+            for fp in functional_points:
+                db.add(db_models.GenFunctionalPoint(
+                    session_id=session_id, fp_id=fp.id,
+                    module=fp.module, name=fp.name,
+                    description=fp.description, category=fp.category,
+                ))
+        if test_cases:
+            for tc in test_cases:
+                db.add(db_models.GenTestCase(
+                    session_id=session_id, test_case_id=tc.test_case_id,
+                    module=tc.module, title=tc.title,
+                    preconditions=tc.preconditions, test_steps=tc.test_steps,
+                    expected_result=tc.expected_result, priority=tc.priority,
+                ))
 
     await db.commit()
     return record
