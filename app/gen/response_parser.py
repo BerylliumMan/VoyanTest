@@ -9,9 +9,12 @@ and ``{"test_cases": [...]}`` which some model versions prefer over markdown tab
 """
 
 import json
+import logging
 import re
 
 from app.gen.models import AnalysisSession, FunctionalPoint, TestCase
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_text(value: str) -> str:
@@ -156,7 +159,8 @@ def _parse_fps_from_text(text: str, session_id: str = "") -> list[FunctionalPoin
             # Handle both {"key": [...]} and raw [...]
             items = data if isinstance(data, list) else (
                 data.get("function_points") or data.get("functional_points")
-                or data.get("fp_extract") or data.get("fp_list") or [])
+                or data.get("fp_extract") or data.get("fp_list")
+                or data.get("功能点列表") or [])
             if items:
                 fps = []
                 for i, item in enumerate(items):
@@ -181,22 +185,27 @@ def _parse_fps_from_text(text: str, session_id: str = "") -> list[FunctionalPoin
 
 
 def _normalize_tc_item(item: dict) -> dict:
-    """Normalize TC field names (handle camelCase, snake_case, etc.)."""
+    """Normalize TC field names (handle Chinese, camelCase, snake_case)."""
     normalized = {}
     field_map = {
-        "module": ["module", "module_name"],
-        "title": ["title", "name", "test_name", "test_name"],
-        "preconditions": ["preconditions", "precondition", "precondition"],
-        "test_steps": ["test_steps", "testSteps", "test_steps", "steps", "step"],
-        "expected_result": ["expected_result", "expectedResult", "expected", "expected_result"],
-        "priority": ["priority", "pri"],
+        "module":          ["module", "module_name", "所属模块", "模块", "module_name"],
+        "title":           ["title", "name", "test_name", "用例标题", "测试标题", "标题",
+                            "case_name", "caseName", "featureName", "feature_name", "functionName"],
+        "preconditions":   ["preconditions", "precondition", "前置条件"],
+        "test_steps":      ["test_steps", "testSteps", "steps", "step", "测试步骤", "步骤",
+                            "test_step", "description", "desc"],
+        "expected_result": ["expected_result", "expectedResult", "expected", "预期结果", "预期", "expect"],
+        "priority":        ["priority", "pri", "优先级", "level"],
     }
     for target, candidates in field_map.items():
         for c in candidates:
-            val = item.get(c) or item.get(c[0].upper() + c[1:]) or item.get(c.lower())
+            val = item.get(c)
             if val:
                 normalized[target] = val
                 break
+    # Fallback: when test_steps is set from description, copy to expected_result
+    if normalized.get("test_steps") and not normalized.get("expected_result"):
+        normalized["expected_result"] = normalized["test_steps"]
     return normalized
 
 
@@ -206,19 +215,24 @@ def _parse_tcs_from_text(text: str, session_id: str = "", start_index: int = 0) 
     if json_str:
         try:
             data = json.loads(json_str)
-            items = data if isinstance(data, list) else (data.get("test_cases") or [])
+            items = data if isinstance(data, list) else (
+                data.get("test_cases") or data.get("测试用例列表") or [])
             if items:
                 tcs = []
                 for i, item in enumerate(items):
-                    tc = item if isinstance(item, dict) else {}
+                    tc = _normalize_tc_item(item if isinstance(item, dict) else {})
+                    if not tc.get("title"):
+                        logger.warning("TC normalize failed. item=%s norm=%s",
+                                      {k: str(v)[:30] for k, v in (item.items() if isinstance(item, dict) else {})},
+                                      {k: str(v)[:30] for k, v in tc.items()})
                     tcs.append(TestCase(
                         test_case_id=f"TC-{start_index + i + 1:03d}",
                         session_id=session_id,
-                        module=tc.get("module", tc.get("module_name", "")),
-                        title=tc.get("title", tc.get("name", "")),
-                        preconditions=tc.get("preconditions", tc.get("precondition", "")),
-                        test_steps=tc.get("test_steps", tc.get("steps", tc.get("step", ""))),
-                        expected_result=tc.get("expected_result", tc.get("expected", "")),
+                        module=tc.get("module", ""),
+                        title=tc.get("title", ""),
+                        preconditions=tc.get("preconditions", ""),
+                        test_steps=tc.get("test_steps", ""),
+                        expected_result=tc.get("expected_result", ""),
                         priority=tc.get("priority", "中"),
                     ))
                 return tcs
