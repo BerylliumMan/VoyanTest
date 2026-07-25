@@ -63,6 +63,8 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
 
     # Check 3: Each step has description and valid action
     for i, step in enumerate(steps):
+        if isinstance(step, str):
+            steps[i] = {"description": step, "action": "", "expected": tc.get("expected_result", "")}
         desc = (step.get("description") or step.get("desc") or "").strip()
         if not desc:
             result.fail(f"step_{i}_desc", f"步骤 {i + 1} 描述不能为空")
