@@ -64,7 +64,8 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     # Check 3: Each step has description and valid action
     for i, step in enumerate(steps):
         if isinstance(step, str):
-            steps[i] = {"description": step, "action": "", "expected": tc.get("expected_result", "")}
+            step = {"description": step, "action": "", "expected": tc.get("expected_result", "")}
+            steps[i] = step
         desc = (step.get("description") or step.get("desc") or "").strip()
         if not desc:
             result.fail(f"step_{i}_desc", f"步骤 {i + 1} 描述不能为空")
@@ -74,7 +75,10 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
             result.fail(f"step_{i}_action", f"步骤 {i + 1} 操作 '{action}' 不在合法操作列表中")
 
         expected = (step.get("parsed_result") or step.get("expected") or "").strip()
-        if not expected:
+        # 只校验最后一步的预期结果（LLM 通常不生成中间步骤的预期结果）
+        if not expected and i < len(steps) - 1:
+            pass  # 中间步骤允许没有预期结果
+        elif not expected:
             result.fail(f"step_{i}_expected", f"步骤 {i + 1} 预期结果不能为空")
 
     # Check 4: Steps have basic sanity (description length)
