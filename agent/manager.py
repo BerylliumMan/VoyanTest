@@ -212,10 +212,23 @@ class AgentManager:
                 # 2. LLM generates tool call from step description + snapshot + expected result
                 tool_call = await generate_tool_call(desc, snap, expected_result=expected_result, client=llm_client, model=model, base_url=base_url_override or None)
 
-                # 3. Send tool call to agent for execution
-                result = await self._execute_step(
-                    session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
-                )
+                # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
+                if (tool_call.action or "").lower() in ("error", "done"):
+                    result = {
+                        "success": False if tool_call.action == "error" else True,
+                        "action": f"{tool_call.action}({tool_call.value or ''})",
+                        "error": (
+                            tool_call.value or "LLM 无法确定本步操作"
+                            if tool_call.action == "error"
+                            else None
+                        ),
+                        "duration_ms": 0,
+                    }
+                else:
+                    # 3. Send tool call to agent for execution
+                    result = await self._execute_step(
+                        session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
+                    )
 
                 # 4. Verify expected result if step succeeded
                 if result.get("success") and expected_result:
@@ -440,11 +453,12 @@ class AgentManager:
                         await db.commit()
                         logger.info("Poller picked up pending exec: run=%s case=%s agent=%s", run_id, case_id, agent_id)
 
-                        # 检查是否有 AI Agent（AgentDefinition）配置
+                        # 检查是否有 AI Agent（AgentDefinition）配置 — 须显式 OTA skill
                         try:
                             from app.crud import agent_definition as _cad
+                            from core.agent_ota import should_use_ota_agent
                             _def = await _cad.get_active_by_type(db, "execution")
-                            if _def and _def.tools:
+                            if should_use_ota_agent(_def):
                                 from core.agent_bridge import AgentBridge
                                 bridge = AgentBridge(self, db, _def)
                                 _batch_id = goal.get("batch_id") if isinstance(goal, dict) else None

@@ -103,7 +103,9 @@ async def resolve_prompt_for_agent(
 
     skills = agent_def.skills or []
     if skills and prompt_key not in skills:
-        logger.warning(
+        # skills 常只列核心能力；执行链路还会解析辅助 prompt（如 step_execute）。
+        # 仍允许回退 PromptTemplate，仅打 debug 避免刷屏。
+        logger.debug(
             "Prompt key '%s' not in agent skills list %s for agent id=%s type=%s",
             prompt_key,
             skills,
