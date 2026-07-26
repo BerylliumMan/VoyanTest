@@ -19,6 +19,8 @@ class GenSession(Base):
     project_description = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="pending")
     error_message = Column(Text, nullable=True)
+    progress = Column(Integer, default=0)  # 0-100，跨 worker 可读
+    progress_message = Column(String(500), nullable=True)
     functional_points_count = Column(Integer, default=0)
     test_cases_count = Column(Integer, default=0)
     imported_count = Column(Integer, default=0)

@@ -65,17 +65,18 @@ async def run_test_case_endpoint(
 
         async def _run_with_existing_browser() -> None:
             try:
-                mgr = await BrowserPool.get(project_id)
-                if mgr is not None:
-                    base_url_override = None
-                    if environment_id:
-                        async with AsyncSessionLocal() as _env_db:
-                            env = await crud.get_environment(_env_db, environment_id)
-                            if env:
-                                base_url_override = env.base_url
-                    await _exec.run_test_case_in_browser(
-                        case_id, mgr, batch_id=batch_id, base_url_override=base_url_override,
-                    )
+                async with BrowserPool.project_lock(project_id):
+                    mgr = await BrowserPool.get(project_id)
+                    if mgr is not None:
+                        base_url_override = None
+                        if environment_id:
+                            async with AsyncSessionLocal() as _env_db:
+                                env = await crud.get_environment(_env_db, environment_id)
+                                if env:
+                                    base_url_override = env.base_url
+                        await _exec.run_test_case_in_browser(
+                            case_id, mgr, batch_id=batch_id, base_url_override=base_url_override,
+                        )
             finally:
                 if user_id:
                     await notify_batch_completed(batch_id, user_id)

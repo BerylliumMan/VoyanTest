@@ -180,11 +180,16 @@ async def _run_startup_init():
                 await conn.execute(text("ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL"))
         except Exception:
             logger.warning("test_runs 表 case_id 列 NOT NULL 约束迁移失败（非关键错误，继续）")
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER"))
-        except Exception:
-            logger.warning("gen_sessions 表 user_id 列迁移失败（非关键错误，继续）")
+        for _col_sql in (
+            "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER",
+            "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress INTEGER DEFAULT 0",
+            "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress_message VARCHAR(500)",
+        ):
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text(_col_sql))
+            except Exception:
+                logger.warning("gen_sessions 迁移失败: %s（非关键，继续）", _col_sql)
         try:
             async with engine.begin() as conn:
                 await conn.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT 131072"))

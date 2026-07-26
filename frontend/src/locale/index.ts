@@ -397,6 +397,8 @@ const i18n = {
     'agent_runs.col.started': 'Started',
     'agent_runs.col.duration': 'Duration',
     'agent_runs.list.load_failed': 'Failed to load runs',
+    'agent_runs.list.empty_hint':
+      'No Agent OTA runs yet. Default case execution uses step-by-step mode and appears under Reports. To record here, add skill "agent_runner" (or "ota") to the Execution Agent and enable its tools.',
     'agent_runs.detail.breadcrumb': 'Run Detail',
     'agent_runs.detail.timeline_title': 'Execution Process',
     'agent_runs.detail.not_found': 'Run not found',
@@ -812,6 +814,8 @@ const i18n = {
     'agent_runs.col.started': '开始时间',
     'agent_runs.col.duration': '耗时',
     'agent_runs.list.load_failed': '加载运行列表失败',
+    'agent_runs.list.empty_hint':
+      '暂无 Agent OTA 运行记录。默认「按步骤执行」结果在「运行报告」中查看；若要在此页留下记录，请给执行 Agent 增加 skill「agent_runner」（或「ota」）并启用 tools。',
     'agent_runs.detail.breadcrumb': '运行详情',
     'agent_runs.detail.timeline_title': '执行过程',
     'agent_runs.detail.not_found': '运行记录未找到',

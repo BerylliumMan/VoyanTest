@@ -224,33 +224,58 @@ async def convert_events_to_steps(
     client: AsyncOpenAI | None = None,
     model: str | None = None,
     temperature: float = 0.1,
+    agent_type: str = "recording",
+    agent_id: int | None = None,
 ) -> list[dict]:
     """Convert raw CDP events into structured test step definitions.
 
-    Args:
-        events: List of event dicts. Each dict represents a RecordedEvent
-                (from core/cdp_session.py) and may contain keys:
-                event_type, url, selector, value, page_title, screenshot.
-                The same shape as RecordedEvent.to_dict() or
-                RecordedEvent.__dict__ is accepted.
-        page_title: Optional final page title for additional LLM context.
-        model: Override the default LLM model (resolved from DB config).
-        temperature: LLM temperature (lower = more deterministic).
-        client: Pre-configured AsyncOpenAI client. Created from DB config
-                via core.llm_wrapper.create_openai_client() if not provided.
-
-    Returns:
-        A list of {"step_description": str, "expected_result": str} dicts.
-        Returns an empty list if `events` is empty, or if the LLM output
-        cannot be parsed after the retry budget is exhausted.
+    Uses the active *recording* AgentDefinition (llm_config + prompt) when
+    available; falls back to global AI config and ``CDP_TO_STEPS_PROMPT``.
     """
     if not events:
         return []
 
-    if client is None:
-        client = await create_openai_client()
+    system_prompt = CDP_TO_STEPS_PROMPT
+    resolved_model = model
+    try:
+        from app.database import AsyncSessionLocal
+        from app.crud.agent_definition import get_active_by_type, get_agent_definition
+        from app.crud.prompt_template import get_prompt_template_by_key
 
-    _, _, resolved_model = await _resolve_config(explicit_model=model)
+        async with AsyncSessionLocal() as db:
+            if client is None:
+                client = await create_openai_client(agent_type=agent_type)
+            _, _, cfg_model = await _resolve_config(
+                explicit_model=model, agent_type=agent_type,
+            )
+            if resolved_model is None:
+                resolved_model = cfg_model
+
+            agent_def = None
+            if agent_id is not None:
+                agent_def = await get_agent_definition(db, agent_id)
+            if agent_def is None:
+                agent_def = await get_active_by_type(db, agent_type)
+
+            # Optional DB prompt template; else agent system_prompt + default schema
+            for prompt_key in ("cdp_convert", "recording_convert"):
+                pt = await get_prompt_template_by_key(db, prompt_key)
+                if pt and (pt.content or "").strip():
+                    body = pt.content.strip()
+                    role = (agent_def.system_prompt or "").strip() if agent_def else ""
+                    system_prompt = f"{role}\n\n{body}" if role else body
+                    break
+            else:
+                if agent_def and (agent_def.system_prompt or "").strip():
+                    system_prompt = (
+                        f"{agent_def.system_prompt.strip()}\n\n{CDP_TO_STEPS_PROMPT}"
+                    )
+    except Exception:
+        logger.debug("recording Agent 解析失败，回退全局配置", exc_info=True)
+        if client is None:
+            client = await create_openai_client()
+        if resolved_model is None:
+            _, _, resolved_model = await _resolve_config(explicit_model=model)
 
     timeline = _format_timeline(events, page_title=page_title)
 
@@ -261,7 +286,7 @@ async def convert_events_to_steps(
     )
 
     messages: list[dict] = [
-        {'role': 'system', 'content': CDP_TO_STEPS_PROMPT},
+        {'role': 'system', 'content': system_prompt},
         {'role': 'user', 'content': user_message},
     ]
 

@@ -7,6 +7,8 @@ import {
   Message,
   Spin,
   Typography,
+  Alert,
+  Empty,
 } from '@arco-design/web-react';
 import { IconEye } from '@arco-design/web-react/icon';
 import { useHistory } from 'react-router-dom';
@@ -169,6 +171,15 @@ const AgentRunsList: React.FC = () => {
           {t['agent_runs.list.title'] || 'Agent 运行记录'}
         </Title>
 
+        <Alert
+          type="info"
+          style={{ marginBottom: 12 }}
+          content={
+            t['agent_runs.list.empty_hint'] ||
+            '本页仅展示 OTA/AgentRunner 运行；默认逐步执行请到运行报告查看。'
+          }
+        />
+
         {/* 工具栏 */}
         <div className={styles['agent-runs-toolbar']}>
           <div className="toolbar-left">
@@ -202,6 +213,14 @@ const AgentRunsList: React.FC = () => {
             columns={columns}
             data={runs}
             rowKey="id"
+            noDataElement={
+              <Empty
+                description={
+                  t['agent_runs.list.empty_hint'] ||
+                  '暂无 Agent OTA 运行记录'
+                }
+              />
+            }
             pagination={{
               current: pagination.current,
               pageSize: pagination.pageSize,

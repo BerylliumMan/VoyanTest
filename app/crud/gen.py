@@ -116,6 +116,23 @@ async def increment_imported_count(
     return record
 
 
+async def update_gen_session_progress(
+    db: AsyncSession,
+    session_id: str,
+    progress: int,
+    progress_message: str = "",
+) -> db_models.GenSession | None:
+    """更新生成会话进度（供 status 接口在无内存会话时回读）。"""
+    record = await get_gen_session(db, session_id)
+    if record is None:
+        return None
+    record.progress = max(0, min(100, int(progress)))
+    if progress_message is not None:
+        record.progress_message = (progress_message or "")[:500]
+    await db.commit()
+    return record
+
+
 async def update_gen_session_status(
     db: AsyncSession,
     session_id: str,
@@ -137,6 +154,12 @@ async def update_gen_session_status(
 
     record.status = status
     record.error_message = error_message
+    if status in ("completed", "failed"):
+        record.progress = 100
+        if error_message and status == "failed":
+            record.progress_message = (error_message or "")[:500]
+        elif status == "completed":
+            record.progress_message = "分析完成"
     if functional_points_count is not None:
         record.functional_points_count = functional_points_count
     if test_cases_count is not None:
@@ -172,6 +195,10 @@ async def persist_gen_session_results(
     record.error_message = error_message
     record.functional_points_count = functional_points_count
     record.test_cases_count = test_cases_count
+    record.progress = 100
+    record.progress_message = (
+        (error_message or "")[:500] if status == "failed" else "分析完成"
+    )
     if completed_at is not None:
         record.completed_at = completed_at
 

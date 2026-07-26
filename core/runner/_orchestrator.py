@@ -229,13 +229,21 @@ async def run_test_case(
     Backward-compatible wrapper that creates its own PlaywrightMCPManager.
     ``run_id`` 用于调试模式等已预创建 TestRun 的场景，保证 WS 广播 id 一致。
     """
+    from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
 
+    project_id: int | None = None
     browser_type = 'chromium'
     headless = True
     base_url_override = None
-    if environment_id:
-        async with AsyncSessionLocal() as _db:
+    async with AsyncSessionLocal() as _db:
+        try:
+            tc = await crud.get_test_case(_db, case_id)
+            if tc:
+                project_id = tc.project_id
+        except SQLAlchemyError:
+            logger.warning("Failed to load case %s for project lock", case_id, exc_info=True)
+        if environment_id:
             try:
                 env = await crud.get_environment(_db, environment_id)
                 if env:
@@ -244,6 +252,30 @@ async def run_test_case(
                     base_url_override = env.base_url
             except SQLAlchemyError as exc:
                 logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
+
+    if project_id is not None:
+        async with BrowserPool.project_lock(project_id):
+            return await _run_test_case_unlocked(
+                case_id, batch_id, browser_type, headless, base_url_override,
+                debug_mode=debug_mode, run_id=run_id,
+            )
+    return await _run_test_case_unlocked(
+        case_id, batch_id, browser_type, headless, base_url_override,
+        debug_mode=debug_mode, run_id=run_id,
+    )
+
+
+async def _run_test_case_unlocked(
+    case_id: int,
+    batch_id: int | None,
+    browser_type: str,
+    headless: bool,
+    base_url_override: str | None,
+    *,
+    debug_mode: bool = False,
+    run_id: int | None = None,
+):
+    from core.playwright_manager import PlaywrightMCPManager
 
     mcp_manager = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
     start_time = tz_now()
@@ -355,6 +387,7 @@ async def run_batch_test_cases(
     if browser_pool is None:
         from core.browser_pool import BrowserPool as browser_pool
 
+    from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
 
     total_main = len(case_ids)
@@ -370,7 +403,7 @@ async def run_batch_test_cases(
     mcp_manager = None
     base_url_override = None
 
-    async with AsyncSessionLocal() as batch_db:
+    async with BrowserPool.project_lock(project_id), AsyncSessionLocal() as batch_db:
         # ── AgentRunner 分发检查（T011）────────────────────────────────────
         # 在打开浏览器之前，先检查是否有激活的 execution AgentDefinition。
         # 如果有且配置了工具，则使用 AgentRunner OTA 循环替代传统的
