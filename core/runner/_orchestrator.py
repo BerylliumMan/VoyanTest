@@ -28,6 +28,7 @@ from core.runner._persistence import (
 
 from core.agent_runner.runner import AgentRunner
 from core.llm_wrapper import create_openai_client
+from core.agent_ota import should_use_ota_agent
 
 logger = logging.getLogger(__name__)
 
@@ -61,26 +62,8 @@ async def _record_batch_case_failure(
 
 
 async def _should_use_agent_runner(agent_def) -> bool:
-    """检查是否满足使用 AgentRunner OTA 循环的条件。
-
-    条件（须全部满足，避免「配了 tools 就绕过用例步骤」）：
-    - agent_def 存在
-    - skills 显式包含 ``agent_runner`` 或 ``ota``
-    - tools 为非空列表，且至少包含一个启用的工具
-    """
-    if agent_def is None:
-        return False
-    skills = getattr(agent_def, "skills", None) or []
-    if not any(s in skills for s in ("agent_runner", "ota")):
-        return False
-    tools = getattr(agent_def, "tools", None)
-    if not tools:
-        return False
-    enabled_count = sum(
-        1 for t in tools
-        if isinstance(t, dict) and t.get("enabled", True) is not False
-    )
-    return enabled_count > 0
+    """兼容旧调用；逻辑见 ``core.agent_ota.should_use_ota_agent``。"""
+    return should_use_ota_agent(agent_def)
 
 
 async def run_test_case_via_agent(

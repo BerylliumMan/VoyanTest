@@ -133,8 +133,9 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         raise HTTPException(status_code=404, detail="Test case not found")
 
     # 检查是否有活跃 execution AgentDefinition — 跨 worker 创建 pending run，由 poller 接管
+    from core.agent_ota import should_use_ota_agent
     active_agent_def = await crud_agent_definition.get_active_by_type(db, "execution")
-    if active_agent_def and active_agent_def.tools and agent_name and (await _find_online_agent_in_db(db, agent_name)):
+    if should_use_ota_agent(active_agent_def) and agent_name and (await _find_online_agent_in_db(db, agent_name)):
         # 在 DB 中创建 AgentRun（status=pending），poller 会在有 WS 连接的 worker 上调起 OTA
         from core.agent_bridge import create_pending_agent_run
         arun = await create_pending_agent_run(db, active_agent_def, db_case.id, agent_name, environment_id)
@@ -154,9 +155,9 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
     else:
         agent = agents[0]
 
-    # 同 worker 路径：直接执行 AgentBridge OTA
+    # 同 worker 路径：显式 OTA skill 时走 AgentBridge
     active_agent_def_same = active_agent_def or (await crud_agent_definition.get_active_by_type(db, "execution"))
-    if active_agent_def_same and active_agent_def_same.tools and agent_name:
+    if should_use_ota_agent(active_agent_def_same) and agent_name:
         from core.agent_bridge import AgentBridge
         bridge = AgentBridge(agent_manager, db, active_agent_def_same)
         arun = await bridge.orchestrate(
@@ -414,11 +415,12 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
             await _asyncio.to_thread(_ensure_dir, output_dir)
 
-            # 检查是否有活跃 execution AgentDefinition — 走 AI Agent 桥接路径
+            # 检查是否有活跃 execution AgentDefinition — 显式 OTA 时走桥接
             try:
                 async with db_mod.AsyncSessionLocal() as _ad_db:
+                    from core.agent_ota import should_use_ota_agent
                     active_agent_def = await crud_agent_definition.get_active_by_type(_ad_db, "execution")
-                    if active_agent_def and active_agent_def.tools and body.agent_name:
+                    if should_use_ota_agent(active_agent_def) and body.agent_name:
                         from core.agent_bridge import AgentBridge
                         bridge = AgentBridge(agent_manager, _ad_db, active_agent_def)
                         await bridge.orchestrate(

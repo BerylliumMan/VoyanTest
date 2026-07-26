@@ -30,6 +30,11 @@ logger = logging.getLogger("agent.client")
 
 def _resolve_mcp_tool(action: str) -> str:
     """将 action 名解析为 MCP 工具名。"""
+    if not action:
+        return ""
+    # LLM 控制信号，不是浏览器工具
+    if action.lower() in ("error", "done"):
+        return ""
     if action.startswith('browser_') or action in ('navigate',):
         # 已经是 MCP 工具名——直接使用
         return action if not action.startswith('browser_') else action
@@ -650,10 +655,15 @@ class AgentClient:
 
         elif msg.type == WSMessageType.STEP_EXECUTE:
             p = msg.payload or {}
-            action = p.get("tool_call", {}).get("action", "") or p.get("action", "")
+            tc = p.get("tool_call") if isinstance(p.get("tool_call"), dict) else {}
+            action = (tc.get("action") or p.get("action") or "").strip()
             if action == "observe":
                 await self._handle_observe(msg)
+            elif "tool_call" in p and "step_order" in p:
+                # 逐步执行路径：含 tool_call + step_order
+                await self._handle_step_execute(msg)
             else:
+                # AgentBridge act：action/selector/value 在 payload 顶层
                 await self._handle_act(msg)
 
         elif msg.type == WSMessageType.SHUTDOWN:
@@ -810,6 +820,18 @@ class AgentClient:
         try:
             if not self._mcp_process:
                 raise RuntimeError("MCP subprocess not started")
+
+            # Bridge / 顶层 action 也可能带上 error/done 控制信号
+            if (action or "").lower() in ("error", "done"):
+                result["success"] = (action or "").lower() == "done"
+                result["error"] = (
+                    "" if result["success"]
+                    else (value or "LLM reported error for this step")
+                )
+                ss_b64 = await self._mcp_screenshot_base64()
+                result["screenshot_b64"] = ss_b64 or ""
+                await self.send_result(run_id, result)
+                return
 
             mcp_result = await self._mcp_call_tool(action, selector, value)
             result["success"] = mcp_result.get("success", False)
