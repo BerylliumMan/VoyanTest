@@ -105,9 +105,8 @@ async def import_test_cases(
             extras = results_text[len(steps_text) - 1:]
             results_text = base + ['；'.join(extras)]
         elif len(results_text) < len(steps_text):
-            # 不足时复用最后一条结果填充
-            last = results_text[-1] if results_text else ''
-            results_text = results_text + [last] * (len(steps_text) - len(results_text))
+            # 不足时用空字符串填充（让用户自行补充）
+            results_text = results_text + [''] * (len(steps_text) - len(results_text))
         created_steps = []
         for idx, step_text in enumerate(steps_text, start=1):
             step = db_models.TestStep(
