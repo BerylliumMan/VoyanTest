@@ -53,9 +53,12 @@ async def create_agent_definition(
 ):
     """创建 Agent 定义"""
     try:
-        return await agent_definition.create_agent_definition(db, body)
+        obj = await agent_definition.create_agent_definition(db, body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    from app.agent_resolver import invalidate_agent_cache
+    invalidate_agent_cache(body.agent_type)
+    return obj
 
 
 @router.get(
@@ -91,6 +94,8 @@ async def update_agent_definition(
         raise HTTPException(status_code=400, detail=str(e))
     if obj is None:
         raise HTTPException(status_code=404, detail="Agent定义不存在")
+    from app.agent_resolver import invalidate_agent_cache
+    invalidate_agent_cache(obj.agent_type)
     return obj
 
 
@@ -104,4 +109,6 @@ async def delete_agent_definition(
     obj = await agent_definition.delete_agent_definition(db, id)
     if obj is None:
         raise HTTPException(status_code=404, detail="Agent定义不存在")
+    from app.agent_resolver import invalidate_agent_cache
+    invalidate_agent_cache(obj.agent_type)
     return {"message": "Agent定义已删除"}

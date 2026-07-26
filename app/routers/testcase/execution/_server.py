@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# 模块级集合：防止调试后台 Task 被 GC（endpoint 局部 set 会在返回后失效）
+_DEBUG_TASKS: set = set()
+
 
 @router.post("/{case_id}/run")
 async def run_test_case_endpoint(
@@ -54,32 +57,43 @@ async def run_test_case_endpoint(
     from core.browser_pool import BrowserPool
 
     project_id = db_case.project_id
+    user_id = getattr(user, "id", None)
+    batch_id = batch.id
+
     if await BrowserPool.is_active(project_id):
         from app.routers.testcase import execution as _exec
 
         async def _run_with_existing_browser() -> None:
-            mgr = await BrowserPool.get(project_id)
-            if mgr is not None:
-                base_url_override = None
-                if environment_id:
-                    async with AsyncSessionLocal() as _env_db:
-                        env = await crud.get_environment(_env_db, environment_id)
-                        if env:
-                            base_url_override = env.base_url
-                await _exec.run_test_case_in_browser(case_id, mgr, batch_id=batch.id, base_url_override=base_url_override)
+            try:
+                mgr = await BrowserPool.get(project_id)
+                if mgr is not None:
+                    base_url_override = None
+                    if environment_id:
+                        async with AsyncSessionLocal() as _env_db:
+                            env = await crud.get_environment(_env_db, environment_id)
+                            if env:
+                                base_url_override = env.base_url
+                    await _exec.run_test_case_in_browser(
+                        case_id, mgr, batch_id=batch_id, base_url_override=base_url_override,
+                    )
+            finally:
+                if user_id:
+                    await notify_batch_completed(batch_id, user_id)
 
         background_tasks.add_task(_run_with_existing_browser)
     else:
         from app.routers.testcase import execution as _exec
-        background_tasks.add_task(_exec.run_test_case, case_id, batch.id, environment_id=environment_id)
 
-    user_id = getattr(user, "id", None)
-    if user_id:
-        async def _notify() -> None:
-            await notify_batch_completed(batch.id, user_id)
-        background_tasks.add_task(_notify)
+        async def _run_and_notify() -> None:
+            try:
+                await _exec.run_test_case(case_id, batch_id, environment_id=environment_id)
+            finally:
+                if user_id:
+                    await notify_batch_completed(batch_id, user_id)
 
-    return {"id": batch.id, "status": "running", "batch_id": batch.id}
+        background_tasks.add_task(_run_and_notify)
+
+    return {"id": batch_id, "status": "running", "batch_id": batch_id}
 
 
 @router.post("/{case_id}/run-debug")
@@ -110,18 +124,15 @@ async def run_test_case_debug(
 
     await db.commit()
 
-    # H-6 修复：保持 Task 引用防止 GC 回收
-    _debug_tasks = set()
-
     async def _run_debug():
         try:
             await _run_debug_mode(case_id, batch.id, run.id, req.environment_id)
         finally:
-            _debug_tasks.discard(_run_debug)
+            _DEBUG_TASKS.discard(task)
 
     task = _asyncio.create_task(_run_debug())
-    _debug_tasks.add(task)
-    task.add_done_callback(_debug_tasks.discard)
+    _DEBUG_TASKS.add(task)
+    task.add_done_callback(_DEBUG_TASKS.discard)
 
     return {
         "batch_id": batch.id,
@@ -142,6 +153,7 @@ async def _run_debug_mode(case_id: int, batch_id: int, run_id: int, environment_
             batch_id=batch_id,
             environment_id=environment_id,
             debug_mode=True,
+            run_id=run_id,
         )
         from app.websocket import LogBroadcaster
         await LogBroadcaster.remove_pause_event(run_id)
@@ -190,20 +202,25 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     total = len(case_ids) + len(init_case_ids)
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total, triggered_by=getattr(user, 'username', None))
     from app.routers.testcase import execution as _exec
-    background_tasks.add_task(
-        _exec.run_batch_test_cases,
-        case_ids,
-        project_id,
-        batch_id=batch.id,
-        environment_id=req.environment_id,
-        init_case_ids=init_case_ids,
-    )
-
+    batch_id = batch.id
     user_id = getattr(user, "id", None)
-    if user_id:
-        background_tasks.add_task(notify_batch_completed, batch.id, user_id)
 
-    return {"batch_id": batch.id, "total": total, "started": total, "status": "running"}
+    async def _batch_and_notify() -> None:
+        try:
+            await _exec.run_batch_test_cases(
+                case_ids,
+                project_id,
+                batch_id=batch_id,
+                environment_id=req.environment_id,
+                init_case_ids=init_case_ids,
+            )
+        finally:
+            if user_id:
+                await notify_batch_completed(batch_id, user_id)
+
+    background_tasks.add_task(_batch_and_notify)
+
+    return {"batch_id": batch_id, "total": total, "started": total, "status": "running"}
 
 
 @router.post("/module/{module_id}/run")

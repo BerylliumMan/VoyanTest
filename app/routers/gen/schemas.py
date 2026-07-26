@@ -15,6 +15,8 @@ class GenStatusResponse(BaseModel):
     status: str  # pending / analyzing / completed / failed
     filename: str = ""
     error_message: str = ""
+    message: str = ""  # live progress text for UI stepper
+    progress: int = 0  # 0-100
     functional_points_count: int = 0
     test_cases_count: int = 0
 

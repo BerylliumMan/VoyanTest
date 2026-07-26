@@ -208,7 +208,7 @@ async def try_heal_and_retry(
 """
                 eval_result = await mcp_manager.call_tool(
                     "browser_evaluate",
-                    {"expression": test_js},
+                    {"function": test_js},
                 )
 
                 if eval_result.get("success") and "found" in eval_result.get("text", ""):

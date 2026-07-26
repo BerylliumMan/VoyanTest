@@ -75,6 +75,7 @@ async def create_session(
         url=url,
         page_title=page_title,
         status="recording",
+        start_time=time.time(),
         cdp_session_ref=cdp_session_ref,
     )
     async with _lock:
@@ -152,7 +153,10 @@ async def cleanup_stale_sessions() -> int:
     async with _lock:
         stale_ids = []
         for sid, state in list(_sessions.items()):
-            age = now - (state.start_time or now)
+            # start_time==0 视为未设置，用 now 避免 age 虚高立刻被清掉；
+            # 正常创建会话会写入真实时间戳。
+            started = state.start_time if state.start_time > 0 else now
+            age = now - started
 
             # Hard TTL exceeded
             if age > _SESSION_TTL_SECONDS:

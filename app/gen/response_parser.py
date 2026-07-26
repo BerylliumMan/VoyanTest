@@ -136,26 +136,153 @@ def _extract_json(text: str) -> str | None:
 
 
 def _normalize_fp_item(item: dict) -> dict:
-    """Normalize FP item field names (handle camelCase, snake_case, etc.)."""
+    """Normalize FP item field names (handle camelCase, snake_case, Chinese)."""
     normalized = {}
     field_map = {
-        "module": ["module", "module_name"],
-        "name": ["name", "function_name", "functionname", "function_name", "title"],
-        "description": ["description", "desc"],
-        "category": ["category", "cat"],
-        "priority": ["priority", "pri"],
+        "module": ["module", "module_name", "模块", "所属模块", "模块名"],
+        "name": ["name", "function_name", "functionname", "title", "功能点标题",
+                 "功能点", "功能名称", "标题", "名称"],
+        "description": ["description", "desc", "功能描述", "描述", "说明"],
+        "category": ["category", "cat", "分类"],
+        "priority": ["priority", "pri", "优先级"],
     }
     for target, candidates in field_map.items():
         for c in candidates:
-            val = item.get(c) or item.get(c.lower()) or item.get(c.title())
+            val = item.get(c)
+            if val is None:
+                # case-insensitive key match
+                for k, v in item.items():
+                    if str(k).strip().lower() == c.lower() and v:
+                        val = v
+                        break
             if val:
-                normalized[target] = val
+                normalized[target] = str(val).strip()
                 break
     return normalized
 
 
+def _split_md_table_row(line: str) -> list[str]:
+    """Split a markdown table row into cells (strip leading/trailing empty pipes)."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return [c.strip() for c in cells]
+
+
+def _is_md_separator_row(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    return all(re.match(r"^:?-+:?$", c.replace(" ", "")) for c in cells if c)
+
+
+def _map_fp_header_indexes(headers: list[str]) -> dict[str, int]:
+    """Map common Chinese/English FP table headers to field indexes."""
+    mapping: dict[str, int] = {}
+    aliases = {
+        "name": ("功能点标题", "功能点", "功能名称", "标题", "名称", "name", "title", "function"),
+        "description": ("功能描述", "描述", "说明", "description", "desc"),
+        "module": ("模块", "所属模块", "模块名", "module"),
+        "priority": ("优先级", "priority", "pri"),
+        "category": ("分类", "category", "cat"),
+    }
+    for i, h in enumerate(headers):
+        h_norm = re.sub(r"\s+", "", h.lower())
+        for field, names in aliases.items():
+            if field in mapping:
+                continue
+            for n in names:
+                if re.sub(r"\s+", "", n.lower()) in h_norm or h_norm in re.sub(r"\s+", "", n.lower()):
+                    mapping[field] = i
+                    break
+    return mapping
+
+
+def _parse_fps_from_markdown_tables(text: str, session_id: str = "") -> list[FunctionalPoint]:
+    """Parse FPs from markdown tables under module headings.
+
+    Supports outputs like::
+
+        ## 用户管理模块
+        | 序号 | 功能点标题 | 功能描述 | 优先级 |
+        | 1 | 用户注册 | ... | P0 |
+    """
+    fps: list[FunctionalPoint] = []
+    current_module = "通用"
+    header_map: dict[str, int] | None = None
+    skip_generic = {"功能点列表", "功能点清单", "概述", "目录", "说明"}
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        heading = re.match(r"^#{1,4}\s+(.+)$", line)
+        if heading:
+            title = heading.group(1).strip()
+            title = re.sub(r"^[\d.、]+\s*", "", title)
+            title = re.sub(r"[（(].*?[）)]\s*$", "", title).strip()
+            # "用户管理模块" / "P0 优先级" — keep module-like headings
+            if title and title not in skip_generic and "优先级" not in title:
+                current_module = title.replace("模块", "").strip() or title
+            header_map = None
+            continue
+
+        if not line.startswith("|"):
+            header_map = None
+            continue
+
+        cells = _split_md_table_row(line)
+        if not cells or _is_md_separator_row(cells):
+            continue
+
+        # Header row
+        if header_map is None:
+            mapped = _map_fp_header_indexes(cells)
+            if "name" in mapped or "description" in mapped:
+                header_map = mapped
+            continue
+
+        name_idx = header_map.get("name")
+        desc_idx = header_map.get("description")
+        mod_idx = header_map.get("module")
+        cat_idx = header_map.get("category")
+
+        # Skip pure index-only rows without name/desc
+        name = cells[name_idx].strip() if name_idx is not None and name_idx < len(cells) else ""
+        desc = cells[desc_idx].strip() if desc_idx is not None and desc_idx < len(cells) else ""
+        if not name and not desc:
+            continue
+        # If only one text column exists, treat first non-index cell as name
+        if not name:
+            for c in cells:
+                if c and not re.match(r"^\d+$", c) and c.upper() not in ("P0", "P1", "P2", "P3"):
+                    name = c
+                    break
+        if not name:
+            continue
+        # Skip header-like repeated rows
+        if name in ("功能点标题", "标题", "名称", "功能点"):
+            continue
+
+        module = current_module
+        if mod_idx is not None and mod_idx < len(cells) and cells[mod_idx].strip():
+            module = cells[mod_idx].strip()
+        category = "通用"
+        if cat_idx is not None and cat_idx < len(cells) and cells[cat_idx].strip():
+            category = cells[cat_idx].strip()
+
+        fps.append(FunctionalPoint(
+            id=len(fps) + 1,
+            session_id=session_id,
+            module=module or "通用",
+            name=name,
+            description=_clean_text(desc),
+            category=category,
+        ))
+
+    return fps
+
+
 def _parse_fps_from_text(text: str, session_id: str = "") -> list[FunctionalPoint]:
-    """Parse functional points — try JSON format first, fall back to markdown."""
+    """Parse functional points — JSON, then markdown tables, then bullet list."""
     json_str = _extract_json(text)
     if json_str:
         try:
@@ -168,6 +295,8 @@ def _parse_fps_from_text(text: str, session_id: str = "") -> list[FunctionalPoin
             if items:
                 fps = []
                 for i, item in enumerate(items):
+                    if not isinstance(item, dict):
+                        continue
                     fp = _normalize_fp_item(item)
                     if not fp.get("name"):
                         continue
@@ -178,36 +307,123 @@ def _parse_fps_from_text(text: str, session_id: str = "") -> list[FunctionalPoin
                         description=fp.get("description", ""),
                         category=fp.get("category", "通用"),
                     ))
-                return fps
+                if fps:
+                    return fps
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
-    # Fallback to markdown parsing
+
+    # Markdown tables under module headings (common minimax / zen output)
+    table_fps = _parse_fps_from_markdown_tables(text, session_id=session_id)
+    if table_fps:
+        return table_fps
+
+    # Fallback to bullet markdown parsing (- **【模块】名称**)
     tmp = AnalysisSession()
     tmp.session_id = session_id
     _parse_response(tmp, text)
     return tmp.functional_points
 
 
+def _coerce_text_field(value) -> str:
+    """Normalize LLM output fields to plain text for TestCase storage.
+
+    Lists become newline-delimited ``1. xxx`` items (space after marker) so that
+    later splitting won't break on numeric values like ``2.0``.
+    Empty list items are dropped here; callers that need index alignment should
+    use ``_listify_field`` + ``align_expected_to_steps`` first.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        parts: list[str] = []
+        for v in value:
+            p = str(v).strip()
+            if not p:
+                continue
+            p = re.sub(r"^\d+[\.、]\s*", "", p)
+            parts.append(f"{len(parts) + 1}. {p}")
+        return "\n".join(parts)
+    return str(value).strip()
+
+
+def _listify_field(value) -> list[str]:
+    """Convert steps/expected field to a list of plain strings (keep empties)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for v in value:
+            p = str(v).strip() if v is not None else ""
+            p = re.sub(r"^\d+[\.、]\s*", "", p)
+            out.append(p)
+        return out
+    from app.gen.adapter import split_numbered_items
+    return split_numbered_items(str(value))
+
+
+def _to_numbered_text(parts: list[str]) -> str:
+    """Join parts as ``1. xxx`` lines; keep empty slots for index alignment."""
+    return "\n".join(f"{i + 1}. {p}" for i, p in enumerate(parts))
+
+
 def _normalize_tc_item(item: dict) -> dict:
     """Normalize TC field names (handle Chinese, camelCase, snake_case)."""
+    from app.gen.adapter import align_expected_to_steps
+
     normalized = {}
     field_map = {
         "module":          ["module", "module_name", "所属模块", "模块", "module_name"],
         "title":           ["title", "name", "test_name", "用例标题", "测试标题", "标题",
                             "case_name", "caseName", "featureName", "feature_name", "functionName"],
         "preconditions":   ["preconditions", "precondition", "前置条件"],
-        "test_steps":      ["test_steps", "testSteps", "steps", "step", "测试步骤", "步骤",
-                            "test_step", "description", "desc"],
-        "expected_result": ["expected_result", "expectedResult", "expected", "预期结果", "预期", "expect"],
         "priority":        ["priority", "pri", "优先级", "level"],
     }
     for target, candidates in field_map.items():
         for c in candidates:
             val = item.get(c)
             if val:
-                normalized[target] = val
+                normalized[target] = (
+                    _coerce_text_field(val) if target == "preconditions" else val
+                )
                 break
-    # Fallback: when test_steps is set from description, copy to expected_result
+
+    # Pair steps/expected with right-align so shorter expected maps to trailing steps
+    steps_raw = None
+    expected_raw = None
+    for c in (
+        "test_steps", "testSteps", "steps", "step", "测试步骤", "步骤",
+        "test_step", "description", "desc",
+    ):
+        if item.get(c) is not None:
+            steps_raw = item.get(c)
+            break
+    for c in ("expected_result", "expectedResult", "expected", "预期结果", "预期", "expect"):
+        if item.get(c) is not None:
+            expected_raw = item.get(c)
+            break
+
+    steps = _listify_field(steps_raw)
+    # Drop trailing empty steps only; keep middle empties rare
+    while steps and not steps[-1]:
+        steps.pop()
+    expected = _listify_field(expected_raw)
+    if steps:
+        expected = align_expected_to_steps(steps, expected)
+        # Intermediate empty expected: fill with neutral observable default for UI exec
+        filled = []
+        for i, (s, e) in enumerate(zip(steps, expected)):
+            if e.strip():
+                filled.append(e)
+            elif i < len(steps) - 1:
+                filled.append("界面状态符合当前操作预期")
+            else:
+                filled.append(e)
+        expected = filled
+        normalized["test_steps"] = _to_numbered_text(steps)
+        normalized["expected_result"] = _to_numbered_text(expected)
+    elif expected:
+        normalized["expected_result"] = _to_numbered_text(expected)
+
     if normalized.get("test_steps") and not normalized.get("expected_result"):
         normalized["expected_result"] = normalized["test_steps"]
     return normalized

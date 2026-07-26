@@ -37,10 +37,21 @@ async def two_phase_analyze(
     project_description: str = "",
     prompts: dict = None,
     db = None,
+    agent_id: int | None = None,
+    skills: list | None = None,
+    tc_prompt_key: str | None = None,
 ) -> dict:
-    """Two-phase analysis using Pipeline."""
+    """Two-phase analysis using Pipeline (generation AgentDefinition)."""
     from app.gen.agents.pipeline import Pipeline
-    config = {"project_description": project_description, "db": db}
+    config = {
+        "project_description": project_description,
+        "db": db,
+        "agent_type": "generation",
+        "agent_id": agent_id,
+        "skills": skills or [],
+        "tc_prompt_key": tc_prompt_key,
+        "progress_callback": progress_callback,
+    }
     if prompts:
         config["prompts"] = prompts
     pipeline = Pipeline(config)

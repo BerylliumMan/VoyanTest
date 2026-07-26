@@ -181,10 +181,19 @@ async def _run_test_case_in_browser_impl(
         logger.info("Starting MCP execution: '%s'", case_data.name)
 
         steps_raw = await crud.get_steps_for_case(db, case_id)
-        step_list = [
-            {'id': s.id, 'step_order': s.step_order, 'description': s.description, 'expected_result': s.parsed_result}
-            for s in steps_raw
-        ]
+        step_list = []
+        for s in steps_raw:
+            desc = s.description or ""
+            healed = (getattr(s, "healed_selector", None) or "").strip()
+            if healed:
+                desc = f"{desc}（优先使用选择器: {healed}）"
+            step_list.append({
+                'id': s.id,
+                'step_order': s.step_order,
+                'description': desc,
+                'expected_result': s.parsed_result,
+                'healed_selector': healed or None,
+            })
         step_list.sort(key=lambda x: x['step_order'])
 
         if not step_list:
@@ -349,17 +358,19 @@ async def _run_test_case_in_browser_impl(
 
                     if healed:
                         logger.info(
-                            f"  🔧 自愈选择器生效: {step_dict['description']} → {healed}"
+                            f"  🔧 自愈选择器生效: {step_obj.description} → {healed}"
                         )
-                        # 更新步骤描述以使用修复后的选择器
-                        step_dict['description'] = healed
-                        # 持久化到数据库
+                        # 保留自然语言描述，只附加选择器提示供 LLM 优先定位
+                        step_dict['healed_selector'] = healed
+                        step_dict['description'] = (
+                            f"{step_obj.description}（优先使用选择器: {healed}）"
+                        )
                         try:
                             step_obj.healed_selector = healed
                             await db.commit()
                         except SQLAlchemyError as db_exc:
                             logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
-                        continue  # 用新选择器重试
+                        continue  # 用提示后的描述重试
                     elif attempt == 0 and not step_success and error_msg:
                         logger.debug("  跳过自愈（非定位错误）: %s", error_msg[:80])
                 attempt += 1

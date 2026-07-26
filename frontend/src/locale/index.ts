@@ -330,6 +330,7 @@ const i18n = {
     'agent_definitions.form.llm_config': 'LLM Config',
     'agent_definitions.form.is_active': 'Active',
     'agent_definitions.form.confirm_activate': 'Activating will deactivate other agents of the same type',
+    'agent_definitions.form.confirm_activate_generation': 'Generation agents can stay active together; pick one on the Gen page.',
     'agent_definitions.form.system_prompt': 'System Prompt',
     'agent_definitions.form.system_prompt_placeholder': 'Optional, leave empty to use default',
 
@@ -744,6 +745,7 @@ const i18n = {
     'agent_definitions.form.llm_config': 'LLM 配置',
     'agent_definitions.form.is_active': '活跃',
     'agent_definitions.form.confirm_activate': '激活后将降活同类型其他 Agent',
+    'agent_definitions.form.confirm_activate_generation': '生成类 Agent 可同时启用多个，在「AI 用例生成」页按用途选择即可。',
     'agent_definitions.form.system_prompt': '系统提示词',
     'agent_definitions.form.system_prompt_placeholder': '可选项，留空则使用默认系统提示词',
 

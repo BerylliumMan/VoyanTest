@@ -17,6 +17,8 @@ class AnalysisSession:
     upload_time: datetime = field(default_factory=datetime.now)
     status: str = "pending"
     error_message: str = ""
+    progress: int = 0
+    progress_message: str = ""
     project_description: str = ""
     filenames: list = field(default_factory=list)
     completed_at: Optional[datetime] = None

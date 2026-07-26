@@ -63,16 +63,19 @@ async def _record_batch_case_failure(
 async def _should_use_agent_runner(agent_def) -> bool:
     """检查是否满足使用 AgentRunner OTA 循环的条件。
 
-    条件：
-    - agent_def 存在且为非 None
-    - agent_def.tools 为非空列表，且至少包含一个启用的工具
+    条件（须全部满足，避免「配了 tools 就绕过用例步骤」）：
+    - agent_def 存在
+    - skills 显式包含 ``agent_runner`` 或 ``ota``
+    - tools 为非空列表，且至少包含一个启用的工具
     """
     if agent_def is None:
+        return False
+    skills = getattr(agent_def, "skills", None) or []
+    if not any(s in skills for s in ("agent_runner", "ota")):
         return False
     tools = getattr(agent_def, "tools", None)
     if not tools:
         return False
-    # tools 是 list[dict]，检查是否有至少一个 enabled 不为 False 的工具
     enabled_count = sum(
         1 for t in tools
         if isinstance(t, dict) and t.get("enabled", True) is not False
@@ -88,19 +91,13 @@ async def run_test_case_via_agent(
     *,
     llm_client=None,
     base_url: str | None = None,
+    batch_id: int | None = None,
+    run_id: int | None = None,
 ) -> dict | None:
     """使用 AgentRunner OTA 循环执行单条测试用例。
 
     该函数替代 run_test_case_in_browser，通过 AgentRunner 让 LLM 自主
-    规划并执行直到目标达成，而非逐步骤翻译执行。
-
-    Args:
-        case_id: 测试用例 ID
-        mcp_manager: 已启动的 PlaywrightMCPManager 实例
-        db: SQLAlchemy AsyncSession（用于查询用例信息并创建 agent_run 记录）
-        agent_def: 已查询到的激活执行 AgentDefinition
-        llm_client: 预创建的 AsyncOpenAI 客户端（批量时可复用，避免重复创建）
-        base_url: 目标应用基础 URL
+    规划并执行；目标描述会包含用例步骤，并写入 TestRun / 批次计数。
 
     Returns:
         执行结果字典，或 None（表示 AgentRunner 路径不可用）
@@ -108,7 +105,7 @@ async def run_test_case_via_agent(
     if not await _should_use_agent_runner(agent_def):
         return None
 
-    # 获取测试用例信息，构造目标描述
+    start_time = tz_now()
     goal_text = str(agent_def.goal or "执行测试用例")
     try:
         tc = await crud.get_test_case(db, case_id)
@@ -116,16 +113,23 @@ async def run_test_case_via_agent(
             goal_text = f"测试用例: {tc.name}"
             if tc.description:
                 goal_text += f"\n描述: {tc.description}"
+            steps = list(getattr(tc, "steps", None) or [])
+            steps.sort(key=lambda s: getattr(s, "step_order", 0) or 0)
+            if steps:
+                goal_text += "\n\n请严格按以下测试步骤执行（可观测预期写在括号内）："
+                for s in steps:
+                    line = f"\n{getattr(s, 'step_order', '?')}. {getattr(s, 'description', '') or ''}"
+                    expected = (getattr(s, "parsed_result", None) or "").strip()
+                    if expected:
+                        line += f"（预期: {expected}）"
+                    goal_text += line
     except Exception as exc:
         logger.warning("查询测试用例 %s 信息失败: %s", case_id, exc)
 
-    # 创建 LLM 客户端（如未预创建）
-    client_owned = False
     if llm_client is None:
         try:
             llm_client = await create_openai_client(agent_type="execution")
-            client_owned = True
-        except Exception as exc:
+        except Exception:
             logger.exception("无法创建 AgentRunner LLM 客户端")
             return None
 
@@ -139,7 +143,6 @@ async def run_test_case_via_agent(
         base_url=base_url,
     )
 
-    # 创建 agent_run 记录
     from app.crud.agent_run import create_agent_run, update_agent_run_status
     from app.models.schemas import AgentRunCreate
 
@@ -148,14 +151,11 @@ async def run_test_case_via_agent(
         case_id=case_id,
         goal={"goal": goal_text, "case_id": case_id},
     ))
-
-    # 更新状态为 running
     await update_agent_run_status(db, run.id, "running")
 
-    # 执行 OTA 循环
     try:
         ota_result = await runner.run()
-    except Exception as exc:  # noqa: BLE001 - AgentRunner 内部已做错误处理，但兜底
+    except Exception as exc:  # noqa: BLE001
         logger.exception("AgentRunner 执行异常 (case_id=%s)", case_id)
         ota_result = {
             "status": "error",
@@ -164,7 +164,6 @@ async def run_test_case_via_agent(
             "result": None,
         }
 
-    # 更新 agent_run 记录
     final_status = ota_result.get("status", "failed")
     await update_agent_run_status(
         db, run.id, final_status,
@@ -173,10 +172,40 @@ async def run_test_case_via_agent(
         error=ota_result.get("error"),
     )
 
+    case_status = (
+        "passed"
+        if final_status in ("success", "passed", "completed", "ok")
+        else "failed"
+    )
+    end_time = tz_now()
+    logs = [{
+        "step_id": None,
+        "level": "INFO" if case_status == "passed" else "ERROR",
+        "message": (
+            f"AgentRunner 完成: status={final_status}, "
+            f"turns={ota_result.get('turns_used', 0)}"
+            + (f", error={ota_result.get('error')}" if ota_result.get("error") else "")
+        ),
+        "screenshot_path": None,
+    }]
+    try:
+        saved_run_id = await save_run_results(
+            case_id, case_status, start_time, end_time,
+            (end_time - start_time).total_seconds(),
+            None, None, logs,
+            batch_id=batch_id,
+            run_id=run_id,
+        )
+    except Exception:
+        logger.exception("AgentRunner 写入 TestRun 失败 case_id=%s", case_id)
+        saved_run_id = run_id
+
     return {
         "case_id": case_id,
-        "status": final_status,
+        "status": case_status,
         "agent_run_id": run.id,
+        "run_id": saved_run_id,
+        "batch_id": batch_id,
         "turns_used": ota_result.get("turns_used", 0),
         "result": ota_result.get("result"),
         "error": ota_result.get("error"),
@@ -188,10 +217,17 @@ async def run_test_case_via_agent(
 # ---------------------------------------------------------------------------
 
 
-async def run_test_case(case_id: int, batch_id: int | None = None, environment_id: int | None = None, debug_mode: bool = False):
+async def run_test_case(
+    case_id: int,
+    batch_id: int | None = None,
+    environment_id: int | None = None,
+    debug_mode: bool = False,
+    run_id: int | None = None,
+):
     """Execute a test case using LLM + Playwright MCP (npx subprocess).
 
     Backward-compatible wrapper that creates its own PlaywrightMCPManager.
+    ``run_id`` 用于调试模式等已预创建 TestRun 的场景，保证 WS 广播 id 一致。
     """
     from core.playwright_manager import PlaywrightMCPManager
 
@@ -213,12 +249,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
     start_time = tz_now()
     try:
         await mcp_manager.start()
-    except Exception as exc:  # noqa: BLE001 - 见下方注释
-        # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
-        # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
-        # Failures can surface as OSError (subprocess), ConnectionError, or
-        # asyncio.TimeoutError — any of them must be reported as a clean
-        # "browser startup failed" so the run results stay consistent.
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to start MCP manager for case %s", case_id)
         await save_run_results(
             case_id, "failed", start_time, tz_now(),
@@ -231,6 +262,7 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
                 "screenshot_path": None,
             }],
             batch_id=batch_id,
+            run_id=run_id,
         )
         try:
             await mcp_manager.stop()
@@ -239,7 +271,6 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
         return {"case_id": case_id, "status": "failed", "error": str(exc)}
 
     try:
-        # ── AgentRunner 分发（T013）─────────────────────────────────────────
         try:
             from app.crud.agent_definition import get_active_by_type as _get_active
         except Exception:
@@ -254,16 +285,26 @@ async def run_test_case(case_id: int, batch_id: int | None = None, environment_i
 
         if await _should_use_agent_runner(_agent_def):
             async with AsyncSessionLocal() as _agent_db:
-                result = await run_test_case_via_agent(case_id, mcp_manager, _agent_db, _agent_def, base_url=base_url_override)
+                result = await run_test_case_via_agent(
+                    case_id, mcp_manager, _agent_db, _agent_def,
+                    base_url=base_url_override,
+                    batch_id=batch_id,
+                    run_id=run_id,
+                )
             logger.info("AgentRunner 完成 case_id=%s status=%s", case_id, (result or {}).get("status", "N/A"))
             if result is None:
-                await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
+                await run_test_case_in_browser(
+                    case_id, mcp_manager,
+                    batch_id=batch_id, run_id=run_id,
+                    base_url_override=base_url_override, debug_mode=debug_mode,
+                )
         else:
-            await run_test_case_in_browser(case_id, mcp_manager, batch_id=batch_id, base_url_override=base_url_override, debug_mode=debug_mode)
-    except Exception:  # noqa: BLE001 - 见下方注释
-        # Broad catch is necessary: run_test_case_in_browser touches DB, MCP
-        # stdio, LLM HTTP, JSON parsing, and assertions. Any unhandled error
-        # must be logged so the batch can still proceed to cleanup.
+            await run_test_case_in_browser(
+                case_id, mcp_manager,
+                batch_id=batch_id, run_id=run_id,
+                base_url_override=base_url_override, debug_mode=debug_mode,
+            )
+    except Exception:  # noqa: BLE001
         logger.exception("Unhandled error in run_test_case_in_browser for case %s", case_id)
     finally:
         try:
@@ -418,9 +459,10 @@ async def run_batch_test_cases(
                         case_id, mcp_manager, batch_db, agent_def,
                         llm_client=agent_llm_client,
                         base_url=base_url_override,
+                        batch_id=batch_id,
+                        run_id=_rid,
                     )
                     if result is None:
-                        # AgentRunner 返回 None 表示不可用，回退传统模式
                         result = await run_test_case_in_browser(
                             case_id, mcp_manager, db=batch_db, clear_cookies=False,
                             batch_id=batch_id, run_id=_rid,
@@ -436,11 +478,7 @@ async def run_batch_test_cases(
                     )
                 results.append(result)
                 logger.info("Batch init-case %s finished: %s", case_id, result['status'])
-            except Exception as exc:  # noqa: BLE001 - 见下方注释
-                # Broad catch is necessary: run_test_case_in_browser touches DB,
-                # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
-                # unhandled error must be recorded on the pre-created TestRun
-                # row so the report page stays consistent.
+            except Exception as exc:  # noqa: BLE001
                 logger.exception("Batch init-case %s failed", case_id)
                 await _record_batch_case_failure(
                     batch_db, precreated_run_ids, case_id, batch_id,
@@ -457,9 +495,10 @@ async def run_batch_test_cases(
                         case_id, mcp_manager, batch_db, agent_def,
                         llm_client=agent_llm_client,
                         base_url=base_url_override,
+                        batch_id=batch_id,
+                        run_id=_rid,
                     )
                     if result is None:
-                        # AgentRunner 返回 None 表示不可用，回退传统模式
                         result = await run_test_case_in_browser(
                             case_id, mcp_manager, db=batch_db, clear_cookies=False,
                             batch_id=batch_id, run_id=_rid,
