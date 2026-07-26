@@ -513,11 +513,32 @@ class AgentClient:
             return {"success": False, "error": "MCP tool call timed out"}
 
     async def _mcp_screenshot_base64(self) -> Optional[str]:
-        """Take a screenshot via MCP and return base64-encoded PNG."""
+        """Take a screenshot via MCP and return base64-encoded PNG.
+
+        截图仅用于回传服务端落盘；客户端临时文件会尽量清理。
+        """
+        tmp_name = f"_fail_{int(time.time() * 1000)}.png"
+        tmp_paths: list[Path] = []
         try:
-            result = await self._mcp_call_tool("screenshot", "", f"_fail_{int(time.time())}.png")
-            # 即使 MCP 标记失败，仍尝试从 content / 落盘路径提取图片
-            b64 = self._extract_screenshot_base64(result.get("_content", []) or [])
+            result = await self._mcp_call_tool("screenshot", "", tmp_name)
+            content = result.get("_content", []) or []
+            # 记录 MCP 可能落盘的路径，便于回传后清理
+            for c in content:
+                if not isinstance(c, dict) or c.get("type") != "text":
+                    continue
+                text = c.get("text", "")
+                for prefix in ("Screenshot saved to:", "Saved to:"):
+                    if prefix in text:
+                        path = text.split(prefix)[-1].strip().split("\n")[0].strip()
+                        if path:
+                            tmp_paths.append(Path(path))
+                m = re.search(r'\[Screenshot of full page\]\(([^)]+)\)', text)
+                if m:
+                    tmp_paths.append(Path(m.group(1)))
+            # 也尝试 cwd 下的临时文件名
+            tmp_paths.append(Path(tmp_name))
+
+            b64 = self._extract_screenshot_base64(content)
             if b64:
                 return b64
             if not result.get("success"):
@@ -529,6 +550,13 @@ class AgentClient:
         except Exception as exc:
             logger.warning(f"MCP screenshot failed: {exc}")
             return None
+        finally:
+            for p in tmp_paths:
+                try:
+                    if p.exists() and p.is_file():
+                        p.unlink()
+                except OSError:
+                    pass
 
     @staticmethod
     def _extract_screenshot_base64(content: list) -> Optional[str]:
