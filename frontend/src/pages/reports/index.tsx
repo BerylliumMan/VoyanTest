@@ -230,12 +230,15 @@ const Reports: React.FC = () => {
 
   const handleExport = async (batchId: number, batchName: string) => {
     try {
-      const res = await axios.get(`/api/reports/batches/${batchId}`);
-      const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
+      const res = await axios.get(`/api/reports/batches/${batchId}/export`, {
+        responseType: 'blob',
+      });
+      const blob = new Blob([res.data], { type: 'text/html;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `report_${batchName || batchId}.json`;
+      const safeName = (batchName || String(batchId)).replace(/[\\/:*?"<>|]+/g, '_');
+      a.download = `report_${safeName}.html`;
       a.click();
       URL.revokeObjectURL(url);
     } catch { Message.error(t['export.failed']); }

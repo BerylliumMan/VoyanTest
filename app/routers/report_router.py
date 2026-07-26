@@ -11,7 +11,7 @@ import logging
 import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
@@ -24,6 +24,7 @@ from ..auth import require_admin, get_current_user, get_user_project_filter
 from .. import crud
 from ..services import ReportService
 from ..services.report import BatchNotFound, ProjectAccessDenied
+from ..services.report_html import render_batch_report_html
 
 logger = logging.getLogger(__name__)
 
@@ -401,17 +402,24 @@ async def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_a
 
 
 @router.get("/batches/{batch_id}/export")
-async def export_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> JSONResponse:
-    """导出批次报告为 JSON 文件"""
+async def export_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> HTMLResponse:
+    """导出批次报告为可离线打开的静态 HTML 文件。"""
     try:
         detail = await ReportService.export_batch_report(db, batch_id, user)
     except BatchNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    filename = f"batch_{batch_id}_{tz_now().strftime('%Y%m%d_%H%M%S')}.json"
-    response = JSONResponse(content=detail)
-    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return response
+    html = await asyncio.to_thread(render_batch_report_html, detail)
+    filename = f"batch_{batch_id}_{tz_now().strftime('%Y%m%d_%H%M%S')}.html"
+    # RFC 5987 文件名，兼容中文批次名场景
+    safe_ascii = filename.encode("ascii", "ignore").decode("ascii") or f"batch_{batch_id}.html"
+    return HTMLResponse(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_ascii}"',
+        },
+    )
 
 
 @router.delete("/batches/{batch_id}")
