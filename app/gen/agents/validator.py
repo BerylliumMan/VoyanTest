@@ -50,7 +50,12 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     # 预解析 expected_result（支持编号格式："1.结果1 2.结果2"，或无编号的纯文本）
     # 注意：编号可能跳过中间步骤（如仅 "3.保存成功"），解析后需要右对齐
     _er_raw = tc.get("expected_result") or tc.get("test_steps") or ""
-    _er_parts = [p.strip() for p in re.split(r'\d+\.\s*', _er_raw.strip()) if p.strip()]
+    if isinstance(_er_raw, list):
+        _er_raw = " ".join(str(v) for v in _er_raw if v)
+    if isinstance(_er_raw, str):
+        _er_parts = [p.strip() for p in re.split(r'\d+\.\s*', _er_raw.strip()) if p.strip()]
+    else:
+        _er_parts = []
 
     # Check 2: At least one step（支持 test_steps 字符串字段）
     steps = tc.get("steps") or tc.get("test_steps") or []
@@ -110,10 +115,18 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     else:
         result.pass_check("module_required")
 
-    # Check 6: Priority is valid — 支持中文（高/中/低）和英文（P0-P3）格式
+    # Check 6: Priority is valid — 支持中文（高/中/低）和英文（P0-P3）格式，允许拼接值（如 P0/P1/P2）
     priority = tc.get("priority") or "P2"
+    # Split combined priorities like "P0/P1/P2" and check the first valid part
+    pri_parts = [p.strip() for p in priority.replace(",", "/").split("/")]
+    valid = False
     valid_priorities = ("P0", "P1", "P2", "P3", "高", "中", "低", "HIGH", "MEDIUM", "LOW")
-    if priority.upper() not in {p.upper() for p in valid_priorities}:
+    valid_upper = {p.upper() for p in valid_priorities}
+    for part in pri_parts:
+        if part.upper() in valid_upper:
+            valid = True
+            break
+    if not valid:
         result.fail("priority_invalid", f"优先级 '{priority}' 不是有效值（P0/P1/P2/P3 或 高/中/低）")
     else:
         result.pass_check("priority_invalid")
