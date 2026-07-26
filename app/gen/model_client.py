@@ -105,7 +105,7 @@ async def call_model(messages: list, temperature: float | None = None, stream_ca
         "model": model_name,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": min(config.get('max_context_tokens', 131072) // 5, 8192),
+        "max_tokens": min(config.get('max_context_tokens', 131072) // 3, 16384),
     }
 
     if stream_callback:

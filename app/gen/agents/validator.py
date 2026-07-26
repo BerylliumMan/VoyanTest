@@ -47,13 +47,29 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     else:
         result.pass_check("title_required")
 
+    # 预解析 expected_result（支持编号格式："1.结果1 2.结果2"，或无编号的纯文本）
+    # 注意：编号可能跳过中间步骤（如仅 "3.保存成功"），解析后需要右对齐
+    _er_raw = tc.get("expected_result") or tc.get("test_steps") or ""
+    _er_parts = [p.strip() for p in re.split(r'\d+\.\s*', _er_raw.strip()) if p.strip()]
+
     # Check 2: At least one step（支持 test_steps 字符串字段）
     steps = tc.get("steps") or tc.get("test_steps") or []
     if isinstance(steps, str):
-        steps = [s.strip() for s in steps.replace("\\n", "\n").split("\n") if s.strip()]
-        steps = [{"description": s, "action": "", "expected": tc.get("expected_result", "")} for s in steps]
-        if not steps:
-            steps = [{"description": tc.get("test_steps", ""), "action": "", "expected": tc.get("expected_result", "")}]
+        # 用编号拆分 steps（"1. step1 2. step2" → ["step1", "step2"]），兼容无编号的纯描述
+        parts = re.split(r'\d+\.\s*', steps.strip())
+        steps = [p.strip() for p in parts if p.strip()] or [steps.strip()]
+
+    # 右对齐 _er_parts：如果预期结果少于步骤，优先匹配末尾步骤
+    _er_padded = _er_parts[:len(steps)]  # 截断多余的
+    if len(_er_padded) < len(steps):
+        _er_padded = [''] * (len(steps) - len(_er_padded)) + _er_padded  # 右对齐
+
+    if isinstance(steps, list) and all(isinstance(s, str) for s in steps):
+        # 如果 steps 是字符串列表（从没进入 string 拆分的路径），转为 dict
+        steps = [
+            {"description": s, "action": "", "expected": _er_padded[i] if i < len(_er_padded) else ""}
+            for i, s in enumerate(steps)
+        ]
     if not isinstance(steps, list):
         result.fail("steps_required", "steps 必须是数组")
     elif len(steps) < 1:
@@ -64,7 +80,7 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     # Check 3: Each step has description and valid action
     for i, step in enumerate(steps):
         if isinstance(step, str):
-            step = {"description": step, "action": "", "expected": tc.get("expected_result", "")}
+            step = {"description": step, "action": "", "expected": _er_padded[i] if i < len(_er_padded) else ""}
             steps[i] = step
         desc = (step.get("description") or step.get("desc") or "").strip()
         if not desc:

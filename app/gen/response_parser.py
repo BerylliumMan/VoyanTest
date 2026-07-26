@@ -107,7 +107,12 @@ def _extract_json(text: str) -> str | None:
     if m:
         candidate = m.group(1).strip()
         if candidate.startswith("[") or candidate.startswith("{"):
-            return candidate
+            try:
+                decoder = json.JSONDecoder()
+                obj, _ = decoder.raw_decode(candidate)
+                return json.dumps(obj, ensure_ascii=False)
+            except (json.JSONDecodeError, ValueError):
+                pass
     # No code block found or content inside block not JSON, scan raw text
     cleaned = text.strip()
     brace = cleaned.find("{")
@@ -121,13 +126,12 @@ def _extract_json(text: str) -> str | None:
         start = bracket
     if start >= 0:
         candidate = cleaned[start:].strip()
-        # Use raw_decode to handle trailing text
         try:
             decoder = json.JSONDecoder()
             obj, _ = decoder.raw_decode(candidate)
             return json.dumps(obj, ensure_ascii=False)
         except (json.JSONDecodeError, ValueError):
-            return candidate
+            pass
     return None
 
 

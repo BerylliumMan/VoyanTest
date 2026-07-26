@@ -7,6 +7,8 @@ preview endpoint serializes in full.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -27,19 +29,25 @@ async def get_status(session_id: str, user=Depends(get_current_user),
     async with _lock:
         session = _sessions.get(session_id)
     if not session:
-        stmt = select(GenSession).where(GenSession.id == session_id)
-        result = await db.execute(stmt)
-        row = result.scalar_one_or_none()
-        if not row:
-            raise HTTPException(404, "Session not found")
-        return GenStatusResponse(
-            session_id=session_id,
-            status=row.status or "analyzing",
-            filename=row.filename or "",
-            error_message=row.error_message or "",
-            functional_points_count=row.functional_points_count or 0,
-            test_cases_count=row.test_cases_count or 0,
-        )
+        try:
+            stmt = select(GenSession).where(GenSession.id == session_id)
+            result = await db.execute(stmt)
+            row = result.scalar_one_or_none()
+            if not row:
+                raise HTTPException(404, "Session not found")
+            return GenStatusResponse(
+                session_id=session_id,
+                status=row.status or "analyzing",
+                filename=row.filename or "",
+                error_message=row.error_message or "",
+                functional_points_count=row.functional_points_count or 0,
+                test_cases_count=row.test_cases_count or 0,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("DB fallback failed")
+            raise HTTPException(500, f"DB error: {e}") from e
     return GenStatusResponse(
         session_id=session.session_id,
         status=session.status,
