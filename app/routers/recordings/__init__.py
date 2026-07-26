@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 
 import openai
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -373,6 +373,9 @@ async def get_recorded_events(
         import json
         return [RecordedEventResponse(**e) for e in json.loads(_rec.events_data)]
 
+    if state.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     cdp_session = state.cdp_session_ref
     get_events = getattr(cdp_session, "get_events", None) if cdp_session else None
     if get_events is None:
@@ -381,7 +384,6 @@ async def get_recorded_events(
     try:
         raw_events = get_events()
     except (RuntimeError, ConnectionError, AttributeError) as exc:
-        # AttributeError: get_events 内部状态被破坏；其他为 CDP 连接错误
         logger.warning(
             "读取录制事件失败 (session_id=%s): %s", session_id, exc
         )
@@ -390,19 +392,51 @@ async def get_recorded_events(
     return [RecordedEventResponse(**e.to_dict()) for e in raw_events]
 
 
+async def _load_recording_event_dicts(session_id: str, state, db: AsyncSession | None = None) -> list[dict]:
+    """非破坏性读取录制事件：优先内存 get_events，其次 DB events_data。"""
+    import json
+
+    cdp_session = getattr(state, "cdp_session_ref", None)
+    get_events = getattr(cdp_session, "get_events", None) if cdp_session else None
+    if get_events is not None:
+        try:
+            events = get_events()
+            if events:
+                return [e.to_dict() if hasattr(e, "to_dict") else e for e in events]
+        except (RuntimeError, ConnectionError, AttributeError) as exc:
+            logger.warning("get_events 失败 (session_id=%s): %s", session_id, exc)
+
+    async def _from_db(session: AsyncSession) -> list[dict]:
+        result = await session.execute(
+            select(db_models.RecordingSession).where(
+                db_models.RecordingSession.session_id == session_id
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row and row.events_data:
+            data = json.loads(row.events_data) if isinstance(row.events_data, str) else row.events_data
+            if isinstance(data, list) and data:
+                return data
+        return []
+
+    try:
+        if db is not None:
+            return await _from_db(db)
+        async with AsyncSessionLocal() as session:
+            return await _from_db(session)
+    except Exception:
+        logger.warning("从 DB 读取录制事件失败 session_id=%s", session_id, exc_info=True)
+    return []
+
+
 @router.post("/{session_id}/convert", response_model=ConvertResponse)
 async def convert_to_test_steps(
     req: ConvertRequest,
     session_id: str,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
 ) -> ConvertResponse:
-    """Collect the recorded events and convert them into test steps via LLM.
-
-    The events buffer is **drained** here (``collect_events`` semantics), so
-    calling :func:`convert` more than once on the same session will see an
-    empty event list after the first call.
-    """
-    # 请求体里也带 session_id；优先用 path 参数的，校验二者一致。
+    """读取录制事件并转换为测试步骤（不 drain 内存缓冲，可重复转换）。"""
     if req.session_id and req.session_id != session_id:
         raise HTTPException(
             status_code=400,
@@ -413,43 +447,38 @@ async def convert_to_test_steps(
         )
 
     state = await get_session(session_id)
-    if state is None:
-        raise HTTPException(
-            status_code=404, detail=f"录制会话不存在: {session_id}"
-        )
-    if state.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    cdp_session = state.cdp_session_ref
-    collect_events = getattr(cdp_session, "collect_events", None) if cdp_session else None
-    if collect_events is None:
-        events = []
+    page_title = ""
+    if state is not None:
+        if state.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Session not found")
+        page_title = state.page_title or ""
+        event_dicts = await _load_recording_event_dicts(session_id, state, db)
     else:
-        try:
-            events = collect_events()
-        except (RuntimeError, ConnectionError, AttributeError) as exc:
-            # AttributeError: collect_events 内部状态被破坏；其他为 CDP 连接错误
-            logger.warning(
-                "collect_events 失败 (session_id=%s): %s", session_id, exc
+        # 历史会话：仅内存已清理时从 DB 读取
+        result = await db.execute(
+            select(db_models.RecordingSession).where(
+                db_models.RecordingSession.session_id == session_id
             )
-            events = []
-
-    event_dicts = [e.to_dict() for e in events]
+        )
+        row = result.scalar_one_or_none()
+        if row is None or (row.user_id is not None and row.user_id != user.id):
+            raise HTTPException(status_code=404, detail=f"录制会话不存在: {session_id}")
+        page_title = row.page_title or ""
+        event_dicts = await _load_recording_event_dicts(session_id, type("S", (), {"cdp_session_ref": None})(), db)
 
     if not event_dicts:
         return ConvertResponse(
             session_id=session_id,
-            page_title=state.page_title,
+            page_title=page_title,
             steps=[],
             events_count=0,
         )
     try:
         raw_steps = await convert_events_to_steps(
             events=event_dicts,
-            page_title=state.page_title or "",
+            page_title=page_title or "",
         )
     except (openai.OpenAIError, asyncio.TimeoutError, OSError, ValueError) as exc:
-        # OpenAI SDK 错误 / 异步超时 / 网络层错误 / 解析错误
         logger.exception(
             "CDP 事件 → 测试步骤 转换失败 (session_id=%s)", session_id,
         )
@@ -474,67 +503,97 @@ async def convert_to_test_steps(
 
     return ConvertResponse(
         session_id=session_id,
-        page_title=state.page_title,
+        page_title=page_title,
         steps=steps,
         events_count=len(event_dicts),
     )
 
 
-__all__ = ["router"]
-
-
 @router.post("/{session_id}/replay")
 async def replay_recording(
     session_id: str,
+    background_tasks: BackgroundTasks,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
-    """把录制内容转为测试步骤后，直接提交运行。"""
+    """把录制转为临时用例并真正提交执行。"""
     state = await get_session(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="录制会话不存在")
-    if state.user_id != user.id:
+    if state is not None and state.user_id != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    cdp_session = state.cdp_session_ref
-    collect = getattr(cdp_session, "collect_events", None) if cdp_session else None
-    events = collect() if collect else []
-    event_dicts = [e.to_dict() for e in events]
+    if state is not None:
+        event_dicts = await _load_recording_event_dicts(session_id, state, db)
+        page_title = state.page_title or ""
+    else:
+        result = await db.execute(
+            select(db_models.RecordingSession).where(
+                db_models.RecordingSession.session_id == session_id
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None or (row.user_id is not None and row.user_id != user.id):
+            raise HTTPException(status_code=404, detail="录制会话不存在")
+        page_title = row.page_title or ""
+        event_dicts = await _load_recording_event_dicts(
+            session_id, type("S", (), {"cdp_session_ref": None})(), db,
+        )
 
     if not event_dicts:
         raise HTTPException(status_code=400, detail="没有录制事件")
 
     try:
         raw_steps = await convert_events_to_steps(
-            events=event_dicts, page_title=state.page_title or "",
+            events=event_dicts, page_title=page_title,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"LLM 转换失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"LLM 转换失败: {exc}") from exc
 
     if not raw_steps:
         raise HTTPException(status_code=400, detail="转换后步骤为空")
 
-    # 查找用户第一个可用项目作为录制回放的项目归属
-    from app.crud import project as project_crud
-    user_projects = await project_crud.get_projects_for_user(db, user.id)
+    allowed_ids = get_user_project_filter(user)
+    user_projects = await crud.list_projects_for_user(db, allowed_ids)
     if not user_projects:
         raise HTTPException(status_code=400, detail="当前用户没有可用的项目，无法回放录制")
     target_project = user_projects[0]
-    from core.runner import save_run_results
 
-    batch = await crud.create_run_batch(db, project_id=target_project.id, total_cases=1, triggered_by=getattr(user, 'username', None))
-    _ = await save_run_results(
-        case_id=0, status="running",
-        start_time=datetime.utcnow(), end_time=datetime.utcnow(),
-        duration=0.0, report_path=None, log_path=None,
-        logs=[], batch_id=batch.id,
+    tc = db_models.TestCase(
+        project_id=target_project.id,
+        module_id=None,
+        name=f"录制回放-{session_id[:8]}-{datetime.utcnow().strftime('%H%M%S')}",
+        description=f"由录制会话 {session_id} 自动生成",
     )
+    db.add(tc)
+    await db.flush()
+    for i, s in enumerate(raw_steps):
+        db.add(db_models.TestStep(
+            case_id=tc.id,
+            step_order=i + 1,
+            description=str(s.get("step_description", "") or "").strip(),
+            parsed_result=str(s.get("expected_result", "") or "").strip(),
+        ))
+    batch = await crud.create_run_batch(
+        db, project_id=target_project.id, total_cases=1,
+        triggered_by=getattr(user, "username", None),
+    )
+    await db.commit()
+    await db.refresh(tc)
+
+    case_id = tc.id
+    batch_id = batch.id
+    from app.routers.testcase import execution as _exec
+
+    background_tasks.add_task(_exec.run_test_case, case_id, batch_id)
 
     return {
         "message": "录制回放已启动",
-        "batch_id": batch.id,
+        "batch_id": batch_id,
+        "case_id": case_id,
         "steps_count": len(raw_steps),
     }
+
+
+__all__ = ["router"]
 
 
 @router.post("/save-as-case", response_model=SaveAsCaseResponse)

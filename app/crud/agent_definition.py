@@ -66,6 +66,10 @@ async def create_agent_definition(
     return db_obj
 
 
+# generation 允许多个同时启用（功能用例 / UI 自动化）；execution/recording 仍互斥
+_EXCLUSIVE_ACTIVE_TYPES = frozenset({"execution", "recording"})
+
+
 async def update_agent_definition(
     db: AsyncSession, id: int, data: AgentDefinitionUpdate
 ) -> db_models.AgentDefinition | None:
@@ -73,8 +77,9 @@ async def update_agent_definition(
 
     特殊规则：
     1. 若 is_active=True 且 agent_type 发生变更，强制 is_active=False（安全阀）
-    2. is_active 互斥：设置 is_active=True 前，先将同类型其他记录置 0
-    3. 以上两个操作在同一事务中原子执行
+    2. is_active 互斥：仅 execution / recording 在激活时关闭同类型其他项；
+       generation 可同时启用多个（由生成页按 agent_id 选择）
+    3. 以上操作在同一事务中原子执行
     """
     db_obj = await get_agent_definition(db, id)
     if db_obj is None:
@@ -98,8 +103,8 @@ async def update_agent_definition(
         )
         new_is_active = False
 
-    # 规则 2：同一事务内先关闭同类所有其他激活项
-    if new_is_active:
+    # 规则 2：execution/recording 互斥；generation 允许多活跃
+    if new_is_active and new_agent_type in _EXCLUSIVE_ACTIVE_TYPES:
         await db.execute(
             update(db_models.AgentDefinition)
             .where(

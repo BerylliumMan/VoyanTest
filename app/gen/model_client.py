@@ -29,18 +29,29 @@ def invalidate_ai_config_cache():
     _ai_config_cache = None
 
 
-async def _load_ai_config(force_refresh: bool = False, agent_type: str | None = None) -> dict:
+async def _load_ai_config(
+    force_refresh: bool = False,
+    agent_type: str | None = None,
+    agent_id: int | None = None,
+) -> dict:
     """Load AI config from DB（首次加载后缓存，避免跨事件循环访问 AsyncSessionLocal）。
 
-    若指定 agent_type，优先从 AgentDefinition 获取 overrides。
+    若指定 agent_type / agent_id，优先从 AgentDefinition 获取 overrides。
     """
-    if agent_type:
+    if agent_type or agent_id is not None:
         try:
             from app.agent_resolver import resolve_agent_config
             from app.database import AsyncSessionLocal
             async with AsyncSessionLocal() as db:
-                agent_cfg = await resolve_agent_config(db, agent_type)
-            if agent_cfg and agent_cfg.get('api_key'):
+                agent_cfg = await resolve_agent_config(
+                    db, agent_type or "generation", agent_id=agent_id,
+                )
+            # resolve_agent_config 已与全局 AIConfig 合并；无激活 Agent 时返回 None
+            if agent_cfg is not None:
+                logger.info(
+                    "Using AgentDefinition llm_config agent_type=%s agent_id=%s model=%s",
+                    agent_type, agent_id, agent_cfg.get("model") or "(global)",
+                )
                 return {
                     'model': agent_cfg.get('model', ''),
                     'api_key': agent_cfg.get('api_key', ''),
@@ -49,7 +60,10 @@ async def _load_ai_config(force_refresh: bool = False, agent_type: str | None = 
                     'max_context_tokens': agent_cfg.get('max_context_tokens', 131072),
                 }
         except Exception:
-            logger.debug("AgentDefinition lookup failed for %s, falling back to global config", agent_type)
+            logger.debug(
+                "AgentDefinition lookup failed type=%s id=%s, falling back to global",
+                agent_type, agent_id,
+            )
 
     global _ai_config_cache
     if _ai_config_cache and not force_refresh:
@@ -80,9 +94,15 @@ async def _load_ai_config(force_refresh: bool = False, agent_type: str | None = 
     return config
 
 
-async def call_model(messages: list, temperature: float | None = None, stream_callback=None, agent_type: str | None = None) -> str:
-    """Call the AI model using uitest-work's AI config."""
-    config = await _load_ai_config(agent_type=agent_type)
+async def call_model(
+    messages: list,
+    temperature: float | None = None,
+    stream_callback=None,
+    agent_type: str | None = None,
+    agent_id: int | None = None,
+) -> str:
+    """Call the AI model using uitest-work's AI config / AgentDefinition overrides."""
+    config = await _load_ai_config(agent_type=agent_type, agent_id=agent_id)
 
     api_url = config['api_base'].rstrip('/')
     # Ensure URL includes /chat/completions path (some proxies like OneAPI store base URL without it)

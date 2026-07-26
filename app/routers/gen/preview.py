@@ -19,6 +19,7 @@ from ...db_models import GenSession
 from .schemas import GenPreviewItem, GenPreviewResponse, GenStatusResponse
 from .state import _lock, _sessions
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -35,11 +36,15 @@ async def get_status(session_id: str, user=Depends(get_current_user),
             row = result.scalar_one_or_none()
             if not row:
                 raise HTTPException(404, "Session not found")
+            status = row.status or "analyzing"
+            err = row.error_message or ""
             return GenStatusResponse(
                 session_id=session_id,
-                status=row.status or "analyzing",
+                status=status,
                 filename=row.filename or "",
-                error_message=row.error_message or "",
+                error_message=err,
+                message=err if status == "failed" else ("分析完成" if status == "completed" else "分析中…"),
+                progress=100 if status in ("completed", "failed") else 0,
                 functional_points_count=row.functional_points_count or 0,
                 test_cases_count=row.test_cases_count or 0,
             )
@@ -48,11 +53,18 @@ async def get_status(session_id: str, user=Depends(get_current_user),
         except Exception as e:
             logger.exception("DB fallback failed")
             raise HTTPException(500, f"DB error: {e}") from e
+    msg = session.progress_message or ""
+    if session.status == "failed" and session.error_message:
+        msg = session.error_message
+    elif session.status == "completed" and not msg:
+        msg = "分析完成"
     return GenStatusResponse(
         session_id=session.session_id,
         status=session.status,
         filename=session.filename,
         error_message=session.error_message,
+        message=msg,
+        progress=max(0, min(100, int(session.progress or 0))),
         functional_points_count=len(session.functional_points),
         test_cases_count=len(session.test_cases),
     )

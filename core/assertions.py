@@ -49,7 +49,7 @@ async def _assert_url_contains(mcp_manager: Any, value: str) -> dict[str, Any]:
     try:
         result = await mcp_manager.call_tool(
             "browser_evaluate",
-            {"expression": "window.location.href"},
+            {"function": "window.location.href"},
         )
         if not result.get('success', False):
             return {
@@ -133,7 +133,7 @@ async def _assert_element_visible(mcp_manager: Any, value: str) -> dict[str, Any
 
     try:
         result = await mcp_manager.call_tool(
-            "browser_evaluate", {"expression": js_code}
+            "browser_evaluate", {"function": js_code}
         )
         if not result.get('success', False):
             return {
@@ -200,7 +200,7 @@ async def _assert_input_value(mcp_manager: Any, value: str) -> dict[str, Any]:
 
     try:
         result = await mcp_manager.call_tool(
-            "browser_evaluate", {"expression": js_code}
+            "browser_evaluate", {"function": js_code}
         )
         if not result.get('success', False):
             return {
@@ -278,7 +278,7 @@ async def _assert_element_count(mcp_manager: Any, value: str) -> dict[str, Any]:
     )
     try:
         result = await mcp_manager.call_tool(
-            "browser_evaluate", {"expression": js_code}
+            "browser_evaluate", {"function": js_code}
         )
         if not result.get('success', False):
             return {

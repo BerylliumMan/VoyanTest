@@ -8,8 +8,15 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
-# 加密密钥优先级：env DB_ENCRYPTION_KEY > SESSION_SECRET_KEY 派生 > 项目根目录 .db_encryption_key > 首次启动自动生成
-KEY_FILE = Path(__file__).resolve().parent.parent.parent / ".db_encryption_key"
+# 加密密钥优先级：
+#   env DB_ENCRYPTION_KEY
+#   > SESSION_SECRET_KEY 派生
+#   > 数据目录 data/.db_encryption_key（Docker 卷持久化）
+#   > 兼容旧路径项目根 .db_encryption_key
+#   > 首次启动自动生成到数据目录
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_LEGACY_KEY_FILE = _PROJECT_ROOT / ".db_encryption_key"
+KEY_FILE = _PROJECT_ROOT / "data" / ".db_encryption_key"
 
 
 def _derive_key_from_secret(secret: str) -> bytes:
@@ -26,14 +33,23 @@ def get_fernet() -> Fernet:
             return Fernet(_derive_key_from_secret(session_secret))
     if not key and KEY_FILE.exists():
         key = KEY_FILE.read_text().strip()
+    # 兼容旧部署：密钥曾写在容器可写层 /app/.db_encryption_key，重建即丢
+    if not key and _LEGACY_KEY_FILE.exists():
+        key = _LEGACY_KEY_FILE.read_text().strip()
+        try:
+            KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            KEY_FILE.write_text(key)
+            KEY_FILE.chmod(0o600)
+        except OSError as e:
+            warnings.warn(f"无法迁移加密密钥到数据目录: {e}", RuntimeWarning)
     if not key:
         key = Fernet.generate_key().decode()
+        KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
         KEY_FILE.write_text(key)
         KEY_FILE.chmod(0o600)  # noqa: ignore return value
-        # 生产环境必须从环境变量注入并备份密钥文件
         warnings.warn(
             f"DB_ENCRYPTION_KEY 未设置，已自动生成并保存到 {KEY_FILE}。"
-            + "生产环境必须通过环境变量注入并安全备份此文件！",
+            + "生产环境请通过环境变量注入并备份此密钥！",
             RuntimeWarning,
         )
     return Fernet(key.encode())

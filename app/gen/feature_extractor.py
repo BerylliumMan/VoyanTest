@@ -16,6 +16,7 @@ from markupsafe import escape
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
 from app.gen.model_client import call_model
+from app.runtime_config import render_prompt_variables
 from app.gen.models import FunctionalPoint, TestCase
 from app.gen.prompts import FP_BATCH_SIZE, FP_EXTRACT_PROMPT, TC_GENERATE_PROMPT
 from app.gen.response_parser import _parse_fps_from_text, _parse_tcs_from_text
@@ -29,6 +30,8 @@ async def extract_functional_points(
     project_description: str = "",
     progress_callback=None,
     fp_prompt: str = None,
+    agent_type: str = "generation",
+    agent_id: int | None = None,
 ) -> list[FunctionalPoint]:
     """Extract functional points from document text or image.
 
@@ -40,6 +43,8 @@ async def extract_functional_points(
         project_description: User-supplied project background.
         progress_callback: Optional callable(current, total, message) — forwarded by caller.
         fp_prompt: Custom FP extraction prompt (None = use default).
+        agent_type: AgentDefinition type for LLM/prompt resolution (default generation).
+        agent_id: Specific AgentDefinition.id (optional).
 
     Exactly one of text or image_data must be provided.
     """
@@ -62,7 +67,7 @@ async def extract_functional_points(
                     {"type": "image_url", "image_url": {"url": f"data:image/{suffix};base64,{b64}"}},
                 ],
             },
-        ])
+        ], agent_type=agent_type, agent_id=agent_id)
     else:
         prompt = desc_prefix + fp_prompt
         if progress_callback:
@@ -70,7 +75,7 @@ async def extract_functional_points(
         content = await call_model([
             {"role": "system", "content": prompt},
             {"role": "user", "content": text},
-        ])
+        ], agent_type=agent_type, agent_id=agent_id)
 
     fps = _parse_fps_from_text(content)
     if progress_callback:
@@ -81,7 +86,7 @@ async def extract_functional_points(
         content = await call_model([
             {"role": "system", "content": prompt},
             {"role": "user", "content": text},
-        ])
+        ], agent_type=agent_type, agent_id=agent_id)
         fps = _parse_fps_from_text(content)
         if not fps:
             logger.warning("FP extraction still empty after retry. Raw: %s", content[:300])
@@ -97,6 +102,8 @@ async def generate_test_cases_for_fps(
     phase1_offset=1,
     total_steps=1,
     tc_prompt: str = None,
+    agent_type: str = "generation",
+    agent_id: int | None = None,
 ) -> dict:
     """Generate test cases for functional points in batches of 5-8.
 
@@ -109,6 +116,8 @@ async def generate_test_cases_for_fps(
             Phase 1 = step 0).
         total_steps: Total number of steps (Phase 1 + all batches).
         tc_prompt: Custom TC generation prompt (None = use default).
+        agent_type: AgentDefinition type for LLM resolution (default generation).
+        agent_id: Specific AgentDefinition.id (optional).
 
     Returns:
         dict with 'test_cases' (list[TestCase]) and 'warnings' (list[str]).
@@ -144,9 +153,12 @@ async def generate_test_cases_for_fps(
                     for fp in batch
                 )
 
-                prompt = tc_prompt.format(
+                csv_header = " | ".join(CSV_HEADER)
+                prompt = render_prompt_variables(
+                    tc_prompt,
                     fp_descriptions=fp_descriptions,
-                    csv_header=' | '.join(CSV_HEADER),
+                    fps=fp_descriptions,
+                    csv_header=csv_header,
                 )
 
                 desc_prefix = ""
@@ -156,7 +168,7 @@ async def generate_test_cases_for_fps(
                 content = await call_model([
                     {"role": "system", "content": desc_prefix + prompt},
                     {"role": "user", "content": f"请为以上功能点生成测试用例。"},
-                ])
+                ], agent_type=agent_type, agent_id=agent_id)
 
                 tcs = _parse_tcs_from_text(content, start_index=tc_counter)
                 if tcs:
@@ -167,8 +179,9 @@ async def generate_test_cases_for_fps(
                     logger.warning("Batch %d raw model output (first 500 chars): %s", idx + 1, content[:500])
                     if attempt < MAX_RETRIES - 1:
                         await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-            except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError, ValueError, RuntimeError) as e:
-                # 单次重试：覆盖 OpenAI 错误 / 异步超时 / JSON 解析 / Pydantic 校验 / MCP 运行时错误
+            except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError,
+                    ValueError, RuntimeError, KeyError, TypeError) as e:
+                # 单次重试：覆盖 API / 超时 / JSON / 校验 / 模板占位符错误
                 logger.warning("Batch %d attempt %d failed: %s", idx + 1, attempt + 1, e)
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(RETRY_DELAY * (attempt + 1))

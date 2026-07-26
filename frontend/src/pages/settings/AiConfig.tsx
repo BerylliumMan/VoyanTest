@@ -8,7 +8,8 @@ import styles from './style/index.module.less';
 /* 预设的提示词键与中文标签 */
 const PRESET_PROMPT_KEYS: { key: string; label: string; category: string }[] = [
   { key: 'fp_extract', label: '功能点提取', category: 'generation' },
-  { key: 'tc_generate', label: '测试用例生成', category: 'generation' },
+  { key: 'tc_generate', label: '功能用例生成', category: 'generation' },
+  { key: 'tc_generate_ui', label: 'UI自动化用例生成', category: 'generation' },
   { key: 'operation_translate', label: '操作指令翻译', category: 'execution' },
   { key: 'verify_expected', label: '预期结果验证', category: 'verification' },
 ];

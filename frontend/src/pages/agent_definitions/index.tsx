@@ -73,6 +73,7 @@ function AgentDefinitions() {
   const [visible, setVisible] = useState(false);
   const [editing, setEditing] = useState<AgentDefinition | null>(null);
   const [form] = Form.useForm();
+  const watchedAgentType = Form.useWatch('agent_type', form);
   const [submitLoading, setSubmitLoading] = useState(false);
   const [promptOptions, setPromptOptions] = useState<PromptOption[]>([]);
 
@@ -400,7 +401,9 @@ function AgentDefinitions() {
             <Switch />
           </Form.Item>
           <div className={styles.activeHint}>
-            {t['agent_definitions.form.confirm_activate']}
+            {watchedAgentType === 'generation'
+              ? t['agent_definitions.form.confirm_activate_generation']
+              : t['agent_definitions.form.confirm_activate']}
           </div>
         </Form>
       </Modal>

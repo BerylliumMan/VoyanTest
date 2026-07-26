@@ -12,21 +12,65 @@ logger = logging.getLogger(__name__)
 PRIORITY_MAP = {"高": "high", "中": "medium", "低": "low"}
 
 
-def _split_numbered_steps(text: str) -> list[str]:
-    """Split text like '1. step1 2. step2' or '1. step1\\n2. step2' into a list of steps."""
-    if not text or not text.strip():
+def split_numbered_items(text: str) -> list[str]:
+    """Split numbered step/expected text without breaking on values like ``2.0``.
+
+    Prefers newline-delimited ``1. xxx`` items; falls back to inline items that
+    require whitespace after the numbering marker (so ``版本2.0`` stays intact).
+    """
+    if not text or not str(text).strip():
         return []
-    # Match patterns like "1. xxx", "2. xxx" etc. - works with or without newlines
-    parts = re.split(r'\d+\.\s*', text.strip())
-    return [p.strip() for p in parts if p.strip()]
+    text = str(text).strip()
+
+    def _clean(items: list[str]) -> list[str]:
+        return [re.sub(r"\s+", " ", m).strip() for m in items if m.strip()]
+
+    # 1. foo\n2. bar — need >=2 hits; a single hit usually means \Z swallowed inline numbers
+    if "\n" in text:
+        matches = re.findall(
+            r"(?:^|\n)\s*\d+[\.、]\s+(.+?)(?=\n\s*\d+[\.、]\s+|\Z)",
+            text,
+            re.S,
+        )
+        if len(matches) >= 2:
+            return _clean(matches)
+    # 1. foo 2. bar  (space required after marker; avoids splitting "2.0")
+    matches = re.findall(
+        r"(?:^|\s)\d+[\.、]\s+(.+?)(?=\s+\d+[\.、]\s+|\Z)",
+        text,
+        re.S,
+    )
+    if matches:
+        return _clean(matches)
+    if "\n" in text:
+        return [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return [text]
+
+
+def _split_numbered_steps(text: str) -> list[str]:
+    return split_numbered_items(text)
 
 
 def _split_expected_results(text: str) -> list[str]:
-    """Split expected results text like '1. result1 2. result2' into a list."""
-    if not text or not text.strip():
+    return split_numbered_items(text)
+
+
+def align_expected_to_steps(steps: list[str], results: list[str]) -> list[str]:
+    """Align expected results to steps: trim extras, right-align when shorter."""
+    if not steps:
         return []
-    parts = re.split(r'\d+\.\s*', text.strip())
-    return [p.strip() for p in parts if p.strip()]
+    if len(results) > len(steps):
+        base = results[: len(steps) - 1] if len(steps) > 1 else []
+        extras = results[len(steps) - 1 :]
+        return base + ["；".join(extras)]
+    if len(results) < len(steps):
+        # 预期更少时右对齐：常见于模型只给最后几步写断言
+        return [""] * (len(steps) - len(results)) + list(results)
+    return list(results)
+
+
+# Backward-compatible alias
+_align_expected_to_steps = align_expected_to_steps
 
 
 async def _find_or_create_module(db: AsyncSession, project_id: int, module_name: str) -> db_models.Module:
@@ -98,15 +142,9 @@ async def import_test_cases(
 
         # Split test_steps and expected_results into TestStep records
         steps_text = _split_numbered_steps(gen_tc.test_steps)
-        results_text = _split_expected_results(gen_tc.expected_result)
-        if len(results_text) > len(steps_text):
-            # 多余结果合并到最后一步
-            base = results_text[:len(steps_text) - 1] if len(steps_text) > 1 else []
-            extras = results_text[len(steps_text) - 1:]
-            results_text = base + ['；'.join(extras)]
-        elif len(results_text) < len(steps_text):
-            # 不足时用空字符串填充（让用户自行补充）
-            results_text = results_text + [''] * (len(steps_text) - len(results_text))
+        results_text = _align_expected_to_steps(
+            steps_text, _split_expected_results(gen_tc.expected_result)
+        )
         created_steps = []
         for idx, step_text in enumerate(steps_text, start=1):
             step = db_models.TestStep(

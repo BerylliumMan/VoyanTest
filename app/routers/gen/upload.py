@@ -17,7 +17,6 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ... import db_models
 from ... import crud
 from ...auth import get_current_user
 from ...database import get_async_db
@@ -59,17 +58,58 @@ def _check_magic_bytes(data: bytes, ext: str) -> None:
         raise HTTPException(400, f"文件内容与扩展名 '{ext}' 不匹配，疑似伪装文件")
 
 
+@router.get("/agents")
+async def list_generation_agents(
+    db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+) -> list[dict]:
+    """List generation AgentDefinitions for the gen page picker (non-admin)."""
+    from app.crud.agent_definition import list_agent_definitions
+
+    agents = await list_agent_definitions(db, agent_type="generation")
+    # Prefer enabled agents for the picker; fall back to all if none enabled
+    enabled = [a for a in agents if a.is_active]
+    source = enabled or agents
+    return [
+        {
+            "id": a.id,
+            "name": a.name,
+            "description": a.description or "",
+            "skills": a.skills or [],
+            "is_active": bool(a.is_active),
+        }
+        for a in source
+    ]
+
+
 @router.post("/upload")
 async def upload_and_analyze(
     files: List[UploadFile] = File(...),
     project_description: str = Form(""),
     project_id: Optional[int] = Form(None),
+    agent_id: Optional[int] = Form(None),
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     """Upload document(s) and start AI analysis to generate test cases."""
     if not files:
         raise HTTPException(400, "请上传至少一个文件")
+
+    # Resolve generation agent early (validate before starting background work)
+    from app.crud.agent_definition import get_active_by_type, get_agent_definition
+    from app.gen.prompts import pick_tc_prompt_key
+
+    selected_agent = None
+    if agent_id is not None:
+        selected_agent = await get_agent_definition(db, agent_id)
+        if selected_agent is None or selected_agent.agent_type != "generation":
+            raise HTTPException(400, f"无效的生成 Agent id={agent_id}")
+    else:
+        selected_agent = await get_active_by_type(db, "generation")
+
+    resolved_agent_id = selected_agent.id if selected_agent else None
+    resolved_skills = list(selected_agent.skills or []) if selected_agent else []
+    tc_prompt_key = pick_tc_prompt_key(resolved_skills)
 
     filenames = [f.filename or f"file_{i}" for i, f in enumerate(files)]
 
@@ -103,6 +143,32 @@ async def upload_and_analyze(
         user_id=user.id,
     )
 
+    async def _set_progress(percent: int, message: str) -> None:
+        async with _lock:
+            session.progress = max(0, min(100, int(percent)))
+            session.progress_message = message
+
+    def _progress_callback(current: int, total: int, message: str) -> None:
+        """Sync callback used by gen pipeline; schedule async session update."""
+        if total and total > 0:
+            percent = int(current / total * 100)
+        else:
+            # Heuristic by message keywords for UI stepper
+            if "用例" in (message or "") or "校验" in (message or ""):
+                percent = 75
+            elif "功能点" in (message or "") or "提取" in (message or ""):
+                percent = 45
+            elif "解析" in (message or ""):
+                percent = 15
+            else:
+                percent = max(session.progress, 10)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_set_progress(percent, message or ""))
+        except RuntimeError:
+            session.progress = percent
+            session.progress_message = message or ""
+
     async def _run_full_analysis() -> None:
         # 等待原 API session 的 cleanup(_close_impl) 完成，避免连接池冲突
         await asyncio.sleep(0.1)
@@ -110,47 +176,76 @@ async def upload_and_analyze(
             from app.gen.analyzer import extract_multi_file_content, two_phase_analyze
             from app.database import AsyncSessionLocal
 
+            await _set_progress(5, "正在解析文档")
             combined_text, _, warnings = await extract_multi_file_content(
-                file_contents, filenames
+                file_contents, filenames, progress_callback=_progress_callback,
             )
 
             if not combined_text.strip():
                 async with _lock:
                     session.status = "failed"
                     session.error_message = "; ".join(warnings or ["未能从文件中提取到有效文本"])
+                    session.progress_message = session.error_message
                 await _update_db(session_id, "failed", session.error_message, 0, 0)
                 return
 
-            # 提前解析提示词（需要 DB），然后关闭 session，避免 AI 分析期间 LLM 调用
-            # 新建 session 时发生连接池冲突（_connection_for_bind vs close）
             fp_prompt = None
             tc_prompt = None
+            agent_name = selected_agent.name if selected_agent else None
             async with AsyncSessionLocal() as pdb:
                 from app.runtime_config import resolve_prompt_for_agent
                 try:
-                    fp_prompt = await resolve_prompt_for_agent(pdb, "generation", "fp_extract")
-                    tc_prompt = await resolve_prompt_for_agent(pdb, "generation", "tc_generate")
+                    if selected_agent:
+                        logger.info(
+                            "Generation via AgentDefinition id=%s name=%s skills=%s tc_key=%s",
+                            selected_agent.id, selected_agent.name,
+                            selected_agent.skills, tc_prompt_key,
+                        )
+                    else:
+                        logger.warning(
+                            "No generation AgentDefinition; using PromptTemplate defaults"
+                        )
+                    fp_prompt = await resolve_prompt_for_agent(
+                        pdb, "generation", "fp_extract", agent_id=resolved_agent_id,
+                    )
+                    tc_prompt = await resolve_prompt_for_agent(
+                        pdb, "generation", tc_prompt_key, agent_id=resolved_agent_id,
+                    )
                 except Exception:
                     logger.debug("resolving prompts from DB failed, using defaults")
-            # pdb 已关闭，AI 分析期间无 DB 连接
+
+            await _set_progress(30, "正在提取功能点")
             result = await two_phase_analyze(
                 combined_text,
+                progress_callback=_progress_callback,
                 project_description=project_description,
                 db=None,
                 prompts={"fp_extract": fp_prompt, "tc_generate": tc_prompt},
+                agent_id=resolved_agent_id,
+                skills=resolved_skills,
+                tc_prompt_key=tc_prompt_key,
             )
+            if agent_name and not result.get("error"):
+                warnings_out = list(result.get("warnings") or [])
+                mode = "UI自动化" if tc_prompt_key == "tc_generate_ui" else "功能用例"
+                warnings_out.insert(0, f"使用 AI Agent：{agent_name}（{mode}）")
+                result["warnings"] = warnings_out
 
             async with _lock:
                 if result.get("error"):
                     session.status = "failed"
                     error_parts = list(result.get("warnings", [])) + list(warnings)
                     session.error_message = "; ".join(error_parts or ["分析失败"])
+                    session.progress_message = session.error_message
+                    session.progress = 100
                 else:
                     session.functional_points = result["functional_points"]
                     session.test_cases = result["test_cases"]
                     session.status = "completed"
                     combined_warnings = (result.get("warnings") or []) + warnings
                     session.error_message = "; ".join(combined_warnings)
+                    session.progress = 100
+                    session.progress_message = "分析完成"
 
             if result.get("error"):
                 await _update_db(session_id, "failed", session.error_message, 0, 0)
@@ -166,14 +261,20 @@ async def upload_and_analyze(
             async with _lock:
                 session.status = "failed"
                 session.error_message = str(e)
+                session.progress = 100
+                session.progress_message = str(e)
             await _update_db(session_id, "failed", str(e), 0, 0)
 
-    # 用 async task 替代 threading.Thread，避免 event loop 冲突
     task = asyncio.create_task(_run_full_analysis())
     _gen_tasks.add(task)
     task.add_done_callback(_gen_tasks.discard)
 
-    return {"session_id": session_id, "status": "analyzing"}
+    return {
+        "session_id": session_id,
+        "status": "analyzing",
+        "agent_id": resolved_agent_id,
+        "tc_prompt_key": tc_prompt_key,
+    }
 
 
 async def _update_db(session_id: str, status: str, error_msg: str, fp_count: int, tc_count: int,

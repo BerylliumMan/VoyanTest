@@ -725,9 +725,73 @@ async def lifespan(app: FastAPI):
         pass
 
     try:
-        from app.scheduler import start_scheduler
+        from app.scheduler import scheduler, start_scheduler
+
+        async def _scheduled_task_executor(task) -> None:
+            """将定时任务分发到用例/模块/项目执行入口。"""
+            from app import crud
+            from app.database import AsyncSessionLocal
+            from app.routers.testcase import execution as _exec
+
+            task_type = getattr(task, "task_type", None)
+            target_id = getattr(task, "target_id", None)
+            if not task_type or target_id is None:
+                logger.error("定时任务缺少 task_type/target_id: %s", getattr(task, "id", "?"))
+                return
+
+            async with AsyncSessionLocal() as db:
+                if task_type == "testcase":
+                    tc = await crud.get_test_case(db, int(target_id))
+                    if not tc:
+                        logger.error("定时任务用例不存在: %s", target_id)
+                        return
+                    batch = await crud.create_run_batch(
+                        db, project_id=tc.project_id, total_cases=1,
+                        triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                    )
+                    batch_id, case_id = batch.id, tc.id
+                    await db.commit()
+                    await _exec.run_test_case(case_id, batch_id)
+                elif task_type == "module":
+                    mod = await crud.get_module(db, int(target_id))
+                    if not mod:
+                        logger.error("定时任务模块不存在: %s", target_id)
+                        return
+                    cases = await crud.get_all_test_cases_for_module(db, int(target_id))
+                    if not cases:
+                        logger.warning("定时任务模块无用例: %s", target_id)
+                        return
+                    case_ids = [c.id for c in cases]
+                    batch = await crud.create_run_batch(
+                        db, project_id=mod.project_id, total_cases=len(case_ids),
+                        triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                    )
+                    batch_id, project_id = batch.id, mod.project_id
+                    await db.commit()
+                    await _exec.run_batch_test_cases(case_ids, project_id, batch_id=batch_id)
+                elif task_type == "project":
+                    proj = await crud.get_project(db, int(target_id))
+                    if not proj:
+                        logger.error("定时任务项目不存在: %s", target_id)
+                        return
+                    cases = await crud.get_all_test_cases_for_project(db, int(target_id))
+                    if not cases:
+                        logger.warning("定时任务项目无用例: %s", target_id)
+                        return
+                    case_ids = [c.id for c in cases]
+                    batch = await crud.create_run_batch(
+                        db, project_id=int(target_id), total_cases=len(case_ids),
+                        triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                    )
+                    batch_id = batch.id
+                    await db.commit()
+                    await _exec.run_batch_test_cases(case_ids, int(target_id), batch_id=batch_id)
+                else:
+                    logger.error("未知定时任务类型: %s", task_type)
+
+        scheduler.set_executor(_scheduled_task_executor)
         await start_scheduler()
-        logger.info("定时调度器已启动")
+        logger.info("定时调度器已启动（executor 已接线）")
     except Exception as e:
         logger.warning("定时调度器启动失败: %s", e)
     yield

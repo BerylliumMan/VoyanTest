@@ -21,8 +21,22 @@ const { Title, Text } = Typography;
 
 const splitNumberedItems = (text: string): string[] => {
   if (!text) return [];
-  const parts = text.split(/\d+\.\s*/).filter((p) => p.trim());
-  return parts.map((p) => p.trim());
+  const src = text.trim();
+  const clean = (items: string[]) =>
+    items.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (src.includes('\n')) {
+    const lineRe = /(?:^|\n)\s*\d+[\.、]\s+([\s\S]+?)(?=\n\s*\d+[\.、]\s+|$)/g;
+    const lineItems: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = lineRe.exec(src)) !== null) lineItems.push(m[1]);
+    if (lineItems.length >= 2) return clean(lineItems);
+  }
+  const inlineRe = /(?:^|\s)\d+[\.、]\s+([\s\S]+?)(?=\s+\d+[\.、]\s+|$)/g;
+  const inlineItems: string[] = [];
+  let m2: RegExpExecArray | null;
+  while ((m2 = inlineRe.exec(src)) !== null) inlineItems.push(m2[1]);
+  if (inlineItems.length) return clean(inlineItems);
+  return src.split('\n').map((p) => p.trim()).filter(Boolean);
 };
 
 const NumberedList: React.FC<{ text: string }> = ({ text }) => {
@@ -69,10 +83,25 @@ interface AnalysisStatus {
   test_cases?: TestCase[];
 }
 
+interface GenAgent {
+  id: number;
+  name: string;
+  description: string;
+  skills: string[];
+  is_active: boolean;
+}
+
+const agentModeLabel = (agent: GenAgent): string => {
+  if ((agent.skills || []).includes('tc_generate_ui')) return 'UI自动化用例';
+  return '功能用例';
+};
+
 const GenPage: React.FC = () => {
   const t = useLocale();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
+  const [genAgents, setGenAgents] = useState<GenAgent[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<number | undefined>(undefined);
   const [description, setDescription] = useState('');
   const [fileList, setFileList] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -89,6 +118,17 @@ const GenPage: React.FC = () => {
       .get('/api/projects/')
       .then((res) => setProjects(res.data || []))
       .catch((err) => Message.error(err?.response?.data?.detail || 'Failed to load projects'));
+    axios
+      .get('/api/gen/agents')
+      .then((res) => {
+        const agents: GenAgent[] = res.data || [];
+        setGenAgents(agents);
+        const active = agents.find((a) => a.is_active) || agents[0];
+        if (active) setSelectedAgentId(active.id);
+      })
+      .catch(() => {
+        /* optional — generation still works with server default */
+      });
   }, []);
 
   useEffect(() => {
@@ -121,6 +161,9 @@ const GenPage: React.FC = () => {
     if (description) {
       formData.append('project_description', description);
     }
+    if (selectedAgentId != null) {
+      formData.append('agent_id', String(selectedAgentId));
+    }
     fileList.forEach((file) => {
       if (file.originFile) {
         formData.append('files', file.originFile);
@@ -133,6 +176,11 @@ const GenPage: React.FC = () => {
         timeout: 60000,
       });
       setSessionId(res.data.session_id);
+      setAnalysisStatus({
+        status: 'analyzing',
+        progress: 5,
+        message: '正在解析文档',
+      });
       Message.success('上传成功，开始分析');
       startPolling(res.data.session_id);
     } catch (e: unknown) {
@@ -150,7 +198,14 @@ const GenPage: React.FC = () => {
     pollTimer.current = setInterval(async () => {
       try {
         const res = await axios.get(`/api/gen/status/${sid}`);
-        const status: AnalysisStatus = res.data;
+        const raw = res.data || {};
+        const status: AnalysisStatus = {
+          status: raw.status,
+          progress: typeof raw.progress === 'number' ? raw.progress : 0,
+          message: raw.message || raw.error_message || '',
+          functional_points: raw.functional_points,
+          test_cases: raw.test_cases,
+        };
         setAnalysisStatus(status);
 
         if (status.status === 'completed') {
@@ -264,6 +319,23 @@ const GenPage: React.FC = () => {
                   options={projects.map((p) => ({ label: p.name, value: p.id }))}
                 />
               </div>
+              {genAgents.length > 0 && (
+                <div className={styles.flexCenter}>
+                  <Text className={styles.formLabel}>生成 Agent：</Text>
+                  <Select
+                    className={styles.selectNarrow}
+                    placeholder="选择用例生成助手"
+                    value={selectedAgentId}
+                    onChange={(v) =>
+                      setSelectedAgentId(typeof v === 'number' ? v : undefined)
+                    }
+                    options={genAgents.map((a) => ({
+                      label: `${a.name}（${agentModeLabel(a)}）`,
+                      value: a.id,
+                    }))}
+                  />
+                </div>
+              )}
               <div className={styles.flexRow}>
                 <Text className={styles.formLabelWithTop}>项目描述（可选）：</Text>
                 <Input.TextArea
