@@ -172,7 +172,7 @@ class AgentManager:
         failed_step_number = None
 
         try:
-            # Notify agent of run start
+            # Notify agent of run start（仅拉起浏览器，不经 LLM）
             await session.send(WSMessage(
                 type=WSMessageType.RUN_START, agent_id=agent_id,
                 run_id=run_id,
@@ -183,6 +183,30 @@ class AgentManager:
 
             llm_client = await create_openai_client()
             _, _, model = await _llm_resolve_config()
+
+            # 等待浏览器就绪后，由 Playwright MCP 直接导航到 BASE URL（不经 LLM）
+            await self._get_snapshot(session, agent_id, run_id)
+            if base_url_override:
+                logger.info("Playwright navigating to BASE URL: %s", base_url_override)
+                nav_result = await self.send_act(
+                    agent_id,
+                    run_id,
+                    {
+                        "name": "browser_navigate",
+                        "tool": "browser_navigate",
+                        "args": {"value": base_url_override, "url": base_url_override},
+                    },
+                )
+                if not nav_result.get("success"):
+                    logger.warning(
+                        "BASE URL Playwright navigation failed: %s",
+                        nav_result.get("error") or "unknown",
+                    )
+            else:
+                logger.warning(
+                    "No BASE URL for run %s — browser may stay on about:blank",
+                    run_id,
+                )
 
             for idx, step in enumerate(steps):
                 if failed_step_number is not None:
@@ -215,11 +239,11 @@ class AgentManager:
                 # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
                 if (tool_call.action or "").lower() in ("error", "done"):
                     result = {
-                        "success": False if tool_call.action == "error" else True,
+                        "success": False if (tool_call.action or "").lower() == "error" else True,
                         "action": f"{tool_call.action}({tool_call.value or ''})",
                         "error": (
                             tool_call.value or "LLM 无法确定本步操作"
-                            if tool_call.action == "error"
+                            if (tool_call.action or "").lower() == "error"
                             else None
                         ),
                         "duration_ms": 0,
@@ -242,16 +266,21 @@ class AgentManager:
                         if not verification.passed:
                             result["success"] = False
                             result["error"] = f"Expected result verification failed: {verification.reason}"
-                            # Capture screenshot on verification failure
-                            ss_result = await self._get_screenshot(session, agent_id, run_id)
-                            if ss_result and ss_result.get("screenshot_base64"):
-                                result["screenshot_base64"] = ss_result["screenshot_base64"]
                         else:
                             result["verification"] = verification.reason
                     except asyncio.TimeoutError:
                         logger.warning(f"Step {step_order} verification timed out")
                     except Exception as exc:
                         logger.warning(f"Step {step_order} verification failed: {exc}")
+
+                # 失败步骤必须截图（含 LLM error/done 短路、验证失败、超时等未带回截图的场景）
+                if not result.get("success") and not result.get("screenshot_base64"):
+                    try:
+                        ss_result = await self._get_screenshot(session, agent_id, run_id)
+                        if ss_result and ss_result.get("screenshot_base64"):
+                            result["screenshot_base64"] = ss_result["screenshot_base64"]
+                    except Exception as exc:
+                        logger.warning(f"Failed to request failure screenshot for step {step_order}: {exc}")
 
                 # Handle screenshot base64 from agent
                 screenshot_path = None
@@ -263,8 +292,8 @@ class AgentManager:
                         ss_path = os.path.join(ss_dir, f"step_{step_order}.png")
                         with open(ss_path, "wb") as f:
                             f.write(base64.b64decode(ss_b64))
-                        screenshot_path = ss_path
-                        # Remove from result to keep report clean
+                        # 报告/前端使用 /reports/... 相对路径
+                        screenshot_path = ss_path.replace("\\", "/")
                         result.pop("screenshot_base64", None)
                     except Exception as exc:
                         logger.warning(f"Failed to save screenshot for step {step_order}: {exc}")
@@ -466,6 +495,7 @@ class AgentManager:
                                     case_id=int(case_id), agent_id=agent_id, goal=goal,
                                     existing_run_id=run_row_id,
                                     existing_batch_id=_batch_id,
+                                    environment_id=(goal.get("environment_id") if isinstance(goal, dict) else None),
                                 )
                                 return
                         except Exception as _abe:
@@ -478,11 +508,27 @@ class AgentManager:
                         if tc:
                             steps_db = await crud.get_steps_for_case(db, int(case_id))
                             steps = [{"step_order": s.step_order, "description": s.description, "expected_result": getattr(s, 'parsed_result', '')} for s in steps_db]
-                            async def _run_with_fallback():
+                            env_id = goal.get("environment_id") if isinstance(goal, dict) else None
+                            base_url = None
+                            try:
+                                if env_id:
+                                    from app.crud.environment import get_environment as _ge
+                                    _env = await _ge(db, int(env_id))
+                                    if _env and (_env.base_url or "").strip():
+                                        base_url = _env.base_url.strip()
+                                if not base_url and getattr(tc, "project_id", None):
+                                    _proj = await crud.get_project(db, tc.project_id)
+                                    if _proj and (getattr(_proj, "base_url", None) or "").strip():
+                                        base_url = _proj.base_url.strip()
+                            except Exception:
+                                logger.warning("Poller failed to resolve BASE URL for case %s", case_id, exc_info=True)
+
+                            async def _run_with_fallback(_base_url=base_url):
                                 try:
                                     result = await self.execute_on_agent(
                                         agent_id, run_id,
                                         tc.name or f"Case #{case_id}", steps,
+                                        base_url_override=_base_url,
                                     )
                                     async with AsyncSessionLocal() as _edb:
                                         await _edb.execute(

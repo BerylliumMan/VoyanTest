@@ -12,6 +12,7 @@ Contains:
 import asyncio
 import logging
 import os
+from pathlib import Path
 import re
 import time
 from typing import Any
@@ -50,7 +51,8 @@ async def _capture_screenshot(
         ss_path = os.path.join(screenshot_dir, f"step_{step_number}.png")
         saved = await mcp_manager.take_screenshot(ss_path)
         if saved:
-            result['screenshot_path'] = saved
+            # 报告/前端使用 /reports/... 相对路径
+            result['screenshot_path'] = Path(saved).as_posix()
     except (OSError, RuntimeError) as exc:
         # OSError: 写文件失败；RuntimeError: MCP / Playwright 截图调用失败
         logger.warning("Failed to capture screenshot: %s", exc, exc_info=True)
@@ -304,6 +306,8 @@ async def execute_step_mcp(
     except Exception as exc:
         result['error'] = f'步骤执行异常: {exc}'
         logger.warning("步骤 %s 异常: %s", step_number, exc, exc_info=True)
+        if not result.get('screenshot_path'):
+            await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
 
     result['duration_ms'] = (time.monotonic() - t_start) * 1000
     return result

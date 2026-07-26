@@ -516,9 +516,16 @@ class AgentClient:
         """Take a screenshot via MCP and return base64-encoded PNG."""
         try:
             result = await self._mcp_call_tool("screenshot", "", f"_fail_{int(time.time())}.png")
+            # 即使 MCP 标记失败，仍尝试从 content / 落盘路径提取图片
+            b64 = self._extract_screenshot_base64(result.get("_content", []) or [])
+            if b64:
+                return b64
             if not result.get("success"):
-                return None
-            return self._extract_screenshot_base64(result.get("_content", []))
+                logger.warning(
+                    "MCP screenshot failed without image payload: %s",
+                    (result.get("error") or result.get("text") or "")[:120],
+                )
+            return None
         except Exception as exc:
             logger.warning(f"MCP screenshot failed: {exc}")
             return None
@@ -631,6 +638,16 @@ class AgentClient:
                         self._log_warning("Existing MCP not responding, restarting")
                         await self._stop_mcp()
                         await self._start_mcp()
+
+                # BASE URL 由 Playwright MCP 直接导航，不经 LLM
+                base_url = ((msg.payload or {}).get("base_url") or "").strip()
+                if base_url:
+                    self._log_info(f"Playwright navigating to BASE URL: {base_url}")
+                    nav = await self._mcp_call_tool("goto", "", base_url)
+                    if not nav.get("success"):
+                        self._log_warning(
+                            f"BASE URL navigation failed: {nav.get('error') or nav.get('text') or 'unknown'}"
+                        )
             except Exception as e:
                 self._log_error(f"Failed to start MCP for run {msg.run_id}: {e}")
                 self._emit_status('error')
@@ -742,6 +759,12 @@ class AgentClient:
                 result.error = value or "LLM reported error"
                 result.screenshot_base64 = await self._mcp_screenshot_base64()
 
+            elif action == "done":
+                result.thinking = value or "LLM marked step done"
+                result.action = f"done({value})"
+                result.success = True
+                result.screenshot_base64 = await self._mcp_screenshot_base64()
+
             else:
                 mcp_result = await self._mcp_call_tool(action, selector, value)
                 result.success = mcp_result.get("success", False)
@@ -811,9 +834,12 @@ class AgentClient:
         run_id = msg.run_id
         p = msg.payload or {}
         tc = p.get("tool_call", {}) or p
-        action = tc.get("action", "")
-        selector = tc.get("selector") or ""
-        value = tc.get("value")
+        action = tc.get("action") or p.get("action") or ""
+        selector = tc.get("selector") if "selector" in tc else (p.get("selector") or "")
+        value = tc.get("value") if "value" in tc else p.get("value")
+        # send_act 可能把 URL 放在 url 字段
+        if not value:
+            value = tc.get("url") or p.get("url")
 
         result: dict = {"success": False, "screenshot_b64": "", "error": ""}
 

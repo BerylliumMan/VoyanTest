@@ -47,6 +47,23 @@ def _ensure_dir(path: str) -> None:
     _os.makedirs(path, exist_ok=True)
 
 
+async def _resolve_execution_base_url(
+    project_id: int,
+    environment_id: Optional[int] = None,
+) -> Optional[str]:
+    """解析执行用 BASE URL：优先环境配置，其次项目 base_url。"""
+    async with db_mod.AsyncSessionLocal() as db:
+        if environment_id:
+            from app.crud.environment import get_environment
+            env = await get_environment(db, environment_id)
+            if env and (env.base_url or "").strip():
+                return env.base_url.strip()
+        project = await crud.get_project(db, project_id)
+        if project and (getattr(project, "base_url", None) or "").strip():
+            return project.base_url.strip()
+    return None
+
+
 router = APIRouter()
 
 
@@ -80,6 +97,7 @@ async def _ensure_agent_def_id(db: AsyncSession) -> int:
 
 async def _create_pending_execution(
     db: AsyncSession, case_id: int, agent_name: str | None, db_case, batch_id: int | None = None,
+    environment_id: Optional[int] = None,
 ) -> dict:
     """在 DB 中创建待执行记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
     from app.db_models import AgentRun
@@ -100,6 +118,8 @@ async def _create_pending_execution(
     goal = {"type": "client_exec", "case_id": case_id, "agent_name": agent_name_text}
     if batch_id:
         goal["batch_id"] = batch_id
+    if environment_id:
+        goal["environment_id"] = environment_id
 
     ar = AgentRun(
         agent_definition_id=dummy_def_id,
@@ -146,7 +166,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         db_agent = await _find_online_agent_in_db(db, agent_name)
         if not db_agent:
             raise HTTPException(status_code=400, detail="No client agents available")
-        return await _create_pending_execution(db, case_id, agent_name, db_case)
+        return await _create_pending_execution(db, case_id, agent_name, db_case, environment_id=environment_id)
     if agent_name:
         matched = [a for a in agents if a.name == agent_name]
         if not matched:
@@ -179,15 +199,15 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
     if not steps:
         raise HTTPException(status_code=400, detail="Test case has no steps")
 
-    # 解析环境配置中的 base_url
-    base_url_override = None
-    if environment_id:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as _env_db:
-            from app.crud.environment import get_environment
-            env = await get_environment(_env_db, environment_id)
-            if env:
-                base_url_override = env.base_url
+    # 解析 BASE URL：环境优先，否则回退项目 base_url
+    base_url_override = await _resolve_execution_base_url(db_case.project_id, environment_id)
+    if base_url_override:
+        logger.info("Client run BASE URL: %s (env_id=%s)", base_url_override, environment_id)
+    else:
+        logger.warning(
+            "Client run has no BASE URL (case=%s env_id=%s) — browser may stay on about:blank",
+            case_id, environment_id,
+        )
 
     batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
 
@@ -350,7 +370,10 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         for cid in (body.case_ids or []):
             tc = await crud.get_test_case(db, cid)
             if tc:
-                pend = await _create_pending_execution(db, cid, body.agent_name, tc, batch_id=batch.id)
+                pend = await _create_pending_execution(
+                    db, cid, body.agent_name, tc,
+                    batch_id=batch.id, environment_id=body.environment_id,
+                )
                 queued.append(cid)
         if queued:
             return {"status": "queued", "case_ids": queued, "agent_name": body.agent_name, "message": f"{len(queued)} cases queued for batch #{batch.id}"}
@@ -379,16 +402,6 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         ]
         return {"id": tc.id, "name": tc.name, "project_id": tc.project_id, "steps": steps, "is_init": cid in init_case_ids}
 
-    # 解析环境配置中的 base_url（批量路径，所有用例共用）
-    base_url_override = None
-    if body.environment_id:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as _env_db:
-            from app.crud.environment import get_environment
-            env = await get_environment(_env_db, body.environment_id)
-            if env:
-                base_url_override = env.base_url
-
     all_case_ids = init_case_ids + case_ids
     case_infos = [await _load_case_info(cid) for cid in all_case_ids]
     case_infos = [c for c in case_infos if c]
@@ -399,6 +412,19 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     project_id = case_infos[0]["project_id"]
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="No valid test cases found")
+
+    # 解析 BASE URL：环境优先，否则回退项目 base_url（批量共用）
+    base_url_override = await _resolve_execution_base_url(project_id, body.environment_id)
+    if base_url_override:
+        logger.info(
+            "Client batch BASE URL: %s (env_id=%s)",
+            base_url_override, body.environment_id,
+        )
+    else:
+        logger.warning(
+            "Client batch has no BASE URL (project=%s env_id=%s)",
+            project_id, body.environment_id,
+        )
 
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
 
