@@ -38,13 +38,24 @@ async def get_status(session_id: str, user=Depends(get_current_user),
                 raise HTTPException(404, "Session not found")
             status = row.status or "analyzing"
             err = row.error_message or ""
+            db_progress = getattr(row, "progress", None)
+            db_msg = getattr(row, "progress_message", None) or ""
+            if status == "failed":
+                msg = err or db_msg or "分析失败"
+                progress = 100
+            elif status == "completed":
+                msg = db_msg or "分析完成"
+                progress = 100
+            else:
+                msg = db_msg or "分析中…"
+                progress = max(0, min(100, int(db_progress or 0)))
             return GenStatusResponse(
                 session_id=session_id,
                 status=status,
                 filename=row.filename or "",
                 error_message=err,
-                message=err if status == "failed" else ("分析完成" if status == "completed" else "分析中…"),
-                progress=100 if status in ("completed", "failed") else 0,
+                message=msg,
+                progress=progress,
                 functional_points_count=row.functional_points_count or 0,
                 test_cases_count=row.test_cases_count or 0,
             )

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -143,10 +144,30 @@ async def upload_and_analyze(
         user_id=user.id,
     )
 
+    _last_db_progress = {"t": 0.0, "p": -1}
+
     async def _set_progress(percent: int, message: str) -> None:
+        percent = max(0, min(100, int(percent)))
         async with _lock:
-            session.progress = max(0, min(100, int(percent)))
+            session.progress = percent
             session.progress_message = message
+        # 节流写入 DB，便于多 worker / 重启后 status 仍可读
+        now = time.monotonic()
+        if (
+            abs(percent - _last_db_progress["p"]) >= 5
+            or now - _last_db_progress["t"] >= 2.0
+            or percent >= 100
+        ):
+            _last_db_progress["t"] = now
+            _last_db_progress["p"] = percent
+            try:
+                from app.database import AsyncSessionLocal
+                async with AsyncSessionLocal() as _pdb:
+                    await crud.update_gen_session_progress(
+                        _pdb, session_id, percent, message or "",
+                    )
+            except Exception:
+                logger.debug("persist gen progress failed", exc_info=True)
 
     def _progress_callback(current: int, total: int, message: str) -> None:
         """Sync callback used by gen pipeline; schedule async session update."""

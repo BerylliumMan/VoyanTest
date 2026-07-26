@@ -69,7 +69,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ### uvicorn 生产模式
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 4
+# 生成进度/录制会话/浏览器池为进程内状态，生产请使用 1 worker
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 1
 ```
 
 ### systemd 服务
@@ -84,7 +85,7 @@ After=network.target
 Type=simple
 User=www-data
 WorkingDirectory=/opt/VoyanTest
-ExecStart=/opt/VoyanTest/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 4
+ExecStart=/opt/VoyanTest/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 1
 Restart=always
 
 [Install]

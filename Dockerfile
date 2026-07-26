@@ -68,7 +68,7 @@ RUN mkdir -p data reports logs
 # Environment defaults — DATABASE_URL 通过 docker-compose 或 /setup 页面配置
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=8002 \
-    APP_WORKERS=2 \
+    APP_WORKERS=1 \
     SESSION_SECRET_KEY= \
     DISABLE_CREATE_ALL=false \
     TZ=Asia/Shanghai
