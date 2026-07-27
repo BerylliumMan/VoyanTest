@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 def _file_header(idx: int, filename: str) -> dict[str, Any]:
-    return {"type": "text", "text": f"===== 文件{idx + 1}: {filename} ====="}
+    # Do NOT embed the real filename — models often copy it into module.
+    return {"type": "text", "text": f"===== 文件{idx + 1} ====="}
 
 
 async def extract_multi_file_content(
@@ -107,7 +108,7 @@ async def extract_multi_file_content(
                         for page_idx, (pext, pb64) in enumerate(page_images):
                             content_parts.append({
                                 "type": "text",
-                                "text": f"===== {filename} 第{page_idx + 1}页 =====",
+                                "text": f"===== 第{page_idx + 1}页 =====",
                             })
                             content_parts.append({"type": "image", "ext": pext, "b64": pb64})
                 else:
@@ -119,7 +120,7 @@ async def extract_multi_file_content(
                     for page_idx, (pext, pb64) in enumerate(page_images):
                         content_parts.append({
                             "type": "text",
-                            "text": f"===== {filename} 第{page_idx + 1}页 =====",
+                            "text": f"===== 第{page_idx + 1}页 =====",
                         })
                         content_parts.append({"type": "image", "ext": pext, "b64": pb64})
 

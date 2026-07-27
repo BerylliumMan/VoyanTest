@@ -198,3 +198,24 @@ def test_image_file_header_does_not_become_module():
     assert all(c.module in ("通用", "文档开头") for c in chunks)
     assert "login_screen" not in chunks[0].intro
     assert "禁止使用文件名" in chunks[0].intro
+
+
+def test_sanitize_filename_modules():
+    from app.gen.chunking import looks_like_filename_module, sanitize_module_name
+
+    assert looks_like_filename_module("需求说明.docx")
+    assert looks_like_filename_module("文件1: shot.png")
+    assert looks_like_filename_module("===== 文件1 =====")
+    assert not looks_like_filename_module("登录注册")
+    assert sanitize_module_name("req_v2.pdf") == "通用"
+    assert sanitize_module_name("首页") == "首页"
+
+
+def test_text_file_banner_not_module():
+    from app.gen.chunking import looks_like_filename_module
+
+    text = "===== 文件1: 需求.docx =====\n## 登录模块\n说明\n"
+    chapters = split_text_by_headings(text)
+    mods = [m for m, _ in chapters]
+    assert not any(looks_like_filename_module(m) for m in mods)
+    assert any("登录" in m for m in mods)
