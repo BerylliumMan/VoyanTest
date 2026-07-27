@@ -38,7 +38,12 @@ function AiConfig() {
     setLoading(true);
     axios
       .get('/api/config/ai')
-      .then((res) => form.setFieldsValue(res.data))
+      .then((res) =>
+        form.setFieldsValue({
+          ...res.data,
+          max_context_tokens: res.data?.max_context_tokens ?? 131072,
+        })
+      )
       .catch((err) => Message.error(err?.response?.data?.detail || t['operate.failed']))
       .finally(() => setLoading(false));
   }, []);
@@ -46,9 +51,18 @@ function AiConfig() {
   const handleSubmit = async (values: Record<string, unknown>) => {
     setSaving(true);
     try {
+      const rawMax = values.max_context_tokens;
+      const maxContextTokens =
+        rawMax === '' || rawMax === null || rawMax === undefined
+          ? 131072
+          : Number(rawMax);
       await axios.put('/api/config/ai', {
         ...values,
         temperature: Number(values.temperature),
+        max_context_tokens:
+          Number.isFinite(maxContextTokens) && maxContextTokens > 0
+            ? maxContextTokens
+            : 131072,
         api_key: values.api_key || undefined,
       });
       Message.success(t['save.success']);

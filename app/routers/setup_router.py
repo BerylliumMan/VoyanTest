@@ -65,7 +65,16 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         await test_engine.dispose()
         logger.info("PG 连接测试成功: %s@%s:%d/%s", cfg.user, cfg.host, cfg.port, cfg.database)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"数据库连接失败: {e}")
+        err_msg = str(e).lower()
+        if any(k in err_msg for k in ("could not connect", "connection refused", "timeout", "no route to host", "network is unreachable", "nodename nor servname")):
+            hint = f"❌ 网络连接失败：无法连接到 {cfg.host}:{cfg.port}，请检查：\n1. 数据库服务器是否已启动\n2. 服务器 IP/端口是否正确\n3. 防火墙是否放行了该端口\n4. 数据库是否配置为允许远程连接（listen_addresses = '*'）"
+        elif any(k in err_msg for k in ("password", "authentication")):
+            hint = f"❌ 认证失败：用户名或密码错误（user={cfg.user}）"
+        elif any(k in err_msg for k in ("does not exist", "doesn't exist")):
+            hint = f"❌ 数据库不存在：database '{cfg.database}' 不存在，请先创建该数据库"
+        else:
+            hint = f"❌ 连接失败，请检查配置\n   {e}"
+        raise HTTPException(status_code=400, detail=hint)
 
     # 保存配置（先于初始化，防止初始化过程中断导致配置丢失）
     config = {
@@ -87,9 +96,8 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
         from app.auth import hash_password
         from app import db_models
         from app.config import get_settings
-        from app.tz import now as tz_now
         from sqlalchemy import select
-        from app.gen.analyzer import get_default_prompts
+        from app.seed_defaults import seed_defaults
 
         settings = get_settings()
         engine = create_async_engine(db_url, pool_size=5, max_overflow=10)
@@ -123,18 +131,8 @@ async def configure_database(cfg: DBConfigRequest) -> dict:
                 await db.commit()
                 logger.info("默认管理员已创建")
 
-            # 种子提示词模板
-            defaults = get_default_prompts()
-            for key, d in defaults.items():
-                existing = await db.execute(
-                    select(db_models.PromptTemplate).where(db_models.PromptTemplate.template_key == key)
-                )
-                if not existing.scalar_one_or_none():
-                    db.add(db_models.PromptTemplate(
-                        template_key=key, label=d["label"],
-                        template_content=d["content"], is_custom=False,
-                    ))
-            await db.commit()
+            # 默认提示词 + AI Agent（与当前参考环境一致）
+            await seed_defaults(db)
             logger.info("数据库初始化完成")
 
         await engine.dispose()

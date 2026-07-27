@@ -48,7 +48,7 @@ async def upsert_ai_config(
         row.api_key = api_key
     row.api_base = api_base
     row.temperature = temperature
-    row.max_context_tokens = max_context_tokens
+    row.max_context_tokens = max_context_tokens if max_context_tokens else 131072
 
     await db.commit()
     await db.refresh(row)

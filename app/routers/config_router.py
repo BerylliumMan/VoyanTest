@@ -30,20 +30,35 @@ def _mask_key(key: Optional[str]) -> str:
 
 # --- Pydantic models ---
 
+_DEFAULT_MAX_CONTEXT_TOKENS = 131072
+
+
 class AIConfigRequest(BaseModel):
     model: str = Field(..., min_length=1)
     api_key: Optional[str] = Field(None, min_length=1)
     api_base: str = Field(..., pattern=r"^https?://")
     temperature: float = Field(..., ge=0.0, le=2.0)
-    max_context_tokens: int = Field(131072, ge=4096, le=1048576)
+    max_context_tokens: Optional[int] = Field(
+        _DEFAULT_MAX_CONTEXT_TOKENS, ge=4096, le=1048576
+    )
 
+    @model_validator(mode="before")
     @classmethod
-    def model_validate(cls, obj):
-        if isinstance(obj, dict):
-            obj = {k: v.strip() if isinstance(v, str) else v for k, v in obj.items()}
-        return super().model_validate(obj)
+    def _normalize(cls, data):
+        if not isinstance(data, dict):
+            return data
+        cleaned = {}
+        for k, v in data.items():
+            if isinstance(v, str):
+                v = v.strip()
+            cleaned[k] = v
+        # 未填 / 空字符串 / null → 使用默认上下文窗口，避免校验失败或入库 NULL
+        mct = cleaned.get("max_context_tokens", _DEFAULT_MAX_CONTEXT_TOKENS)
+        if mct is None or mct == "":
+            cleaned["max_context_tokens"] = _DEFAULT_MAX_CONTEXT_TOKENS
+        return cleaned
 
-    model_config = {'extra': 'allow'}
+    model_config = {"extra": "allow"}
 
 
 class AIConfigResponse(BaseModel):
@@ -51,7 +66,7 @@ class AIConfigResponse(BaseModel):
     api_key_masked: str
     api_base: str
     temperature: float
-    max_context_tokens: int
+    max_context_tokens: int = _DEFAULT_MAX_CONTEXT_TOKENS
 
 
 # --- Routes ---
@@ -65,13 +80,14 @@ async def get_ai_config(db: AsyncSession = Depends(get_async_db), user = Depends
             api_key_masked="",
             api_base="",
             temperature=0.0,
+            max_context_tokens=_DEFAULT_MAX_CONTEXT_TOKENS,
         )
     return AIConfigResponse(
         model=row.model,
         api_key_masked=_mask_key(row.api_key),
         api_base=row.api_base,
         temperature=row.temperature,
-        max_context_tokens=row.max_context_tokens,
+        max_context_tokens=row.max_context_tokens or _DEFAULT_MAX_CONTEXT_TOKENS,
     )
 
 
@@ -83,10 +99,11 @@ async def update_ai_config(
 ) -> AIConfigResponse:
     # 在 router 层做加密：CRUD 层只接受已加密/可存储的值
     encrypted_key = encrypt_value(body.api_key) if body.api_key else None
+    max_tokens = body.max_context_tokens or _DEFAULT_MAX_CONTEXT_TOKENS
     try:
         row = await crud.upsert_ai_config(
             db, body.model, encrypted_key, body.api_base,
-            body.temperature, body.max_context_tokens,
+            body.temperature, max_tokens,
         )
     except SQLAlchemyError as exc:
         await db.rollback()
@@ -102,7 +119,7 @@ async def update_ai_config(
         api_key_masked=_mask_key(row.api_key),
         api_base=row.api_base,
         temperature=row.temperature,
-        max_context_tokens=row.max_context_tokens,
+        max_context_tokens=row.max_context_tokens or _DEFAULT_MAX_CONTEXT_TOKENS,
     )
 
 
