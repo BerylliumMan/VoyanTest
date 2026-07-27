@@ -143,7 +143,7 @@ async def test_extract_fps_chunks_when_over_budget(monkeypatch):
     async def fake_budget():
         return 20_000
 
-    async def fake_once(**kwargs):
+    async def fake_cont(**kwargs):
         calls["n"] += 1
         return [
             FunctionalPoint(
@@ -155,7 +155,7 @@ async def test_extract_fps_chunks_when_over_budget(monkeypatch):
         ]
 
     monkeypatch.setattr(fe, "get_context_budget", fake_budget)
-    monkeypatch.setattr(fe, "_extract_fps_once", fake_once)
+    monkeypatch.setattr(fe, "_extract_fps_with_continuation", fake_cont)
 
     async def nosleep(*_a, **_k):
         return None
@@ -166,3 +166,23 @@ async def test_extract_fps_chunks_when_over_budget(monkeypatch):
     fps = await fe.extract_functional_points(text=long_text)
     assert calls["n"] >= 2
     assert len(fps) == calls["n"]
+
+
+def test_multi_chapter_splits_even_under_budget():
+    """Multiple headings → one Phase1 chunk per chapter even if all fit budget."""
+    text = "## 登录模块\n用户登录说明\n\n## 首页模块\n首页说明\n\n## 设置模块\n设置说明\n"
+    chunks = build_phase1_chunks_from_text(text, budget=100_000)
+    assert len(chunks) >= 3
+    modules = [c.module for c in chunks]
+    assert any("登录" in m for m in modules)
+    assert any("首页" in m for m in modules)
+    assert any("设置" in m for m in modules)
+
+
+def test_multi_chapter_parts_split_under_budget():
+    parts = [
+        {"type": "text", "text": "## 模块甲\n甲内容"},
+        {"type": "text", "text": "## 模块乙\n乙内容"},
+    ]
+    chunks = build_phase1_chunks_from_parts(parts, budget=100_000)
+    assert len(chunks) >= 2

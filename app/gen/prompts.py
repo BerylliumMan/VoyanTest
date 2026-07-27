@@ -31,26 +31,17 @@ FP_EXTRACT_PROMPT = """你是资深的软件测试工程师。请仔细阅读需
 - P2：辅助/体验类功能
 
 【输出要求 — 必须严格遵守】
-- 只输出一个 JSON 对象，不要输出 Markdown 标题、表格或解释性文字
-- 不要使用 ``` 代码块包裹
-- 字段名必须使用英文：module / name / category / desc / priority
-- name 为测试项名称（简洁、可测试，建议含场景意图）
+- 只输出一个 JSON 对象，不要 Markdown、表格、解释文字，也不要用 ``` 包裹
+- 字段：module / name / category / desc / priority（英文键名）
+- **优先写全量测试项**：宁可 desc 极短，也不要漏项；输出被截断等于失败
+- desc 控制在一句内（约 20 字），勿展开步骤
+- name 简洁可测，建议含场景意图
 
-输出格式：
-{
-  "functional_points": [
-    {
-      "module": "所属业务模块名称",
-      "name": "测试项名称（简洁、可测试）",
-      "category": "增删改查 | 校验规则 | 交互反馈 | 权限控制 | 数据展示 | 其他",
-      "desc": "测试项简明描述（1-2句，含关键约束/边界）",
-      "priority": "P0 | P1 | P2"
-    }
-  ]
-}
+输出格式（紧凑单行亦可）：
+{"functional_points":[{"module":"模块名","name":"测试项名","category":"增删改查|校验规则|交互反馈|权限控制|数据展示|其他","desc":"一句说明","priority":"P0|P1|P2"}]}
 
 示例：
-{"functional_points":[{"module":"登录注册","name":"手机号验证码登录成功","category":"增删改查","desc":"用户输入正确手机号和验证码完成登录","priority":"P0"},{"module":"登录注册","name":"验证码错误提示","category":"校验规则","desc":"输入错误验证码时页面提示错误且不登录","priority":"P0"},{"module":"登录注册","name":"登录失败锁定","category":"校验规则","desc":"同一账号密码错误超过5次后锁定30分钟","priority":"P0"}]}
+{"functional_points":[{"module":"登录注册","name":"手机号验证码登录成功","category":"增删改查","desc":"正确手机号验证码可登录","priority":"P0"},{"module":"登录注册","name":"验证码错误提示","category":"校验规则","desc":"错误验证码提示且不登录","priority":"P0"},{"module":"登录注册","name":"登录失败锁定","category":"校验规则","desc":"密码错超5次锁30分钟","priority":"P0"}]}
 """
 
 TC_GENERATE_PROMPT = """你是资深的软件测试工程师。请为以下**测试项**生成**功能测试用例**（业务场景验证，不限于 UI 操作细节）。

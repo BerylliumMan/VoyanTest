@@ -113,6 +113,16 @@ def _extract_json(text: str) -> str | None:
                 return json.dumps(obj, ensure_ascii=False)
             except (json.JSONDecodeError, ValueError):
                 pass
+    # Truncated fence without closing ```
+    m2 = re.search(r"```(?:json)?\s*\n?([\[{].*)", text, re.DOTALL)
+    if m2:
+        candidate = re.sub(r"\n?```\s*$", "", m2.group(1)).strip()
+        try:
+            decoder = json.JSONDecoder()
+            obj, _ = decoder.raw_decode(candidate)
+            return json.dumps(obj, ensure_ascii=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
     # No code block found or content inside block not JSON, scan raw text
     cleaned = text.strip()
     brace = cleaned.find("{")
@@ -133,6 +143,104 @@ def _extract_json(text: str) -> str | None:
         except (json.JSONDecodeError, ValueError):
             pass
     return None
+
+
+def _iter_complete_json_objects(array_body: str) -> list[dict]:
+    """Extract complete ``{...}`` objects from a (possibly truncated) JSON array body."""
+    objects: list[dict] = []
+    i = 0
+    n = len(array_body)
+    while i < n:
+        while i < n and array_body[i] != "{":
+            i += 1
+        if i >= n:
+            break
+        start = i
+        depth = 0
+        in_str = False
+        escape = False
+        ok = False
+        while i < n:
+            ch = array_body[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        ok = True
+                        i += 1
+                        break
+            i += 1
+        if not ok:
+            break
+        snippet = array_body[start:i]
+        try:
+            obj = json.loads(snippet)
+            if isinstance(obj, dict):
+                objects.append(obj)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return objects
+
+
+def looks_truncated_fp_output(text: str) -> bool:
+    """Heuristic: model output cut off mid-JSON / mid-fence."""
+    if not text or not text.strip():
+        return False
+    t = text.strip()
+    if t.startswith("```") and t.count("```") < 2:
+        return True
+    if '"functional_points"' in t or '"function_points"' in t or t.lstrip().startswith("["):
+        # Unbalanced braces/brackets often mean truncation
+        if t.count("{") > t.count("}"):
+            return True
+        if t.count("[") > t.count("]"):
+            return True
+        if re.search(r'[,:\[]\s*$', t):
+            return True
+        if re.search(r'"\s*:\s*"[^"]*$', t):
+            return True
+    return False
+
+
+def _salvage_fp_items_from_truncated(text: str) -> list[dict]:
+    """Best-effort recovery of FP dicts when model output is truncated mid-JSON."""
+    if not text or not text.strip():
+        return []
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+
+    key_match = re.search(
+        r'"(?:functional_points|function_points|fp_list|功能点列表)"\s*:\s*\[',
+        cleaned,
+    )
+    if key_match:
+        items = _iter_complete_json_objects(cleaned[key_match.end():])
+        if items:
+            logger.info("Salvaged %d FP objects from truncated JSON object", len(items))
+            return items
+
+    bracket = cleaned.find("[")
+    if bracket >= 0:
+        items = _iter_complete_json_objects(cleaned[bracket + 1:])
+        if items and any(
+            isinstance(it, dict) and (it.get("name") or it.get("title") or it.get("功能点"))
+            for it in items
+        ):
+            logger.info("Salvaged %d FP objects from truncated JSON array", len(items))
+            return items
+    return []
 
 
 def _normalize_fp_item(item: dict) -> dict:
@@ -281,36 +389,45 @@ def _parse_fps_from_markdown_tables(text: str, session_id: str = "") -> list[Fun
     return fps
 
 
+def _fps_from_item_dicts(items: list, session_id: str = "") -> list[FunctionalPoint]:
+    fps: list[FunctionalPoint] = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        fp = _normalize_fp_item(item)
+        if not fp.get("name"):
+            continue
+        fps.append(FunctionalPoint(
+            id=i + 1, session_id=session_id,
+            module=fp.get("module", ""),
+            name=fp["name"],
+            description=fp.get("description", ""),
+            category=fp.get("category", "通用"),
+        ))
+    return fps
+
+
 def _parse_fps_from_text(text: str, session_id: str = "") -> list[FunctionalPoint]:
-    """Parse functional points — JSON, then markdown tables, then bullet list."""
+    """Parse functional points — JSON, truncated salvage, then markdown."""
     json_str = _extract_json(text)
     if json_str:
         try:
             data = json.loads(json_str)
-            # Handle both {"key": [...]} and raw [...]
             items = data if isinstance(data, list) else (
                 data.get("function_points") or data.get("functional_points")
                 or data.get("fp_extract") or data.get("fp_list")
                 or data.get("功能点列表") or [])
-            if items:
-                fps = []
-                for i, item in enumerate(items):
-                    if not isinstance(item, dict):
-                        continue
-                    fp = _normalize_fp_item(item)
-                    if not fp.get("name"):
-                        continue
-                    fps.append(FunctionalPoint(
-                        id=i + 1, session_id=session_id,
-                        module=fp.get("module", ""),
-                        name=fp["name"],
-                        description=fp.get("description", ""),
-                        category=fp.get("category", "通用"),
-                    ))
-                if fps:
-                    return fps
+            fps = _fps_from_item_dicts(items, session_id=session_id)
+            if fps:
+                return fps
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
+
+    salvaged = _salvage_fp_items_from_truncated(text)
+    if salvaged:
+        fps = _fps_from_item_dicts(salvaged, session_id=session_id)
+        if fps:
+            return fps
 
     # Markdown tables under module headings (common minimax / zen output)
     table_fps = _parse_fps_from_markdown_tables(text, session_id=session_id)
@@ -473,4 +590,5 @@ __all__ = [
     "_parse_response",
     "_parse_fps_from_text",
     "_parse_tcs_from_text",
+    "looks_truncated_fp_output",
 ]
