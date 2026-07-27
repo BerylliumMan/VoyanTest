@@ -274,7 +274,6 @@ class TestImportTestCases:
     async def test_import_creates_l1_l2_modules(self):
         """「一级——二级」应创建父子模块，用例挂在二级。"""
         from app import db_models as m
-        from sqlalchemy import select as sel
 
         tc = GenTestCase(
             test_case_id="TC-HIER",
