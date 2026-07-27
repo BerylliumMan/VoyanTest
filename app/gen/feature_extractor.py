@@ -34,7 +34,11 @@ from app.gen.prompts import (
     MIN_TCS_PER_ITEM,
     TC_GENERATE_PROMPT,
 )
-from app.gen.response_parser import _parse_fps_from_text, _parse_tcs_from_text
+from app.gen.response_parser import (
+    _parse_fps_from_text,
+    _parse_tcs_from_text,
+    looks_truncated_fp_output,
+)
 from app.runtime_config import render_prompt_variables
 
 logger = logging.getLogger(__name__)
@@ -85,7 +89,10 @@ async def _extract_fps_once(
     agent_type: str,
     agent_id: int | None,
     multimodal: bool,
-) -> list[FunctionalPoint]:
+    continue_from: list[FunctionalPoint] | None = None,
+) -> tuple[list[FunctionalPoint], str, bool]:
+    """Returns (fps, raw_content, truncated_flag)."""
+
     async def _call(payload) -> str:
         return await call_model(
             [
@@ -96,8 +103,31 @@ async def _extract_fps_once(
             agent_id=agent_id,
         )
 
+    # When continuing, prepend instruction as text prefix for string payloads,
+    # or as an extra text part for multimodal lists.
+    cont_hint = ""
+    if continue_from:
+        names = "、".join(
+            f"{fp.module}/{fp.name}" for fp in continue_from[:80] if fp.name
+        )
+        cont_hint = (
+            "【续写】上一轮输出可能被截断。请继续提取尚未覆盖的测试项，"
+            "不要重复以下已有项：\n"
+            f"{names}\n"
+            "只输出增量 JSON：{\"functional_points\":[...]}，desc 控制在一句话内。\n\n"
+        )
+
+    def _with_hint(payload):
+        if not cont_hint:
+            return payload
+        if isinstance(payload, str):
+            return cont_hint + payload
+        if isinstance(payload, list):
+            return [{"type": "text", "text": cont_hint}] + list(payload)
+        return payload
+
     try:
-        content = await _call(user_payload)
+        content = await _call(_with_hint(user_payload))
     except (openai.OpenAIError, asyncio.TimeoutError, OSError, RuntimeError, ValueError) as e:
         hint = _vision_hint(e) if multimodal else None
         if hint:
@@ -105,15 +135,62 @@ async def _extract_fps_once(
             raise RuntimeError(hint) from e
         raise
 
+    truncated = looks_truncated_fp_output(content)
     fps = _parse_fps_from_text(content)
     if not fps:
         logger.warning("Test-item extraction empty, retrying... raw: %s", content[:300])
         await asyncio.sleep(2)
-        content = await _call(user_payload)
+        content = await _call(_with_hint(user_payload))
+        truncated = looks_truncated_fp_output(content)
         fps = _parse_fps_from_text(content)
         if not fps:
             logger.warning("Test-item extraction still empty after retry. Raw: %s", content[:300])
-    return fps
+    elif truncated:
+        logger.warning(
+            "Test-item extraction truncated but salvaged %d items; will continue if needed",
+            len(fps),
+        )
+    return fps, content, truncated
+
+
+async def _extract_fps_with_continuation(
+    *,
+    user_payload,
+    prompt: str,
+    agent_type: str,
+    agent_id: int | None,
+    multimodal: bool,
+    max_continues: int = 2,
+) -> list[FunctionalPoint]:
+    """Extract FPs; if output truncates, continue up to ``max_continues`` times."""
+    all_fps: list[FunctionalPoint] = []
+    continue_from: list[FunctionalPoint] | None = None
+    for round_i in range(max_continues + 1):
+        fps, _raw, truncated = await _extract_fps_once(
+            user_payload=user_payload,
+            prompt=prompt,
+            agent_type=agent_type,
+            agent_id=agent_id,
+            multimodal=multimodal,
+            continue_from=continue_from,
+        )
+        if fps:
+            all_fps = merge_functional_points([all_fps, fps]) if all_fps else list(fps)
+        if not truncated:
+            break
+        if round_i >= max_continues:
+            logger.warning(
+                "Phase1 still truncated after %d continuations; keeping %d items",
+                max_continues, len(all_fps),
+            )
+            break
+        logger.info(
+            "Phase1 continuation %d/%d after truncation (have %d items)",
+            round_i + 1, max_continues, len(all_fps),
+        )
+        continue_from = all_fps
+        await asyncio.sleep(RETRY_DELAY)
+    return all_fps
 
 
 async def extract_functional_points(
@@ -155,7 +232,7 @@ async def extract_functional_points(
                 "image_url": {"url": f"data:image/{suffix};base64,{b64}"},
             },
         ]
-        fps = await _extract_fps_once(
+        fps = await _extract_fps_with_continuation(
             user_payload=payload,
             prompt=prompt,
             agent_type=agent_type,
@@ -172,18 +249,18 @@ async def extract_functional_points(
     if content_parts is not None:
         total = estimate_parts_tokens(content_parts)
         phase1_chunks = build_phase1_chunks_from_parts(content_parts, budget)
-        if total > budget:
+        if len(phase1_chunks) > 1:
             logger.info(
-                "Phase1 chapter-chunking content_parts: ~%d tokens > budget %d → %d chunks",
+                "Phase1 chapter-chunking content_parts: ~%d tokens, budget %d → %d chunks",
                 total, budget, len(phase1_chunks),
             )
     else:
         body = text or ""
         total = estimate_text_tokens(body)
         phase1_chunks = build_phase1_chunks_from_text(body, budget)
-        if total > budget:
+        if len(phase1_chunks) > 1:
             logger.info(
-                "Phase1 chapter-chunking text: ~%d tokens > budget %d → %d chunks",
+                "Phase1 chapter-chunking text: ~%d tokens, budget %d → %d chunks",
                 total, budget, len(phase1_chunks),
             )
 
@@ -220,7 +297,7 @@ async def extract_functional_points(
                 payload = chunk.text
             use_mm = False
 
-        fps = await _extract_fps_once(
+        fps = await _extract_fps_with_continuation(
             user_payload=payload,
             prompt=prompt,
             agent_type=agent_type,

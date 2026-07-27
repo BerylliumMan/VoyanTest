@@ -908,6 +908,31 @@ class TestResponseParserFpHelpers:
         # Default start_index=0 → TC-001
         assert tcs[0].test_case_id == "TC-001"
 
+    def test_looks_truncated_unbalanced_braces(self):
+        from app.gen.response_parser import looks_truncated_fp_output
+
+        text = (
+            '{"functional_points":['
+            '{"module":"登录","name":"成功登录","category":"增删改查","desc":"ok","priority":"P0"},'
+            '{"module":"登录","name":"密码错误","category":"校验规则","desc":"提示"'
+        )
+        assert looks_truncated_fp_output(text) is True
+
+    def test_salvage_truncated_fp_json(self):
+        from app.gen.response_parser import _parse_fps_from_text, looks_truncated_fp_output
+
+        text = (
+            '{"functional_points":['
+            '{"module":"登录","name":"成功登录","category":"增删改查","desc":"ok","priority":"P0"},'
+            '{"module":"登录","name":"密码错误","category":"校验规则","desc":"提示","priority":"P0"},'
+            '{"module":"登录","name":"账号锁定","category":"校验规则","desc":"超次锁'
+        )
+        assert looks_truncated_fp_output(text) is True
+        fps = _parse_fps_from_text(text, session_id="s1")
+        assert len(fps) == 2
+        assert fps[0].name == "成功登录"
+        assert fps[1].name == "密码错误"
+
 
 # ===========================================================================
 # feature_extractor tests
@@ -915,6 +940,12 @@ class TestResponseParserFpHelpers:
 
 class TestFeatureExtractorExtractFPs:
     """Test extract_functional_points."""
+
+    def _patch_budget(self):
+        return patch(
+            "app.gen.feature_extractor.get_context_budget",
+            new=AsyncMock(return_value=100_000),
+        )
 
     @pytest.mark.asyncio
     async def test_extract_fps_from_text(self):
@@ -926,7 +957,9 @@ class TestFeatureExtractorExtractFPs:
 ## 测试用例
 | TC-001 | M | T | P | S | R | 高 |
 """
-        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)):
+        with self._patch_budget(), patch(
+            "app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)
+        ):
             fps = await extract_functional_points(text="Some document text")
 
         assert len(fps) == 1
@@ -954,7 +987,9 @@ class TestFeatureExtractorExtractFPs:
         from app.gen.feature_extractor import extract_functional_points
 
         mock_response = "## 功能点清单\n"
-        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)) as mcall:
+        with self._patch_budget(), patch(
+            "app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)
+        ) as mcall:
             fps = await extract_functional_points(
                 text="doc",
                 project_description="This is a banking app"
@@ -972,7 +1007,9 @@ class TestFeatureExtractorExtractFPs:
         def cb(cur, total, msg):
             progress_calls.append((cur, total, msg))
 
-        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")):
+        with self._patch_budget(), patch(
+            "app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")
+        ):
             await extract_functional_points(text="x", progress_callback=cb)
 
         # At least one progress call
@@ -996,7 +1033,9 @@ class TestFeatureExtractorExtractFPs:
     async def test_extract_fps_custom_prompt(self):
         from app.gen.feature_extractor import extract_functional_points
 
-        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")) as mcall:
+        with self._patch_budget(), patch(
+            "app.gen.feature_extractor.call_model", new=AsyncMock(return_value="## 功能点清单\n")
+        ) as mcall:
             await extract_functional_points(text="x", fp_prompt="CUSTOM FP PROMPT")
         sys_msg = mcall.call_args.args[0][0]["content"]
         assert "CUSTOM FP PROMPT" in sys_msg
@@ -1005,7 +1044,9 @@ class TestFeatureExtractorExtractFPs:
     async def test_extract_fps_no_fps_in_response(self):
         from app.gen.feature_extractor import extract_functional_points
 
-        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="no markers at all")):
+        with self._patch_budget(), patch(
+            "app.gen.feature_extractor.call_model", new=AsyncMock(return_value="no markers at all")
+        ):
             fps = await extract_functional_points(text="x")
         assert fps == []
 

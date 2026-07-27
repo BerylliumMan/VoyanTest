@@ -331,28 +331,22 @@ def _finalize_chapter_chunks(
 
 
 def build_phase1_chunks_from_text(text: str, budget: int) -> list[Phase1Chunk]:
-    """Chapter-first chunking for plain text documents."""
+    """Chapter-first chunking for plain text documents.
+
+    Always emits one call per chapter when multiple headings exist, so Phase1
+    does not under-extract by stuffing the whole doc into a single short list.
+    Chapters that exceed ``budget`` are further split.
+    """
     chapters = split_text_by_headings(text)
     if not chapters:
         return []
 
-    # Whole doc fits → single chunk (keep original text, no forced labels)
-    if estimate_text_tokens(text) <= budget and len(chapters) == 1:
+    # Single short chapter that fits → one chunk
+    if len(chapters) == 1 and estimate_text_tokens(text) <= budget:
         return [
             Phase1Chunk(
                 text=chapters[0][1],
                 module=chapters[0][0],
-                segment=1,
-                segment_total=1,
-                multimodal=False,
-            )
-        ]
-    if estimate_text_tokens(text) <= budget:
-        # Multiple short chapters still fit in one call — keep as one chunk
-        return [
-            Phase1Chunk(
-                text=text,
-                module="通用",
                 segment=1,
                 segment_total=1,
                 multimodal=False,
@@ -423,23 +417,28 @@ def build_phase1_chunks_from_parts(
     content_parts: list[dict[str, Any]],
     budget: int,
 ) -> list[Phase1Chunk]:
-    """Chapter-first chunking for ordered multimodal parts."""
+    """Chapter-first chunking for ordered multimodal parts.
+
+    Prefer one model call per chapter so extraction density stays high even when
+    the whole document fits in the context budget.
+    """
     if not content_parts:
         return []
 
+    chapters = _content_parts_to_chapters(content_parts)
     total = estimate_parts_tokens(content_parts)
-    if total <= budget:
+    if total <= budget and len(chapters) <= 1:
+        module = chapters[0][0] if chapters else "通用"
         return [
             Phase1Chunk(
                 parts=list(content_parts),
-                module="通用",
+                module=module,
                 segment=1,
                 segment_total=1,
                 multimodal=True,
             )
         ]
 
-    chapters = _content_parts_to_chapters(content_parts)
     result: list[Phase1Chunk] = []
     for module, parts in chapters:
         packed = _pack_parts_with_image_affinity(parts, budget)
