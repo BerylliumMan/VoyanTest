@@ -177,7 +177,7 @@ async def upload_and_analyze(
             # Heuristic by message keywords for UI stepper
             if "用例" in (message or "") or "校验" in (message or ""):
                 percent = 75
-            elif "功能点" in (message or "") or "提取" in (message or ""):
+            elif "测试项" in (message or "") or "功能点" in (message or "") or "提取" in (message or ""):
                 percent = 45
             elif "解析" in (message or ""):
                 percent = 15
@@ -198,14 +198,18 @@ async def upload_and_analyze(
             from app.database import AsyncSessionLocal
 
             await _set_progress(5, "正在解析文档")
-            combined_text, _, warnings = await extract_multi_file_content(
+            combined_text, _, warnings, content_parts = await extract_multi_file_content(
                 file_contents, filenames, progress_callback=_progress_callback,
             )
 
-            if not combined_text.strip():
+            has_content = bool(
+                (combined_text and combined_text.strip())
+                or any(p.get("type") == "image" for p in (content_parts or []))
+            )
+            if not has_content:
                 async with _lock:
                     session.status = "failed"
-                    session.error_message = "; ".join(warnings or ["未能从文件中提取到有效文本"])
+                    session.error_message = "; ".join(warnings or ["未能从文件中提取到有效内容"])
                     session.progress_message = session.error_message
                 await _update_db(session_id, "failed", session.error_message, 0, 0)
                 return
@@ -235,7 +239,7 @@ async def upload_and_analyze(
                 except Exception:
                     logger.debug("resolving prompts from DB failed, using defaults")
 
-            await _set_progress(30, "正在提取功能点")
+            await _set_progress(30, "正在提取测试项")
             result = await two_phase_analyze(
                 combined_text,
                 progress_callback=_progress_callback,
@@ -245,6 +249,7 @@ async def upload_and_analyze(
                 agent_id=resolved_agent_id,
                 skills=resolved_skills,
                 tc_prompt_key=tc_prompt_key,
+                content_parts=content_parts,
             )
             if agent_name and not result.get("error"):
                 warnings_out = list(result.get("warnings") or [])

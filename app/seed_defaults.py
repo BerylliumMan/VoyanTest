@@ -118,7 +118,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是功能测试用例生成专家，负责将需求文档转为高质量功能测试用例。工作流程：(1) fp_extract 提取功能点；(2) tc_generate 按等价类/边界值设计业务场景用例。",
+        "system_prompt": "你是功能测试用例生成专家，负责将需求文档转为高质量功能测试用例。工作流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate 按等价类/边界值设计业务场景用例，每个测试项至少 3 条（正常/异常/边界）。",
         "prompt_overrides": {}
     },
     {
@@ -135,7 +135,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是 UI 自动化用例生成专家，负责将需求文档转为浏览器可执行的 UI 自动化用例。工作流程：(1) fp_extract 提取功能点；(2) tc_generate_ui 输出可操作步骤与可观测预期，优先主路径与关键异常 UI，避免纯接口/后台逻辑用例。",
+        "system_prompt": "你是 UI 自动化用例生成专家，负责将需求文档转为浏览器可执行的 UI 自动化用例。工作流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出可操作步骤与可观测预期，每个测试项至少 3 条，优先主路径与关键异常 UI，避免纯接口/后台逻辑用例。",
         "prompt_overrides": {}
     }
 ]
@@ -145,25 +145,25 @@ def get_seed_prompts() -> dict[str, dict]:
     """All skill prompt templates to seed (key → metadata + content)."""
     return {
         "fp_extract": {
-            "name": "功能点提取",
+            "name": "测试项提取",
             "category": "generation",
             "content": FP_EXTRACT_PROMPT.strip(),
             "variables": [],
-            "description": "强制 JSON 输出功能点列表",
+            "description": "强制 JSON 输出细粒度测试项列表",
         },
         "tc_generate": {
             "name": "功能用例生成",
             "category": "generation",
             "content": TC_GENERATE_PROMPT.strip(),
             "variables": ["fp_descriptions", "fps", "csv_header"],
-            "description": "功能测试用例 JSON",
+            "description": "功能测试用例 JSON（每测试项至少 3 条）",
         },
         "tc_generate_ui": {
             "name": "UI自动化用例生成",
             "category": "generation",
             "content": TC_GENERATE_UI_PROMPT.strip(),
             "variables": ["fp_descriptions", "fps", "csv_header"],
-            "description": "UI 自动化用例 JSON",
+            "description": "UI 自动化用例 JSON（每测试项至少 3 条）",
         },
         "operation_translate": {
             "name": "操作指令翻译",
@@ -211,6 +211,41 @@ async def seed_prompt_templates(db: AsyncSession) -> int:
     return created
 
 
+async def sync_prompt_templates_from_seed(db: AsyncSession) -> int:
+    """If active prompt content differs from seed, create+activate a new version.
+
+    Returns number of keys updated.
+    """
+    from app.crud.prompt_template import (
+        activate_prompt_version,
+        create_prompt_template,
+        get_prompt_template_by_key,
+    )
+
+    updated = 0
+    for key, meta in get_seed_prompts().items():
+        active = await get_prompt_template_by_key(db, key)
+        desired = (meta["content"] or "").strip()
+        if active and (active.content or "").strip() == desired:
+            continue
+        if active is None:
+            # seed_prompt_templates should have created it; skip here
+            continue
+        pt = await create_prompt_template(
+            db,
+            key=key,
+            name=meta["name"],
+            category=meta["category"],
+            content=desired,
+            variables=meta["variables"],
+            description=meta["description"],
+        )
+        await activate_prompt_version(db, key, pt.version)
+        updated += 1
+        logger.info("提示词 %s 已同步到 seed v%d", key, pt.version)
+    return updated
+
+
 async def seed_default_agents(db: AsyncSession) -> int:
     """Insert default AgentDefinitions when the table is empty. Returns number created."""
     from app import db_models
@@ -224,15 +259,19 @@ async def seed_default_agents(db: AsyncSession) -> int:
 
 
 async def seed_defaults(db: AsyncSession) -> None:
-    """Seed prompts + agents for a fresh database (idempotent)."""
+    """Seed prompts + agents for a fresh database (idempotent).
+
+    Also syncs generation prompt bodies to the latest seed content so existing
+    deployments pick up test-item wording without manual edits.
+    """
     n_prompts = await seed_prompt_templates(db)
+    n_synced = await sync_prompt_templates_from_seed(db)
     n_agents = await seed_default_agents(db)
-    if n_prompts or n_agents:
+    if n_prompts or n_synced or n_agents:
         await db.commit()
         if n_prompts:
             logger.info("已创建 %d 个默认提示词模板", n_prompts)
+        if n_synced:
+            logger.info("已同步 %d 个提示词模板到最新种子内容", n_synced)
         if n_agents:
             logger.info("已创建 %d 个默认 AI Agent", n_agents)
-    else:
-        # still commit if caller expects clean session state? no-op commit ok
-        pass
