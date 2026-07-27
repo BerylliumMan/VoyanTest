@@ -215,15 +215,20 @@ async def delete_history(
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
-    """Delete analysis history record."""
+    """Delete analysis history record.
+
+    In-progress sessions (``analyzing`` / ``pending``) must be stopped first.
+    """
 
     record = await crud.gen.get_gen_session(db, session_id)
     if not record:
         raise HTTPException(404, "记录不存在")
     _check_session_ownership(record, user)
 
+    if record.status in ("analyzing", "pending"):
+        raise HTTPException(400, "分析进行中，请先停止后再删除")
+
     # Also remove from in-memory if present
-    await request_cancel_gen(session_id)
     async with _lock:
         _sessions.pop(session_id, None)
     await clear_gen_runtime(session_id)
