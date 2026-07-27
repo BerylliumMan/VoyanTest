@@ -300,27 +300,29 @@ class TestRunStartupInit:
 
     @pytest.mark.asyncio
     async def test_existing_prompt_template_content_updated(self, db):
-        """非自定义的默认模板在启动时应被更新（content 变化）。"""
+        """已有 key 的提示词在启动时不会被覆盖（仅补种缺失项）。"""
         from app import db_models
         from app.main import _run_startup_init
         template_key = "fp_extract"
         result = await db.execute(
             select(db_models.PromptTemplate).where(
-                db_models.PromptTemplate.template_key == template_key,
-            )
+                db_models.PromptTemplate.key == template_key,
+            ).limit(1)
         )
         existing = result.scalar_one_or_none()
         if existing:
-            existing.label = "旧标签"
-            existing.template_content = "旧内容"
-            existing.is_custom = False
+            existing.name = "旧标签"
+            existing.content = "旧内容"
             await db.commit()
         else:
             existing = db_models.PromptTemplate(
-                template_key=template_key,
-                label="旧标签",
-                template_content="旧内容",
-                is_custom=False,
+                key=template_key,
+                name="旧标签",
+                category="generation",
+                content="旧内容",
+                variables=[],
+                version=1,
+                is_active=True,
             )
             db.add(existing)
             await db.commit()
@@ -329,43 +331,45 @@ class TestRunStartupInit:
         await _run_startup_init()
 
         await db.refresh(existing)
-        assert existing.template_content != "旧内容"
-        assert existing.label != "旧标签"
+        assert existing.content == "旧内容"
+        assert existing.name == "旧标签"
 
     @pytest.mark.asyncio
     async def test_custom_prompt_template_not_overwritten(self, db):
-        """is_custom=True 的模板不应被默认内容覆盖。"""
+        """已存在的提示词内容在启动补种时保持不变。"""
         from app import db_models
         from app.main import _run_startup_init
         template_key = "tc_generate"
         result = await db.execute(
             select(db_models.PromptTemplate).where(
-                db_models.PromptTemplate.template_key == template_key,
-            )
+                db_models.PromptTemplate.key == template_key,
+            ).limit(1)
         )
         existing = result.scalar_one_or_none()
         if existing:
-            existing.label = "自定义"
-            existing.template_content = "我自定义的内容"
-            existing.is_custom = True
+            existing.name = "自定义"
+            existing.content = "我自定义的内容"
             await db.commit()
         else:
             existing = db_models.PromptTemplate(
-                template_key=template_key,
-                label="自定义",
-                template_content="我自定义的内容",
-                is_custom=True,
+                key=template_key,
+                name="自定义",
+                category="generation",
+                content="我自定义的内容",
+                variables=[],
+                version=1,
+                is_active=True,
             )
             db.add(existing)
             await db.commit()
         await db.refresh(existing)
-        original_content = existing.template_content
+        original_content = existing.content
 
         await _run_startup_init()
 
         await db.refresh(existing)
-        assert existing.template_content == original_content
-        assert existing.label == "自定义"
+        assert existing.content == original_content
+        assert existing.name == "自定义"
 
 
 class TestLifespan:
