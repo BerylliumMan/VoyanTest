@@ -279,6 +279,7 @@ const GenHistoryPage: React.FC = () => {
             size="small"
             icon={<IconDelete />}
             status="danger"
+            disabled={record.status === 'analyzing' || record.status === 'pending'}
             onClick={() => handleDelete(record.id)}
             aria-label="删除"
           />

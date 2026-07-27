@@ -321,6 +321,22 @@ class TestHistoryDelete:
         resp = client.delete(f"/api/gen/history/{rec.id}", cookies=admin_cookies)
         assert resp.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_delete_analyzing_rejected(self, client, admin_cookies, db):
+        """分析中的记录不可删除，需先停止。"""
+        rec = await _make_session(db, status="analyzing")
+        resp = client.delete(f"/api/gen/history/{rec.id}", cookies=admin_cookies)
+        assert resp.status_code == 400
+        assert "停止" in resp.json()["detail"]
+        await db.refresh(rec)
+        assert rec.status == "analyzing"
+
+    @pytest.mark.asyncio
+    async def test_delete_cancelled_allowed(self, client, admin_cookies, db):
+        rec = await _make_session(db, status="cancelled")
+        resp = client.delete(f"/api/gen/history/{rec.id}", cookies=admin_cookies)
+        assert resp.status_code == 200
+
 
 # ==================== 停止分析 ====================
 
