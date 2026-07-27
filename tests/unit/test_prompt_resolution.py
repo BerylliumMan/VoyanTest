@@ -37,11 +37,11 @@ class TestSeedData:
         assert keys == expected, f"种子 key: {keys}"
 
     @pytest.mark.parametrize("marker", [
-        "JSON", "functional_points", "等价类",
+        "JSON", "functional_points", "测试项",
         "浏览器自动化", "操作类型", "三级验证", "verdict",
     ])
     def test_content_markers(self, seed_source, marker):
-        """每个种子内容包含关键业务标记（JSON、操作类型等）。"""
+        """每个种子内容包含关键业务标记（JSON、测试项等）。"""
         assert marker in seed_source, f"缺少标记: {marker}"
 
 

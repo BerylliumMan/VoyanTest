@@ -1,22 +1,18 @@
-"""Extract text and FP summaries from a mixed batch of uploaded files.
+"""Extract text and ordered multimodal parts from a mixed batch of uploaded files.
 
-Supports ``.docx``, ``.md``, ``.pdf`` (auto-detect dual-layer vs scan-only)
-and ``.png`` / ``.jpg`` / ``.jpeg``. Documents contribute raw text; images
-and scanned PDFs contribute per-page functional-point summaries produced by
-:mod:`app.gen.feature_extractor`. The result is a single concatenated string
-ready to feed into :func:`app.gen.orchestrator.two_phase_analyze`.
+Supports ``.docx`` (ordered text + embedded images), ``.md``, ``.pdf``
+(auto-detect dual-layer vs scan-only) and ``.png`` / ``.jpg`` / ``.jpeg``.
 """
 
+from __future__ import annotations
+
 import asyncio
-import json as _json
 import logging
 import os
+from typing import Any
 
-import openai
-
-from app.gen.constants import ALLOWED_EXTENSIONS, MAX_FILES, MAX_RETRIES, MAX_TOTAL_SIZE, RETRY_DELAY
-from app.gen.docx_parser import extract_text
-from app.gen.feature_extractor import extract_functional_points
+from app.gen.constants import ALLOWED_EXTENSIONS, MAX_FILES, MAX_TOTAL_SIZE
+from app.gen.docx_parser import blocks_to_plain_text, extract_ordered_blocks
 from app.gen.image_parser import encode_image
 from app.gen.md_parser import extract_text_from_md
 from app.gen.pdf_parser import (
@@ -28,34 +24,33 @@ from app.gen.pdf_parser import (
 logger = logging.getLogger(__name__)
 
 
-async def extract_multi_file_content(files, filenames, progress_callback=None) -> tuple[str, list[str], list[str]]:
-    """从多个文件中提取内容并拼接为一个大文本。
+def _file_header(idx: int, filename: str) -> dict[str, Any]:
+    return {"type": "text", "text": f"===== 文件{idx + 1}: {filename} ====="}
 
-    Args:
-        files: 文件对象列表（SpooledTemporaryFile 等，同步 read/write）
-        filenames: 对应文件名列表
-        progress_callback: 可选 callable(current, total, message)
+
+async def extract_multi_file_content(
+    files,
+    filenames,
+    progress_callback=None,
+) -> tuple[str, list[str], list[str], list[dict[str, Any]]]:
+    """从多个文件中提取内容。
 
     Returns:
-        (combined_text, filenames, warnings)
-        - combined_text: 拼接后的文本
-        - filenames: 所有文件名列表
-        - warnings: 警告信息列表
+        (combined_text, filenames, warnings, content_parts)
+        - combined_text: 拼接后的纯文本（含图片占位），兼容旧调用方
+        - content_parts: 有序多模态块，供 Phase1 vision 使用
     """
     warnings: list[str] = []
-    text_parts: list[str] = []
-    image_fp_parts: list[str] = []
+    content_parts: list[dict[str, Any]] = []
 
-    # 校验文件数量
     if len(files) > MAX_FILES:
         raise ValueError(f"最多上传 {MAX_FILES} 个文件，当前选择了 {len(files)} 个")
 
-    # 校验总大小
     total_size = 0
     for f in files:
-        f.seek(0, 2)  # SEEK_END
+        f.seek(0, 2)
         total_size += f.tell()
-        f.seek(0)     # SEEK_SET
+        f.seek(0)
     if total_size > MAX_TOTAL_SIZE:
         raise ValueError(f"文件总大小超过 50MB 限制（当前 {total_size / 1024 / 1024:.1f}MB）")
 
@@ -74,102 +69,73 @@ async def extract_multi_file_content(files, filenames, progress_callback=None) -
         try:
             file.seek(0)
             if ext == ".docx":
-                text = await asyncio.to_thread(extract_text, file)
-                if not text.strip():
+                blocks, doc_warnings = await asyncio.to_thread(extract_ordered_blocks, file)
+                warnings.extend(doc_warnings)
+                if not blocks:
                     warnings.append(f"文件 {filename} 为空，已跳过")
                     continue
-                text_parts.append(f"===== 文件{idx + 1}: {filename} =====\n{text}")
+                content_parts.append(_file_header(idx, filename))
+                content_parts.extend(blocks)
 
             elif ext == ".md":
                 text = await asyncio.to_thread(extract_text_from_md, file)
                 if not text.strip():
                     warnings.append(f"文件 {filename} 为空，已跳过")
                     continue
-                text_parts.append(f"===== 文件{idx + 1}: {filename} =====\n{text}")
+                content_parts.append(_file_header(idx, filename))
+                content_parts.append({"type": "text", "text": text})
 
             elif ext == ".pdf":
-                # 双层 PDF 提取文本，扫描 PDF 提取图片功能点
                 if await asyncio.to_thread(is_pdf_dual_layer, file):
                     text = await asyncio.to_thread(extract_text_from_pdf, file)
-                    if not text.strip():
+                    if text.strip():
+                        content_parts.append(_file_header(idx, filename))
+                        content_parts.append({"type": "text", "text": text})
+                    else:
                         warnings.append(f"PDF 文件 {filename} 无有效文字，尝试图片模式")
                         file.seek(0)
                         page_images = await asyncio.to_thread(render_pdf_pages_to_images, file)
-                        if page_images:
-                            for page_idx, (pext, pb64) in enumerate(page_images):
-                                fps = await extract_functional_points(
-                                    image_data=(pext, pb64),
-                                    progress_callback=progress_callback,
-                                )
-                                fp_text = "\n".join(
-                                    f"- 【{fp.module}】{fp.name}({fp.category}): {fp.description}"
-                                    for fp in fps
-                                ) if fps else "（未提取到功能点）"
-                                image_fp_parts.append(
-                                    f"===== 图片功能点提取: {filename} 第{page_idx + 1}页 =====\n{fp_text}"
-                                )
-                        else:
+                        if not page_images:
                             warnings.append(f"PDF文件 {filename} 无有效页面，已跳过")
-                        continue
-                    text_parts.append(f"===== 文件{idx + 1}: {filename} =====\n{text}")
+                            continue
+                        content_parts.append(_file_header(idx, filename))
+                        for page_idx, (pext, pb64) in enumerate(page_images):
+                            content_parts.append({
+                                "type": "text",
+                                "text": f"===== {filename} 第{page_idx + 1}页 =====",
+                            })
+                            content_parts.append({"type": "image", "ext": pext, "b64": pb64})
                 else:
                     page_images = await asyncio.to_thread(render_pdf_pages_to_images, file)
                     if not page_images:
                         warnings.append(f"PDF文件 {filename} 无有效页面，已跳过")
                         continue
+                    content_parts.append(_file_header(idx, filename))
                     for page_idx, (pext, pb64) in enumerate(page_images):
-                        fps = await extract_functional_points(
-                            image_data=(pext, pb64),
-                            progress_callback=progress_callback,
-                        )
-                        fp_text = "\n".join(
-                            f"- 【{fp.module}】{fp.name}({fp.category}): {fp.description}"
-                            for fp in fps
-                        ) if fps else "（未提取到功能点）"
-                        image_fp_parts.append(
-                            f"===== 图片功能点提取: {filename} 第{page_idx + 1}页 =====\n{fp_text}"
-                        )
+                        content_parts.append({
+                            "type": "text",
+                            "text": f"===== {filename} 第{page_idx + 1}页 =====",
+                        })
+                        content_parts.append({"type": "image", "ext": pext, "b64": pb64})
 
             elif ext in (".png", ".jpg", ".jpeg"):
                 suffix = ext.lstrip(".")
                 b64 = await asyncio.to_thread(encode_image, file)
-                fps = []
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        fps = await extract_functional_points(
-                            image_data=(suffix, b64),
-                            progress_callback=progress_callback,
-                        )
-                        break
-                    except Exception as e:  # noqa: BLE001 - 重试判定依赖 str(e)，需吞掉所有异常
-                        if "timed out" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                            logger.warning("图片 %s 分析超时，第 %d 次重试...", filename, attempt + 1)
-                            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-                        else:
-                            raise
-                fp_text = "\n".join(
-                    f"- 【{fp.module}】{fp.name}({fp.category}): {fp.description}"
-                    for fp in fps
-                ) if fps else "（未提取到功能点）"
-                image_fp_parts.append(
-                    f"===== 图片功能点提取: {filename} =====\n{fp_text}"
-                )
+                content_parts.append(_file_header(idx, filename))
+                content_parts.append({"type": "image", "ext": suffix, "b64": b64})
 
-        except Exception as e:  # noqa: BLE001 - 文件级兜底：单个文件解析失败不影响其他文件
+        except Exception as e:  # noqa: BLE001
             logger.warning("文件 %s 提取失败: %s", filename, e)
             warnings.append(f"文件 {filename} 提取失败: {e}")
 
-        # 文件间延迟，避免 API 限流
         if idx < total_files - 1:
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
 
-    # 拼接：文档文本在前，图片功能点描述在后
-    combined = "\n\n".join(text_parts + image_fp_parts)
-
-    if not combined.strip():
+    combined = blocks_to_plain_text(content_parts)
+    if not combined.strip() and not any(p.get("type") == "image" for p in content_parts):
         raise ValueError("所有文件均未提取到有效内容")
 
-    return combined, filenames, warnings
+    return combined, filenames, warnings, content_parts
 
 
 __all__ = ["extract_multi_file_content"]

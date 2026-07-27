@@ -1185,7 +1185,7 @@ class TestPrompts:
         prompts = get_default_prompts()
         assert "fp_extract" in prompts
         assert "tc_generate" in prompts
-        assert prompts["fp_extract"]["label"] == "功能点提取"
+        assert prompts["fp_extract"]["label"] == "测试项提取"
         assert prompts["tc_generate"]["label"] == "功能用例生成"
         assert "content" in prompts["fp_extract"]
         assert "content" in prompts["tc_generate"]

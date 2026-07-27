@@ -1,14 +1,16 @@
 """Phase 1 / Phase 2 model calls.
 
-Phase 1 extracts functional points from a document or image; Phase 2 turns
-each batch of functional points into test cases. Both phases go through
-``call_model`` from :mod:`app.gen.model_client`.
+Phase 1 extracts test items from document text, images, or ordered multimodal
+parts; Phase 2 turns each batch of test items into test cases. Both phases go
+through ``call_model`` from :mod:`app.gen.model_client`.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json as _json
 import logging
-import time
+from typing import Any
 
 import openai
 from markupsafe import escape
@@ -16,83 +18,209 @@ from markupsafe import escape
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
 from app.gen.model_client import call_model
-from app.runtime_config import render_prompt_variables
 from app.gen.models import FunctionalPoint, TestCase
-from app.gen.prompts import FP_BATCH_SIZE, FP_EXTRACT_PROMPT, TC_GENERATE_PROMPT
+from app.gen.prompts import (
+    FP_BATCH_SIZE,
+    FP_EXTRACT_PROMPT,
+    MIN_TCS_PER_ITEM,
+    TC_GENERATE_PROMPT,
+)
 from app.gen.response_parser import _parse_fps_from_text, _parse_tcs_from_text
+from app.runtime_config import render_prompt_variables
 
 logger = logging.getLogger(__name__)
+
+
+def content_parts_to_openai_user_content(
+    content_parts: list[dict[str, Any]],
+    *,
+    intro: str = "请分析以下需求文档内容（文字与图片按文档顺序排列）：",
+) -> list[dict[str, Any]]:
+    """Build OpenAI multimodal user ``content`` array preserving order."""
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": intro}]
+    for part in content_parts:
+        ptype = part.get("type")
+        if ptype == "text":
+            text = (part.get("text") or "").strip()
+            if text:
+                user_content.append({"type": "text", "text": text})
+        elif ptype == "image":
+            ext = (part.get("ext") or "png").lstrip(".").lower()
+            if ext == "jpg":
+                ext = "jpeg"
+            b64 = part.get("b64") or ""
+            if not b64:
+                continue
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/{ext};base64,{b64}"},
+            })
+    return user_content
+
+
+def _has_images(content_parts: list[dict[str, Any]] | None) -> bool:
+    return bool(content_parts) and any(p.get("type") == "image" for p in content_parts)
+
+
+def _vision_hint(exc: BaseException) -> str | None:
+    err = str(exc).lower()
+    if any(k in err for k in ("vision", "image", "multimodal", "unsupported", "invalid_request")):
+        return f"当前模型可能不支持图片理解，请更换多模态模型后重试: {exc}"
+    return None
 
 
 async def extract_functional_points(
     text: str = None,
     image_data: tuple = None,
+    content_parts: list[dict[str, Any]] | None = None,
     project_description: str = "",
     progress_callback=None,
     fp_prompt: str = None,
     agent_type: str = "generation",
     agent_id: int | None = None,
 ) -> list[FunctionalPoint]:
-    """Extract functional points from document text or image.
+    """Extract test items (stored as FunctionalPoint) from document / image / parts.
 
-    Phase 1 of two-phase pipeline.
-
-    Args:
-        text: Document text content (for .docx files).
-        image_data: Tuple of (file_extension, base64_encoded_image) for image files.
-        project_description: User-supplied project background.
-        progress_callback: Optional callable(current, total, message) — forwarded by caller.
-        fp_prompt: Custom FP extraction prompt (None = use default).
-        agent_type: AgentDefinition type for LLM/prompt resolution (default generation).
-        agent_id: Specific AgentDefinition.id (optional).
-
-    Exactly one of text or image_data must be provided.
+    Phase 1 of two-phase pipeline. When ``content_parts`` includes images, a
+    multimodal user message is sent with document order preserved.
     """
     fp_prompt = fp_prompt or FP_EXTRACT_PROMPT
     desc_prefix = ""
     if project_description:
         desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
 
-    if image_data:
-        suffix, b64 = image_data
-        prompt = desc_prefix + fp_prompt
-        if progress_callback:
-            progress_callback(0, 0, "正在分析图片提取功能点")
-        content = await call_model([
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请分析此界面原型图中的所有功能点和UI元素："},
-                    {"type": "image_url", "image_url": {"url": f"data:image/{suffix};base64,{b64}"}},
-                ],
-            },
-        ], agent_type=agent_type, agent_id=agent_id)
-    else:
-        prompt = desc_prefix + fp_prompt
-        if progress_callback:
-            progress_callback(0, 0, "正在分析文档提取功能点")
-        content = await call_model([
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text},
-        ], agent_type=agent_type, agent_id=agent_id)
+    prompt = desc_prefix + fp_prompt
+    if progress_callback:
+        if _has_images(content_parts) or image_data:
+            progress_callback(0, 0, "正在分析文档/图片提取测试项")
+        else:
+            progress_callback(0, 0, "正在分析文档提取测试项")
+
+    async def _call(user_payload) -> str:
+        return await call_model(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_payload},
+            ],
+            agent_type=agent_type,
+            agent_id=agent_id,
+        )
+
+    def _user_payload():
+        if content_parts is not None:
+            return content_parts_to_openai_user_content(content_parts)
+        if image_data:
+            suffix, b64 = image_data
+            return [
+                {"type": "text", "text": "请分析此界面原型图中的所有测试项和UI元素："},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/{suffix};base64,{b64}"},
+                },
+            ]
+        return text or ""
+
+    try:
+        content = await _call(_user_payload())
+    except (openai.OpenAIError, asyncio.TimeoutError, OSError, RuntimeError, ValueError) as e:
+        hint = _vision_hint(e) if (_has_images(content_parts) or image_data) else None
+        if hint:
+            logger.warning("Multimodal test-item extraction failed: %s", e)
+            raise RuntimeError(hint) from e
+        raise
 
     fps = _parse_fps_from_text(content)
     if progress_callback:
-        progress_callback(0, 0, f"提取到 {len(fps)} 个功能点")
+        progress_callback(0, 0, f"提取到 {len(fps)} 个测试项")
     if not fps:
-        logger.warning("FP extraction empty, retrying... raw output: %s", content[:300])
+        logger.warning("Test-item extraction empty, retrying... raw: %s", content[:300])
         await asyncio.sleep(2)
-        content = await call_model([
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text},
-        ], agent_type=agent_type, agent_id=agent_id)
+        content = await _call(_user_payload())
         fps = _parse_fps_from_text(content)
         if not fps:
-            logger.warning("FP extraction still empty after retry. Raw: %s", content[:300])
+            logger.warning("Test-item extraction still empty after retry. Raw: %s", content[:300])
         if progress_callback:
-            progress_callback(0, 0, f"重试后提取到 {len(fps)} 个功能点")
+            progress_callback(0, 0, f"重试后提取到 {len(fps)} 个测试项")
     return fps
+
+
+def _fp_descriptions(batch: list[FunctionalPoint]) -> str:
+    return "\n".join(
+        f"- 模块：{fp.module}\n  测试项：{fp.name} ({fp.category})\n  描述：{fp.description}"
+        for fp in batch
+    )
+
+
+def _merge_tcs_by_title(primary: list[TestCase], extra: list[TestCase]) -> list[TestCase]:
+    seen = {(tc.title or "").strip() for tc in primary}
+    merged = list(primary)
+    for tc in extra:
+        title = (tc.title or "").strip()
+        if title and title in seen:
+            continue
+        if title:
+            seen.add(title)
+        merged.append(tc)
+    return merged
+
+
+async def _generate_batch_once(
+    *,
+    batch: list[FunctionalPoint],
+    tc_prompt: str,
+    project_description: str,
+    agent_type: str,
+    agent_id: int | None,
+    tc_counter: int,
+    user_hint: str,
+) -> list[TestCase]:
+    fp_descriptions = _fp_descriptions(batch)
+    csv_header = " | ".join(CSV_HEADER)
+    prompt = render_prompt_variables(
+        tc_prompt,
+        fp_descriptions=fp_descriptions,
+        fps=fp_descriptions,
+        csv_header=csv_header,
+    )
+    desc_prefix = ""
+    if project_description:
+        desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
+
+    tcs: list[TestCase] = []
+    content = ""
+    for attempt in range(MAX_RETRIES):
+        try:
+            content = await call_model(
+                [
+                    {"role": "system", "content": desc_prefix + prompt},
+                    {"role": "user", "content": user_hint},
+                ],
+                agent_type=agent_type,
+                agent_id=agent_id,
+            )
+            tcs = _parse_tcs_from_text(content, start_index=tc_counter)
+            if tcs:
+                return tcs
+            logger.warning(
+                "TC batch attempt %d: no TCs parsed, retrying... raw: %s",
+                attempt + 1,
+                content[:500],
+            )
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+        except (
+            openai.OpenAIError,
+            asyncio.TimeoutError,
+            _json.JSONDecodeError,
+            ValueError,
+            RuntimeError,
+            KeyError,
+            TypeError,
+        ) as e:
+            logger.warning("TC batch attempt %d failed: %s", attempt + 1, e)
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+    return tcs
 
 
 async def generate_test_cases_for_fps(
@@ -105,35 +233,21 @@ async def generate_test_cases_for_fps(
     agent_type: str = "generation",
     agent_id: int | None = None,
 ) -> dict:
-    """Generate test cases for functional points in batches of 5-8.
+    """Generate test cases for test items in batches of ``FP_BATCH_SIZE``.
 
-    Phase 2 of two-phase pipeline. Groups FPs into batches, calls
-    TC_GENERATE_PROMPT per batch with structured FP descriptions as context
-    (no longer sends the full document), and merges all test cases.
-
-    Args:
-        phase1_offset: The starting step number for Phase 2 (default 1, meaning
-            Phase 1 = step 0).
-        total_steps: Total number of steps (Phase 1 + all batches).
-        tc_prompt: Custom TC generation prompt (None = use default).
-        agent_type: AgentDefinition type for LLM resolution (default generation).
-        agent_id: Specific AgentDefinition.id (optional).
-
-    Returns:
-        dict with 'test_cases' (list[TestCase]) and 'warnings' (list[str]).
+    If a batch yields fewer than ``len(batch) * MIN_TCS_PER_ITEM`` cases, one
+    supplemental generation pass is attempted and results are merged by title.
     """
     tc_prompt = tc_prompt or TC_GENERATE_PROMPT
     all_tcs: list[TestCase] = []
     warnings: list[str] = []
-    tc_counter = 0  # running counter for global TC numbering
+    tc_counter = 0
 
-    # Split FPs into batches of FP_BATCH_SIZE
-    batches = []
+    batches: list[list[FunctionalPoint]] = []
     for i in range(0, len(fps), FP_BATCH_SIZE):
         batches.append(fps[i : i + FP_BATCH_SIZE])
 
     for idx, batch in enumerate(batches):
-        # Build display name for logging/warnings
         fp_names = ", ".join(fp.name for fp in batch[:3])
         if len(batch) > 3:
             fp_names += f" +{len(batch) - 3} more"
@@ -143,56 +257,60 @@ async def generate_test_cases_for_fps(
             msg = f"正在为 {batch[0].name} 生成用例 ({step + 1}/{total_steps})"
             progress_callback(step, total_steps, msg)
 
-        tcs = []
-        content = ""
+        min_needed = len(batch) * MIN_TCS_PER_ITEM
+        tcs = await _generate_batch_once(
+            batch=batch,
+            tc_prompt=tc_prompt,
+            project_description=project_description,
+            agent_type=agent_type,
+            agent_id=agent_id,
+            tc_counter=tc_counter,
+            user_hint=(
+                f"请为以上 {len(batch)} 个测试项生成测试用例。"
+                f"每个测试项至少 {MIN_TCS_PER_ITEM} 条（正常/异常/边界），"
+                f"本批合计至少 {min_needed} 条。"
+            ),
+        )
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                fp_descriptions = "\n".join(
-                    f"- 模块：{fp.module}\n  功能点：{fp.name} ({fp.category})\n  描述：{fp.description}"
-                    for fp in batch
-                )
-
-                csv_header = " | ".join(CSV_HEADER)
-                prompt = render_prompt_variables(
-                    tc_prompt,
-                    fp_descriptions=fp_descriptions,
-                    fps=fp_descriptions,
-                    csv_header=csv_header,
-                )
-
-                desc_prefix = ""
-                if project_description:
-                    desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
-
-                content = await call_model([
-                    {"role": "system", "content": desc_prefix + prompt},
-                    {"role": "user", "content": f"请为以上功能点生成测试用例。"},
-                ], agent_type=agent_type, agent_id=agent_id)
-
-                tcs = _parse_tcs_from_text(content, start_index=tc_counter)
-                if tcs:
-                    break
-                else:
-                    logger.warning("Batch %d attempt %d: no TCs parsed, retrying...",
-                                  idx + 1, attempt + 1)
-                    logger.warning("Batch %d raw model output (first 500 chars): %s", idx + 1, content[:500])
-                    if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-            except (openai.OpenAIError, asyncio.TimeoutError, _json.JSONDecodeError,
-                    ValueError, RuntimeError, KeyError, TypeError) as e:
-                # 单次重试：覆盖 API / 超时 / JSON / 校验 / 模板占位符错误
-                logger.warning("Batch %d attempt %d failed: %s", idx + 1, attempt + 1, e)
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+        if tcs and len(tcs) < min_needed:
+            logger.info(
+                "Batch %d got %d TCs < required %d; supplemental generation",
+                idx + 1,
+                len(tcs),
+                min_needed,
+            )
+            extra = await _generate_batch_once(
+                batch=batch,
+                tc_prompt=tc_prompt,
+                project_description=project_description,
+                agent_type=agent_type,
+                agent_id=agent_id,
+                tc_counter=tc_counter + len(tcs),
+                user_hint=(
+                    f"上一轮仅生成 {len(tcs)} 条，不足。"
+                    f"请继续为以上 {len(batch)} 个测试项补齐用例，"
+                    f"确保每个测试项至少 {MIN_TCS_PER_ITEM} 条（正常/异常/边界），"
+                    f"不要重复已有标题。"
+                ),
+            )
+            if extra:
+                tcs = _merge_tcs_by_title(tcs, extra)
 
         if not tcs:
-            logger.warning("Batch %d failed after %d attempts. fp_descriptions: %s",
-                          idx + 1, MAX_RETRIES, fp_descriptions[:500] if fp_descriptions else "N/A")
-            warnings.append(f"Batch {idx + 1} ({fp_names}) returned no test cases after {MAX_RETRIES} retries")
+            warnings.append(
+                f"Batch {idx + 1} ({fp_names}) returned no test cases after {MAX_RETRIES} retries"
+            )
         else:
+            # Re-number sequentially after merge
+            for i, tc in enumerate(tcs):
+                tc.test_case_id = f"TC-{tc_counter + i + 1:03d}"
             tc_counter += len(tcs)
             all_tcs.extend(tcs)
+            if len(tcs) < min_needed:
+                warnings.append(
+                    f"Batch {idx + 1} ({fp_names}) 仅生成 {len(tcs)} 条用例，"
+                    f"低于期望 {min_needed} 条（每测试项至少 {MIN_TCS_PER_ITEM} 条）"
+                )
             logger.info("Batch %d generated %d test cases for: %s", idx + 1, len(tcs), fp_names)
 
         if idx < len(batches) - 1:
@@ -202,6 +320,7 @@ async def generate_test_cases_for_fps(
 
 
 __all__ = [
+    "content_parts_to_openai_user_content",
     "extract_functional_points",
     "generate_test_cases_for_fps",
 ]

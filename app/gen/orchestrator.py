@@ -40,8 +40,13 @@ async def two_phase_analyze(
     agent_id: int | None = None,
     skills: list | None = None,
     tc_prompt_key: str | None = None,
+    content_parts: list | None = None,
 ) -> dict:
-    """Two-phase analysis using Pipeline (generation AgentDefinition)."""
+    """Two-phase analysis using Pipeline (generation AgentDefinition).
+
+    ``content_parts`` is an optional ordered multimodal list
+    (``[{type:text|image,...}, ...]``) for vision-capable Phase 1.
+    """
     from app.gen.agents.pipeline import Pipeline
     config = {
         "project_description": project_description,
@@ -55,7 +60,7 @@ async def two_phase_analyze(
     if prompts:
         config["prompts"] = prompts
     pipeline = Pipeline(config)
-    return await pipeline.run(text)
+    return await pipeline.run(text, content_parts=content_parts)
 
 
 async def _analyze_image_two_phase(file, progress_callback, project_description) -> dict:
@@ -66,7 +71,7 @@ async def _analyze_image_two_phase(file, progress_callback, project_description)
     image_data = (suffix, b64)
 
     if progress_callback:
-        progress_callback(0, 0, "正在从图片提取功能点")
+        progress_callback(0, 0, "正在从图片提取测试项")
 
     try:
         fps = await extract_functional_points(image_data=image_data, project_description=project_description)

@@ -412,13 +412,13 @@ const GenPage: React.FC = () => {
                       <div className={styles.stepRow}>
                         {[
                           { label: '文档解析', icon: <IconFile aria-hidden /> },
-                          { label: '功能点提取', icon: <IconCode aria-hidden /> },
+                          { label: '测试项提取', icon: <IconCode aria-hidden /> },
                           { label: '生成用例', icon: <IconStar aria-hidden /> },
                         ].map((s, i) => {
                           const msg = analysisStatus.message || '';
                           const step =
                             msg.includes('用例') ? 2
-                            : msg.includes('功能点') || msg.includes('提取') ? 1
+                            : msg.includes('测试项') || msg.includes('功能点') || msg.includes('提取') ? 1
                             : 0;
                           const isActive = i === step;
                           const isDone = i < step;
@@ -445,11 +445,11 @@ const GenPage: React.FC = () => {
                         })}
                       </div>
                       <div className={styles.stepLabels}>
-                        {['文档解析', '功能点提取', '生成用例'].map((label, i) => {
+                        {['文档解析', '测试项提取', '生成用例'].map((label, i) => {
                           const msg = analysisStatus.message || '';
                           const step =
                             msg.includes('用例') ? 2
-                            : msg.includes('功能点') || msg.includes('提取') ? 1
+                            : msg.includes('测试项') || msg.includes('功能点') || msg.includes('提取') ? 1
                             : 0;
                           const isActive = i === step;
                           const isDone = i < step;
@@ -498,7 +498,7 @@ const GenPage: React.FC = () => {
                       </Text>
                     </div>
                     <Text className={styles.mutedText}>
-                      共提取 {functionalPoints.length} 个功能点，生成 {testCases.length} 个测试用例
+                      共提取 {functionalPoints.length} 个测试项，生成 {testCases.length} 个测试用例
                     </Text>
                   </div>
                 </Card>
@@ -523,7 +523,7 @@ const GenPage: React.FC = () => {
             <>
               <Divider />
               <div className={styles.resultSection}>
-                <Title heading={5}>功能点 ({functionalPoints.length})</Title>
+                <Title heading={5}>测试项 ({functionalPoints.length})</Title>
                 <Collapse defaultActiveKey={[]}>
                   {functionalPoints.map((fp, i) => (
                     <Collapse.Item
