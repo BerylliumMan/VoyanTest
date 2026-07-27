@@ -1126,6 +1126,30 @@ class TestFeatureExtractorGenerateTCs:
         assert len(progress_calls) >= 1
 
     @pytest.mark.asyncio
+    async def test_generate_tcs_default_total_steps_from_batch_count(self):
+        """未传 total_steps 时分母应为 phase1_offset + 批次数，避免 (7/1)。"""
+        from app.gen.feature_extractor import generate_test_cases_for_fps
+        from app.gen.prompts import FP_BATCH_SIZE
+
+        n = FP_BATCH_SIZE * 2 + 1  # 3 batches when FP_BATCH_SIZE=3
+        fps = self._make_fps(n)
+        progress_calls = []
+
+        def cb(cur, total, msg):
+            progress_calls.append((cur, total, msg))
+
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value="| TC-1 | M | T | P | S | R | 高 |")), \
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
+            await generate_test_cases_for_fps(fps, "", progress_callback=cb)
+
+        num_batches = (n + FP_BATCH_SIZE - 1) // FP_BATCH_SIZE
+        expected_total = 1 + num_batches
+        assert progress_calls
+        for _cur, total, msg in progress_calls:
+            assert total == expected_total
+            assert f"/{expected_total})" in msg
+
+    @pytest.mark.asyncio
     async def test_generate_tcs_custom_prompt(self):
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
