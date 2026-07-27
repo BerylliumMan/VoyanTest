@@ -22,7 +22,9 @@ from app.gen.chunking import (
     chunk_token_budget,
     estimate_parts_tokens,
     estimate_text_tokens,
+    looks_like_filename_module,
     merge_functional_points,
+    sanitize_module_name,
 )
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
@@ -304,11 +306,16 @@ async def extract_functional_points(
             agent_id=agent_id,
             multimodal=use_mm and multimodal,
         )
-        # Prefer chapter module when model left it generic
+        # Prefer chapter module when model left it generic (never file-name modules)
         for fp in fps:
-            if chunk.module and chunk.module not in ("通用", "文档开头"):
+            if (
+                chunk.module
+                and chunk.module not in ("通用", "文档开头")
+                and not looks_like_filename_module(chunk.module)
+            ):
                 if not (fp.module or "").strip() or fp.module in ("通用", "文档开头"):
                     fp.module = chunk.module
+            fp.module = sanitize_module_name(fp.module)
         batch_results.append(fps)
         if idx < n_chunks - 1:
             await asyncio.sleep(RETRY_DELAY)
@@ -494,9 +501,12 @@ async def generate_test_cases_for_fps(
                 f"Batch {idx + 1} ({fp_names}) returned no test cases after {MAX_RETRIES} retries"
             )
         else:
-            # Re-number sequentially after merge
+            # Re-number sequentially after merge; scrub filename-like modules
             for i, tc in enumerate(tcs):
                 tc.test_case_id = f"TC-{tc_counter + i + 1:03d}"
+                tc.module = sanitize_module_name(tc.module or "")
+                if (not tc.module or tc.module == "通用") and len(batch) == 1:
+                    tc.module = sanitize_module_name(batch[0].module or "")
             tc_counter += len(tcs)
             all_tcs.extend(tcs)
             if len(tcs) < min_needed:

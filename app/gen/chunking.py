@@ -37,8 +37,11 @@ _HEADING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^【([^】]{1,40})】\s*(.*)$"),
 ]
 
-_FILE_HEADER_RE = re.compile(r"^=====\s*文件\d+\s*[:：].*?\s*=====\s*$")
-_PAGE_HEADER_RE = re.compile(r"^=====\s*.+?\s*第\d+页\s*=====\s*$")
+_FILE_HEADER_RE = re.compile(r"^=====\s*文件\d+(?:\s*[:：].*?)?\s*=====\s*$")
+_PAGE_HEADER_RE = re.compile(r"^=====\s*(?:.+?\s*)?第\d+页\s*=====\s*$")
+_FILENAME_MODULE_RE = re.compile(
+    r"(?i)(?:^文件\d+\b|\.(?:docx?|pdf|md|markdown|png|jpe?g|gif|webp|xlsx?|csv|txt)\s*$)"
+)
 
 
 
@@ -112,6 +115,30 @@ def is_file_separator_line(line: str) -> bool:
     if not s or "\n" in s:
         return False
     return bool(_FILE_HEADER_RE.match(s) or _PAGE_HEADER_RE.match(s))
+
+
+def looks_like_filename_module(module: str) -> bool:
+    """True when module looks like an upload filename / file banner, not a业务模块."""
+    m = (module or "").strip()
+    if not m:
+        return False
+    if is_file_separator_line(m):
+        return True
+    if _FILENAME_MODULE_RE.search(m):
+        return True
+    # e.g. "需求说明_v1.docx" or "文件1: foo.png"
+    if re.search(r"(?i)\.(?:docx?|pdf|md|png|jpe?g)\b", m):
+        return True
+    return False
+
+
+def sanitize_module_name(module: str, fallback: str = "通用") -> str:
+    m = (module or "").strip()
+    if not m or m in ("文档开头",):
+        return fallback
+    if looks_like_filename_module(m):
+        return fallback
+    return m
 
 
 def detect_heading(line: str) -> str | None:
@@ -189,7 +216,14 @@ def split_text_by_headings(text: str) -> list[tuple[str, str]]:
             chapters.append((current_module, body))
 
     for line in lines:
-        heading = detect_heading(line.rstrip("\n"))
+        raw = line.rstrip("\n")
+        # File / page banners: structural split only, never a business module
+        if is_file_separator_line(raw):
+            flush()
+            current_module = "通用"
+            buf.append(line)
+            continue
+        heading = detect_heading(raw)
         if heading is not None:
             flush()
             current_module = heading
@@ -490,6 +524,7 @@ def merge_functional_points(batches: list[list]) -> list:
     merged: list[FunctionalPoint] = []
     for batch in batches:
         for fp in batch:
+            fp.module = sanitize_module_name(getattr(fp, "module", "") or "")
             key = ((fp.module or "").strip(), (fp.name or "").strip())
             if not key[1]:
                 continue
@@ -515,6 +550,9 @@ __all__ = [
     "estimate_parts_tokens",
     "estimate_text_tokens",
     "merge_functional_points",
+    "looks_like_filename_module",
+    "sanitize_module_name",
+    "is_file_separator_line",
     "split_content_parts",
     "split_text_by_headings",
     "split_text_into_chunks",
