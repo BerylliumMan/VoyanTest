@@ -21,6 +21,8 @@ from app.gen.pdf_parser import (
     render_pdf_pages_to_images,
 )
 
+from app.gen.cancel import GenAnalysisCancelled
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +34,7 @@ async def extract_multi_file_content(
     files,
     filenames,
     progress_callback=None,
+    cancel_checker=None,
 ) -> tuple[str, list[str], list[str], list[dict[str, Any]]]:
     """从多个文件中提取内容。
 
@@ -57,6 +60,8 @@ async def extract_multi_file_content(
     total_files = len(files)
 
     for idx, file in enumerate(files):
+        if cancel_checker and cancel_checker():
+            raise GenAnalysisCancelled()
         filename = filenames[idx] if idx < len(filenames) else f"file_{idx + 1}"
         ext = os.path.splitext(filename)[1].lower()
 

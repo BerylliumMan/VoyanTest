@@ -76,7 +76,7 @@ interface TestCase {
 }
 
 interface AnalysisStatus {
-  status: 'pending' | 'analyzing' | 'completed' | 'failed';
+  status: 'pending' | 'analyzing' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   message: string;
   functional_points?: FunctionalPoint[];
@@ -222,6 +222,13 @@ const GenPage: React.FC = () => {
           }
           setUploading(false);
           Message.error(status.message || '分析失败');
+        } else if (status.status === 'cancelled') {
+          if (pollTimer.current) {
+            clearInterval(pollTimer.current);
+            pollTimer.current = null;
+          }
+          setUploading(false);
+          Message.warning(status.message || '分析已停止');
         }
       } catch (err) {
         logger.error('Polling error:', err);
@@ -511,6 +518,19 @@ const GenPage: React.FC = () => {
                     <div className={styles.resultTitle}>
                       <Text className={styles.dangerText}>
                         {analysisStatus.message || '分析失败'}
+                      </Text>
+                    </div>
+                  </div>
+                </Card>
+              )}
+
+              {analysisStatus.status === 'cancelled' && (
+                <Card>
+                  <div className={styles.resultCentered}>
+                    <IconClose className={styles.dangerIconLarge} aria-hidden />
+                    <div className={styles.resultTitle}>
+                      <Text className={styles.dangerText}>
+                        {analysisStatus.message || '分析已停止'}
                       </Text>
                     </div>
                   </div>

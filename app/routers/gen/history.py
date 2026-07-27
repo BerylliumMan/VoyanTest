@@ -22,7 +22,13 @@ from .schemas import (
     GenPreviewResponse,
     GenTestCaseUpdate,
 )
-from .state import _lock, _sessions
+from app.gen.cancel import CANCEL_MESSAGE
+from .state import (
+    _lock,
+    _sessions,
+    clear_gen_runtime,
+    request_cancel_gen,
+)
 
 router = APIRouter()
 
@@ -217,11 +223,50 @@ async def delete_history(
     _check_session_ownership(record, user)
 
     # Also remove from in-memory if present
+    await request_cancel_gen(session_id)
     async with _lock:
         _sessions.pop(session_id, None)
+    await clear_gen_runtime(session_id)
 
     await crud.gen.delete_gen_session(db, session_id)
     return {"message": "删除成功"}
+
+
+@router.post("/history/{session_id}/cancel")
+async def cancel_analysis(
+    session_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+) -> dict:
+    """Stop an in-progress analysis (same worker cancels the asyncio task)."""
+    from datetime import datetime
+
+    record = await crud.gen.get_gen_session(db, session_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
+
+    if record.status not in ("analyzing", "pending"):
+        raise HTTPException(400, f"当前状态无法停止：{record.status}")
+
+    await request_cancel_gen(session_id)
+
+    async with _lock:
+        mem = _sessions.get(session_id)
+        if mem:
+            mem.status = "cancelled"
+            mem.error_message = CANCEL_MESSAGE
+            mem.progress_message = CANCEL_MESSAGE
+            mem.progress = 100
+
+    await crud.gen.update_gen_session_status(
+        db,
+        session_id,
+        status="cancelled",
+        error_message=CANCEL_MESSAGE,
+        completed_at=datetime.now(),
+    )
+    return {"message": "已停止分析", "status": "cancelled"}
 
 
 @router.put("/history/{session_id}/test-cases/{test_case_id}")

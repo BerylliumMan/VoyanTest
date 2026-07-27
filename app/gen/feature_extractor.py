@@ -15,6 +15,7 @@ from typing import Any
 import openai
 from markupsafe import escape
 
+from app.gen.cancel import GenAnalysisCancelled
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
 from app.gen.model_client import call_model
@@ -78,6 +79,7 @@ async def extract_functional_points(
     fp_prompt: str = None,
     agent_type: str = "generation",
     agent_id: int | None = None,
+    cancel_checker=None,
 ) -> list[FunctionalPoint]:
     """Extract test items (stored as FunctionalPoint) from document / image / parts.
 
@@ -95,6 +97,9 @@ async def extract_functional_points(
             progress_callback(0, 0, "正在分析文档/图片提取测试项")
         else:
             progress_callback(0, 0, "正在分析文档提取测试项")
+
+    if cancel_checker and cancel_checker():
+        raise GenAnalysisCancelled()
 
     async def _call(user_payload) -> str:
         return await call_model(
@@ -232,6 +237,7 @@ async def generate_test_cases_for_fps(
     tc_prompt: str = None,
     agent_type: str = "generation",
     agent_id: int | None = None,
+    cancel_checker=None,
 ) -> dict:
     """Generate test cases for test items in batches of ``FP_BATCH_SIZE``.
 
@@ -248,6 +254,8 @@ async def generate_test_cases_for_fps(
         batches.append(fps[i : i + FP_BATCH_SIZE])
 
     for idx, batch in enumerate(batches):
+        if cancel_checker and cancel_checker():
+            raise GenAnalysisCancelled()
         fp_names = ", ".join(fp.name for fp in batch[:3])
         if len(batch) > 3:
             fp_names += f" +{len(batch) - 3} more"
@@ -314,6 +322,8 @@ async def generate_test_cases_for_fps(
             logger.info("Batch %d generated %d test cases for: %s", idx + 1, len(tcs), fp_names)
 
         if idx < len(batches) - 1:
+            if cancel_checker and cancel_checker():
+                raise GenAnalysisCancelled()
             await asyncio.sleep(2)
 
     return {"test_cases": all_tcs, "warnings": warnings}
