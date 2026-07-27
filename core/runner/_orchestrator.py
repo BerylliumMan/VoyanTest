@@ -116,7 +116,9 @@ async def run_test_case_via_agent(
             logger.exception("无法创建 AgentRunner LLM 客户端")
             return None
 
-    model = agent_def.llm_config.get("model") if agent_def.llm_config else None
+    model = (agent_def.llm_config or {}).get("model") or None
+    if isinstance(model, str) and not model.strip():
+        model = None
 
     runner = AgentRunner(
         mcp_manager=mcp_manager,

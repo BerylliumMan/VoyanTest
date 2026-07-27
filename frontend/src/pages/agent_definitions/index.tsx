@@ -118,13 +118,18 @@ function AgentDefinitions() {
     setVisible(true);
   };
 
-  const buildLlmConfig = (values: Record<string, unknown>): Record<string, unknown> => ({
-    model: values.llm_model,
-    temperature: values.llm_temperature,
-    max_tokens: values.llm_max_tokens,
-    api_base: values.llm_api_base,
-    provider: values.llm_provider,
-  });
+  const buildLlmConfig = (values: Record<string, unknown>): Record<string, unknown> => {
+    const cfg: Record<string, unknown> = {
+      temperature: values.llm_temperature,
+      max_tokens: values.llm_max_tokens,
+      provider: values.llm_provider || 'openai',
+    };
+    const model = String(values.llm_model ?? '').trim();
+    if (model) cfg.model = model;
+    const apiBase = String(values.llm_api_base ?? '').trim();
+    if (apiBase) cfg.api_base = apiBase;
+    return cfg;
+  };
 
   const handleSubmit = async () => {
     const values = await form.validate();
@@ -259,7 +264,7 @@ function AgentDefinitions() {
 
                     <div className={styles.cardSection}>
                       <span className={styles.llmInfo}>
-                        {llmCfg.model || '-'}
+                        {llmCfg.model || '默认模型'}
                         {llmCfg.temperature !== 0 &&
                           ` · temp: ${llmCfg.temperature}`}
                       </span>
@@ -359,8 +364,12 @@ function AgentDefinitions() {
             {t['agent_definitions.form.llm_config']}
           </div>
 
-          <Form.Item field="llm_model" label="Model" rules={[{ required: true }]}>
-            <Input placeholder="gpt-4" />
+          <Form.Item
+            field="llm_model"
+            label="Model"
+            extra="留空则使用系统 AI 配置中的默认模型"
+          >
+            <Input placeholder="留空使用默认模型" allowClear />
           </Form.Item>
 
           <Form.Item field="llm_temperature" label="Temperature">

@@ -23,6 +23,22 @@ _GLOBAL_TTL = 30
 TTL_SECONDS = 30
 
 
+def merge_llm_config(defaults: dict, overrides: dict | None) -> dict:
+    """Merge Agent llm_config onto global defaults; skip empty overrides.
+
+    Empty / whitespace-only strings (e.g. unset model) do not replace defaults,
+    so Agents can leave model blank and inherit AIConfig.model.
+    """
+    merged = dict(defaults or {})
+    for key, value in (overrides or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        merged[key] = value
+    return merged
+
+
 async def _load_global_ai_config() -> dict:
     """加载系统全局 AI 配置（带缓存），用作 Agent 配置的默认值。"""
     global _global_config_cache, _global_config_cached_at
@@ -91,7 +107,7 @@ async def resolve_agent_config(
     if active_agent is not None:
         defaults = await _load_global_ai_config()
         agent_cfg: dict = active_agent.llm_config or {}
-        llm_config = {**defaults, **agent_cfg}
+        llm_config = merge_llm_config(defaults, agent_cfg)
         logger.debug(
             "Agent 配置缓存回填: key=%s id=%s model=%s",
             cache_key, active_agent.id, llm_config.get("model", "?"),
