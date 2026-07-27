@@ -132,6 +132,12 @@ def looks_like_filename_module(module: str) -> bool:
     return False
 
 
+MODULE_PATH_SEP = "——"
+_MODULE_SEP_SPLIT_RE = re.compile(
+    r"\s*(?:——+|—+|–+|-+|/+|\\+|>+|·+|＋+|＋)\s*"
+)
+
+
 def sanitize_module_name(module: str, fallback: str = "通用") -> str:
     m = (module or "").strip()
     if not m or m in ("文档开头",):
@@ -139,6 +145,49 @@ def sanitize_module_name(module: str, fallback: str = "通用") -> str:
     if looks_like_filename_module(m):
         return fallback
     return m
+
+
+def normalize_module_path(
+    raw: str,
+    chapter_hint: str | None = None,
+    *,
+    fallback: str = "通用",
+) -> str:
+    """Normalize module to ``一级`` or ``一级——二级`` (max 2 levels)."""
+    m = sanitize_module_name(raw, fallback="")
+    hint = sanitize_module_name(chapter_hint or "", fallback="")
+    if hint in ("通用", "文档开头"):
+        hint = ""
+
+    if not m:
+        # Empty model module → fall back to chapter label (single level)
+        if not hint:
+            return fallback
+        hint_parts = [p.strip() for p in _MODULE_SEP_SPLIT_RE.split(hint) if p and p.strip()]
+        return MODULE_PATH_SEP.join(hint_parts[:2]) or fallback
+
+    parts = [p.strip() for p in _MODULE_SEP_SPLIT_RE.split(m) if p and p.strip()]
+    cleaned: list[str] = []
+    for p in parts:
+        p2 = sanitize_module_name(p, fallback="")
+        if p2 and p2 not in cleaned:
+            cleaned.append(p2)
+    if not cleaned:
+        return hint or fallback
+    return MODULE_PATH_SEP.join(cleaned[:2])
+
+
+def split_module_path(module: str) -> tuple[str, str | None]:
+    """Return ``(primary, secondary|None)`` after normalization."""
+    path = normalize_module_path(module)
+    if MODULE_PATH_SEP in path:
+        left, right = path.split(MODULE_PATH_SEP, 1)
+        return left.strip() or "通用", (right.strip() or None)
+    return path, None
+
+
+def primary_module_name(module: str) -> str:
+    return split_module_path(module)[0]
 
 
 def detect_heading(line: str) -> str | None:
@@ -524,7 +573,7 @@ def merge_functional_points(batches: list[list]) -> list:
     merged: list[FunctionalPoint] = []
     for batch in batches:
         for fp in batch:
-            fp.module = sanitize_module_name(getattr(fp, "module", "") or "")
+            fp.module = normalize_module_path(getattr(fp, "module", "") or "")
             key = ((fp.module or "").strip(), (fp.name or "").strip())
             if not key[1]:
                 continue
@@ -541,6 +590,7 @@ __all__ = [
     "BRIDGE_CHARS",
     "CHARS_PER_TOKEN_INV",
     "IMAGE_TOKEN_COST",
+    "MODULE_PATH_SEP",
     "Phase1Chunk",
     "build_phase1_chunks_from_parts",
     "build_phase1_chunks_from_text",
@@ -549,11 +599,14 @@ __all__ = [
     "estimate_part_tokens",
     "estimate_parts_tokens",
     "estimate_text_tokens",
-    "merge_functional_points",
-    "looks_like_filename_module",
-    "sanitize_module_name",
     "is_file_separator_line",
+    "looks_like_filename_module",
+    "merge_functional_points",
+    "normalize_module_path",
+    "primary_module_name",
+    "sanitize_module_name",
     "split_content_parts",
+    "split_module_path",
     "split_text_by_headings",
     "split_text_into_chunks",
 ]

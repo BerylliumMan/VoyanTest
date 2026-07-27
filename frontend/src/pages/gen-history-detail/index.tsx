@@ -60,6 +60,26 @@ interface ProjectItem {
   name: string;
 }
 
+const MODULE_PATH_SEP = '——';
+
+const primaryModuleName = (module?: string): string => {
+  const m = (module || '').trim() || '通用';
+  const idx = m.indexOf(MODULE_PATH_SEP);
+  if (idx >= 0) {
+    return m.slice(0, idx).trim() || '通用';
+  }
+  // Also split common legacy separators for grouping
+  const legacy = m.split(/\s*[\/|>·]\s*/)[0]?.trim();
+  return legacy || '通用';
+};
+
+interface ModuleSummaryRow {
+  primary: string;
+  fpCount: number;
+  tcCount: number;
+  testCaseIds: string[];
+}
+
 interface Step {
   step_order: number;
   description: string;
@@ -162,6 +182,8 @@ const GenHistoryDetailPage: React.FC = () => {
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editSteps, setEditSteps] = useState<Step[]>([]);
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
+  const [viewMode, setViewMode] = useState<'summary' | 'cases'>('summary');
+  const [selectedPrimary, setSelectedPrimary] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -237,21 +259,37 @@ const GenHistoryDetailPage: React.FC = () => {
     fetchProjects();
   }, []);
 
-  const handleImport = async (mode: 'all' | 'selected') => {
+  const handleImport = async (mode: 'all' | 'selected' | 'module') => {
     if (!selectedProjectId) {
       Message.warning('请先选择项目');
       return;
     }
-    if (mode === 'selected' && selectedRowKeys.length === 0) {
-      Message.warning('请先选择要导入的测试用例');
-      return;
+    let selectedIds: string[] | null = null;
+    if (mode === 'selected') {
+      if (selectedRowKeys.length === 0) {
+        Message.warning('请先选择要导入的测试用例');
+        return;
+      }
+      selectedIds = selectedRowKeys;
+    } else if (mode === 'module') {
+      if (!selectedPrimary || !previewData) {
+        Message.warning('请先进入一级模块查看用例');
+        return;
+      }
+      selectedIds = previewData.test_cases
+        .filter((tc) => primaryModuleName(tc.module) === selectedPrimary)
+        .map((tc) => tc.test_case_id);
+      if (selectedIds.length === 0) {
+        Message.warning('该一级模块下没有可导入的用例');
+        return;
+      }
     }
     setImportLoading(true);
     try {
       const res = await axios.post<{ imported_count: number; test_case_ids: number[] }>('/api/gen/import', {
         session_id: id,
         project_id: selectedProjectId,
-        selected_ids: mode === 'selected' ? selectedRowKeys : null,
+        selected_ids: selectedIds,
       });
       Message.success(`成功导入 ${res.data.imported_count} 条测试用例`);
       setSelectedRowKeys([]);
@@ -388,36 +426,92 @@ const GenHistoryDetailPage: React.FC = () => {
     }
   };
 
-  const paginatedTestCases = useMemo(() => {
+  const moduleSummaries = useMemo((): ModuleSummaryRow[] => {
     if (!previewData) return [];
-    const start = (testCasesPage - 1) * testCasesPageSize;
-    return previewData.test_cases.slice(start, start + testCasesPageSize);
-  }, [previewData, testCasesPage, testCasesPageSize]);
+    const map = new Map<string, ModuleSummaryRow>();
+    for (const fp of previewData.functional_points) {
+      const primary = primaryModuleName(fp.module);
+      const row = map.get(primary) || {
+        primary,
+        fpCount: 0,
+        tcCount: 0,
+        testCaseIds: [],
+      };
+      row.fpCount += 1;
+      map.set(primary, row);
+    }
+    for (const tc of previewData.test_cases) {
+      const primary = primaryModuleName(tc.module);
+      const row = map.get(primary) || {
+        primary,
+        fpCount: 0,
+        tcCount: 0,
+        testCaseIds: [],
+      };
+      row.tcCount += 1;
+      row.testCaseIds.push(tc.test_case_id);
+      map.set(primary, row);
+    }
+    return Array.from(map.values()).sort((a, b) => a.primary.localeCompare(b.primary, 'zh'));
+  }, [previewData]);
 
-  const functionalPointColumns = [
+  const filteredTestCases = useMemo(() => {
+    if (!previewData || !selectedPrimary) return [];
+    return previewData.test_cases.filter(
+      (tc) => primaryModuleName(tc.module) === selectedPrimary,
+    );
+  }, [previewData, selectedPrimary]);
+
+  const filteredFunctionalPoints = useMemo(() => {
+    if (!previewData || !selectedPrimary) return [];
+    return previewData.functional_points.filter(
+      (fp) => primaryModuleName(fp.module) === selectedPrimary,
+    );
+  }, [previewData, selectedPrimary]);
+
+  const paginatedTestCases = useMemo(() => {
+    const start = (testCasesPage - 1) * testCasesPageSize;
+    return filteredTestCases.slice(start, start + testCasesPageSize);
+  }, [filteredTestCases, testCasesPage, testCasesPageSize]);
+
+  const openModuleCases = (primary: string) => {
+    setSelectedPrimary(primary);
+    setViewMode('cases');
+    setTestCasesPage(1);
+    setSelectedRowKeys([]);
+  };
+
+  const backToSummary = () => {
+    setViewMode('summary');
+    setSelectedPrimary(null);
+    setSelectedRowKeys([]);
+    setTestCasesPage(1);
+  };
+
+  const moduleSummaryColumns = [
     {
-      title: '序号',
-      dataIndex: 'id',
-      width: 80,
+      title: '一级模块',
+      dataIndex: 'primary',
+      width: 240,
     },
     {
-      title: '模块',
-      dataIndex: 'module',
+      title: '测试项数',
+      dataIndex: 'fpCount',
       width: 120,
     },
     {
-      title: '名称',
-      dataIndex: 'name',
-      width: 200,
-    },
-    {
-      title: '分类',
-      dataIndex: 'category',
+      title: '用例数',
+      dataIndex: 'tcCount',
       width: 120,
     },
     {
-      title: '描述',
-      dataIndex: 'description',
+      title: '操作',
+      width: 140,
+      render: (_: unknown, record: ModuleSummaryRow) => (
+        <Button type="text" size="small" onClick={() => openModuleCases(record.primary)}>
+          查看用例
+        </Button>
+      ),
     },
   ];
 
@@ -441,7 +535,8 @@ const GenHistoryDetailPage: React.FC = () => {
     {
       title: '模块',
       dataIndex: 'module',
-      width: 120,
+      width: 180,
+      render: (val: string) => <TruncateText text={val || '通用'} maxWidth={160} />,
     },
     {
       title: '标题',
@@ -579,23 +674,36 @@ const GenHistoryDetailPage: React.FC = () => {
                   </Select.Option>
                 ))}
               </Select>
-              <Button
-                type="primary"
-                disabled={!selectedProjectId}
-                loading={importLoading}
-                onClick={() => handleImport('all')}
-              >
-                全部导入
-              </Button>
-              <Button
-                type="primary"
-                status="success"
-                disabled={!selectedProjectId || selectedRowKeys.length === 0}
-                loading={importLoading}
-                onClick={() => handleImport('selected')}
-              >
-                导入选中
-              </Button>
+              {viewMode === 'summary' ? (
+                <Button
+                  type="primary"
+                  disabled={!selectedProjectId}
+                  loading={importLoading}
+                  onClick={() => handleImport('all')}
+                >
+                  全部导入
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    type="primary"
+                    disabled={!selectedProjectId}
+                    loading={importLoading}
+                    onClick={() => handleImport('module')}
+                  >
+                    导入本一级
+                  </Button>
+                  <Button
+                    type="primary"
+                    status="success"
+                    disabled={!selectedProjectId || selectedRowKeys.length === 0}
+                    loading={importLoading}
+                    onClick={() => handleImport('selected')}
+                  >
+                    导入选中
+                  </Button>
+                </>
+              )}
               <Button
                 icon={<IconDownload />}
                 onClick={() => {
@@ -611,12 +719,40 @@ const GenHistoryDetailPage: React.FC = () => {
           </div>
         )}
 
-        {previewData && (
+        {previewData && viewMode === 'summary' && (
+          <div className={styles.section}>
+            <Title heading={6}>按一级模块分类 ({moduleSummaries.length})</Title>
+            <Table
+              rowKey="primary"
+              columns={moduleSummaryColumns}
+              data={moduleSummaries}
+              pagination={false}
+              size="small"
+              border={false}
+            />
+          </div>
+        )}
+
+        {previewData && viewMode === 'cases' && selectedPrimary && (
           <>
             <div className={styles.section}>
-              <Title heading={6}>功能点 ({previewData.functional_points.length})</Title>
+              <div className={styles.moduleDrillHeader}>
+                <Button type="text" icon={<IconLeft />} onClick={backToSummary}>
+                  返回模块列表
+                </Button>
+                <Title heading={6} className={styles.titleNoMargin}>
+                  一级模块：{selectedPrimary}
+                </Title>
+                <Text type="secondary">
+                  测试项 {filteredFunctionalPoints.length} · 用例 {filteredTestCases.length}
+                </Text>
+              </div>
+            </div>
+
+            <div className={styles.section}>
+              <Title heading={6}>测试项 ({filteredFunctionalPoints.length})</Title>
               <Collapse defaultActiveKey={[]}>
-                {previewData.functional_points.map((fp) => (
+                {filteredFunctionalPoints.map((fp) => (
                   <Collapse.Item
                     key={String(fp.id)}
                     name={String(fp.id)}
@@ -641,7 +777,7 @@ const GenHistoryDetailPage: React.FC = () => {
             </div>
 
             <div className={styles.section}>
-              <Title heading={6}>测试用例 ({previewData.test_cases.length})</Title>
+              <Title heading={6}>测试用例 ({filteredTestCases.length})</Title>
               <Table
                 rowKey="test_case_id"
                 columns={testCaseColumns}
@@ -654,7 +790,7 @@ const GenHistoryDetailPage: React.FC = () => {
                 pagination={{
                   current: testCasesPage,
                   pageSize: testCasesPageSize,
-                  total: previewData.test_cases.length,
+                  total: filteredTestCases.length,
                   onChange: setTestCasesPage,
                   onPageSizeChange: setTestCasesPageSize,
                   showTotal: true,

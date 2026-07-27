@@ -269,3 +269,45 @@ class TestImportTestCases:
         assert steps_db[0].description == "点击【新增】"
         assert steps_db[1].description == "在【名称】框输入数据"
         assert steps_db[2].description == "点击【保存】"
+
+    @pytest.mark.asyncio
+    async def test_import_creates_l1_l2_modules(self):
+        """「一级——二级」应创建父子模块，用例挂在二级。"""
+        from app import db_models as m
+        from sqlalchemy import select as sel
+
+        tc = GenTestCase(
+            test_case_id="TC-HIER",
+            module="登录注册——验证码登录",
+            title="层级用例",
+            preconditions="",
+            test_steps="1. 打开登录页",
+            expected_result="1. 页面展示",
+            priority="高",
+        )
+        created = await import_test_cases(self.db, self.project.id, [tc])
+        assert len(created) == 1
+        leaf = await self.db.get(m.Module, created[0].module_id)
+        assert leaf is not None
+        assert leaf.name == "验证码登录"
+        assert leaf.parent_id is not None
+        parent = await self.db.get(m.Module, leaf.parent_id)
+        assert parent is not None
+        assert parent.name == "登录注册"
+        assert parent.parent_id is None
+
+    @pytest.mark.asyncio
+    async def test_import_single_level_module(self):
+        tc = GenTestCase(
+            test_case_id="TC-L1",
+            module="首页",
+            title="单级用例",
+            preconditions="",
+            test_steps="1. 打开首页",
+            expected_result="1. 展示成功",
+            priority="中",
+        )
+        created = await import_test_cases(self.db, self.project.id, [tc])
+        leaf = await self.db.get(db_models.Module, created[0].module_id)
+        assert leaf.name == "首页"
+        assert leaf.parent_id is None
