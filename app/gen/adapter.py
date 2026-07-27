@@ -73,21 +73,53 @@ def align_expected_to_steps(steps: list[str], results: list[str]) -> list[str]:
 _align_expected_to_steps = align_expected_to_steps
 
 
-async def _find_or_create_module(db: AsyncSession, project_id: int, module_name: str) -> db_models.Module:
-    """Find existing module by name in project, or create it."""
-    result = await db.execute(
-        select(db_models.Module).where(
-            db_models.Module.project_id == project_id,
-            db_models.Module.name == module_name,
-        )
+from app.gen.chunking import normalize_module_path, split_module_path
+
+
+async def _find_or_create_module(
+    db: AsyncSession,
+    project_id: int,
+    module_name: str,
+    parent_id: int | None = None,
+) -> db_models.Module:
+    """Find existing module by name + parent in project, or create it."""
+    name = (module_name or "").strip() or "通用"
+    q = select(db_models.Module).where(
+        db_models.Module.project_id == project_id,
+        db_models.Module.name == name,
     )
+    if parent_id is None:
+        q = q.where(db_models.Module.parent_id.is_(None))
+    else:
+        q = q.where(db_models.Module.parent_id == parent_id)
+    result = await db.execute(q)
     module = result.scalar_one_or_none()
     if not module:
-        module = db_models.Module(project_id=project_id, name=module_name)
+        module = db_models.Module(
+            project_id=project_id,
+            name=name,
+            parent_id=parent_id,
+        )
         db.add(module)
         await db.flush()
-        logger.info("Created module: %s (id=%d)", module_name, module.id)
+        logger.info(
+            "Created module: %s (id=%d, parent_id=%s)",
+            name, module.id, parent_id,
+        )
     return module
+
+
+async def resolve_module_for_import(
+    db: AsyncSession,
+    project_id: int,
+    module_path: str,
+) -> db_models.Module:
+    """Resolve ``一级`` / ``一级——二级`` into the leaf Module (create parents as needed)."""
+    primary, secondary = split_module_path(module_path)
+    l1 = await _find_or_create_module(db, project_id, primary, parent_id=None)
+    if not secondary:
+        return l1
+    return await _find_or_create_module(db, project_id, secondary, parent_id=l1.id)
 
 
 async def import_test_cases(
@@ -115,9 +147,11 @@ async def import_test_cases(
         if selected_set is not None and gen_tc.test_case_id not in selected_set:
             continue
 
-        # Find or create module
-        module_name = gen_tc.module.strip() if gen_tc.module else "通用"
-        module = await _find_or_create_module(db, project_id, module_name)
+        # Find or create L1 / L2 modules from path like 「一级——二级」
+        module_name = normalize_module_path(
+            gen_tc.module.strip() if gen_tc.module else "通用"
+        )
+        module = await resolve_module_for_import(db, project_id, module_name)
 
         # Build description from preconditions
         description = ""

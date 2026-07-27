@@ -211,6 +211,17 @@ def test_sanitize_filename_modules():
     assert sanitize_module_name("首页") == "首页"
 
 
+def test_normalize_module_path_two_levels():
+    from app.gen.chunking import normalize_module_path, primary_module_name, split_module_path
+
+    assert normalize_module_path("登录注册/验证码") == "登录注册——验证码"
+    assert normalize_module_path("登录注册 > 验证码 > 多余") == "登录注册——验证码"
+    assert normalize_module_path("登录注册") == "登录注册"
+    assert normalize_module_path("", chapter_hint="首页") == "首页"
+    assert split_module_path("登录注册——验证码") == ("登录注册", "验证码")
+    assert primary_module_name("登录注册——验证码") == "登录注册"
+
+
 def test_text_file_banner_not_module():
     from app.gen.chunking import looks_like_filename_module
 

@@ -24,7 +24,7 @@ from app.gen.chunking import (
     estimate_text_tokens,
     looks_like_filename_module,
     merge_functional_points,
-    sanitize_module_name,
+    normalize_module_path,
 )
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
@@ -241,6 +241,8 @@ async def extract_functional_points(
             agent_id=agent_id,
             multimodal=True,
         )
+        for fp in fps:
+            fp.module = normalize_module_path(fp.module)
         if progress_callback:
             progress_callback(0, 0, f"提取到 {len(fps)} 个测试项")
         return fps
@@ -315,7 +317,7 @@ async def extract_functional_points(
             ):
                 if not (fp.module or "").strip() or fp.module in ("通用", "文档开头"):
                     fp.module = chunk.module
-            fp.module = sanitize_module_name(fp.module)
+            fp.module = normalize_module_path(fp.module, chapter_hint=chunk.module)
         batch_results.append(fps)
         if idx < n_chunks - 1:
             await asyncio.sleep(RETRY_DELAY)
@@ -504,9 +506,9 @@ async def generate_test_cases_for_fps(
             # Re-number sequentially after merge; scrub filename-like modules
             for i, tc in enumerate(tcs):
                 tc.test_case_id = f"TC-{tc_counter + i + 1:03d}"
-                tc.module = sanitize_module_name(tc.module or "")
+                tc.module = normalize_module_path(tc.module or "")
                 if (not tc.module or tc.module == "通用") and len(batch) == 1:
-                    tc.module = sanitize_module_name(batch[0].module or "")
+                    tc.module = normalize_module_path(batch[0].module or "")
             tc_counter += len(tcs)
             all_tcs.extend(tcs)
             if len(tcs) < min_needed:
