@@ -17,12 +17,12 @@ from markupsafe import escape
 
 from app.gen.cancel import GenAnalysisCancelled
 from app.gen.chunking import (
+    build_phase1_chunks_from_parts,
+    build_phase1_chunks_from_text,
     chunk_token_budget,
     estimate_parts_tokens,
     estimate_text_tokens,
     merge_functional_points,
-    split_content_parts,
-    split_text_into_chunks,
 )
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
@@ -169,77 +169,69 @@ async def extract_functional_points(
     max_ctx = await get_context_budget()
     budget = chunk_token_budget(max_ctx)
 
-    part_chunks: list[list[dict[str, Any]]] | None = None
-    text_chunks: list[str] | None = None
-
     if content_parts is not None:
         total = estimate_parts_tokens(content_parts)
-        if total <= budget:
-            part_chunks = [content_parts]
-        else:
-            part_chunks = split_content_parts(content_parts, budget)
+        phase1_chunks = build_phase1_chunks_from_parts(content_parts, budget)
+        if total > budget:
             logger.info(
-                "Phase1 chunking content_parts: ~%d tokens > budget %d → %d chunks",
-                total, budget, len(part_chunks),
+                "Phase1 chapter-chunking content_parts: ~%d tokens > budget %d → %d chunks",
+                total, budget, len(phase1_chunks),
             )
     else:
         body = text or ""
         total = estimate_text_tokens(body)
-        if total <= budget:
-            text_chunks = [body] if body.strip() else []
-        else:
-            text_chunks = split_text_into_chunks(body, budget)
+        phase1_chunks = build_phase1_chunks_from_text(body, budget)
+        if total > budget:
             logger.info(
-                "Phase1 chunking text: ~%d tokens > budget %d → %d chunks",
-                total, budget, len(text_chunks),
+                "Phase1 chapter-chunking text: ~%d tokens > budget %d → %d chunks",
+                total, budget, len(phase1_chunks),
             )
 
-    n_chunks = len(part_chunks or text_chunks or [])
+    n_chunks = len(phase1_chunks)
     if n_chunks == 0:
         return []
 
     if progress_callback:
         msg = "正在分析文档/图片提取测试项" if multimodal else "正在分析文档提取测试项"
         if n_chunks > 1:
-            msg = f"{msg}（分段 1/{n_chunks}）"
+            c0 = phase1_chunks[0]
+            msg = f"{msg}（{c0.module} 1/{n_chunks}）"
         progress_callback(0, 0, msg)
 
     batch_results: list[list[FunctionalPoint]] = []
-    for idx in range(n_chunks):
+    for idx, chunk in enumerate(phase1_chunks):
         if cancel_checker and cancel_checker():
             raise GenAnalysisCancelled()
         if n_chunks > 1 and progress_callback:
             progress_callback(
                 idx, n_chunks,
-                f"正在提取测试项（分段 {idx + 1}/{n_chunks}）",
+                f"正在提取测试项（{chunk.module} {chunk.segment}/{chunk.segment_total}，总段 {idx + 1}/{n_chunks}）",
             )
-        if part_chunks is not None:
+        if chunk.multimodal or chunk.parts:
             payload = content_parts_to_openai_user_content(
-                part_chunks[idx],
-                intro=(
-                    f"请分析以下需求文档内容（第 {idx + 1}/{n_chunks} 段，"
-                    "文字与图片按文档顺序排列；只提取本段出现的测试项）："
-                    if n_chunks > 1
-                    else "请分析以下需求文档内容（文字与图片按文档顺序排列）："
-                ),
+                chunk.parts,
+                intro=chunk.intro,
             )
+            use_mm = True
         else:
-            chunk_text = (text_chunks or [])[idx]
             if n_chunks > 1:
-                payload = (
-                    f"以下为需求文档第 {idx + 1}/{n_chunks} 段，"
-                    f"请只提取本段中的测试项：\n\n{chunk_text}"
-                )
+                payload = f"{chunk.intro}\n\n{chunk.text}"
             else:
-                payload = chunk_text
+                payload = chunk.text
+            use_mm = False
 
         fps = await _extract_fps_once(
             user_payload=payload,
             prompt=prompt,
             agent_type=agent_type,
             agent_id=agent_id,
-            multimodal=multimodal and part_chunks is not None,
+            multimodal=use_mm and multimodal,
         )
+        # Prefer chapter module when model left it generic
+        for fp in fps:
+            if chunk.module and chunk.module not in ("通用", "文档开头"):
+                if not (fp.module or "").strip() or fp.module in ("通用", "文档开头"):
+                    fp.module = chunk.module
         batch_results.append(fps)
         if idx < n_chunks - 1:
             await asyncio.sleep(RETRY_DELAY)
