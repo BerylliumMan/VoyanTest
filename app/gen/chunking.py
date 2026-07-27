@@ -30,12 +30,16 @@ BRIDGE_CHARS = 400
 
 _HEADING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^#{1,4}\s+(.+)$"),
-    re.compile(r"^=====?\s*(文件\d+\s*[:：].*?)\s*=====?\s*$"),
+    # File separators (===== 文件N: name =====) are NOT module headings — handled separately.
     re.compile(r"^第[一二三四五六七八九十百千零〇0-9]+[章节篇部分]\s*[、.．:]?\s*(.*)$"),
     re.compile(r"^[（(]?[一二三四五六七八九十]+[）)]\s*[、.．]?\s*(.+)$"),
     re.compile(r"^\d+(?:\.\d+){0,3}\s+([\u4e00-\u9fffA-Za-z].{0,60})$"),
     re.compile(r"^【([^】]{1,40})】\s*(.*)$"),
 ]
+
+_FILE_HEADER_RE = re.compile(r"^=====\s*文件\d+\s*[:：].*?\s*=====\s*$")
+_PAGE_HEADER_RE = re.compile(r"^=====\s*.+?\s*第\d+页\s*=====\s*$")
+
 
 
 @dataclass
@@ -53,7 +57,10 @@ class Phase1Chunk:
     def intro(self) -> str:
         if self.segment_total <= 1 and self.module in ("通用", "文档开头", ""):
             if self.multimodal:
-                return "请分析以下需求文档内容（文字与图片按文档顺序排列）："
+                return (
+                    "请分析以下需求文档内容（文字与图片按文档顺序排列）；"
+                    "module 请根据界面/业务功能命名，禁止使用文件名："
+                )
             return "请分析以下需求文档，提取测试项："
         mod = self.module or "通用"
         cont = "，续篇" if self.segment > 1 else ""
@@ -99,13 +106,23 @@ def _clean_heading_title(raw: str) -> str:
     return title or "通用"
 
 
+def is_file_separator_line(line: str) -> bool:
+    """True for multi-file / PDF page separator banners (not business modules)."""
+    s = (line or "").strip()
+    if not s or "\n" in s:
+        return False
+    return bool(_FILE_HEADER_RE.match(s) or _PAGE_HEADER_RE.match(s))
+
+
 def detect_heading(line: str) -> str | None:
     """Return module/chapter title if ``line`` looks like a section heading."""
     s = (line or "").strip()
     if not s or len(s) > 80:
         return None
-    # Skip obvious body / table lines
+    # Skip obvious body / table lines / upload file banners
     if s.startswith("|") or s.startswith("```"):
+        return None
+    if is_file_separator_line(s):
         return None
     for pat in _HEADING_PATTERNS:
         m = pat.match(s)
@@ -383,11 +400,10 @@ def _content_parts_to_chapters(
         if not text.strip():
             continue
 
-        # File header → new chapter
-        file_hdr = re.match(r"^=====\s*(文件\d+\s*[:：].*?)\s*=====\s*$", text.strip())
-        if file_hdr and "\n" not in text.strip():
+        # File / page banner → structural split only; never use filename as module
+        if is_file_separator_line(text):
             flush()
-            current_module = _clean_heading_title(file_hdr.group(1))
+            current_module = "通用"
             current_parts.append({"type": "text", "text": text})
             continue
 
