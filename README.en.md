@@ -22,7 +22,9 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 
 ## ✨ Features
 
-- **🧠 AI Test Generation**: Upload requirement documents (docx/pdf/md/images), AI automatically extracts features, splits steps, and matches expected results
+- **🧠 AI Test Generation**: Upload requirement docs (docx/pdf/md/images); two-phase pipeline extracts fine-grained **test items**, then generates functional or UI-automation cases (normal / exception / boundary)
+- **📄 Multimodal docs**: Ordered text + embedded images for docx; chapter-aware chunking (~80% of context window) for long documents
+- **🗂️ Generation history**: Stop in-flight analysis; delete only after completed / failed / cancelled; preview, import, xlsx export
 - **🗣️ Natural Language Driven**: Write "click login button" in plain language — no Playwright API knowledge needed
 - **🖥️ Real Browser**: Controls Chromium via `@playwright/mcp`, supporting navigate, click, fill, screenshot, and more
 - **🔍 Expected Result Verification**: Auto-screenshots after execution, LLM compares screenshots to verify results
@@ -73,9 +75,9 @@ Login → Create Project → Add Module → Write Cases → Run Tests → View R
 
 **Two ways to create test cases:**
 1. **Manual** — Create step by step with natural language steps and expected results
-2. **AI Generation** — Upload requirement documents, AI generates cases automatically, preview and import in bulk
+2. **AI Generation** — Upload requirement documents; extract test items, generate cases, preview and import; stop analysis from generation history when needed
 
-Configure your LLM in "Settings → AI Config" before running (supports OpenAI and compatible APIs).
+Configure your LLM in "Settings → AI Config" before running (supports OpenAI and compatible APIs). Fresh installs seed default Agents and prompt templates on startup.
 
 ## 🏗️ Architecture
 
@@ -95,7 +97,7 @@ flowchart LR
     end
 
     CH <-->|Playwright MCP| Backend
-    Backend --> DB[(SQLite)]
+    Backend --> DB[(PostgreSQL)]
     Backend --> UI[Web UI<br/>React + Arco]
     Backend <-->|WebSocket| AC
 ```
@@ -104,9 +106,9 @@ flowchart LR
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | FastAPI + SQLAlchemy + SQLite |
+| Backend | FastAPI + SQLAlchemy async + PostgreSQL 16 |
 | Browser Automation | Playwright MCP |
-| AI/LLM | OpenAI SDK (any compatible API) |
+| AI/LLM | OpenAI-compatible API (generation / execution / recording Agents) |
 | Frontend | React 18 + Arco Design Pro + Vite |
 | Distributed | WebSocket + Custom Agent Protocol |
 
@@ -115,22 +117,24 @@ flowchart LR
 ```
 VoyanTest/
 ├── app/          # FastAPI backend
-│   ├── gen/      # AI generation engine (orchestrator / analyzer / feature_extractor)
-│   ├── models/   # Domain models (agent / auth / batch / config / gen / project / testcase)
-│   └── routers/  # API routes (including gen/ sub-routes)
-├── frontend/     # React frontend source
-├── core/         # Execution engine (runner / llm_wrapper / step_executor)
-├── agent/        # Distributed agent client (with pre-built exe)
+│   ├── gen/      # AI generation (chunking / prompts / pipeline)
+│   ├── models/   # Domain models
+│   ├── seed_defaults.py  # Default Agents & prompt sync
+│   └── routers/  # API routes (including gen/ upload, history, cancel)
+├── frontend/     # React frontend (gen / gen-history / ...)
+├── core/         # Execution engine
+├── agent/        # Distributed agent client
 ├── reports/      # Test reports & screenshots
 ├── docs/         # Documentation
-└── tests/        # Unit tests
+└── tests/        # Unit / contract / e2e tests
 ```
 
 ## 📚 Docs
 
 - API Docs: visit `/docs` after starting (Swagger)
 - Deployment: see [DEPLOYMENT.md](DEPLOYMENT.md)
-- DB Migration: `alembic upgrade head`
+- Chinese README: [README.md](README.md)
+- Database: PostgreSQL primary; startup adds missing columns / seeds defaults (Alembic optional)
 
 ## 📄 License
 

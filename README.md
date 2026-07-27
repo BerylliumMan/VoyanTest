@@ -36,7 +36,11 @@ Playwright: click #login-btn → fill #username → fill #password → click #su
 - **🛡️ CSRF 防护**：Double Submit Cookie 模式，所有写入请求自动校验
 
 ### AI 驱动
-- **📝 AI 用例生成**：上传需求文档（docx/pdf/md/图片），AI 自动提取功能点生成测试用例
+- **📝 AI 用例生成**：上传需求文档（docx/pdf/md/图片），两阶段流水线——先提取细粒度**测试项**，再按项生成功能用例或 UI 自动化用例
+- **📄 多模态文档**：docx 按文档顺序保留文字与内嵌图；扫描版 PDF 可按页理解
+- **📚 智能分段**：长文档按章节优先切分，超长章节再按上下文窗口约 80% 二次分段，续篇带模块衔接；图片尽量与说明文字同段
+- **🤖 生成 Agent**：可选功能用例 / UI 自动化生成助手；提示词模板可在设置中管理，启动时与种子内容同步
+- **🗂️ 生成记录**：查看历史、停止分析中任务；仅完成 / 失败 / 已停止后可删除；支持预览、导入与 xlsx 导出
 - **🔍 预期结果验证**：执行后自动截图，LLM 比对截图判断预期结果是否达成
 - **📋 执行计划预览**：执行前可视化展示 LLM 对每步的理解和计划操作
 
@@ -144,7 +148,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
 **两种方式编写用例：**
 - **手动** — 在「测试用例」页逐条创建，自然语言描述步骤和预期结果
-- **AI 生成** — 上传需求文档（docx/pdf/md/图片），AI 自动提取功能点生成用例
+- **AI 生成** — 上传需求文档（docx/pdf/md/图片），AI 提取测试项并生成用例（每测试项覆盖正常 / 异常 / 边界）
 
 | 测试用例管理 | 执行报告 |
 |-------------|---------|
@@ -160,7 +164,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
 ### 4. AI 用例生成
 
-上传需求文档（docx/pdf/md/图片），AI 自动提取功能点并生成测试用例。
+上传需求文档（docx/pdf/md/图片），选择生成 Agent 后开始分析：
+
+1. **解析文档** — 多文件合并；docx 保留图文顺序  
+2. **提取测试项** — 按章节 / Token 预算分段提取并合并去重  
+3. **生成用例** — 按测试项分批生成（功能用例或 UI 自动化）；分析中可在「生成记录」停止  
+4. **预览导入** — 勾选后导入到目标项目；记录可导出 xlsx  
+
+执行前需在「系统设置 → AI 模型配置」填写 LLM（含上下文窗口），并在「提示词 / Agent」中确认生成相关模板已激活。
 
 | AI 生成页面 |
 |------------|
@@ -168,7 +179,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
 ### 5. AI 配置
 
-执行前需在「系统设置 → AI 模型配置」填写 LLM 信息（支持 OpenAI 及兼容 API）。
+执行与生成前需在「系统设置 → AI 模型配置」填写 LLM 信息（支持 OpenAI 及兼容 API）。新部署启动时会自动补种默认 Agent 与提示词；若库内活跃提示词与种子不一致，会创建新版本并激活。
 
 | AI 配置 |
 |---------|
@@ -199,7 +210,7 @@ python agent/client.py --server http://<服务端IP>:8002
 
 **两种编写方式：**
 1. **手动** — 逐条创建，每用例包含步骤（自然语言）和预期结果
-2. **AI 生成** — 上传需求文档，AI 自动生成用例，预览编辑后批量导入
+2. **AI 生成** — 上传需求文档，提取测试项并生成用例，预览编辑后批量导入；生成记录支持停止分析与完成后的删除 / 导出
 
 > [!TIP]
 > 离线环境部署：从 GitHub Releases 下载离线包，见 [DEPLOYMENT.md](DEPLOYMENT.md)
@@ -232,7 +243,7 @@ flowchart LR
 
     CH <-->|Playwright MCP| Backend
     CDP -->|CDP Protocol| CDPConv
-    Backend --> DB[(SQLite)]
+    Backend --> DB[(PostgreSQL)]
     Backend --> UI[Web 界面<br/>React + Arco]
     Backend <-->|WebSocket<br/>调试协议| UI
     Backend <-->|WebSocket| AC
@@ -243,11 +254,11 @@ flowchart LR
 
 | 层级 | 技术 |
 |------|------|
-| 后端 | FastAPI + SQLAlchemy + SQLite/PostgreSQL |
+| 后端 | FastAPI + SQLAlchemy async + PostgreSQL 16 |
 | 浏览器自动化 | Playwright MCP |
-| AI/LLM | OpenAI SDK（兼容任意 API） |
+| AI/LLM | OpenAI 兼容 API（生成 / 执行 / 录制 Agent） |
 | 前端 | React 18 + Arco Design Pro + Vite + ECharts |
-| 实时通信 | WebSocket（执行日志 + 调试协议 + 重连 3 态指示） |
+| 实时通信 | WebSocket（执行日志 + 调试协议 + Agent） |
 | 分布式 | WebSocket + 自定义 Agent 协议 |
 | CLI | argparse + asyncio（退出码标准） |
 
@@ -256,11 +267,12 @@ flowchart LR
 ```
 VoyanTest/
 ├── app/              # FastAPI 后端
-│   ├── gen/          # AI 生成引擎
+│   ├── gen/          # AI 生成引擎（分段 / 提示词 / Pipeline）
 │   ├── middleware/    # 中间件（CSRF 等）
 │   ├── models/       # 领域模型（auth / project / testcase / batch / recording / notification 等）
 │   ├── services/     # 服务层（通知、报告等）
-│   └── routers/      # API 路由（含 run-debug 调试端点、录制历史、通知中心）
+│   ├── seed_defaults.py  # 默认 Agent / 提示词种子与同步
+│   └── routers/      # API 路由（含 gen 上传/状态/历史、run-debug、录制、通知）
 ├── core/             # 执行引擎
 │   ├── runner/            # 测试执行器（含重试/暂停/自愈）
 │   ├── assertions.py      # 步骤断言引擎（5 种类型）
@@ -269,21 +281,19 @@ VoyanTest/
 │   ├── step_executor.py   # MCP 步骤执行
 │   ├── cdp_session.py     # CDP 录制会话引擎
 │   └── cdp_converter.py   # CDP 事件→测试步骤转换
-
-...
 ├── frontend/         # React 前端
 │   └── src/pages/
-│       ├── recordings/    # CDP 录制回放（含历史/保存对话框）
-│       ├── run-debug/     # 交互式调试执行（含 WS 重连状态）
-│       ├── testcases/     # 用例管理（含断言编辑器、xlsx 导入导出）
-│       ├── reports/       # 报告（含对比弹窗）
-│       ├── agents/        # Agent 管理（含详情页）
-│       ├── audit-logs/    # 审计日志（结构化 JSON 展示）
-│       └── settings/      # 系统设置（含自愈配置 Tab）
+│       ├── gen/           # AI 用例生成
+│       ├── gen-history/   # 生成记录（停止 / 删除限制）
+│       ├── recordings/    # CDP 录制回放
+│       ├── run-debug/     # 交互式调试执行
+│       ├── testcases/     # 用例管理
+│       ├── reports/       # 报告
+│       ├── agents/        # Agent 管理
+│       └── settings/      # 系统设置（AI / 提示词 / Agent）
 ├── agent/            # 分布式 Agent 客户端
-├── voyan_cli.py      # CLI 命令行工具（voyan run / list / run-single）
-├── alembic/          # 数据库迁移
-├── tests/            # 单元 + 契约 + E2E 测试（1400+ 条）
+├── voyan_cli.py      # CLI（voyan run / list / run-single）
+├── tests/            # 单元 + 契约 + E2E 测试
 ├── reports/          # 测试报告与截图
 └── docs/             # 文档
 ```
@@ -292,7 +302,8 @@ VoyanTest/
 
 - API 文档：启动后访问 `/docs`（Swagger）
 - 离线部署：见 [DEPLOYMENT.md](DEPLOYMENT.md)
-- 数据库迁移：`alembic upgrade head`
+- 英文说明：[README.en.md](README.en.md)
+- 数据库：生产以 PostgreSQL 为主；启动时自动补齐缺失列 / 默认种子（无强制 Alembic）
 
 ## 📄 许可证
 
