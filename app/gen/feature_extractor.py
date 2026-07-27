@@ -253,6 +253,11 @@ async def generate_test_cases_for_fps(
     for i in range(0, len(fps), FP_BATCH_SIZE):
         batches.append(fps[i : i + FP_BATCH_SIZE])
 
+    num_batches = max(1, len(batches)) if fps else 0
+    if total_steps <= 1 and num_batches:
+        # Pipeline / TCGenerator 未传 total_steps 时，与 image 两阶段路径一致
+        total_steps = phase1_offset + num_batches
+
     for idx, batch in enumerate(batches):
         if cancel_checker and cancel_checker():
             raise GenAnalysisCancelled()
