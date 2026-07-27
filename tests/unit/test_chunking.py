@@ -35,10 +35,9 @@ class TestDetectHeading:
     def test_chapter_cn(self):
         assert "数据" in (detect_heading("第一章 数据总览") or "")
 
-    def test_file_header(self):
-        h = detect_heading("===== 文件1: req.docx =====")
-        assert h is not None
-        assert "文件1" in h or "req" in h
+    def test_file_header_is_not_module_heading(self):
+        assert detect_heading("===== 文件1: req.docx =====") is None
+        assert detect_heading("===== shot.png 第1页 =====") is None
 
     def test_body_not_heading(self):
         assert detect_heading("用户输入正确的账号密码后点击登录按钮。") is None
@@ -186,3 +185,16 @@ def test_multi_chapter_parts_split_under_budget():
     ]
     chunks = build_phase1_chunks_from_parts(parts, budget=100_000)
     assert len(chunks) >= 2
+
+
+def test_image_file_header_does_not_become_module():
+    """Uploaded image banners must not be used as FP module names."""
+    parts = [
+        {"type": "text", "text": "===== 文件1: login_screen.png ====="},
+        {"type": "image", "ext": "png", "b64": "abc"},
+    ]
+    chunks = build_phase1_chunks_from_parts(parts, budget=100_000)
+    assert len(chunks) >= 1
+    assert all(c.module in ("通用", "文档开头") for c in chunks)
+    assert "login_screen" not in chunks[0].intro
+    assert "禁止使用文件名" in chunks[0].intro
