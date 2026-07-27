@@ -1025,25 +1025,31 @@ class TestFeatureExtractorGenerateTCs:
     async def test_generate_tcs_single_batch(self):
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
-        fps = self._make_fps(3)
-        mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
+        fps = self._make_fps(1)
+        # Enough rows so MIN_TCS_PER_ITEM is satisfied without supplemental call
+        mock_response = "\n".join(
+            f"| TC-{i} | M | T{i} | P | S | R | 高 |" for i in range(1, 4)
+        )
 
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)):
             result = await generate_test_cases_for_fps(fps, "")
 
         assert "test_cases" in result
         assert "warnings" in result
-        assert len(result["test_cases"]) >= 1
+        assert len(result["test_cases"]) >= 3
         assert result["warnings"] == []
 
     @pytest.mark.asyncio
     async def test_generate_tcs_multiple_batches(self):
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
-        fps = self._make_fps(16)  # 2 batches of 8 (FP_BATCH_SIZE=8)
-        mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
+        fps = self._make_fps(16)  # multiple batches (FP_BATCH_SIZE)
+        mock_response = "\n".join(
+            f"| TC-{i} | M | T{i} | P | S | R | 高 |" for i in range(1, 10)
+        )
 
-        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)):
+        with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)), \
+             patch("app.gen.feature_extractor.asyncio.sleep", new=AsyncMock()):
             result = await generate_test_cases_for_fps(fps, "")
 
         # Should have generated TCs for both batches
@@ -1053,8 +1059,10 @@ class TestFeatureExtractorGenerateTCs:
     async def test_generate_tcs_with_project_description(self):
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
-        fps = self._make_fps(2)
-        mock_response = """| TC-1 | M | T | P | S | R | 高 |"""
+        fps = self._make_fps(1)
+        mock_response = "\n".join(
+            f"| TC-{i} | M | T{i} | P | S | R | 高 |" for i in range(1, 4)
+        )
 
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(return_value=mock_response)) as mcall:
             await generate_test_cases_for_fps(fps, "My project context")
@@ -1068,10 +1076,11 @@ class TestFeatureExtractorGenerateTCs:
         from app.gen.feature_extractor import generate_test_cases_for_fps
 
         fps = self._make_fps(1)
-        # First call returns no TCs, second returns TCs
+        ok = "\n".join(f"| TC-{i} | M | T{i} | P | S | R | 高 |" for i in range(1, 4))
+        # First call returns no TCs, second returns enough TCs
         responses = [
             "no markers",  # empty parse
-            "| TC-1 | M | T | P | S | R | 高 |",  # success
+            ok,
         ]
 
         with patch("app.gen.feature_extractor.call_model", new=AsyncMock(side_effect=responses)), \
@@ -1131,7 +1140,7 @@ class TestFeatureExtractorGenerateTCs:
         from app.gen.feature_extractor import generate_test_cases_for_fps
         from app.gen.prompts import FP_BATCH_SIZE
 
-        n = FP_BATCH_SIZE * 2 + 1  # 3 batches when FP_BATCH_SIZE=3
+        n = FP_BATCH_SIZE * 2 + 1  # 3 batches
         fps = self._make_fps(n)
         progress_calls = []
 

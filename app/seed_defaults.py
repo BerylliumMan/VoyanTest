@@ -118,7 +118,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是功能测试用例生成专家，负责将需求文档转为高质量功能测试用例。工作流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate 按等价类/边界值设计业务场景用例，每个测试项至少 3 条（正常/异常/边界）。",
+        "system_prompt": "你是功能测试用例生成专家。流程：(1) fp_extract 按章节细粒度提取测试项；(2) tc_generate 按等价类/边界值设计用例，每个测试项至少 3 条（正常/异常/边界），输出带 fp_name 与 scenario_type。",
         "prompt_overrides": {}
     },
     {
@@ -135,7 +135,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是 UI 自动化用例生成专家，负责将需求文档转为浏览器可执行的 UI 自动化用例。工作流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出可操作步骤与可观测预期，每个测试项至少 3 条，优先主路径与关键异常 UI，避免纯接口/后台逻辑用例。",
+        "system_prompt": "你是 UI 自动化用例生成专家。流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出可操作步骤与可观测预期，每个测试项至少 3 条，优先主路径与关键异常 UI，避免纯接口/后台逻辑。",
         "prompt_overrides": {}
     }
 ]
