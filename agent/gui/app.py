@@ -24,9 +24,16 @@ except ImportError:
     HAS_CTK = False
 
 try:
-    import pystray
     from PIL import Image, ImageDraw
-    HAS_TRAY = True
+    HAS_PIL = True
+except ImportError:
+    Image = None  # type: ignore[assignment,misc]
+    ImageDraw = None  # type: ignore[assignment,misc]
+    HAS_PIL = False
+
+try:
+    import pystray
+    HAS_TRAY = HAS_PIL  # 托盘同时需要 pystray + Pillow
 except ImportError:
     pystray = None  # type: ignore[assignment]
     HAS_TRAY = False
@@ -39,10 +46,50 @@ except ImportError:
     ConfigDialog = None  # type: ignore[assignment]
 
 
-# ── 托盘图标生成 ───────────────────────────────────────────────────────
+# ── 托盘状态 / 图标生成 ───────────────────────────────────────────────
+
+# 内部状态 key → 显示文案
+_STATUS_DISPLAY = {
+    "disconnected": "未连接",
+    "connecting": "连接中…",
+    "connected": "已连接",
+    "idle": "已连接",
+    "busy": "执行中",
+    "error": "连接失败",
+}
+
+# 托盘着色（RGB 元组，避免 Pillow/Win32 对 hex/RGBA 处理不一致）
+# 选用高饱和色，保证 Windows 任务栏 16×16 缩略后仍可辨认
+_STATUS_RGB = {
+    "disconnected": (142, 150, 160),  # 灰
+    "connecting": (240, 180, 40),     # 黄
+    "connected": (40, 190, 70),       # 绿
+    "idle": (40, 190, 70),
+    "busy": (40, 190, 70),
+    "error": (230, 60, 55),           # 红
+}
+
+
+def normalize_status_key(value: Optional[str]) -> str:
+    """将状态值归一化为英文 key（兼容中文显示值）。"""
+    if not value:
+        return "disconnected"
+    if value in _STATUS_DISPLAY or value in _STATUS_RGB:
+        return value
+    for key, label in _STATUS_DISPLAY.items():
+        if label == value:
+            return key
+    return "disconnected"
+
+
+def tray_rgb_for_status(status: str) -> tuple:
+    """返回托盘图标填充色 (R, G, B)。"""
+    key = normalize_status_key(status)
+    return _STATUS_RGB.get(key, _STATUS_RGB["disconnected"])
+
 
 def _create_tray_image(status: str = "disconnected") -> "Image.Image":
-    """以程序方式生成 64×64 的 Agent 托盘图标，按连接状态着色。
+    """生成 Agent 托盘图标，按连接状态着色。
 
     状态颜色：
         disconnected — 灰色（未连接）
@@ -50,45 +97,39 @@ def _create_tray_image(status: str = "disconnected") -> "Image.Image":
         connected / idle / busy — 绿色（连接成功）
         error        — 红色（连接失败）
     """
-    color_map = {
-        "disconnected": "#6e7681",  # 灰
-        "connecting": "#d29922",    # 黄
-        "connected": "#2ea043",     # 绿
-        "idle": "#2ea043",
-        "busy": "#2ea043",
-        "error": "#da3633",         # 红
-    }
-    fill_color = color_map.get(status, "#6e7681")
-    accent_color = fill_color
+    if not HAS_PIL:
+        raise RuntimeError("Pillow 未安装，无法生成托盘图标")
 
-    size = 64
+    fill_color = tray_rgb_for_status(status)
+    # Windows 托盘实际约 16×16；用 32×32 + 实心圆，缩略后颜色更稳
+    size = 32
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    # 圆形背景
-    margin = 6
+    margin = 1
     draw.ellipse(
-        [margin, margin, size - margin, size - margin],
-        fill=fill_color,
+        [margin, margin, size - margin - 1, size - margin - 1],
+        fill=fill_color + (255,),
     )
 
-    # 双眼（白色圆点）
-    eye_y = 20
-    draw.ellipse([18, eye_y, 26, eye_y + 8], fill="white")   # 左眼
-    draw.ellipse([38, eye_y, 46, eye_y + 8], fill="white")   # 右眼
-
-    # 嘴巴（白色矩形）
-    mouth_y = 36
-    draw.rectangle([24, mouth_y, 40, mouth_y + 4], fill="white")
-
-    # 天线
-    draw.ellipse([28, 4, 36, 12], fill=accent_color)
+    # 简易面孔（白色），占比较小，避免淹没状态色
+    draw.ellipse([9, 10, 13, 14], fill=(255, 255, 255, 255))
+    draw.ellipse([19, 10, 23, 14], fill=(255, 255, 255, 255))
+    draw.rectangle([11, 19, 21, 21], fill=(255, 255, 255, 255))
 
     return image
 
 
 # ── 托盘图标缓存 ───────────────────────────────────────────────────────
 _TRAY_IMAGE_CACHE: dict = {}
+
+
+def _get_tray_image(status: str) -> "Image.Image":
+    """按状态取托盘图；返回副本，避免 Win32 因同一 Image 对象跳过刷新。"""
+    key = normalize_status_key(status)
+    if key not in _TRAY_IMAGE_CACHE:
+        _TRAY_IMAGE_CACHE[key] = _create_tray_image(key)
+    return _TRAY_IMAGE_CACHE[key].copy()
 
 
 # ── 主应用类 ──────────────────────────────────────────────────────────
@@ -99,15 +140,8 @@ class AgentGUI:
     流程：加载配置 → 显示配置对话框 → 连接服务器 → 最小化到系统托盘。
     """
 
-    # 状态中文映射（内部仍用英文 key 驱动托盘颜色）
-    _STATUS_MAP = {
-        "disconnected": "未连接",
-        "connecting": "连接中…",
-        "connected": "已连接",
-        "idle": "已连接",
-        "busy": "执行中",
-        "error": "连接失败",
-    }
+    # 兼容旧引用；权威映射见模块级 _STATUS_DISPLAY
+    _STATUS_MAP = _STATUS_DISPLAY
 
     def __init__(
         self,
@@ -123,6 +157,7 @@ class AgentGUI:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_event: Optional[asyncio.Event] = None   # 线程安全停止信号
         self._status: str = "disconnected"
+        self._status_lock = threading.Lock()
 
         # 系统托盘
         self._tray_icon: Optional["pystray.Icon"] = None    # type: ignore[name-defined]
@@ -227,7 +262,7 @@ class AgentGUI:
                 await agent.start()
             except Exception:
                 logger.error("Agent 连接异常", exc_info=True)
-                self._update_status_and_tray("disconnected")
+                self._schedule_status_update("disconnected")
 
             if self._stop_event.is_set():
                 break
@@ -264,25 +299,30 @@ class AgentGUI:
 
     def _resolve_status_key(self, value: Optional[str] = None) -> str:
         """将内部状态解析为英文 key（用于托盘颜色）。"""
-        raw = value if value is not None else self._status
-        if raw in self._STATUS_MAP:
-            return raw
-        for k, v in self._STATUS_MAP.items():
-            if v == raw:
-                return k
-        return "disconnected"
+        with self._status_lock:
+            raw = value if value is not None else self._status
+        return normalize_status_key(raw)
 
     def _status_display(self, key: Optional[str] = None) -> str:
         resolved = self._resolve_status_key(key)
-        return self._STATUS_MAP.get(resolved, resolved)
+        return _STATUS_DISPLAY.get(resolved, resolved)
+
+    def _schedule_status_update(self, status: str) -> None:
+        """任意线程均可调用：把状态更新派发到 Tk 主线程（若可用）。"""
+        key = normalize_status_key(status)
+        root = self._root
+        if root is not None:
+            try:
+                root.after(0, lambda k=key: self._update_status_and_tray(k))
+                return
+            except Exception:
+                logger.debug("schedule status update via after() failed", exc_info=True)
+        # 无 Tk 主循环时直接更新（含托盘跨线程赋值）
+        self._update_status_and_tray(key)
 
     def _on_status_change(self, status: str) -> None:
         """AgentClient 状态变更回调（在 asyncio 线程中调用）。"""
-        key = self._resolve_status_key(status)
-        self._status = key
-        # 委托到主线程更新 UI
-        if self._root is not None:
-            self._root.after(0, lambda k=key: self._update_status_and_tray(k))
+        self._schedule_status_update(status)
 
     def _on_agent_log(self, level: str, message: str) -> None:
         """AgentClient 日志回调（在 asyncio 线程中调用）——写入线程安全缓冲区。"""
@@ -290,20 +330,30 @@ class AgentGUI:
             _LOG_BUFFER.append((level, message))
 
     def _update_status_and_tray(self, status_value: str) -> None:
-        """更新状态文本、托盘标题、图标颜色、菜单文字（主线程安全）。"""
-        old_status = self._status
-        key = self._resolve_status_key(status_value)
-        self._status = key
+        """更新状态文本、托盘标题、图标颜色、菜单文字。"""
+        key = normalize_status_key(status_value)
+        with self._status_lock:
+            old_status = self._status
+            self._status = key
         status_display = self._status_display(key)
 
-        self._refresh_tray_icon()
+        self._refresh_tray_icon(key)
         self._refresh_tray_title()
 
-        if self._tray_icon is not None and HAS_TRAY:
-            self._tray_icon.menu = self._build_tray_menu()
+        icon = self._tray_icon
+        if icon is not None and HAS_TRAY:
+            try:
+                # 动态菜单项用 callable 时需显式刷新
+                if hasattr(icon, "update_menu"):
+                    icon.update_menu()
+                else:
+                    icon.menu = self._build_tray_menu()
+            except Exception:
+                logger.debug("Failed to update tray menu", exc_info=True)
+
             if old_status == "disconnected" and key != "disconnected":
                 try:
-                    self._tray_icon.notify(
+                    icon.notify(
                         f"VoyanTest Agent — {status_display}",
                         title="VoyanTest",
                     )
@@ -314,50 +364,70 @@ class AgentGUI:
         """刷新托盘图标的提示文本（线程安全）。"""
         icon = self._tray_icon
         if icon is not None and HAS_TRAY:
-            icon.title = f"VoyanTest Agent — {self._status_display()}"
+            try:
+                icon.title = f"VoyanTest Agent — {self._status_display()}"
+            except Exception:
+                logger.debug("Failed to refresh tray title", exc_info=True)
 
-    def _refresh_tray_icon(self) -> None:
-        """按当前状态刷新托盘图标颜色。"""
+    def _refresh_tray_icon(self, status_key: Optional[str] = None) -> None:
+        """按当前状态刷新托盘图标颜色。
+
+        每次赋值新的 Image 副本，避免 Win32 因同一对象引用跳过 NIM_MODIFY。
+        """
         icon = self._tray_icon
         if icon is None or not HAS_TRAY:
             return
-        status_key = self._resolve_status_key()
-        cache_key = f"tray_{status_key}"
-        if cache_key not in _TRAY_IMAGE_CACHE:
-            _TRAY_IMAGE_CACHE[cache_key] = _create_tray_image(status_key)
-        icon.icon = _TRAY_IMAGE_CACHE[cache_key]
+        key = normalize_status_key(
+            status_key if status_key is not None else self._resolve_status_key()
+        )
+        try:
+            icon.icon = _get_tray_image(key)
+        except Exception:
+            logger.debug("Failed to refresh tray icon", exc_info=True)
 
     # ── 系统托盘设置 ───────────────────────────────────────────────────
 
     def _build_tray_menu(self) -> "pystray.Menu":  # type: ignore[name-defined]
-        """根据连接状态动态构建托盘菜单。"""
-        key = self._resolve_status_key()
-        is_connected = key not in ("disconnected", "error")
-        connect_label = "断开" if is_connected else "连接"
+        """构建托盘菜单；文案用 callable，便于 update_menu 刷新。"""
+
+        def status_text(_item: "pystray.MenuItem" = None) -> str:  # type: ignore[name-defined]
+            return f"状态: {self._status_display()}"
+
+        def connect_label(_item: "pystray.MenuItem" = None) -> str:  # type: ignore[name-defined]
+            key = self._resolve_status_key()
+            return "断开" if key not in ("disconnected", "error") else "连接"
+
+        def on_connect_toggle(icon: "pystray.Icon", item: "pystray.MenuItem") -> None:  # type: ignore[name-defined]
+            key = self._resolve_status_key()
+            if key not in ("disconnected", "error"):
+                self._do_disconnect()
+            else:
+                self._show_config_window()
+
         return pystray.Menu(
             pystray.MenuItem(
-                f"状态: {self._status_display(key)}",
-                self._on_tray_action,
+                status_text,
+                lambda *_: None,
                 enabled=False,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "显示窗口",
-                self._on_tray_action,
+                lambda icon, item: self._show_config_window(),
                 default=True,
             ),
             pystray.MenuItem(
                 "查看日志",
-                self._on_tray_action,
+                lambda icon, item: self._show_log_window(),
             ),
             pystray.MenuItem(
                 connect_label,
-                self._on_tray_action,
+                on_connect_toggle,
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "退出",
-                self._on_tray_action,
+                lambda icon, item: self._do_exit(),
             ),
         )
 
@@ -371,16 +441,28 @@ class AgentGUI:
                 self._root.mainloop()
             return
 
-        image = _create_tray_image(self._status)
+        status_key = self._resolve_status_key()
+        image = _get_tray_image(status_key)
         self._tray_icon = pystray.Icon(
             "voyantest-agent",
             image,
-            f"VoyanTest Agent — {self._status}",
+            f"VoyanTest Agent — {self._status_display(status_key)}",
             self._build_tray_menu(),
         )
 
+        def _on_tray_ready(icon: "pystray.Icon") -> None:  # type: ignore[name-defined]
+            # run() 就绪后再刷一次，避免初始化前的状态更新被吞掉
+            icon.visible = True
+            self._refresh_tray_icon(self._resolve_status_key())
+            self._refresh_tray_title()
+            if hasattr(icon, "update_menu"):
+                try:
+                    icon.update_menu()
+                except Exception:
+                    pass
+
         tray_thread = threading.Thread(
-            target=self._tray_icon.run,
+            target=lambda: self._tray_icon.run(setup=_on_tray_ready),
             daemon=True,
             name="tray-icon",
         )
@@ -389,22 +471,6 @@ class AgentGUI:
         if self._root is not None:
             self._root.protocol("WM_DELETE_WINDOW", self._root.withdraw)
             self._root.mainloop()
-
-    # ── 托盘菜单回调 ───────────────────────────────────────────────────
-
-    def _on_tray_action(self, icon: "pystray.Icon", item: "pystray.MenuItem") -> None:  # type: ignore[name-defined]
-        text = str(item.text)
-
-        if text == "显示窗口":
-            self._show_config_window()
-        elif text == "查看日志":
-            self._show_log_window()
-        elif text == "断开":
-            self._do_disconnect()
-        elif text == "连接":
-            self._show_config_window()
-        elif text == "退出":
-            self._do_exit()
 
     def _show_config_window(self) -> None:
         """在主线程显示配置对话框（Bug 4 修复：去重窗口）。"""
@@ -508,7 +574,7 @@ class AgentGUI:
     def _do_disconnect(self) -> None:
         """断开当前 Agent 连接。"""
         self._stop_agent()
-        self._update_status_and_tray("disconnected")
+        self._schedule_status_update("disconnected")
 
     def _do_exit(self) -> None:
         self._stop_agent()
