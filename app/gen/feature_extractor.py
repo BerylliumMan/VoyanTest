@@ -16,9 +16,17 @@ import openai
 from markupsafe import escape
 
 from app.gen.cancel import GenAnalysisCancelled
+from app.gen.chunking import (
+    chunk_token_budget,
+    estimate_parts_tokens,
+    estimate_text_tokens,
+    merge_functional_points,
+    split_content_parts,
+    split_text_into_chunks,
+)
 from app.gen.constants import MAX_RETRIES, RETRY_DELAY
 from app.gen.csv_generator import CSV_HEADER
-from app.gen.model_client import call_model
+from app.gen.model_client import call_model, get_context_budget
 from app.gen.models import FunctionalPoint, TestCase
 from app.gen.prompts import (
     FP_BATCH_SIZE,
@@ -70,6 +78,44 @@ def _vision_hint(exc: BaseException) -> str | None:
     return None
 
 
+async def _extract_fps_once(
+    *,
+    user_payload,
+    prompt: str,
+    agent_type: str,
+    agent_id: int | None,
+    multimodal: bool,
+) -> list[FunctionalPoint]:
+    async def _call(payload) -> str:
+        return await call_model(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": payload},
+            ],
+            agent_type=agent_type,
+            agent_id=agent_id,
+        )
+
+    try:
+        content = await _call(user_payload)
+    except (openai.OpenAIError, asyncio.TimeoutError, OSError, RuntimeError, ValueError) as e:
+        hint = _vision_hint(e) if multimodal else None
+        if hint:
+            logger.warning("Multimodal test-item extraction failed: %s", e)
+            raise RuntimeError(hint) from e
+        raise
+
+    fps = _parse_fps_from_text(content)
+    if not fps:
+        logger.warning("Test-item extraction empty, retrying... raw: %s", content[:300])
+        await asyncio.sleep(2)
+        content = await _call(user_payload)
+        fps = _parse_fps_from_text(content)
+        if not fps:
+            logger.warning("Test-item extraction still empty after retry. Raw: %s", content[:300])
+    return fps
+
+
 async def extract_functional_points(
     text: str = None,
     image_data: tuple = None,
@@ -83,8 +129,8 @@ async def extract_functional_points(
 ) -> list[FunctionalPoint]:
     """Extract test items (stored as FunctionalPoint) from document / image / parts.
 
-    Phase 1 of two-phase pipeline. When ``content_parts`` includes images, a
-    multimodal user message is sent with document order preserved.
+    Phase 1 of two-phase pipeline. Long documents are split so each model call
+    stays within ~80% of the configured context window; results are merged.
     """
     fp_prompt = fp_prompt or FP_EXTRACT_PROMPT
     desc_prefix = ""
@@ -92,61 +138,122 @@ async def extract_functional_points(
         desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
 
     prompt = desc_prefix + fp_prompt
-    if progress_callback:
-        if _has_images(content_parts) or image_data:
-            progress_callback(0, 0, "正在分析文档/图片提取测试项")
-        else:
-            progress_callback(0, 0, "正在分析文档提取测试项")
+    multimodal = bool(_has_images(content_parts) or image_data)
 
     if cancel_checker and cancel_checker():
         raise GenAnalysisCancelled()
 
-    async def _call(user_payload) -> str:
-        return await call_model(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_payload},
-            ],
+    # Single-image shortcut (no chunking needed)
+    if image_data and content_parts is None and not text:
+        if progress_callback:
+            progress_callback(0, 0, "正在分析文档/图片提取测试项")
+        suffix, b64 = image_data
+        payload = [
+            {"type": "text", "text": "请分析此界面原型图中的所有测试项和UI元素："},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/{suffix};base64,{b64}"},
+            },
+        ]
+        fps = await _extract_fps_once(
+            user_payload=payload,
+            prompt=prompt,
             agent_type=agent_type,
             agent_id=agent_id,
+            multimodal=True,
         )
-
-    def _user_payload():
-        if content_parts is not None:
-            return content_parts_to_openai_user_content(content_parts)
-        if image_data:
-            suffix, b64 = image_data
-            return [
-                {"type": "text", "text": "请分析此界面原型图中的所有测试项和UI元素："},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/{suffix};base64,{b64}"},
-                },
-            ]
-        return text or ""
-
-    try:
-        content = await _call(_user_payload())
-    except (openai.OpenAIError, asyncio.TimeoutError, OSError, RuntimeError, ValueError) as e:
-        hint = _vision_hint(e) if (_has_images(content_parts) or image_data) else None
-        if hint:
-            logger.warning("Multimodal test-item extraction failed: %s", e)
-            raise RuntimeError(hint) from e
-        raise
-
-    fps = _parse_fps_from_text(content)
-    if progress_callback:
-        progress_callback(0, 0, f"提取到 {len(fps)} 个测试项")
-    if not fps:
-        logger.warning("Test-item extraction empty, retrying... raw: %s", content[:300])
-        await asyncio.sleep(2)
-        content = await _call(_user_payload())
-        fps = _parse_fps_from_text(content)
-        if not fps:
-            logger.warning("Test-item extraction still empty after retry. Raw: %s", content[:300])
         if progress_callback:
-            progress_callback(0, 0, f"重试后提取到 {len(fps)} 个测试项")
-    return fps
+            progress_callback(0, 0, f"提取到 {len(fps)} 个测试项")
+        return fps
+
+    max_ctx = await get_context_budget()
+    budget = chunk_token_budget(max_ctx)
+
+    part_chunks: list[list[dict[str, Any]]] | None = None
+    text_chunks: list[str] | None = None
+
+    if content_parts is not None:
+        total = estimate_parts_tokens(content_parts)
+        if total <= budget:
+            part_chunks = [content_parts]
+        else:
+            part_chunks = split_content_parts(content_parts, budget)
+            logger.info(
+                "Phase1 chunking content_parts: ~%d tokens > budget %d → %d chunks",
+                total, budget, len(part_chunks),
+            )
+    else:
+        body = text or ""
+        total = estimate_text_tokens(body)
+        if total <= budget:
+            text_chunks = [body] if body.strip() else []
+        else:
+            text_chunks = split_text_into_chunks(body, budget)
+            logger.info(
+                "Phase1 chunking text: ~%d tokens > budget %d → %d chunks",
+                total, budget, len(text_chunks),
+            )
+
+    n_chunks = len(part_chunks or text_chunks or [])
+    if n_chunks == 0:
+        return []
+
+    if progress_callback:
+        msg = "正在分析文档/图片提取测试项" if multimodal else "正在分析文档提取测试项"
+        if n_chunks > 1:
+            msg = f"{msg}（分段 1/{n_chunks}）"
+        progress_callback(0, 0, msg)
+
+    batch_results: list[list[FunctionalPoint]] = []
+    for idx in range(n_chunks):
+        if cancel_checker and cancel_checker():
+            raise GenAnalysisCancelled()
+        if n_chunks > 1 and progress_callback:
+            progress_callback(
+                idx, n_chunks,
+                f"正在提取测试项（分段 {idx + 1}/{n_chunks}）",
+            )
+        if part_chunks is not None:
+            payload = content_parts_to_openai_user_content(
+                part_chunks[idx],
+                intro=(
+                    f"请分析以下需求文档内容（第 {idx + 1}/{n_chunks} 段，"
+                    "文字与图片按文档顺序排列；只提取本段出现的测试项）："
+                    if n_chunks > 1
+                    else "请分析以下需求文档内容（文字与图片按文档顺序排列）："
+                ),
+            )
+        else:
+            chunk_text = (text_chunks or [])[idx]
+            if n_chunks > 1:
+                payload = (
+                    f"以下为需求文档第 {idx + 1}/{n_chunks} 段，"
+                    f"请只提取本段中的测试项：\n\n{chunk_text}"
+                )
+            else:
+                payload = chunk_text
+
+        fps = await _extract_fps_once(
+            user_payload=payload,
+            prompt=prompt,
+            agent_type=agent_type,
+            agent_id=agent_id,
+            multimodal=multimodal and part_chunks is not None,
+        )
+        batch_results.append(fps)
+        if idx < n_chunks - 1:
+            await asyncio.sleep(RETRY_DELAY)
+
+    merged = merge_functional_points(batch_results)
+    if progress_callback:
+        if n_chunks > 1:
+            progress_callback(
+                n_chunks, n_chunks,
+                f"分段提取完成，合并后共 {len(merged)} 个测试项",
+            )
+        else:
+            progress_callback(0, 0, f"提取到 {len(merged)} 个测试项")
+    return merged
 
 
 def _fp_descriptions(batch: list[FunctionalPoint]) -> str:
@@ -279,9 +386,12 @@ async def generate_test_cases_for_fps(
             agent_id=agent_id,
             tc_counter=tc_counter,
             user_hint=(
-                f"请为以上 {len(batch)} 个测试项生成测试用例。"
-                f"每个测试项至少 {MIN_TCS_PER_ITEM} 条（正常/异常/边界），"
-                f"本批合计至少 {min_needed} 条。"
+                f"本批测试项共 {len(batch)} 个，名称："
+                + "、".join(fp.name for fp in batch)
+                + f"。\n请为以上每个测试项各生成至少 {MIN_TCS_PER_ITEM} 条用例"
+                f"（正常/异常/边界各至少 1 条），"
+                f"JSON 数组合计至少 {min_needed} 条；"
+                f"每条必须带 fp_name 与 scenario_type。"
             ),
         )
 
@@ -300,10 +410,11 @@ async def generate_test_cases_for_fps(
                 agent_id=agent_id,
                 tc_counter=tc_counter + len(tcs),
                 user_hint=(
-                    f"上一轮仅生成 {len(tcs)} 条，不足。"
-                    f"请继续为以上 {len(batch)} 个测试项补齐用例，"
-                    f"确保每个测试项至少 {MIN_TCS_PER_ITEM} 条（正常/异常/边界），"
-                    f"不要重复已有标题。"
+                    f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
+                    f"请继续为以下测试项补齐："
+                    + "、".join(fp.name for fp in batch)
+                    + f"。每个测试项至少 {MIN_TCS_PER_ITEM} 条（正常/异常/边界），"
+                    f"不要重复已有标题；每条必须带 fp_name 与 scenario_type。"
                 ),
             )
             if extra:
