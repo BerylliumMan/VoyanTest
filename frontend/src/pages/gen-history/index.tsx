@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, Table, Button, Message, Tag, Space, Modal, Typography, Select } from '@arco-design/web-react';
-import { IconDelete, IconEye, IconRefresh, IconImport, IconDownload } from '@arco-design/web-react/icon';
+import { IconDelete, IconEye, IconRefresh, IconImport, IconDownload, IconPause } from '@arco-design/web-react/icon';
 import { useHistory } from 'react-router-dom';
 import axios from 'axios';
 import styles from './style/index.module.less';
@@ -38,9 +38,15 @@ const GenHistoryPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
   const [importing, setImporting] = useState<string | null>(null);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dataRef = useRef<GenHistoryItem[]>([]);
+  dataRef.current = data;
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
     try {
       const params: Record<string, string | number> = { page, page_size: pageSize };
       if (selectedProject) {
@@ -53,7 +59,9 @@ const GenHistoryPage: React.FC = () => {
       const err = e as { response?: { data?: { detail?: string } } };
       Message.error(err?.response?.data?.detail || '加载失败');
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -62,11 +70,48 @@ const GenHistoryPage: React.FC = () => {
   }, [page, pageSize, selectedProject]);
 
   useEffect(() => {
+    pollRef.current = setInterval(() => {
+      const needsPoll = dataRef.current.some(
+        (row) => row.status === 'analyzing' || row.status === 'pending',
+      );
+      if (needsPoll) {
+        fetchData(true);
+      }
+    }, 3000);
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [page, pageSize, selectedProject]);
+
+  useEffect(() => {
     axios
       .get('/api/projects/')
       .then((res) => setProjects(res.data || []))
       .catch(() => {});
   }, []);
+
+  const handleStop = (id: string) => {
+    Modal.confirm({
+      title: '停止分析',
+      content: '确定要停止该分析任务吗？已生成的中间结果不会保留。',
+      onOk: async () => {
+        setStopping(id);
+        try {
+          await axios.post(`/api/gen/history/${id}/cancel`);
+          Message.success('已停止分析');
+          fetchData();
+        } catch (e: unknown) {
+          const err = e as { response?: { data?: { detail?: string } } };
+          Message.error(err?.response?.data?.detail || '停止失败');
+        } finally {
+          setStopping(null);
+        }
+      },
+    });
+  };
 
   const handleDelete = (id: string) => {
     Modal.confirm({
@@ -124,6 +169,8 @@ const GenHistoryPage: React.FC = () => {
         return <Tag color="red">失败</Tag>;
       case 'analyzing':
         return <Tag color="blue">分析中</Tag>;
+      case 'cancelled':
+        return <Tag color="orange">已停止</Tag>;
       default:
         return <Tag color="gray">{status}</Tag>;
     }
@@ -183,9 +230,20 @@ const GenHistoryPage: React.FC = () => {
     {
       title: '操作',
       dataIndex: 'actions',
-      width: 200,
+      width: 240,
       render: (_: unknown, record: GenHistoryItem) => (
         <Space>
+          {(record.status === 'analyzing' || record.status === 'pending') && (
+            <Button
+              type="text"
+              size="small"
+              status="warning"
+              icon={<IconPause />}
+              loading={stopping === record.id}
+              onClick={() => handleStop(record.id)}
+              aria-label="停止分析"
+            />
+          )}
           <Button
             type="text"
             size="small"

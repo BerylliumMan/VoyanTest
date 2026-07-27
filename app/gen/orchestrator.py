@@ -41,6 +41,7 @@ async def two_phase_analyze(
     skills: list | None = None,
     tc_prompt_key: str | None = None,
     content_parts: list | None = None,
+    cancel_checker=None,
 ) -> dict:
     """Two-phase analysis using Pipeline (generation AgentDefinition).
 
@@ -56,6 +57,7 @@ async def two_phase_analyze(
         "skills": skills or [],
         "tc_prompt_key": tc_prompt_key,
         "progress_callback": progress_callback,
+        "cancel_checker": cancel_checker,
     }
     if prompts:
         config["prompts"] = prompts

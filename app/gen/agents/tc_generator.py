@@ -43,6 +43,7 @@ class TCGenerator(BaseAgent[dict, list[dict]]):
             tc_prompt=tc_prompt,
             agent_type=agent_type,
             agent_id=agent_id,
+            cancel_checker=self.config.get("cancel_checker"),
         )
         self.last_warnings = result.get("warnings", [])
         return result.get("test_cases", [])

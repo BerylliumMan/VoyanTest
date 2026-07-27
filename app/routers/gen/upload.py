@@ -22,11 +22,11 @@ from ... import crud
 from ...auth import get_current_user
 from ...database import get_async_db
 from app.gen.constants import ALLOWED_EXTENSIONS
-from .state import _lock, _sessions
+from .state import _lock, _sessions, clear_gen_runtime, make_cancel_checker, register_gen_task
 
 logger = logging.getLogger(__name__)
 
-# 跟踪后台分析 task，防止被 GC 回收
+# 跟踪无 session 绑定的 orphan task（兼容旧逻辑，新任务按 session 注册）
 _gen_tasks: set = set()
 
 router = APIRouter()
@@ -191,16 +191,27 @@ async def upload_and_analyze(
             session.progress_message = message or ""
 
     async def _run_full_analysis() -> None:
+        from app.gen.cancel import CANCEL_MESSAGE, GenAnalysisCancelled
+
+        cancel_checker = make_cancel_checker(session_id)
+
+        def _raise_if_cancelled() -> None:
+            if cancel_checker():
+                raise GenAnalysisCancelled()
+
         # 等待原 API session 的 cleanup(_close_impl) 完成，避免连接池冲突
         await asyncio.sleep(0.1)
         try:
             from app.gen.analyzer import extract_multi_file_content, two_phase_analyze
             from app.database import AsyncSessionLocal
 
+            _raise_if_cancelled()
             await _set_progress(5, "正在解析文档")
             combined_text, _, warnings, content_parts = await extract_multi_file_content(
                 file_contents, filenames, progress_callback=_progress_callback,
+                cancel_checker=cancel_checker,
             )
+            _raise_if_cancelled()
 
             has_content = bool(
                 (combined_text and combined_text.strip())
@@ -240,6 +251,7 @@ async def upload_and_analyze(
                     logger.debug("resolving prompts from DB failed, using defaults")
 
             await _set_progress(30, "正在提取测试项")
+            _raise_if_cancelled()
             result = await two_phase_analyze(
                 combined_text,
                 progress_callback=_progress_callback,
@@ -250,7 +262,9 @@ async def upload_and_analyze(
                 skills=resolved_skills,
                 tc_prompt_key=tc_prompt_key,
                 content_parts=content_parts,
+                cancel_checker=cancel_checker,
             )
+            _raise_if_cancelled()
             if agent_name and not result.get("error"):
                 warnings_out = list(result.get("warnings") or [])
                 mode = "UI自动化" if tc_prompt_key == "tc_generate_ui" else "功能用例"
@@ -282,6 +296,25 @@ async def upload_and_analyze(
                     functional_points=result["functional_points"],
                     test_cases=result["test_cases"],
                 )
+        except GenAnalysisCancelled:
+            logger.info("Analysis cancelled by user session_id=%s", session_id)
+            async with _lock:
+                session.status = "cancelled"
+                session.error_message = CANCEL_MESSAGE
+                session.progress = 100
+                session.progress_message = CANCEL_MESSAGE
+            await _update_db(session_id, "cancelled", CANCEL_MESSAGE, 0, 0)
+        except asyncio.CancelledError:
+            if cancel_checker():
+                logger.info("Analysis task cancelled session_id=%s", session_id)
+                async with _lock:
+                    session.status = "cancelled"
+                    session.error_message = CANCEL_MESSAGE
+                    session.progress = 100
+                    session.progress_message = CANCEL_MESSAGE
+                await _update_db(session_id, "cancelled", CANCEL_MESSAGE, 0, 0)
+            else:
+                raise
         except Exception as e:
             logger.exception("Analysis failed")
             async with _lock:
@@ -290,8 +323,11 @@ async def upload_and_analyze(
                 session.progress = 100
                 session.progress_message = str(e)
             await _update_db(session_id, "failed", str(e), 0, 0)
+        finally:
+            await clear_gen_runtime(session_id)
 
     task = asyncio.create_task(_run_full_analysis())
+    await register_gen_task(session_id, task)
     _gen_tasks.add(task)
     task.add_done_callback(_gen_tasks.discard)
 
@@ -314,7 +350,7 @@ async def _update_db(session_id: str, status: str, error_msg: str, fp_count: int
             error_message=error_msg,
             functional_points_count=fp_count,
             test_cases_count=tc_count,
-            completed_at=datetime.now() if status in ("completed", "failed") else None,
+            completed_at=datetime.now() if status in ("completed", "failed", "cancelled") else None,
             functional_points=functional_points,
             test_cases=test_cases,
         )

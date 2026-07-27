@@ -9,6 +9,8 @@ from app.gen.agents.fp_analyzer import FPAnalyzer
 from app.gen.agents.tc_generator import TCGenerator
 from app.gen.agents.validator import validate_test_cases
 
+from app.gen.cancel import GenAnalysisCancelled
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,6 +30,11 @@ class Pipeline:
             except Exception:
                 logger.debug("progress_callback failed", exc_info=True)
 
+    def _check_cancelled(self) -> None:
+        checker = self.config.get("cancel_checker")
+        if checker and checker():
+            raise GenAnalysisCancelled()
+
     async def run(
         self,
         text: str,
@@ -35,10 +42,12 @@ class Pipeline:
         content_parts: list[dict[str, Any]] | None = None,
     ) -> dict:
         # Step 1: Parse input (text / multimodal parts already prepared by caller)
+        self._check_cancelled()
         self._progress(1, 4, "正在解析文档")
         full_text = text or ""
 
         # Step 2: Extract test items
+        self._check_cancelled()
         self._progress(2, 4, "正在提取测试项")
         fps = await self.fp_analyzer.run({
             "text": full_text,
@@ -46,6 +55,7 @@ class Pipeline:
         })
 
         # Step 3: Generate test cases
+        self._check_cancelled()
         self._progress(3, 4, "正在生成用例")
         tcs = await self.tc_generator.run({
             "fps": fps,
@@ -54,6 +64,7 @@ class Pipeline:
         warnings = list(getattr(self.tc_generator, "last_warnings", None) or [])
 
         # Step 4: Validate
+        self._check_cancelled()
         self._progress(4, 4, "正在校验用例")
         v_result = validate_test_cases(tcs, fps)
         warnings.extend(v_result["warnings"])

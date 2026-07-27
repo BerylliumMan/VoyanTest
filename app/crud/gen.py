@@ -154,9 +154,9 @@ async def update_gen_session_status(
 
     record.status = status
     record.error_message = error_message
-    if status in ("completed", "failed"):
+    if status in ("completed", "failed", "cancelled"):
         record.progress = 100
-        if error_message and status == "failed":
+        if error_message and status in ("failed", "cancelled"):
             record.progress_message = (error_message or "")[:500]
         elif status == "completed":
             record.progress_message = "分析完成"
@@ -197,7 +197,9 @@ async def persist_gen_session_results(
     record.test_cases_count = test_cases_count
     record.progress = 100
     record.progress_message = (
-        (error_message or "")[:500] if status == "failed" else "分析完成"
+        (error_message or "")[:500]
+        if status in ("failed", "cancelled")
+        else "分析完成"
     )
     if completed_at is not None:
         record.completed_at = completed_at

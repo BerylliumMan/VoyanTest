@@ -43,6 +43,9 @@ async def get_status(session_id: str, user=Depends(get_current_user),
             if status == "failed":
                 msg = err or db_msg or "分析失败"
                 progress = 100
+            elif status == "cancelled":
+                msg = err or db_msg or "用户已停止分析"
+                progress = 100
             elif status == "completed":
                 msg = db_msg or "分析完成"
                 progress = 100
@@ -67,6 +70,8 @@ async def get_status(session_id: str, user=Depends(get_current_user),
     msg = session.progress_message or ""
     if session.status == "failed" and session.error_message:
         msg = session.error_message
+    elif session.status == "cancelled":
+        msg = session.error_message or session.progress_message or "用户已停止分析"
     elif session.status == "completed" and not msg:
         msg = "分析完成"
     return GenStatusResponse(
