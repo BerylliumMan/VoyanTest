@@ -159,45 +159,49 @@ async def _run_startup_init():
     if engine is None:
         logger.warning("数据库引擎不可用，跳过字段迁移")
     else:
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)"))
-                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
-        except Exception:
-            logger.warning("users 表 nickname/email 列迁移失败（非关键错误，继续）")
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)"))
-        except Exception:
-            logger.warning("run_batches 表 triggered_by 列迁移失败（非关键错误，继续）")
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT"))
-        except Exception:
-            logger.warning("recording_sessions 表 events_data 列迁移失败（非关键错误，继续）")
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL"))
-        except Exception:
-            logger.warning("test_runs 表 case_id 列 NOT NULL 约束迁移失败（非关键错误，继续）")
+        async def _ddl(sql: str, label: str) -> None:
+            """Run one DDL statement with AUTOCOMMIT; log real errors."""
+            try:
+                async with engine.connect() as conn:
+                    await conn.execution_options(isolation_level="AUTOCOMMIT")
+                    await conn.execute(text(sql))
+            except Exception:
+                logger.warning("%s 失败（非关键，继续）: %s", label, sql, exc_info=True)
+
+        await _ddl(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)",
+            "users.nickname 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)",
+            "users.email 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)",
+            "run_batches.triggered_by 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT",
+            "recording_sessions.events_data 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL",
+            "test_runs.case_id DROP NOT NULL 迁移",
+        )
         for _col_sql in (
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER",
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress INTEGER DEFAULT 0",
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress_message VARCHAR(500)",
             "ALTER TABLE gen_test_cases ADD COLUMN IF NOT EXISTS validation_errors TEXT",
         ):
-            try:
-                async with engine.begin() as conn:
-                    await conn.execute(text(_col_sql))
-            except Exception:
-                logger.warning("gen_sessions 迁移失败: %s（非关键，继续）", _col_sql)
+            await _ddl(_col_sql, "gen 表字段迁移")
+        await _ddl(
+            "ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT 131072",
+            "ai_configs.max_context_tokens 迁移",
+        )
         try:
-            async with engine.begin() as conn:
-                await conn.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT 131072"))
-        except Exception:
-            logger.warning("ai_configs 表 max_context_tokens 列迁移失败（非关键错误，继续）")
-        try:
-            async with engine.begin() as conn:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
                 await conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS prompt_templates (
                         id              SERIAL PRIMARY KEY,
@@ -215,9 +219,10 @@ async def _run_startup_init():
                     )
                 """))
         except Exception:
-            logger.warning("prompt_templates 表创建失败（非关键错误，继续）")
+            logger.warning("prompt_templates 表创建失败（非关键错误，继续）", exc_info=True)
         try:
-            async with engine.begin() as conn:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
                 await conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS agent_definitions (
                         id              SERIAL PRIMARY KEY,
@@ -232,47 +237,33 @@ async def _run_startup_init():
                     )
                 """))
         except Exception:
-            logger.warning("agent_definitions 表创建失败（非关键错误，继续）")
+            logger.warning("agent_definitions 表创建失败（非关键错误，继续）", exc_info=True)
 
         # ── agent_definitions 列迁移 ────────────────────────────────────────
-        try:
-            await conn.execute(text(
-                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS system_prompt TEXT"
-            ))
-        except Exception:
-            logger.warning("agent_definitions.system_prompt 列迁移失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS tools JSONB DEFAULT '[]'"
-            ))
-        except Exception:
-            logger.warning("agent_definitions.tools 列迁移失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS goal TEXT DEFAULT ''"
-            ))
-        except Exception:
-            logger.warning("agent_definitions.goal 列迁移失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS constraints JSONB DEFAULT '[]'"
-            ))
-        except Exception:
-            logger.warning("agent_definitions.constraints 列迁移失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text(
-                "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS thinking_config JSONB DEFAULT '{}'"
-            ))
-        except Exception:
-            logger.warning("agent_definitions.thinking_config 列迁移失败（非关键错误，继续）")
+        await _ddl(
+            "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS system_prompt TEXT",
+            "agent_definitions.system_prompt 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS tools JSONB DEFAULT '[]'",
+            "agent_definitions.tools 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS goal TEXT DEFAULT ''",
+            "agent_definitions.goal 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS constraints JSONB DEFAULT '[]'",
+            "agent_definitions.constraints 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE agent_definitions ADD COLUMN IF NOT EXISTS thinking_config JSONB DEFAULT '{}'",
+            "agent_definitions.thinking_config 迁移",
+        )
 
         # ── agent_runs 相关表创建 ────────────────────────────────────────────
-        try:
-            await conn.execute(text("""
+        for _label, _sql in (
+            ("agent_runs 表创建", """
                 CREATE TABLE IF NOT EXISTS agent_runs (
                     id                  SERIAL PRIMARY KEY,
                     agent_definition_id INTEGER NOT NULL REFERENCES agent_definitions(id) ON DELETE CASCADE,
@@ -289,12 +280,8 @@ async def _run_startup_init():
                     idempotency_key     VARCHAR(255) UNIQUE,
                     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            """))
-        except Exception:
-            logger.warning("agent_runs 表创建失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text("""
+            """),
+            ("agent_messages 表创建", """
                 CREATE TABLE IF NOT EXISTS agent_messages (
                     id              SERIAL PRIMARY KEY,
                     run_id          INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
@@ -305,12 +292,8 @@ async def _run_startup_init():
                     token_count     INTEGER DEFAULT 0,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            """))
-        except Exception:
-            logger.warning("agent_messages 表创建失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text("""
+            """),
+            ("agent_tool_calls 表创建", """
                 CREATE TABLE IF NOT EXISTS agent_tool_calls (
                     id              SERIAL PRIMARY KEY,
                     run_id          INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
@@ -323,12 +306,8 @@ async def _run_startup_init():
                     duration_ms     INTEGER,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            """))
-        except Exception:
-            logger.warning("agent_tool_calls 表创建失败（非关键错误，继续）")
-
-        try:
-            await conn.execute(text("""
+            """),
+            ("agent_run_snapshots 表创建", """
                 CREATE TABLE IF NOT EXISTS agent_run_snapshots (
                     id              SERIAL PRIMARY KEY,
                     run_id          INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
@@ -338,9 +317,9 @@ async def _run_startup_init():
                     token_count     INTEGER DEFAULT 0,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            """))
-        except Exception:
-            logger.warning("agent_run_snapshots 表创建失败（非关键错误，继续）")
+            """),
+        ):
+            await _ddl(_sql, _label)
 
         # ── 种子提示词 + 默认 Agent（与参考环境一致）────────────────────────
         try:
@@ -348,7 +327,7 @@ async def _run_startup_init():
                 from app.seed_defaults import seed_defaults
                 await seed_defaults(_prompt_db)
         except Exception:
-            logger.warning("种子提示词/Agent 写入失败（非关键错误，继续）")
+            logger.warning("种子提示词/Agent 写入失败（非关键错误，继续）", exc_info=True)
 
     from app.auth import hash_password
 
