@@ -168,9 +168,10 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
 
         case_blocks.append(
             f"""
-        <article class="case {_status_class(r_status)}" id="case-{idx}">
-          <header class="case-head">
+        <article class="case {_status_class(r_status)}" id="case-{idx}" data-case-index="{idx}">
+          <header class="case-head" role="button" tabindex="0" aria-expanded="false" aria-controls="case-body-{idx}">
             <div class="case-title">
+              <span class="chevron" aria-hidden="true"></span>
               <span class="case-index">{idx:02d}</span>
               <h2>{_esc(run.get('case_name') or f"Case #{run.get('case_id')}")}</h2>
             </div>
@@ -180,17 +181,20 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
               <span>{len(steps)} 步</span>
             </div>
           </header>
-          {steps_html}
+          <div class="case-body" id="case-body-{idx}" hidden>
+            {steps_html}
+          </div>
         </article>"""
         )
 
     cases_html = "".join(case_blocks) or '<p class="empty">本批次没有用例运行记录</p>'
+    total_runs = len(runs)
 
     toc_items: list[str] = []
     for i, r in enumerate(runs, start=1):
         case_label = r.get("case_name") or f"Case #{r.get('case_id')}"
         toc_items.append(
-            f'<li><a href="#case-{i}">{_esc(case_label)}</a>'
+            f'<li><a href="#case-{i}" data-jump-case="{i}">{_esc(case_label)}</a>'
             f' <span class="pill {_status_class(r.get("status"))}">{_esc(r.get("status") or "—")}</span></li>'
         )
     toc_html = "".join(toc_items) or "<li>无</li>"
@@ -349,6 +353,51 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
   .toc h3 {{ margin: 0 0 10px; font-size: 13px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }}
   .toc ol {{ margin: 0; padding-left: 18px; }}
   .toc li {{ margin: 4px 0; }}
+  .list-toolbar {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 8px 0 4px;
+    color: var(--muted);
+    font-size: 13px;
+  }}
+  .list-toolbar-right {{
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }}
+  .page-size-label {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }}
+  .page-size-label select {{
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 4px 28px 4px 10px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+      linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }}
+  .page-size-label select:hover {{
+    border-color: var(--brand);
+  }}
+  .page-size-label select:focus-visible {{
+    outline: 2px solid var(--brand);
+    outline-offset: 1px;
+  }}
   .case {{
     background: var(--paper);
     border: 1px solid var(--line);
@@ -365,10 +414,32 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
     justify-content: space-between;
     gap: 16px;
     align-items: flex-start;
-    padding: 18px 20px 12px;
+    padding: 18px 20px;
+    cursor: pointer;
+    user-select: none;
+  }}
+  .case-head:hover {{ background: #f7fafb; }}
+  .case-head:focus-visible {{
+    outline: 2px solid var(--brand);
+    outline-offset: -2px;
+  }}
+  .case.open .case-head {{
     border-bottom: 1px solid var(--line);
   }}
-  .case-title {{ display: flex; gap: 12px; align-items: baseline; min-width: 0; }}
+  .case-title {{ display: flex; gap: 10px; align-items: baseline; min-width: 0; }}
+  .chevron {{
+    width: 0;
+    height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 7px solid var(--muted);
+    flex: 0 0 auto;
+    transform: translateY(2px);
+    transition: transform 0.15s ease;
+  }}
+  .case.open .chevron {{
+    transform: translateY(2px) rotate(90deg);
+  }}
   .case-index {{
     font-variant-numeric: tabular-nums;
     color: var(--brand);
@@ -389,6 +460,7 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
     font-size: 13px;
     white-space: nowrap;
   }}
+  .case-body[hidden] {{ display: none !important; }}
   .steps {{
     list-style: none;
     margin: 0;
@@ -460,6 +532,40 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
     padding: 18px 20px;
     color: var(--muted);
   }}
+  .pager {{
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }}
+  .pager button {{
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    border-radius: 10px;
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }}
+  .pager button:hover:not(:disabled) {{
+    border-color: var(--brand);
+    color: var(--brand);
+  }}
+  .pager button:disabled {{
+    opacity: 0.45;
+    cursor: not-allowed;
+  }}
+  .pager .page-info {{
+    color: var(--muted);
+    font-size: 13px;
+    min-width: 120px;
+    text-align: center;
+  }}
   footer.site {{
     margin-top: 36px;
     color: var(--muted);
@@ -471,6 +577,10 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
     .wrap {{ width: 100%; padding: 0; }}
     .rate-panel, .stats, .case, .toc {{ box-shadow: none; }}
     .shot img {{ max-height: none; }}
+    .pager, .list-toolbar {{ display: none !important; }}
+    .case {{ display: block !important; }}
+    .case-body {{ display: block !important; }}
+    .case-body[hidden] {{ display: block !important; }}
   }}
 </style>
 </head>
@@ -509,12 +619,152 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
       </ol>
     </nav>
 
-    <main>
+    <div class="list-toolbar">
+      <span>默认折叠步骤与截图，点击用例行展开</span>
+      <div class="list-toolbar-right">
+        <label class="page-size-label">
+          每页
+          <select id="page-size" aria-label="每页显示数量">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          条
+        </label>
+        <span id="page-summary"></span>
+      </div>
+    </div>
+
+    <main id="case-list" data-page-size="20" data-total="{total_runs}">
       {cases_html}
     </main>
 
+    <nav class="pager" id="pager" hidden>
+      <button type="button" id="page-prev">上一页</button>
+      <span class="page-info" id="page-info">1 / 1</span>
+      <button type="button" id="page-next">下一页</button>
+    </nav>
+
     <footer class="site">Generated by VoyanTest · 静态执行报告</footer>
   </div>
+<script>
+(function () {{
+  var list = document.getElementById('case-list');
+  if (!list) return;
+  var cases = Array.prototype.slice.call(list.querySelectorAll('.case'));
+  var allowedSizes = {{ '10': 1, '20': 1, '50': 1, '100': 1 }};
+  var pageSizeSelect = document.getElementById('page-size');
+  var pageSize = 20;
+  if (pageSizeSelect && allowedSizes[pageSizeSelect.value]) {{
+    pageSize = parseInt(pageSizeSelect.value, 10);
+  }} else {{
+    var raw = parseInt(list.getAttribute('data-page-size') || '20', 10);
+    pageSize = allowedSizes[String(raw)] ? raw : 20;
+    if (pageSizeSelect) pageSizeSelect.value = String(pageSize);
+  }}
+  var total = cases.length;
+  var totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+  var page = 1;
+  var pager = document.getElementById('pager');
+  var pageInfo = document.getElementById('page-info');
+  var pageSummary = document.getElementById('page-summary');
+  var prevBtn = document.getElementById('page-prev');
+  var nextBtn = document.getElementById('page-next');
+
+  function setExpanded(article, open) {{
+    var head = article.querySelector('.case-head');
+    var body = article.querySelector('.case-body');
+    if (!head || !body) return;
+    article.classList.toggle('open', open);
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) body.removeAttribute('hidden');
+    else body.setAttribute('hidden', '');
+  }}
+
+  function recalcPages() {{
+    totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+    if (page > totalPages) page = totalPages;
+  }}
+
+  function renderPage() {{
+    var start = (page - 1) * pageSize;
+    var end = start + pageSize;
+    cases.forEach(function (el, idx) {{
+      var onPage = idx >= start && idx < end;
+      el.style.display = onPage ? '' : 'none';
+      if (!onPage) setExpanded(el, false);
+    }});
+    if (pager) {{
+      if (totalPages > 1) pager.removeAttribute('hidden');
+      else pager.setAttribute('hidden', '');
+    }}
+    if (pageInfo) pageInfo.textContent = page + ' / ' + totalPages;
+    if (pageSummary) {{
+      var from = total ? start + 1 : 0;
+      var to = Math.min(end, total);
+      pageSummary.textContent = total
+        ? ('第 ' + from + '–' + to + ' 条，共 ' + total + ' 条用例')
+        : '无用例';
+    }}
+    if (prevBtn) prevBtn.disabled = page <= 1;
+    if (nextBtn) nextBtn.disabled = page >= totalPages;
+  }}
+
+  cases.forEach(function (article) {{
+    var head = article.querySelector('.case-head');
+    if (!head) return;
+    head.addEventListener('click', function () {{
+      var open = !article.classList.contains('open');
+      setExpanded(article, open);
+    }});
+    head.addEventListener('keydown', function (ev) {{
+      if (ev.key === 'Enter' || ev.key === ' ') {{
+        ev.preventDefault();
+        head.click();
+      }}
+    }});
+  }});
+
+  if (pageSizeSelect) {{
+    pageSizeSelect.addEventListener('change', function () {{
+      var next = parseInt(pageSizeSelect.value, 10);
+      if (!allowedSizes[String(next)]) return;
+      pageSize = next;
+      list.setAttribute('data-page-size', String(pageSize));
+      page = 1;
+      recalcPages();
+      renderPage();
+    }});
+  }}
+
+  if (prevBtn) prevBtn.addEventListener('click', function () {{
+    if (page > 1) {{ page -= 1; renderPage(); window.scrollTo({{ top: list.offsetTop - 24, behavior: 'smooth' }}); }}
+  }});
+  if (nextBtn) nextBtn.addEventListener('click', function () {{
+    if (page < totalPages) {{ page += 1; renderPage(); window.scrollTo({{ top: list.offsetTop - 24, behavior: 'smooth' }}); }}
+  }});
+
+  document.querySelectorAll('[data-jump-case]').forEach(function (a) {{
+    a.addEventListener('click', function (ev) {{
+      var idx = parseInt(a.getAttribute('data-jump-case') || '0', 10);
+      if (!idx) return;
+      ev.preventDefault();
+      var targetPage = Math.ceil(idx / pageSize);
+      page = targetPage;
+      renderPage();
+      var el = document.getElementById('case-' + idx);
+      if (el) {{
+        setExpanded(el, true);
+        el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      }}
+    }});
+  }});
+
+  recalcPages();
+  renderPage();
+}})();
+</script>
 </body>
 </html>
 """
