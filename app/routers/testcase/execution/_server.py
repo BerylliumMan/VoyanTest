@@ -52,10 +52,10 @@ async def run_test_case_endpoint(
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    if backend is not None and backend not in ("playwright_mcp", "browser_use"):
+    if backend is not None and backend not in ("playwright_mcp", "browser_use", "hybrid"):
         raise HTTPException(
             status_code=400,
-            detail="backend must be playwright_mcp or browser_use",
+            detail="backend must be playwright_mcp, browser_use, or hybrid",
         )
 
     allowed_ids = get_user_project_filter(user)

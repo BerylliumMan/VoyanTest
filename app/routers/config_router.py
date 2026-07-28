@@ -386,7 +386,7 @@ async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)
 
 @router.get("/execution-backend", response_model=ExecutionBackendConfig)
 async def get_execution_backend(admin=Depends(require_admin)) -> ExecutionBackendConfig:
-    """获取服务端 UI 执行后端（playwright_mcp | browser_use）。"""
+    """获取执行后端（playwright_mcp | browser_use | hybrid）。"""
     return _execution_backend_config
 
 
@@ -394,7 +394,7 @@ async def get_execution_backend(admin=Depends(require_admin)) -> ExecutionBacken
 async def update_execution_backend(
     cfg: ExecutionBackendConfig, admin=Depends(require_admin),
 ) -> ExecutionBackendConfig:
-    """切换服务端 UI 执行后端（仅影响服务端跑法，不改 Agent 客户端）。"""
+    """切换执行后端。hybrid 仅客户端 Agent：MCP 默认，定位失败同浏览器 browser-use 救场。"""
     from app.runtime_config import execution_backend_config as _rt
     _rt.backend = cfg.backend
     _rt.max_steps_per_nl = cfg.max_steps_per_nl

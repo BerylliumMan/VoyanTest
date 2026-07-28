@@ -214,7 +214,8 @@ async def run_test_case(
 
     Backward-compatible wrapper that creates its own PlaywrightMCPManager.
     ``run_id`` 用于调试模式等已预创建 TestRun 的场景，保证 WS 广播 id 一致。
-    ``backend`` 可选覆盖运行时配置：``playwright_mcp`` | ``browser_use``。
+    ``backend`` 可选覆盖运行时配置：``playwright_mcp`` | ``browser_use`` | ``hybrid``。
+    hybrid 在服务端跑法中按 playwright_mcp 处理（救场仅客户端 Agent）。
     """
     from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager

@@ -109,6 +109,11 @@ class AgentClient:
         self._mcp_req_id = 0
         self._bu_browser = None  # shared browser-use session across batch cases
 
+        # Hybrid / shared-CDP execution Chromium (separate from recording)
+        self._exec_chrome_process = None
+        self._exec_chrome_user_data = None
+        self._exec_cdp_http = None  # e.g. http://127.0.0.1:9222
+
         # CDP Chrome recording state
         self._chrome_process = None
         self._chrome_user_data_dir = None
@@ -274,12 +279,157 @@ class AgentClient:
 
     # ---- MCP subprocess management ----
 
-    async def _start_mcp(self):
-        # 清理可能残留的旧进程
+    def _resolve_chrome_exe(self) -> Optional[str]:
+        """Locate Chromium/Chrome binary for MCP or shared CDP launch."""
+        _pkg_root = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.dirname(__file__))
+        )
+        _search_roots = [_pkg_root]
+        if getattr(sys, "frozen", False):
+            _search_roots.append(os.path.dirname(_pkg_root))
+
+        if sys.platform == "win32":
+            for _root in _search_roots:
+                for _name in ["chromium/chrome-win64/chrome.exe", "chrome-win64/chrome.exe"]:
+                    _candidate = os.path.join(_root, _name)
+                    if os.path.isfile(_candidate):
+                        return _candidate
+            for _p in [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ]:
+                if os.path.isfile(_p):
+                    return _p
+
+        playwright_browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""))
+        if not playwright_browsers.is_dir():
+            playwright_browsers = Path.home() / ".cache" / "ms-playwright"
+        if not playwright_browsers.is_dir():
+            playwright_browsers = Path.home() / "AppData" / "Local" / "ms-playwright"
+        for _pat in ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-win64/chrome.exe"]:
+            _cd = (
+                sorted(playwright_browsers.glob(f"chromium-*/{_pat}"))
+                if playwright_browsers.is_dir()
+                else []
+            )
+            if _cd:
+                return str(_cd[-1])
+
+        for _p in [
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/snap/bin/chromium",
+        ]:
+            if os.path.isfile(_p):
+                return _p
+        return None
+
+    async def _start_exec_chrome_cdp(self) -> str:
+        """Launch Chromium with remote debugging for hybrid MCP+browser-use.
+
+        Returns HTTP CDP endpoint ``http://127.0.0.1:PORT``.
+        """
+        await self._stop_exec_chrome()
+        _chrome_exe = self._resolve_chrome_exe()
+        if not _chrome_exe:
+            raise RuntimeError("Chrome binary not found for hybrid CDP")
+
+        import tempfile
+
+        user_data_dir = tempfile.mkdtemp(prefix="voyan_exec_cdp_")
+        proc_kwargs: dict = {
+            "stdout": asyncio.subprocess.DEVNULL,
+            "stderr": asyncio.subprocess.DEVNULL,
+        }
+        if sys.platform != "win32":
+            proc_kwargs["preexec_fn"] = os.setsid
+
+        chrome_args = [
+            _chrome_exe,
+            "--remote-debugging-port=0",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-features=ChromeWhatsNewUI,ChromeWhatsNew",
+            "--disable-sync",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-extensions",
+        ]
+        if self._headless:
+            chrome_args.append("--headless=new")
+        else:
+            chrome_args.append("--start-maximized")
+
+        self._exec_chrome_user_data = user_data_dir
+        self._exec_chrome_process = await asyncio.create_subprocess_exec(
+            *chrome_args, **proc_kwargs
+        )
+
+        active_port_file = os.path.join(user_data_dir, "DevToolsActivePort")
+        actual_port = None
+        for _ in range(40):
+            await asyncio.sleep(0.25)
+            try:
+                with open(active_port_file) as f:
+                    actual_port = int(f.readline().strip())
+                break
+            except (OSError, ValueError):
+                continue
+        if actual_port is None:
+            raise RuntimeError("Exec Chrome did not write DevToolsActivePort in time")
+        if self._exec_chrome_process.returncode is not None:
+            raise RuntimeError(
+                f"Exec Chrome exited early code={self._exec_chrome_process.returncode}"
+            )
+
+        self._exec_cdp_http = f"http://127.0.0.1:{actual_port}"
+        self._log_info(f"Hybrid CDP Chromium ready: {self._exec_cdp_http}")
+        return self._exec_cdp_http
+
+    async def _stop_exec_chrome(self) -> None:
+        proc = self._exec_chrome_process
+        self._exec_chrome_process = None
+        self._exec_cdp_http = None
+        if proc is not None:
+            try:
+                if sys.platform != "win32" and proc.pid:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except Exception:
+                        proc.terminate()
+                else:
+                    proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        ud = self._exec_chrome_user_data
+        self._exec_chrome_user_data = None
+        if ud:
+            try:
+                import shutil
+
+                shutil.rmtree(ud, ignore_errors=True)
+            except Exception:
+                pass
+
+    async def _start_mcp(self, *, shared_cdp: bool = False):
+        # 清理可能残留的旧 MCP；hybrid 共用 Chromium 时不要 pkill chrome
         try:
             import subprocess as _sp
-            for _patt in ['playwright', 'chrome', 'chromium']:
-                _out = _sp.run(['pkill', '-f', _patt], capture_output=True, timeout=3)
+
+            patterns = ["playwright"] if shared_cdp else ["playwright", "chrome", "chromium"]
+            for _patt in patterns:
+                _out = _sp.run(["pkill", "-f", _patt], capture_output=True, timeout=3)
                 if _out.returncode == 0:
                     self._log_info(f"Cleaned up stale {_patt} processes")
         except Exception:
@@ -287,23 +437,35 @@ class AgentClient:
         if self._mcp_process:
             self._log_info("Stopping previous MCP before starting new one")
             await self._stop_mcp()
-        self._log_info(f"Starting MCP: chromium headless={self._headless}")
+
+        cdp_endpoint = None
+        if shared_cdp:
+            cdp_endpoint = await self._start_exec_chrome_cdp()
+            self._log_info(
+                f"Starting MCP attached to shared CDP headless={self._headless}"
+            )
+        else:
+            self._log_info(f"Starting MCP: chromium headless={self._headless}")
 
         # 确定包根目录（exe 同级）
-        _pkg_root = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__))
+        _pkg_root = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.dirname(__file__))
+        )
         _search_roots = [_pkg_root]
-        if getattr(sys, 'frozen', False):
-            _search_roots.append(os.path.dirname(_pkg_root))  # parent of dist/
+        if getattr(sys, "frozen", False):
+            _search_roots.append(os.path.dirname(_pkg_root))
 
-        # 查找捆绑的 node.exe
-        _node_exe = os.path.join(_pkg_root, 'node.exe')
+        _node_exe = os.path.join(_pkg_root, "node.exe")
         if not os.path.isfile(_node_exe):
-            _node_exe = 'node'  # fallback to system PATH
+            _node_exe = "node"
 
-        # 查找捆绑的 @playwright/mcp 入口（搜索全部根目录，与 node.exe 一致）
         _cli_js = ""
         for _root in _search_roots:
-            _candidate = os.path.join(_root, 'node_modules', '@playwright', 'mcp', 'cli.js')
+            _candidate = os.path.join(
+                _root, "node_modules", "@playwright", "mcp", "cli.js"
+            )
             if os.path.isfile(_candidate):
                 _cli_js = _candidate
                 break
@@ -313,81 +475,51 @@ class AgentClient:
                 f"Searched in: {[os.path.join(r, 'node_modules', '@playwright', 'mcp', 'cli.js') for r in _search_roots]}"
             )
 
-        args = [_node_exe, _cli_js, '--browser=chromium']
+        args = [_node_exe, _cli_js, "--browser=chromium"]
 
-        # 查找 Chromium（Playwright 缓存优先，系统安装次之）
-        _chrome_exe = None
-        if sys.platform == 'win32':
-            for _root in _search_roots:
-                for _name in ['chromium/chrome-win64/chrome.exe', 'chrome-win64/chrome.exe']:
-                    _candidate = os.path.join(_root, _name)
-                    if os.path.isfile(_candidate):
-                        _chrome_exe = _candidate
-                        break
-                if _chrome_exe:
-                    break
-        if not _chrome_exe:
-            # Playwright 缓存中的 Chromium
-            playwright_browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''))
-            if not playwright_browsers.is_dir():
-                # Linux
-                playwright_browsers = Path.home() / '.cache' / 'ms-playwright'
-            if not playwright_browsers.is_dir():
-                playwright_browsers = Path.home() / 'AppData' / 'Local' / 'ms-playwright'
-            for _pat in ['chrome-linux64/chrome', 'chrome-linux/chrome', 'chrome-win64/chrome.exe']:
-                _cd = sorted(playwright_browsers.glob(f'chromium-*/{_pat}')) if playwright_browsers.is_dir() else []
-                if _cd:
-                    _chrome_exe = str(_cd[-1])
-                    break
-        if not _chrome_exe:
-            # Linux 系统 Chromium
-            for _p in [
-                '/usr/bin/chromium',
-                '/usr/bin/chromium-browser',
-                '/usr/bin/google-chrome',
-                '/usr/bin/google-chrome-stable',
-                '/snap/bin/chromium',
-            ]:
-                if os.path.isfile(_p):
-                    _chrome_exe = _p
-                    break
-        if not _chrome_exe:
-            # Windows 系统路径兜底
-            for _p in [
-                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-            ]:
-                if os.path.isfile(_p):
-                    _chrome_exe = _p
-                    break
-
-        if os.path.isfile(_chrome_exe):
-            args.extend(['--executable-path', _chrome_exe])
-            self._log_info(f"Using Chromium: {_chrome_exe}")
-        if self._headless:
-            args.append('--headless')
+        if cdp_endpoint:
+            args.extend(["--cdp-endpoint", cdp_endpoint])
         else:
-            args.extend(['--viewport-size', '1920x1080'])
-        args.append('--isolated')
-        import sys as _sys
+            _chrome_exe = self._resolve_chrome_exe()
+            if _chrome_exe and os.path.isfile(_chrome_exe):
+                args.extend(["--executable-path", _chrome_exe])
+                self._log_info(f"Using Chromium: {_chrome_exe}")
+            if self._headless:
+                args.append("--headless")
+                args.extend(["--viewport-size", "1920x1080"])
+            else:
+                import json as _json
+                import tempfile as _tempfile
+
+                _cfg = {
+                    "browser": {
+                        "launchOptions": {"args": ["--start-maximized"]},
+                        "contextOptions": {"viewport": None},
+                    }
+                }
+                _cfg_path = os.path.join(
+                    _tempfile.gettempdir(), f"voyantest-mcp-{os.getpid()}.json"
+                )
+                with open(_cfg_path, "w", encoding="utf-8") as _f:
+                    _json.dump(_cfg, _f)
+                args.extend(["--config", _cfg_path])
+                self._mcp_config_path = _cfg_path
+            args.append("--isolated")
+
         import subprocess as _sp
+
         proc_kwargs = dict(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        if _sys.platform == 'win32':
-            # Hide the black console window from bundled node.exe (console subsystem).
-            # Does not affect Chromium visibility (separate process).
-            proc_kwargs['creationflags'] = _sp.CREATE_NO_WINDOW
+        if sys.platform == "win32":
+            proc_kwargs["creationflags"] = _sp.CREATE_NO_WINDOW
         else:
-            proc_kwargs['preexec_fn'] = os.setsid
-        self._mcp_process = await asyncio.create_subprocess_exec(
-            *args, **proc_kwargs,
-        )
+            proc_kwargs["preexec_fn"] = os.setsid
+        self._mcp_process = await asyncio.create_subprocess_exec(*args, **proc_kwargs)
         self._mcp_stdin = self._mcp_process.stdin
         self._mcp_stdout = self._mcp_process.stdout
-
         asyncio.create_task(self._pipe_stderr())
 
         await self._mcp_send("initialize", {
@@ -452,6 +584,7 @@ class AgentClient:
             self._mcp_stdin = None
             self._mcp_stdout = None
             self._log_info("MCP subprocess stopped (browser closed)")
+        await self._stop_exec_chrome()
 
     async def _pipe_stderr(self):
         try:
@@ -671,19 +804,28 @@ class AgentClient:
                 await self._handle_run_start_browser_use(msg)
                 return
 
-            self._log_info(f"Run {msg.run_id} started — launching browser")
+            shared_cdp = backend == "hybrid"
+            self._log_info(
+                f"Run {msg.run_id} started — launching browser backend={backend} shared_cdp={shared_cdp}"
+            )
             self._emit_status('busy')
             try:
                 if not self._mcp_process:
-                    await self._start_mcp()
+                    await self._start_mcp(shared_cdp=shared_cdp)
                 else:
                     self._log_info("Reusing existing MCP subprocess (browser stays open)")
-                    try:
-                        await asyncio.wait_for(self._mcp_call_tool("snapshot", "", ""), timeout=10)
-                    except Exception:
-                        self._log_warning("Existing MCP not responding, restarting")
+                    # hybrid reuse requires CDP endpoint still alive
+                    if shared_cdp and not self._exec_cdp_http:
+                        self._log_warning("Hybrid CDP missing on reuse — restarting with shared CDP")
                         await self._stop_mcp()
-                        await self._start_mcp()
+                        await self._start_mcp(shared_cdp=True)
+                    else:
+                        try:
+                            await asyncio.wait_for(self._mcp_call_tool("snapshot", "", ""), timeout=10)
+                        except Exception:
+                            self._log_warning("Existing MCP not responding, restarting")
+                            await self._stop_mcp()
+                            await self._start_mcp(shared_cdp=shared_cdp)
 
                 # BASE URL 由 Playwright MCP 直接导航，不经 LLM（批量后续用例可跳过）
                 navigate = payload.get("navigate_base_url", True)
@@ -733,6 +875,9 @@ class AgentClient:
                 # AgentBridge act：action/selector/value 在 payload 顶层
                 await self._handle_act(msg)
 
+        elif msg.type == WSMessageType.STEP_BROWSER_USE:
+            await self._handle_step_browser_use(msg)
+
         elif msg.type == WSMessageType.SHUTDOWN:
             self._log_info("Shutdown signal received — closing browser")
             try:
@@ -766,6 +911,95 @@ class AgentClient:
         except Exception as exc:
             self._log_warning(f"browser-use session stop: {exc}")
 
+    async def _handle_step_browser_use(self, msg: WSMessage):
+        """Hybrid fallback: run one NL step via browser-use on the shared CDP browser."""
+        payload = msg.payload or {}
+        step_order = payload.get("step_order") or 0
+        desc = payload.get("description") or ""
+        expected = payload.get("expected_result")
+        max_steps = int(payload.get("max_steps_per_nl") or 20)
+        t0 = time.monotonic()
+        self._log_info(
+            f"Hybrid fallback step {step_order} via browser-use on CDP={self._exec_cdp_http}"
+        )
+        try:
+            if not self._exec_cdp_http:
+                raise RuntimeError("无共享 CDP（请用 hybrid 后端启动 MCP）")
+
+            from core.browser_use_exec import (
+                create_browser_use_llm_from_config,
+                execute_nl_steps_browser_use,
+            )
+
+            llm_cfg = payload.get("llm") or {}
+            api_key = (llm_cfg.get("api_key") or "").strip()
+            if not api_key:
+                raise RuntimeError("服务端未下发 LLM api_key，无法 browser-use 救场")
+
+            llm = create_browser_use_llm_from_config(
+                api_key=api_key,
+                api_base=llm_cfg.get("api_base"),
+                model=llm_cfg.get("model"),
+            )
+            # Attach to existing Chromium; never stop it
+            results = await execute_nl_steps_browser_use(
+                [
+                    {
+                        "step_order": step_order,
+                        "description": desc,
+                        "expected_result": expected,
+                    }
+                ],
+                llm=llm,
+                base_url=None,
+                headless=self._headless,
+                max_steps_per_nl=max_steps,
+                stop_browser=False,
+                cdp_url=self._exec_cdp_http,
+            )
+            r = results[0] if results else {"success": False, "error": "empty result"}
+            await self._send(
+                WSMessageType.STEP_RESULT,
+                msg.run_id,
+                {
+                    "step_order": step_order,
+                    "success": bool(r.get("success")),
+                    "thinking": r.get("thinking") or "",
+                    "action": r.get("action") or "browser_use_fallback",
+                    "next_goal": "",
+                    "error": r.get("error"),
+                    "duration_ms": r.get("duration_ms")
+                    or (time.monotonic() - t0) * 1000,
+                    "screenshot_base64": r.get("screenshot_base64"),
+                    "backend": "browser_use_fallback",
+                },
+            )
+            self._log_info(
+                f"Hybrid fallback step {step_order} "
+                f"{'passed' if r.get('success') else 'failed'}"
+            )
+        except Exception as e:
+            self._log_error(f"Hybrid fallback failed: {e}")
+            ss_b64 = None
+            try:
+                ss_b64 = await self._mcp_screenshot_base64()
+            except Exception:
+                pass
+            await self._send(
+                WSMessageType.STEP_RESULT,
+                msg.run_id,
+                {
+                    "step_order": step_order,
+                    "success": False,
+                    "thinking": "",
+                    "action": "browser_use_fallback",
+                    "error": str(e),
+                    "duration_ms": (time.monotonic() - t0) * 1000,
+                    "screenshot_base64": ss_b64,
+                    "backend": "browser_use_fallback",
+                },
+            )
+
     async def _handle_run_start_browser_use(self, msg: WSMessage):
         """Client-local browser-use: run all NL steps, reply RUN_COMPLETE."""
         payload = msg.payload or {}
@@ -773,8 +1007,8 @@ class AgentClient:
         self._emit_status('busy')
         try:
             try:
-                from browser_use import BrowserSession
                 from core.browser_use_exec import (
+                    create_browser_session,
                     create_browser_use_llm_from_config,
                     execute_nl_steps_browser_use,
                 )
@@ -799,16 +1033,26 @@ class AgentClient:
             if not navigate:
                 base_url = None
             max_steps = int(payload.get("max_steps_per_nl") or 20)
-            headless = bool(payload.get("headless", self._headless))
+            # Client GUI/CLI headless wins. Server execution-backend.headless is for
+            # server-side runs only; it used to force headless=True and skip maximize.
+            server_headless = payload.get("headless")
+            headless = bool(self._headless)
+            if server_headless is not None and bool(server_headless) != headless:
+                self._log_info(
+                    f"browser-use: ignore server headless={server_headless}, "
+                    f"use client headless={headless}"
+                )
 
             if navigate or self._bu_browser is None:
                 await self._stop_bu_browser()
-                self._bu_browser = BrowserSession(
+                self._bu_browser = create_browser_session(
                     headless=headless,
                     keep_alive=True,
                     enable_default_extensions=False,
                 )
-                self._log_info("browser-use: new browser session")
+                self._log_info(
+                    f"browser-use: new browser session headless={headless} maximized={not headless}"
+                )
             else:
                 self._log_info("browser-use: reuse browser session (batch follow-up)")
 

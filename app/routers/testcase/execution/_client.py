@@ -156,7 +156,7 @@ async def run_test_case_on_client(
 ) -> dict:
     """Run a test case on a connected client agent via WebSocket.
 
-    Query ``backend``: ``playwright_mcp``（默认）| ``browser_use``（客户端本地 NL Agent）。
+    Query ``backend``: ``playwright_mcp``（默认）| ``browser_use`` | ``hybrid``（MCP 默认，定位失败同浏览器救场）。
     """
     from agent.manager import agent_manager
 
@@ -164,10 +164,10 @@ async def run_test_case_on_client(
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    if backend is not None and backend not in ("playwright_mcp", "browser_use"):
+    if backend is not None and backend not in ("playwright_mcp", "browser_use", "hybrid"):
         raise HTTPException(
             status_code=400,
-            detail="backend must be playwright_mcp or browser_use",
+            detail="backend must be playwright_mcp, browser_use, or hybrid",
         )
 
     allowed_ids = get_user_project_filter(user)
@@ -197,7 +197,7 @@ async def run_test_case_on_client(
     else:
         agent = agents[0]
 
-    if backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
+    if backend in ("browser_use", "hybrid") and "browser_use" not in (agent.capabilities or []):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -458,9 +458,9 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     else:
         agent = agents[0]
 
-    if body.backend is not None and body.backend not in ("playwright_mcp", "browser_use"):
-        raise HTTPException(status_code=400, detail="backend must be playwright_mcp or browser_use")
-    if body.backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
+    if body.backend is not None and body.backend not in ("playwright_mcp", "browser_use", "hybrid"):
+        raise HTTPException(status_code=400, detail="backend must be playwright_mcp, browser_use, or hybrid")
+    if body.backend in ("browser_use", "hybrid") and "browser_use" not in (agent.capabilities or []):
         raise HTTPException(
             status_code=400,
             detail=(
