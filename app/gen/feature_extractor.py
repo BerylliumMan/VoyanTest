@@ -17,6 +17,7 @@ from markupsafe import escape
 
 from app.gen.cancel import GenAnalysisCancelled
 from app.gen.chunking import (
+    CHARS_PER_TOKEN_INV,
     build_phase1_chunks_from_parts,
     build_phase1_chunks_from_text,
     chunk_token_budget,
@@ -75,6 +76,67 @@ def content_parts_to_openai_user_content(
 
 def _has_images(content_parts: list[dict[str, Any]] | None) -> bool:
     return bool(content_parts) and any(p.get("type") == "image" for p in content_parts)
+
+
+def compact_parts_keep_images(
+    content_parts: list[dict[str, Any]],
+    budget: int,
+) -> list[dict[str, Any]]:
+    """Shrink multimodal parts to fit ``budget`` while preferring to keep images.
+
+    Text parts are truncated / dropped first; images are kept in document order
+    until the remaining budget is exhausted.
+    """
+    if estimate_parts_tokens(content_parts) <= budget:
+        return list(content_parts)
+
+    images = [p for p in content_parts if p.get("type") == "image" and p.get("b64")]
+    texts = [p for p in content_parts if p.get("type") == "text" and (p.get("text") or "").strip()]
+
+    # Reserve capacity for as many images as possible, then fill with text.
+    kept_images: list[dict[str, Any]] = []
+    used = 0
+    for img in images:
+        cost = estimate_parts_tokens([img])
+        if used + cost > budget and kept_images:
+            break
+        if used + cost > budget:
+            break
+        kept_images.append(img)
+        used += cost
+
+    text_budget = max(0, budget - used)
+    kept_texts: list[dict[str, Any]] = []
+    for t in texts:
+        raw = (t.get("text") or "").strip()
+        if not raw:
+            continue
+        cost = estimate_text_tokens(raw)
+        if cost <= text_budget:
+            kept_texts.append({"type": "text", "text": raw})
+            text_budget -= cost
+            continue
+        # Truncate to remaining budget (approx chars)
+        max_chars = max(80, int(text_budget / CHARS_PER_TOKEN_INV) if text_budget else 0)
+        if max_chars < 80:
+            break
+        kept_texts.append({"type": "text", "text": raw[:max_chars] + "…"})
+        text_budget = 0
+        break
+
+    # Re-interleave roughly: all truncated texts first as context, then images
+    # (order less critical once compacted; intro still carries the TC hint).
+    if not kept_images and not kept_texts:
+        return list(content_parts)[:1]
+    logger.info(
+        "Phase2 flow compact_parts: %d→%d parts (images %d→%d) for budget %d",
+        len(content_parts),
+        len(kept_texts) + len(kept_images),
+        len(images),
+        len(kept_images),
+        budget,
+    )
+    return kept_texts + kept_images
 
 
 def _vision_hint(exc: BaseException) -> str | None:
@@ -363,6 +425,8 @@ async def _generate_batch_once(
     agent_id: int | None,
     tc_counter: int,
     user_hint: str,
+    content_parts: list[dict[str, Any]] | None = None,
+    flow_mode: bool = False,
 ) -> list[TestCase]:
     fp_descriptions = _fp_descriptions(batch)
     csv_header = " | ".join(CSV_HEADER)
@@ -376,6 +440,22 @@ async def _generate_batch_once(
     if project_description:
         desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
 
+    # Flow mode: attach handbook text+screenshots so steps can read boxed UI labels.
+    user_payload: Any = user_hint
+    multimodal = False
+    if flow_mode and _has_images(content_parts):
+        max_ctx = await get_context_budget(agent_type=agent_type, agent_id=agent_id)
+        budget = chunk_token_budget(max_ctx)
+        # Leave headroom for system prompt + hint already counted loosely in budget.
+        parts = compact_parts_keep_images(list(content_parts or []), budget)
+        intro = (
+            f"{user_hint}\n\n"
+            "以下为操作手册原文与截图（按文档顺序）。"
+            "请结合红框/色框/高亮区域与相邻文字生成本批 UI 步骤。"
+        )
+        user_payload = content_parts_to_openai_user_content(parts, intro=intro)
+        multimodal = True
+
     tcs: list[TestCase] = []
     content = ""
     for attempt in range(MAX_RETRIES):
@@ -383,7 +463,7 @@ async def _generate_batch_once(
             content = await call_model(
                 [
                     {"role": "system", "content": desc_prefix + prompt},
-                    {"role": "user", "content": user_hint},
+                    {"role": "user", "content": user_payload},
                 ],
                 agent_type=agent_type,
                 agent_id=agent_id,
@@ -407,6 +487,14 @@ async def _generate_batch_once(
             KeyError,
             TypeError,
         ) as e:
+            hint = _vision_hint(e) if multimodal else None
+            if hint:
+                logger.warning("Flow TC multimodal failed, falling back to text-only: %s", e)
+                user_payload = user_hint
+                multimodal = False
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                continue
             logger.warning("TC batch attempt %d failed: %s", attempt + 1, e)
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(RETRY_DELAY * (attempt + 1))
@@ -425,6 +513,7 @@ async def generate_test_cases_for_fps(
     cancel_checker=None,
     min_tcs_per_item: int = MIN_TCS_PER_ITEM,
     flow_mode: bool = False,
+    content_parts: list[dict[str, Any]] | None = None,
 ) -> dict:
     """Generate test cases for test items in batches of ``FP_BATCH_SIZE``.
 
@@ -484,6 +573,8 @@ async def generate_test_cases_for_fps(
             agent_id=agent_id,
             tc_counter=tc_counter,
             user_hint=user_hint,
+            content_parts=content_parts,
+            flow_mode=flow_mode,
         )
 
         if tcs and len(tcs) < min_needed:
@@ -516,6 +607,8 @@ async def generate_test_cases_for_fps(
                 agent_id=agent_id,
                 tc_counter=tc_counter + len(tcs),
                 user_hint=extra_hint,
+                content_parts=content_parts,
+                flow_mode=flow_mode,
             )
             if extra:
                 tcs = _merge_tcs_by_title(tcs, extra)
