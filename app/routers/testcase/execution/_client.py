@@ -249,6 +249,24 @@ async def run_test_case_on_client(
 
         _all_success = True
         agent_run_id = None
+        db_run_id = None
+
+        # 预创建 TestRun，避免长跑（browser-use）期间轮询批次因「无 runs」误判失败
+        try:
+            async with db_mod.AsyncSessionLocal() as _pr_db:
+                pending = db_models.TestRun(
+                    case_id=case_id,
+                    batch_id=batch.id,
+                    status="running",
+                    start_time=start_time,
+                    end_time=start_time,
+                )
+                _pr_db.add(pending)
+                await _pr_db.commit()
+                await _pr_db.refresh(pending)
+                db_run_id = pending.id
+        except Exception:
+            logger.exception("Failed to precreate TestRun for client exec")
 
         # 创建 AgentRun 记录
         try:
@@ -294,7 +312,7 @@ async def run_test_case_on_client(
             await save_run_results(
                 case_id, status, start_time, tz_now(),
                 (tz_now() - start_time).total_seconds(),
-                report_path, None, [], batch_id=batch.id,
+                report_path, None, [], batch_id=batch.id, run_id=db_run_id,
             )
 
             # 更新 AgentRun 状态
@@ -322,7 +340,7 @@ async def run_test_case_on_client(
                 (end_time - start_time).total_seconds(),
                 None, None,
                 [{"level": "error", "message": "客户端 Agent 执行过程中发生内部错误，请查看服务端日志获取详情"}],
-                batch_id=batch.id,
+                batch_id=batch.id, run_id=db_run_id,
             )
 
         async with db_mod.AsyncSessionLocal() as _db:

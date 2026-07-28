@@ -1,11 +1,12 @@
 import React from 'react';
 import { Tabs } from '@arco-design/web-react';
-import { IconSettings, IconUser, IconClockCircle, IconSafe } from '@arco-design/web-react/icon';
+import { IconSettings, IconUser, IconClockCircle, IconSafe, IconThunderbolt } from '@arco-design/web-react/icon';
 import useLocale from '@/utils/useLocale';
 import AiConfig from './AiConfig';
 import UserManagement from './UserManagement';
 import ScheduleManagement from './ScheduleManagement';
 import HealingConfig from './HealingConfig';
+import ExecutionBackendConfig from './ExecutionBackendConfig';
 import styles from './index.module.less';
 
 const { TabPane } = Tabs;
@@ -24,6 +25,12 @@ function Settings() {
         </TabPane>
         <TabPane key="schedules" title={<><IconClockCircle className={styles.tabIcon} />{t['schedule.mgmt']}</>}>
           <ScheduleManagement />
+        </TabPane>
+        <TabPane
+          key="execution-backend"
+          title={<><IconThunderbolt className={styles.tabIcon} />执行后端</>}
+        >
+          <ExecutionBackendConfig />
         </TabPane>
         <TabPane key="healing" title={<><IconSafe className={styles.tabIcon} />自愈配置</>}>
           <HealingConfig />

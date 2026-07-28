@@ -10,3 +10,22 @@ pillow
 browser-use>=0.8.0,<1.0.0
 playwright>=1.40.0
 openai>=1.0.0
+setuptools
+# pkg_resources / PyInstaller runtime
+jaraco.text
+jaraco.functools
+jaraco.context
+jaraco.collections
+more-itertools
+backports.tarfile
+typer-slim
+autocommand
+# Windows PyInstaller helpers (sys_platform == win32)
+pefile>=2022.5.30
+pywin32-ctypes>=0.2.1
+# useful on Windows consoles / click
+colorama
+darkdetect
+packaging
+altgraph
+pyinstaller-hooks-contrib

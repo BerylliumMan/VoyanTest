@@ -129,13 +129,21 @@ async def execute_nl_steps_browser_use(
     from browser_use import Agent, BrowserSession
 
     step_results: list[dict] = []
-    browser = browser_session or BrowserSession(headless=headless, keep_alive=True)
+    # Disable default extensions: sync download can block the asyncio loop
+    # (WS heartbeat dies → server unregisters the agent mid-run).
+    browser = browser_session or BrowserSession(
+        headless=headless,
+        keep_alive=True,
+        enable_default_extensions=False,
+    )
     try:
         if base_url:
+            # Keep URL alone on a line: browser-use URL extraction may swallow
+            # trailing Chinese punctuation into the navigate target.
             open_agent = Agent(
                 task=(
-                    f"打开网址 {base_url}，等待页面基本加载完成即可。"
-                    "完成后 done 并 success=true。"
+                    f"Open this URL exactly (copy as-is):\n{base_url}\n"
+                    "Wait until the page has basically loaded, then call done with success=true."
                 ),
                 llm=llm,
                 browser_session=browser,
