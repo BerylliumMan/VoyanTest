@@ -4,9 +4,9 @@
 Safe for Agent client offline packaging — only depends on browser-use + stdlib.
 """
 
-from __future__ import annotations
-
+import base64
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -74,6 +74,8 @@ def build_step_task(
         "规则:\n"
         "- 只完成本步骤，不要擅自执行后续无关操作\n"
         "- 若页面未打开且需要导航，可先打开相关页面\n"
+        "- 下拉框/树选择/联想选项：输入文字后必须再点击匹配项完成选择，仅输入不算完成\n"
+        "- 优先少步完成；看到目标选项就立刻点击，不要反复探索\n"
         "- 完成后必须 done：成功则 success=true，失败则 success=false 并说明原因\n"
         "- 判断成败时只依据页面真实可见内容，不要臆造文案\n"
     )
@@ -101,6 +103,125 @@ def create_browser_use_llm_from_config(
         base_url=api_base or None,
         temperature=0.2,
     )
+
+
+def maximize_browser_session(session) -> None:
+    """Force headed Chrome to start maximized.
+
+    browser-use's profile validator copies display size into ``window_size``,
+    which makes launch use ``--window-size=WxH`` instead of ``--start-maximized``.
+    Clear that and ensure the maximize flag is present.
+    """
+    profile = getattr(session, "browser_profile", None)
+    if profile is None:
+        return
+    try:
+        profile.window_size = None
+    except Exception:
+        logger.debug("clear window_size failed", exc_info=True)
+    try:
+        args = [a for a in (list(getattr(profile, "args", None) or [])) if a != "--start-maximized"]
+        args.append("--start-maximized")
+        profile.args = args
+    except Exception:
+        logger.debug("set --start-maximized failed", exc_info=True)
+
+
+def create_browser_session(
+    *,
+    headless: bool = True,
+    keep_alive: bool = True,
+    enable_default_extensions: bool = False,
+    cdp_url: str | None = None,
+    **kwargs,
+):
+    """Create a BrowserSession; headed mode starts maximized.
+
+    ``cdp_url``: attach to an existing Chromium (hybrid MCP fallback). Skip maximize.
+    """
+    from browser_use import BrowserSession
+
+    if cdp_url:
+        return BrowserSession(
+            cdp_url=cdp_url,
+            keep_alive=keep_alive,
+            enable_default_extensions=enable_default_extensions,
+            is_local=True,
+            **kwargs,
+        )
+
+    session = BrowserSession(
+        headless=headless,
+        keep_alive=keep_alive,
+        enable_default_extensions=enable_default_extensions,
+        **kwargs,
+    )
+    if not headless:
+        maximize_browser_session(session)
+    return session
+
+
+async def capture_browser_screenshot(
+    browser,
+    *,
+    step_order: int | None = None,
+    screenshots_dir: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Take a PNG screenshot. Returns ``(screenshot_path, screenshot_base64)``."""
+    import asyncio
+
+    if browser is None:
+        return None, None
+    take = getattr(browser, "take_screenshot", None)
+    if not callable(take):
+        return None, None
+    try:
+        data = await take(full_page=False, format="png")
+        if not data:
+            return None, None
+        b64 = base64.b64encode(data).decode("ascii")
+        path = None
+        if screenshots_dir:
+            await asyncio.to_thread(os.makedirs, screenshots_dir, exist_ok=True)
+            name = f"step_{step_order or 'x'}.png"
+            path = os.path.join(screenshots_dir, name).replace("\\", "/")
+            with open(path, "wb") as f:
+                f.write(data)
+        return path, b64
+    except Exception as exc:
+        logger.warning("browser-use screenshot failed: %s", exc, exc_info=True)
+        return None, None
+
+
+def persist_step_screenshot_files(
+    step_results: list[dict],
+    output_dir: str | None,
+) -> list[dict]:
+    """Decode ``screenshot_base64`` into ``output_dir/screenshots`` and set ``screenshot_path``."""
+    if not output_dir or not step_results:
+        return step_results
+    ss_dir = os.path.join(output_dir, "screenshots")
+    os.makedirs(ss_dir, exist_ok=True)
+    for r in step_results:
+        b64 = r.pop("screenshot_base64", None)
+        if not b64 or r.get("screenshot_path"):
+            continue
+        try:
+            order = r.get("step_number") or "x"
+            ss_path = os.path.join(ss_dir, f"step_{order}.png").replace("\\", "/")
+            with open(ss_path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            r["screenshot_path"] = ss_path
+        except Exception as exc:
+            logger.warning("persist screenshot failed: %s", exc, exc_info=True)
+    return step_results
+
+
+def _is_max_steps_incomplete(error: str | None) -> bool:
+    if not error:
+        return False
+    low = error.lower()
+    return "max_steps" in low or "reached max" in low or "maximum step" in low
 
 
 def history_to_step_fields(history) -> dict[str, Any]:
@@ -156,9 +277,11 @@ async def execute_nl_steps_browser_use(
     llm,
     base_url: str | None = None,
     headless: bool = True,
-    max_steps_per_nl: int = 20,
+    max_steps_per_nl: int = 30,
     browser_session=None,
     stop_browser: bool = True,
+    screenshots_dir: str | None = None,
+    cdp_url: str | None = None,
 ) -> list[dict]:
     """Run NL steps with a shared browser-use session. No DB side effects.
 
@@ -166,8 +289,10 @@ async def execute_nl_steps_browser_use(
 
     ``browser_session``: reuse an existing BrowserSession (batch follow-up).
     ``stop_browser``: when False, leave the session open for the next case.
+    ``screenshots_dir``: if set, also write PNGs there (server-side runs).
+    ``cdp_url``: attach to existing Chromium (hybrid MCP fallback); implies no stop.
     """
-    from browser_use import Agent, BrowserSession
+    from browser_use import Agent
 
     step_results: list[dict] = []
     prompt_override = resolve_system_prompt_override()
@@ -179,12 +304,16 @@ async def execute_nl_steps_browser_use(
     if prompt_override is not None:
         agent_common["override_system_message"] = prompt_override
 
+    if cdp_url:
+        stop_browser = False
+
     # Disable default extensions: sync download can block the asyncio loop
     # (WS heartbeat dies → server unregisters the agent mid-run).
-    browser = browser_session or BrowserSession(
+    browser = browser_session or create_browser_session(
         headless=headless,
         keep_alive=True,
         enable_default_extensions=False,
+        cdp_url=cdp_url,
     )
     try:
         if base_url:
@@ -242,6 +371,28 @@ async def execute_nl_steps_browser_use(
             try:
                 history = await agent.run(max_steps=max_steps_per_nl)
                 fields = history_to_step_fields(history)
+                # One continuation if we hit max_steps but made partial progress
+                if (not fields["success"]) and _is_max_steps_incomplete(fields.get("error")):
+                    cont_budget = max(10, min(20, int(max_steps_per_nl)))
+                    logger.info(
+                        "browser-use step %s hit max_steps, continue +%s",
+                        order, cont_budget,
+                    )
+                    cont_task = (
+                        "继续完成尚未完成的操作，不要从头开始。\n"
+                        f"原步骤:\n{desc}\n\n"
+                        f"上次进度/原因:\n{fields.get('error') or ''}\n\n"
+                        "若是下拉/树选择，直接点击已出现的匹配选项。"
+                        "完成后 done(success=true)；仍无法完成则 done(success=false)。"
+                    )
+                    cont_agent = Agent(
+                        task=cont_task,
+                        browser_session=browser,
+                        max_actions_per_step=8,
+                        **agent_common,
+                    )
+                    history = await cont_agent.run(max_steps=cont_budget)
+                    fields = history_to_step_fields(history)
             except Exception as exc:
                 logger.exception("browser-use step %s failed", order)
                 fields = {
@@ -251,6 +402,12 @@ async def execute_nl_steps_browser_use(
                     "error": str(exc),
                 }
 
+            ss_path, ss_b64 = None, None
+            # Always capture on failure; also on success for report consistency
+            ss_path, ss_b64 = await capture_browser_screenshot(
+                browser, step_order=order, screenshots_dir=screenshots_dir,
+            )
+
             result = {
                 "step_number": order,
                 "original_description": desc,
@@ -259,7 +416,8 @@ async def execute_nl_steps_browser_use(
                 "action": fields.get("action") or "browser_use",
                 "next_goal": "",
                 "error": fields.get("error"),
-                "screenshot_path": None,
+                "screenshot_path": ss_path,
+                "screenshot_base64": ss_b64,
                 "duration_ms": (time.monotonic() - t0) * 1000,
                 "backend": "browser_use",
             }

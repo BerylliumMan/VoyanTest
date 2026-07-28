@@ -38,6 +38,7 @@ class WSMessageType(str, Enum):
     # Server → Agent
     RUN_START = "run_start"
     STEP_EXECUTE = "step_execute"
+    STEP_BROWSER_USE = "step_browser_use"  # hybrid: one NL step via browser-use on shared CDP
     GET_SNAPSHOT = "get_snapshot"
     GET_SCREENSHOT = "get_screenshot"
     RUN_END = "run_end"

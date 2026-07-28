@@ -125,13 +125,18 @@ async def run_test_case_via_browser_use(
         )
 
         llm = await _create_browser_use_llm()
+        screenshots_dir = os.path.join(output_dir, "screenshots")
         step_results = await execute_nl_steps_browser_use(
             step_list,
             llm=llm,
             base_url=nav_url,
             headless=headless,
             max_steps_per_nl=max_steps_per_nl,
+            screenshots_dir=screenshots_dir,
         )
+        # Drop base64 blobs from report JSON (paths already set)
+        for r in step_results:
+            r.pop("screenshot_base64", None)
 
         test_status = (
             "passed" if step_results and all(r["success"] for r in step_results) else "failed"

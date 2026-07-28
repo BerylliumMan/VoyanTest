@@ -25,6 +25,35 @@ from core.step_executor import HYBRID_SETTLE_SECONDS
 
 logger = logging.getLogger("agent.manager")
 
+_LOCATOR_FAIL_HINTS = (
+    "not found",
+    "no element",
+    "locator",
+    "timeout",
+    "timed out",
+    "unable to find",
+    "strict mode violation",
+    "waiting for",
+    "does not exist",
+    "找不到",
+    "无法定位",
+    "定位失败",
+    "element is not",
+    "无法确定本步",
+    "无法确定",
+)
+
+
+def _is_locator_failure(result: dict | None) -> bool:
+    """True when MCP/LLM failure looks like element locating, not assertion."""
+    if not result:
+        return False
+    err = f"{result.get('error') or ''} {result.get('action') or ''}"
+    low = err.lower()
+    if "verification failed" in low or "expected result verification" in low or "断言" in err:
+        return False
+    return any(h in low for h in _LOCATOR_FAIL_HINTS)
+
 
 class AgentSession:
     """Holds WebSocket send callback and agent metadata for a connected agent."""
@@ -211,6 +240,7 @@ class AgentManager:
         if selected == "browser_use":
             return await self._execute_on_agent_browser_use(
                 agent_id, run_id, case_name, steps,
+                output_dir=output_dir,
                 base_url_override=base_url_override if navigate_base_url else None,
                 max_steps_per_nl=execution_backend_config.max_steps_per_nl,
                 headless=execution_backend_config.headless,
@@ -220,6 +250,14 @@ class AgentManager:
         session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
+
+        hybrid = selected == "hybrid"
+        if hybrid and "browser_use" not in (session.agent.capabilities or []):
+            logger.warning(
+                "hybrid requested but agent %s lacks browser_use capability; MCP only",
+                agent_id,
+            )
+            hybrid = False
 
         session.agent.status = AgentStatus.BUSY
         step_results = []
@@ -237,7 +275,7 @@ class AgentManager:
                     "case_name": case_name,
                     "steps": steps,
                     "base_url": (base_url_override or "") if navigate_base_url else "",
-                    "backend": "playwright_mcp",
+                    "backend": "hybrid" if hybrid else "playwright_mcp",
                     "navigate_base_url": navigate_base_url,
                 },
             ))
@@ -355,6 +393,43 @@ class AgentManager:
                         )
                         result["relocate_attempted"] = True
 
+                # Hybrid: locator failure → same-browser browser-use for this NL step only
+                step_backend = "playwright_mcp"
+                if (
+                    hybrid
+                    and not result.get("success")
+                    and action_lower != "done"
+                    and _is_locator_failure(result)
+                ):
+                    logger.info(
+                        "Hybrid browser-use fallback: step %s after MCP locator failure: %s",
+                        step_order, (result.get("error") or "")[:200],
+                    )
+                    fb = await self._execute_step_browser_use_fallback(
+                        session,
+                        agent_id,
+                        run_id,
+                        step_order=step_order,
+                        description=desc,
+                        expected_result=expected_result,
+                        max_steps_per_nl=min(
+                            20, int(execution_backend_config.max_steps_per_nl or 20)
+                        ),
+                    )
+                    if fb.get("success"):
+                        result = fb
+                        step_backend = "browser_use_fallback"
+                    else:
+                        # Keep richer error; still mark attempted
+                        result = {
+                            **result,
+                            **{k: v for k, v in fb.items() if v is not None},
+                            "success": False,
+                            "fallback_attempted": True,
+                            "fallback_error": fb.get("error"),
+                        }
+                        step_backend = "browser_use_fallback"
+
                 # 4. Verify expected result if step succeeded
                 if result.get("success") and expected_result:
                     try:
@@ -428,6 +503,7 @@ class AgentManager:
                     "duration_ms": result.get("duration_ms", 0),
                     "screenshot_path": screenshot_path,
                     "verification": result.get("verification"),
+                    "backend": step_backend,
                 }
                 step_results.append(step_result)
 
@@ -480,6 +556,7 @@ class AgentManager:
         case_name: str,
         steps: List[dict],
         *,
+        output_dir: Optional[str] = None,
         base_url_override: Optional[str] = None,
         max_steps_per_nl: int = 20,
         headless: bool = True,
@@ -540,7 +617,8 @@ class AgentManager:
                 raise RuntimeError(
                     f"Agent browser-use 执行失败: {err or status or 'unknown'}"
                 )
-            return steps_out
+            from core.browser_use_exec import persist_step_screenshot_files
+            return persist_step_screenshot_files(steps_out, output_dir)
         finally:
             try:
                 await session.send(WSMessage(
@@ -584,6 +662,59 @@ class AgentManager:
             return payload
         except asyncio.TimeoutError:
             return {"success": False, "error": "Step timeout", "action": "", "duration_ms": 0}
+
+    async def _execute_step_browser_use_fallback(
+        self,
+        session: AgentSession,
+        agent_id: str,
+        run_id: str,
+        *,
+        step_order: int,
+        description: str,
+        expected_result: Optional[str] = None,
+        max_steps_per_nl: int = 20,
+    ) -> dict:
+        """Ask client to run one NL step via browser-use on the shared CDP browser."""
+        try:
+            key, base, model = await _llm_resolve_config()
+            timeout = max(300.0, 25.0 * max(1, int(max_steps_per_nl)))
+            payload = await session.request(
+                WSMessage(
+                    type=WSMessageType.STEP_BROWSER_USE,
+                    agent_id=agent_id,
+                    run_id=run_id,
+                    payload={
+                        "step_order": step_order,
+                        "description": description,
+                        "expected_result": expected_result,
+                        "max_steps_per_nl": max_steps_per_nl,
+                        "llm": {
+                            "api_key": key,
+                            "api_base": base,
+                            "model": model,
+                        },
+                    },
+                ),
+                timeout=timeout,
+            )
+            if not isinstance(payload, dict):
+                return {"success": False, "error": "invalid STEP_BROWSER_USE reply", "action": "browser_use_fallback"}
+            return payload
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": "browser-use fallback timeout",
+                "action": "browser_use_fallback",
+                "duration_ms": 0,
+            }
+        except Exception as exc:
+            logger.exception("browser-use fallback step %s failed", step_order)
+            return {
+                "success": False,
+                "error": str(exc),
+                "action": "browser_use_fallback",
+                "duration_ms": 0,
+            }
 
     # ---- bridge: AI Agent observe/act 指令 ----
 
