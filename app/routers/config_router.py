@@ -360,7 +360,12 @@ def _pt_to_response(pt: Any) -> PromptTemplateResponse:
     )
 
 
-from app.runtime_config import HealingConfig, healing_config as _healing_config
+from app.runtime_config import (
+    ExecutionBackendConfig,
+    HealingConfig,
+    execution_backend_config as _execution_backend_config,
+    healing_config as _healing_config,
+)
 
 
 @router.get("/healing", response_model=HealingConfig)
@@ -376,4 +381,22 @@ async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)
     _rt.enabled = cfg.enabled
     _rt.max_retries = cfg.max_retries
     _rt.threshold = cfg.threshold
+    return _rt
+
+
+@router.get("/execution-backend", response_model=ExecutionBackendConfig)
+async def get_execution_backend(admin=Depends(require_admin)) -> ExecutionBackendConfig:
+    """获取服务端 UI 执行后端（playwright_mcp | browser_use）。"""
+    return _execution_backend_config
+
+
+@router.put("/execution-backend", response_model=ExecutionBackendConfig)
+async def update_execution_backend(
+    cfg: ExecutionBackendConfig, admin=Depends(require_admin),
+) -> ExecutionBackendConfig:
+    """切换服务端 UI 执行后端（仅影响服务端跑法，不改 Agent 客户端）。"""
+    from app.runtime_config import execution_backend_config as _rt
+    _rt.backend = cfg.backend
+    _rt.max_steps_per_nl = cfg.max_steps_per_nl
+    _rt.headless = cfg.headless
     return _rt

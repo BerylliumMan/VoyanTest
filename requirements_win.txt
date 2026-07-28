@@ -10,6 +10,7 @@ alembic==1.18.4
 # Browser Automation
 playwright==1.58.0
 mcp==1.26.0
+browser-use>=0.8.0,<1.0.0
 
 # AI/LLM
 openai==1.109.1

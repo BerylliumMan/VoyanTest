@@ -2,3 +2,11 @@ httpx>=0.24.0
 websockets>=10.0
 openpyxl
 pyinstaller>=5.0
+pydantic>=2.0
+rich
+customtkinter
+pystray
+pillow
+browser-use>=0.8.0,<1.0.0
+playwright>=1.40.0
+openai>=1.0.0

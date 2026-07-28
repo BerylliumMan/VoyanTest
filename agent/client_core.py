@@ -107,6 +107,7 @@ class AgentClient:
         self._mcp_stdin = None
         self._mcp_stdout = None
         self._mcp_req_id = 0
+        self._bu_browser = None  # shared browser-use session across batch cases
 
         # CDP Chrome recording state
         self._chrome_process = None
@@ -632,11 +633,17 @@ class AgentClient:
         await self._ws.send(msg.model_dump_json())
 
     async def _send_registration(self):
+        caps = ["mcp", "playwright", "ui_testing", "local_browser"]
+        try:
+            import browser_use  # noqa: F401
+            caps.append("browser_use")
+        except ImportError:
+            pass
         reg = AgentRegistration(
             name=self.agent_name,
             hostname=self.hostname,
             ip_address=self.ip_address,
-            capabilities=["mcp", "playwright", "ui_testing", "local_browser"],
+            capabilities=caps,
         )
         await self._send(WSMessageType.REGISTERED, payload=reg.model_dump())
 
@@ -658,6 +665,12 @@ class AgentClient:
             return
 
         if msg.type == WSMessageType.RUN_START:
+            payload = msg.payload or {}
+            backend = (payload.get("backend") or "playwright_mcp").strip()
+            if backend == "browser_use":
+                await self._handle_run_start_browser_use(msg)
+                return
+
             self._log_info(f"Run {msg.run_id} started — launching browser")
             self._emit_status('busy')
             try:
@@ -672,15 +685,18 @@ class AgentClient:
                         await self._stop_mcp()
                         await self._start_mcp()
 
-                # BASE URL 由 Playwright MCP 直接导航，不经 LLM
-                base_url = ((msg.payload or {}).get("base_url") or "").strip()
-                if base_url:
+                # BASE URL 由 Playwright MCP 直接导航，不经 LLM（批量后续用例可跳过）
+                navigate = payload.get("navigate_base_url", True)
+                base_url = (payload.get("base_url") or "").strip()
+                if navigate and base_url:
                     self._log_info(f"Playwright navigating to BASE URL: {base_url}")
                     nav = await self._mcp_call_tool("goto", "", base_url)
                     if not nav.get("success"):
                         self._log_warning(
                             f"BASE URL navigation failed: {nav.get('error') or nav.get('text') or 'unknown'}"
                         )
+                elif not navigate:
+                    self._log_info("Skip BASE URL navigation (batch follow-up, keep session)")
             except Exception as e:
                 self._log_error(f"Failed to start MCP for run {msg.run_id}: {e}")
                 self._emit_status('error')
@@ -690,9 +706,10 @@ class AgentClient:
                 )
 
         elif msg.type == WSMessageType.RUN_END:
-            self._log_info(f"Run {msg.run_id} ended — MCP stays alive for next run")
+            self._log_info(f"Run {msg.run_id} ended — keep browser session for next case")
             try:
-                await self._mcp_call_tool("snapshot", "", "")
+                if self._mcp_process:
+                    await self._mcp_call_tool("snapshot", "", "")
             except Exception as e:
                 self._log_warning(f"Error during run end: {e}")
             self._emit_status('idle')
@@ -722,6 +739,10 @@ class AgentClient:
                 await self._stop_mcp()
             except Exception as e:
                 self._log_error(f"Error shutting down MCP: {e}")
+            try:
+                await self._stop_bu_browser()
+            except Exception as e:
+                self._log_error(f"Error shutting down browser-use: {e}")
 
         elif msg.type == WSMessageType.HEARTBEAT:
             pass
@@ -731,6 +752,97 @@ class AgentClient:
 
         elif msg.type == WSMessageType.RECORDING_STOP:
             await self._handle_recording_stop(msg)
+
+    async def _stop_bu_browser(self) -> None:
+        browser = self._bu_browser
+        self._bu_browser = None
+        if browser is None:
+            return
+        try:
+            if hasattr(browser, "stop"):
+                await browser.stop()
+            elif hasattr(browser, "close"):
+                await browser.close()
+        except Exception as exc:
+            self._log_warning(f"browser-use session stop: {exc}")
+
+    async def _handle_run_start_browser_use(self, msg: WSMessage):
+        """Client-local browser-use: run all NL steps, reply RUN_COMPLETE."""
+        payload = msg.payload or {}
+        self._log_info(f"Run {msg.run_id} started — backend=browser_use")
+        self._emit_status('busy')
+        try:
+            try:
+                from browser_use import BrowserSession
+                from core.browser_use_exec import (
+                    create_browser_use_llm_from_config,
+                    execute_nl_steps_browser_use,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"browser-use 执行模块不可用: {exc}. 请在 Agent 环境安装 browser-use"
+                ) from exc
+
+            llm_cfg = payload.get("llm") or {}
+            api_key = (llm_cfg.get("api_key") or "").strip()
+            if not api_key:
+                raise RuntimeError("服务端未下发 LLM api_key，无法启动 browser-use")
+
+            llm = create_browser_use_llm_from_config(
+                api_key=api_key,
+                api_base=llm_cfg.get("api_base"),
+                model=llm_cfg.get("model"),
+            )
+            steps = payload.get("steps") or []
+            navigate = payload.get("navigate_base_url", True)
+            base_url = (payload.get("base_url") or "").strip() or None
+            if not navigate:
+                base_url = None
+            max_steps = int(payload.get("max_steps_per_nl") or 20)
+            headless = bool(payload.get("headless", self._headless))
+
+            if navigate or self._bu_browser is None:
+                await self._stop_bu_browser()
+                self._bu_browser = BrowserSession(headless=headless, keep_alive=True)
+                self._log_info("browser-use: new browser session")
+            else:
+                self._log_info("browser-use: reuse browser session (batch follow-up)")
+
+            step_results = await execute_nl_steps_browser_use(
+                steps,
+                llm=llm,
+                base_url=base_url,
+                headless=headless,
+                max_steps_per_nl=max_steps,
+                browser_session=self._bu_browser,
+                stop_browser=False,
+            )
+            status = (
+                "passed"
+                if step_results and all(r.get("success") for r in step_results)
+                else "failed"
+            )
+            await self._send(
+                WSMessageType.RUN_COMPLETE,
+                msg.run_id,
+                {"status": status, "steps": step_results, "backend": "browser_use"},
+            )
+            self._log_info(f"browser-use run {msg.run_id} complete: {status}")
+        except Exception as e:
+            self._log_error(f"browser-use run failed: {e}")
+            self._emit_status('error')
+            await self._send(
+                WSMessageType.RUN_COMPLETE,
+                msg.run_id,
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "steps": [],
+                    "backend": "browser_use",
+                },
+            )
+        finally:
+            self._emit_status('idle')
 
     async def _handle_get_screenshot(self, run_id: str):
         try:
