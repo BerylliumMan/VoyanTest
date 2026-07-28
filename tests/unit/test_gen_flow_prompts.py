@@ -35,6 +35,15 @@ def test_flow_prompts_require_boxed_ui_and_vision():
         assert "截图" in text
 
 
+def test_ui_and_flow_tc_prompts_forbid_dropdown_control_words():
+    from app.gen.prompts import TC_GENERATE_FLOW_PROMPT, TC_GENERATE_UI_PROMPT
+
+    for text in (TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
+        assert "在【单位】中选择" in text or "在【字段】中选择" in text or "在【字段名】中选择" in text
+        assert "下拉框选择" in text  # appears in forbidden examples
+        assert "禁止" in text
+
+
 def test_compact_parts_keep_images_prefers_images():
     from app.gen.feature_extractor import compact_parts_keep_images
 

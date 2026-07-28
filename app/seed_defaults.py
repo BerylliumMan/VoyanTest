@@ -143,7 +143,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是 UI 自动化用例生成专家。流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出可操作步骤与可观测预期，每个测试项至少 3 条，优先主路径与关键异常 UI，避免纯接口/后台逻辑。",
+        "system_prompt": "你是 UI 自动化用例生成专家。流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出可被浏览器执行的步骤与可观测预期，每个测试项至少 3 条。步骤必须用【】标注页面真实可见文案；禁止「某下拉框选择【选项】」「某输入框输入…」等把控件类型词当页面文案的写法；下拉写「在【字段】中选择【选项】」，输入写「在【字段】输入 …」，点击写「点击【按钮文案】」。优先主路径与关键异常 UI，避免纯接口/后台逻辑。",
         "prompt_overrides": {}
     },
     {
@@ -316,18 +316,29 @@ async def sync_prompt_templates_from_seed(
     return updated
 
 
-# Product-owned flow-manual prompts: auto-activate seed upgrades on startup.
+# Product-owned prompts: auto-activate seed upgrades on startup.
 _FLOW_PROMPT_KEYS = frozenset({"fp_extract_flow", "tc_generate_flow"})
+_UI_GEN_PROMPT_KEYS = frozenset({"tc_generate_ui"})
 # Execution prompts that fix dropdown getByText('…下拉框') regressions.
 _EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate"})
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
+_UI_AGENT_NAME = "UI自动化用例生成助手"
 
 
 async def ensure_flow_agent_system_prompt(db: AsyncSession) -> bool:
     """Keep flow-manual Agent system_prompt aligned with seed (idempotent)."""
+    return await _ensure_named_agent_system_prompt(db, _FLOW_AGENT_NAME)
+
+
+async def ensure_ui_agent_system_prompt(db: AsyncSession) -> bool:
+    """Keep UI-automation Agent system_prompt aligned with seed (idempotent)."""
+    return await _ensure_named_agent_system_prompt(db, _UI_AGENT_NAME)
+
+
+async def _ensure_named_agent_system_prompt(db: AsyncSession, name: str) -> bool:
     from app import db_models
 
-    seed = next((a for a in DEFAULT_AGENTS if a.get("name") == _FLOW_AGENT_NAME), None)
+    seed = next((a for a in DEFAULT_AGENTS if a.get("name") == name), None)
     if not seed:
         return False
     desired = (seed.get("system_prompt") or "").strip()
@@ -335,7 +346,7 @@ async def ensure_flow_agent_system_prompt(db: AsyncSession) -> bool:
         return False
     row = await db.execute(
         select(db_models.AgentDefinition)
-        .where(db_models.AgentDefinition.name == _FLOW_AGENT_NAME)
+        .where(db_models.AgentDefinition.name == name)
         .limit(1)
     )
     agent = row.scalar_one_or_none()
@@ -344,7 +355,7 @@ async def ensure_flow_agent_system_prompt(db: AsyncSession) -> bool:
     if (agent.system_prompt or "").strip() == desired:
         return False
     agent.system_prompt = desired
-    logger.info("已更新 Agent「%s」system_prompt（图文/框选说明）", _FLOW_AGENT_NAME)
+    logger.info("已更新 Agent「%s」system_prompt", name)
     return True
 
 
@@ -393,27 +404,28 @@ async def seed_defaults(db: AsyncSession) -> None:
     for an explicit upgrade. Also upserts missing Agents by name.
     """
     n_prompts = await seed_prompt_templates(db)
-    owned_keys = _FLOW_PROMPT_KEYS | _EXEC_PROMPT_KEYS
+    owned_keys = _FLOW_PROMPT_KEYS | _UI_GEN_PROMPT_KEYS | _EXEC_PROMPT_KEYS
     non_owned_keys = set(get_seed_prompts()) - owned_keys
     n_drafts = await sync_prompt_templates_from_seed(
         db, activate=False, keys=non_owned_keys,
     )
-    # Flow-manual + execution schema prompts are product-owned; activate seed
-    # upgrades so dropdown/vision fixes take effect without admin UI step.
-    n_flow = await sync_prompt_templates_from_seed(
+    # Flow / UI-gen / execution schema prompts are product-owned; activate seed
+    # upgrades so executable-step & dropdown fixes take effect without admin UI.
+    n_owned = await sync_prompt_templates_from_seed(
         db, activate=True, keys=owned_keys,
     )
     n_agents = await seed_default_agents(db)
     n_named = await ensure_named_seed_agents(db)
     flow_sp = await ensure_flow_agent_system_prompt(db)
-    if n_prompts or n_drafts or n_flow or n_agents or n_named or flow_sp:
+    ui_sp = await ensure_ui_agent_system_prompt(db)
+    if n_prompts or n_drafts or n_owned or n_agents or n_named or flow_sp or ui_sp:
         await db.commit()
         if n_prompts:
             logger.info("已创建 %d 个默认提示词模板", n_prompts)
         if n_drafts:
             logger.info("已写入 %d 个种子提示词草稿（未覆盖活跃版）", n_drafts)
-        if n_flow:
-            logger.info("已激活 %d 个产品提示词种子版（流程手册/执行）", n_flow)
+        if n_owned:
+            logger.info("已激活 %d 个产品提示词种子版（流程/UI生成/执行）", n_owned)
         if n_agents:
             logger.info("已创建 %d 个默认 AI Agent", n_agents)
         if n_named:
