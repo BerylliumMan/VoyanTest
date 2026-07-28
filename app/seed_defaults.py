@@ -20,7 +20,13 @@ from app.gen.prompts import (
 
 logger = logging.getLogger(__name__)
 
-OPERATION_TRANSLATE_PROMPT = "你是一个浏览器自动化操作翻译器。将自然语言测试步骤翻译为精确的浏览器操作指令。\n\n【可用操作类型】\nclick：点击元素（按钮/链接/菜单项）。\nfill：向输入框填充文本（非 type，直接 set value）。\ntype：逐字键盘输入（用于触发实时搜索/自动补全）。\nselect：下拉选择框选取选项（按 value 或 label）。\nhover：鼠标悬停在元素上（触发 tooltip/下拉菜单）。\nscroll：滚动页面或元素内部滚动条（参数：x, y 或 selector）。\npress_key：按下键盘按键（如 Enter、Escape、Tab、ArrowDown）。\ngoto：导航到指定URL。\nwait：等待指定条件（参数：selector | ms | url_contains）。\nassert：验证断言（子类型：url_contains | element_visible | text_present | element_count | input_value）。\n\n【输出格式 — 严格JSON】\n{\n  \"action\": \"操作类型（click | fill | type | select | hover | scroll | press_key | goto | wait | assert）\",\n  \"selector\": \"CSS/XPath选择器，复合操作可为null\",\n  \"value\": \"操作参数（填充文本、URL、按键名等），无参数时为null\",\n  \"options\": {\"可选的操作选项\": \"值\"},\n  \"confidence\": 0.0-1.0（对本次翻译的置信度）,\n  \"fallback_actions\": [\n    {\n      \"action\": \"后备操作类型\",\n      \"selector\": \"后备选择器（更宽泛匹配）\",\n      \"value\": \"后备参数\",\n      \"reason\": \"触发该后备策略的原因\"\n    }\n  ]\n}\n\n【边界与异常处理规则】\n- 超时：所有等待操作默认超时30秒（wait时添加 options.timeout=30000ms）。\n- 弹窗/对话框：翻译前先判断步骤是否可能触发弹窗，若可能则添加 wait:selector=弹窗关闭按钮 或 press_key:Escape 作为 fallback。\n- 元素过时重试（stale element）：遇到动态刷新列表时，优先用文本匹配而非索引选择器（如 text=\"确定\" 而非 nth=0）。\n- iframe 感知：如果步骤涉及 iframe 内元素，selector 添加 frame_locator 前缀标注。\n- 动态加载：涉及异步加载内容时，操作前自动插入 wait:selector 等待目标元素出现。\n\n【示例 — 成功翻译】\n步骤：\"在搜索框输入手机，然后点击搜索按钮\"\nURL：https://shop.example.com\n输出：[\n  {\"action\":\"fill\",\"selector\":\"input[placeholder*='搜索']\",\"value\":\"手机\",\"options\":null,\"confidence\":0.95,\"fallback_actions\":[{\"action\":\"fill\",\"selector\":\"input[type='search']\",\"value\":\"手机\",\"reason\":\"备选搜索框选择器\"}]},\n  {\"action\":\"wait\",\"selector\":null,\"value\":null,\"options\":{\"ms\":500},\"confidence\":0.8,\"fallback_actions\":[]},\n  {\"action\":\"click\",\"selector\":\"button:has-text('搜索')\",\"value\":null,\"options\":null,\"confidence\":0.9,\"fallback_actions\":[{\"action\":\"press_key\",\"selector\":null,\"value\":\"Enter\",\"reason\":\"直接按回车触发搜索\"}]}\n]\n\n【示例 — 失败处理（元素定位失败）】\n步骤：\"点击页面顶部的优惠券弹窗关闭按钮\"\nURL：https://shop.example.com/products\n输出：[\n  {\"action\":\"wait\",\"selector\":\"[class*='coupon'], [class*='popup'], [class*='modal']\",\"value\":null,\"options\":{\"timeout\":5000},\"confidence\":0.7,\"fallback_actions\":[]},\n  {\"action\":\"click\",\"selector\":\"[class*='coupon'] [class*='close'], [class*='popup'] button[class*='close'], .modal .close-btn\",\"value\":null,\"options\":null,\"confidence\":0.55,\"fallback_actions\":[{\"action\":\"press_key\",\"selector\":null,\"value\":\"Escape\",\"reason\":\"弹窗关闭按钮未找到，尝试Esc键关闭\"},{\"action\":\"click\",\"selector\":\"body\",\"value\":null,\"reason\":\"最后尝试点击页面空白区域关闭弹窗\"}]}\n]\n\n用户步骤：\n{step}\n\n页面 URL：\n{url}"
+# Import after gen.prompts to avoid circular imports at module load in some paths.
+def _execution_system_prompt() -> str:
+    from core.llm_wrapper import SYSTEM_PROMPT
+    return SYSTEM_PROMPT.strip()
+
+
+OPERATION_TRANSLATE_PROMPT = "你是一个浏览器自动化操作翻译器。将自然语言测试步骤翻译为精确的浏览器操作指令。\n\n【可用操作类型】\nclick：点击元素（按钮/链接/菜单项）。\nfill：向输入框填充文本（非 type，直接 set value）。\ntype：逐字键盘输入（用于触发实时搜索/自动补全）。\nselect：下拉选择框选取选项（按 value 或 label）。\nhover：鼠标悬停在元素上（触发 tooltip/下拉菜单）。\nscroll：滚动页面或元素内部滚动条（参数：x, y 或 selector）。\npress_key：按下键盘按键（如 Enter、Escape、Tab、ArrowDown）。\ngoto：导航到指定URL。\nwait：等待指定条件（参数：selector | ms | url_contains）。\nassert：验证断言（子类型：url_contains | element_visible | text_present | element_count | input_value）。\n\n【下拉选择 — 必须遵守】\n- 「单位下拉框选择【汉东省院】」= 字段「单位」+ 选项「汉东省院」。禁止用 getByText/text 定位「下拉框」「单位下拉框」等控件类型词。\n- 原生 select：action=select，selector 指向 select，value=选项文案。\n- 自定义下拉（Ant Design 等）：先 click 展开组合框（按字段标签「单位」匹配），再 click/select 选项「汉东省院」。\n- wait 只能等选项文案或字段标签，不能等「xxx下拉框」。\n\n【输出格式 — 严格JSON】\n{\n  \"action\": \"操作类型（click | fill | type | select | hover | scroll | press_key | goto | wait | assert）\",\n  \"selector\": \"CSS/XPath选择器，复合操作可为null\",\n  \"value\": \"操作参数（填充文本、URL、按键名等），无参数时为null\",\n  \"options\": {\"可选的操作选项\": \"值\"},\n  \"confidence\": 0.0-1.0（对本次翻译的置信度）,\n  \"fallback_actions\": [\n    {\n      \"action\": \"后备操作类型\",\n      \"selector\": \"后备选择器（更宽泛匹配）\",\n      \"value\": \"后备参数\",\n      \"reason\": \"触发该后备策略的原因\"\n    }\n  ]\n}\n\n【边界与异常处理规则】\n- 超时：所有等待操作默认超时30秒（wait时添加 options.timeout=30000ms）。\n- 弹窗/对话框：翻译前先判断步骤是否可能触发弹窗，若可能则添加 wait:selector=弹窗关闭按钮 或 press_key:Escape 作为 fallback。\n- 元素过时重试（stale element）：遇到动态刷新列表时，优先用文本匹配而非索引选择器（如 text=\"确定\" 而非 nth=0）。\n- iframe 感知：如果步骤涉及 iframe 内元素，selector 添加 frame_locator 前缀标注。\n- 动态加载：涉及异步加载内容时，操作前自动插入 wait:selector 等待目标元素出现。\n\n【示例 — 成功翻译】\n步骤：\"在搜索框输入手机，然后点击搜索按钮\"\nURL：https://shop.example.com\n输出：[\n  {\"action\":\"fill\",\"selector\":\"input[placeholder*='搜索']\",\"value\":\"手机\",\"options\":null,\"confidence\":0.95,\"fallback_actions\":[{\"action\":\"fill\",\"selector\":\"input[type='search']\",\"value\":\"手机\",\"reason\":\"备选搜索框选择器\"}]},\n  {\"action\":\"wait\",\"selector\":null,\"value\":null,\"options\":{\"ms\":500},\"confidence\":0.8,\"fallback_actions\":[]},\n  {\"action\":\"click\",\"selector\":\"button:has-text('搜索')\",\"value\":null,\"options\":null,\"confidence\":0.9,\"fallback_actions\":[{\"action\":\"press_key\",\"selector\":null,\"value\":\"Enter\",\"reason\":\"直接按回车触发搜索\"}]}\n]\n\n【示例 — 下拉选择】\n步骤：\"单位下拉框选择【汉东省院】\"\n输出：[\n  {\"action\":\"click\",\"selector\":\"label:has-text('单位') ~ .ant-select, [aria-label*='单位'], .ant-select:near(:text('单位'))\",\"value\":null,\"options\":null,\"confidence\":0.8,\"fallback_actions\":[{\"action\":\"click\",\"selector\":\".ant-select-selector\",\"value\":null,\"reason\":\"按字段邻近的组合框展开\"}]},\n  {\"action\":\"click\",\"selector\":\".ant-select-item-option:has-text('汉东省院'), [role='option']:has-text('汉东省院')\",\"value\":\"汉东省院\",\"options\":null,\"confidence\":0.9,\"fallback_actions\":[]}\n]\n\n【示例 — 失败处理（元素定位失败）】\n步骤：\"点击页面顶部的优惠券弹窗关闭按钮\"\nURL：https://shop.example.com/products\n输出：[\n  {\"action\":\"wait\",\"selector\":\"[class*='coupon'], [class*='popup'], [class*='modal']\",\"value\":null,\"options\":{\"timeout\":5000},\"confidence\":0.7,\"fallback_actions\":[]},\n  {\"action\":\"click\",\"selector\":\"[class*='coupon'] [class*='close'], [class*='popup'] button[class*='close'], .modal .close-btn\",\"value\":null,\"options\":null,\"confidence\":0.55,\"fallback_actions\":[{\"action\":\"press_key\",\"selector\":null,\"value\":\"Escape\",\"reason\":\"弹窗关闭按钮未找到，尝试Esc键关闭\"},{\"action\":\"click\",\"selector\":\"body\",\"value\":null,\"reason\":\"最后尝试点击页面空白区域关闭弹窗\"}]}\n]\n\n用户步骤：\n{step}\n\n页面 URL：\n{url}"
 
 VERIFY_EXPECTED_PROMPT = "你是一个测试结果验证专家。请按三级验证策略判断预期结果是否达成。\n\n【三级验证策略 — 按优先级递减尝试】\n第1级「精确匹配」：预期值与实际值字面一致（如\"页面标题为首页\" → 实际标题=\"首页\"）。最高置信度。\n第2级「语义匹配」：预期描述与实际含义等价但表述不同（如\"显示用户名\" → 实际显示\"欢迎回来，张三\"）。检查核心关键词和语义。\n第3级「存在性检测」：仅验证某元素/文本是否存在（如\"出现错误提示\" → 页面存在包含\"错误\"的文本）。最低置信度，仅用于宽泛断言。\n\n【容忍规则 — 以下情况不算失败】\n- 时间戳/日期：预期中带有\"当前时间\"→接受任意合法时间字符串。如\"登录时间：YYYY-MM-DD HH:mm:ss\"。\n- 动态ID/Token：\"order_id=ABC123\" 实际显示 \"order_id=XYZ789\" → 仅比对格式，不比对具体值。\n- 数字范围：\"约100条记录\" 实际 98条 → 容差 ±5% 内视为通过。\n- 异步加载：页面仍在渲染中，给出结论时标注\"页面可能未完全加载\"并降级置信度。\n\n【证据链格式】\n输出时必须引用DOM快照中的具体行号作为证据：\n- 若从DOM快照验证：标注\"见DOM行N：<原文>\"。\n- 若从截图验证：标注\"截图显示XXX区域存在/不存在目标内容\"。\n- 不可凭空断言真实性，必须绑定到具体观测。\n\n【输出格式】\n{\n  \"verdict\": \"pass | fail | partial\",\n  \"confidence\": 0.0-1.0,\n  \"matched_level\": \"exact | semantic | presence\",\n  \"reason\": \"验证结论的中文说明（引用具体证据）\",\n  \"evidence\": [\"证据1：见DOM行15 — 页面标题为\\\"首页\\\"\", \"证据2：见DOM行23 — 用户名span包含\\\"张三\\\"\"]\n}\n\n【中文验证示例1 — 精确匹配通过】\n操作：goto https://example.com\n预期：\"页面标题显示为'示例网站首页'\"\nDOM快照：第5行 <title>示例网站首页</title>\n输出：{\"verdict\":\"pass\",\"confidence\":0.98,\"matched_level\":\"exact\",\"reason\":\"页面标题与预期完全一致\",\"evidence\":[\"见DOM行5：<title>示例网站首页</title>\"]}\n\n【中文验证示例2 — 语义匹配通过】\n操作：click 登录按钮后 fill 用户名\n预期：\"登录成功后右上角显示用户名\"\nDOM快照：第12行 <span class=\"user-name\">欢迎，admin@test.com</span>\n输出：{\"verdict\":\"pass\",\"confidence\":0.85,\"matched_level\":\"semantic\",\"reason\":\"用户名admin@test.com出现在右上角用户信息区域，语义符合\\\"显示用户名\\\"\",\"evidence\":[\"见DOM行12：<span class=\\\"user-name\\\">欢迎，admin@test.com</span>\"]}\n\n【中文验证示例3 — 存在性检测失败】\n操作：提交空表单\n预期：\"用户名输入框下方出现'必填'红色提示\"\nDOM快照：无任何包含\"必填\"的文本节点，input标签无aria-invalid属性\n输出：{\"verdict\":\"fail\",\"confidence\":0.92,\"matched_level\":\"presence\",\"reason\":\"DOM中未找到\\\"必填\\\"提示文本，input元素缺少表单校验标记\",\"evidence\":[\"遍历全部DOM文本节点，未匹配到\\\"必填\\\"关键词\",\"input元素未设置aria-invalid=\\\"true\\\"属性\"]}\n\n【中文验证示例4 — 时间戳容忍通过】\n操作：创建订单后查看订单详情\n预期：\"创建时间显示为当前时间\"\nDOM快照：第45行 <span class=\"create-time\">2026-07-24 15:32:18</span>\n输出：{\"verdict\":\"pass\",\"confidence\":0.78,\"matched_level\":\"semantic\",\"reason\":\"订单创建时间格式正确，符合当前时间上下文（容忍规则-时间戳）\",\"evidence\":[\"见DOM行45：时间格式YYYY-MM-DD HH:mm:ss正确\"]}\n\n操作：\n{action}\n\n预期结果：\n{expected}"
 
@@ -207,6 +213,13 @@ def get_seed_prompts() -> dict[str, dict]:
             "variables": ["step", "url"],
             "description": "将自然语言步骤转换为 MCP 浏览器操作",
         },
+        "execution_system": {
+            "name": "逐步执行系统提示",
+            "category": "execution",
+            "content": _execution_system_prompt(),
+            "variables": [],
+            "description": "逐步执行：accessibility snapshot + ref 定位（禁止 getByText 控件类型词）",
+        },
         "cdp_convert": {
             "name": "录制事件转步骤",
             "category": "recording",
@@ -305,6 +318,8 @@ async def sync_prompt_templates_from_seed(
 
 # Product-owned flow-manual prompts: auto-activate seed upgrades on startup.
 _FLOW_PROMPT_KEYS = frozenset({"fp_extract_flow", "tc_generate_flow"})
+# Execution prompts that fix dropdown getByText('…下拉框') regressions.
+_EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate"})
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
 
 
@@ -378,14 +393,15 @@ async def seed_defaults(db: AsyncSession) -> None:
     for an explicit upgrade. Also upserts missing Agents by name.
     """
     n_prompts = await seed_prompt_templates(db)
-    non_flow_keys = set(get_seed_prompts()) - _FLOW_PROMPT_KEYS
+    owned_keys = _FLOW_PROMPT_KEYS | _EXEC_PROMPT_KEYS
+    non_owned_keys = set(get_seed_prompts()) - owned_keys
     n_drafts = await sync_prompt_templates_from_seed(
-        db, activate=False, keys=non_flow_keys,
+        db, activate=False, keys=non_owned_keys,
     )
-    # Flow-manual prompts are product-owned; activate seed upgrades so vision
-    # instructions (boxed UI regions) take effect without admin UI step.
+    # Flow-manual + execution schema prompts are product-owned; activate seed
+    # upgrades so dropdown/vision fixes take effect without admin UI step.
     n_flow = await sync_prompt_templates_from_seed(
-        db, activate=True, keys=_FLOW_PROMPT_KEYS,
+        db, activate=True, keys=owned_keys,
     )
     n_agents = await seed_default_agents(db)
     n_named = await ensure_named_seed_agents(db)
@@ -397,7 +413,7 @@ async def seed_defaults(db: AsyncSession) -> None:
         if n_drafts:
             logger.info("已写入 %d 个种子提示词草稿（未覆盖活跃版）", n_drafts)
         if n_flow:
-            logger.info("已激活 %d 个流程手册提示词种子版", n_flow)
+            logger.info("已激活 %d 个产品提示词种子版（流程手册/执行）", n_flow)
         if n_agents:
             logger.info("已创建 %d 个默认 AI Agent", n_agents)
         if n_named:

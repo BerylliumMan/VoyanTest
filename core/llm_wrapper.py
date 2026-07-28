@@ -140,6 +140,15 @@ PROGRESSIVE SELECTOR MATCHING (try in this order):
 3. aria-label match — if no text match exists, use the element's aria-label attribute.
 4. Placeholder match — for input fields, match by placeholder attribute text.
 
+DROPDOWN / SELECT (critical):
+- Steps like "单位下拉框选择【汉东省院】" / "在【单位】下拉中选择【汉东省院】" mean:
+  label = 单位 (field name), option = 汉东省院 (choice to pick).
+- NEVER locate by the literal strings "下拉框" / "下拉" / "输入框" / "选择框" / "按钮" — these are control-type words from the step text, NOT page UI text.
+- Prefer: combobox/listbox/select near accessible name or label text 「单位」; or option/menuitem named 「汉东省院」 if the list is already open.
+- Native <select>: action="select", selector=ref of the select, value=option label/value.
+- Custom dropdown (Ant Design etc.): click the combobox/selector to expand; if the option is already visible in the snapshot, click the option ref instead.
+- For wait/assert_text: wait for the OPTION text (汉东省院) or field label (单位), never wait for "单位下拉框".
+
 EDGE CASE HANDLING:
 - Timeout: If element not found within 30s, retry once with a refreshed snapshot, then abort with action="error".
 - Popup/Dialog: If an unexpected popup/dialog/modal blocks the page, dismiss it first — look for 取消/关闭/Cancel/Close buttons or press Escape — before proceeding.
@@ -147,7 +156,8 @@ EDGE CASE HANDLING:
 - Iframe: If the target element is inside an iframe, note the iframe boundary from the snapshot and switch context to that iframe first.
 
 RULES:
-- Use element refs from the snapshot (e.g., "e12") as selectors — do NOT invent CSS selectors.
+- Use element refs from the snapshot (e.g., "e12") as selectors — do NOT invent CSS selectors or raw Chinese phrases as selectors.
+- NEVER set selector/value to control-type words alone (下拉框/输入框/按钮). That causes Playwright getByText timeouts.
 - Output ONLY the JSON object. No markdown fences, no explanation text.
 - Always include "thinking" referencing the thinking chain stages.
 - For text input fields, match by role="textbox" and accessible name, aria-label, or placeholder.
