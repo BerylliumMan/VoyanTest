@@ -200,7 +200,7 @@ class TestImportTestCases:
             "1.步骤1 2.步骤2 3.步骤3 4.步骤4 5.步骤5",
             "1.结果1 2.结果2 3.结果3 4.结果4 5.结果5",
         )
-        created = await import_test_cases(self.db, self.project.id, [tc])
+        created, _skipped = await import_test_cases(self.db, self.project.id, [tc])
         assert len(created) == 1
         # Verify TestSteps
         result = await self.db.execute(
@@ -220,7 +220,7 @@ class TestImportTestCases:
             "1.打开页面 2.输入数据 3.点击保存",
             "1.页面提示保存成功",
         )
-        created = await import_test_cases(self.db, self.project.id, [tc])
+        created, _skipped = await import_test_cases(self.db, self.project.id, [tc])
         result = await self.db.execute(
             select(db_models.TestStep)
             .where(db_models.TestStep.case_id == created[0].id)
@@ -239,7 +239,7 @@ class TestImportTestCases:
             "1.点击【新增】",
             "1.弹窗打开 2.字段显示 3.按钮可用",
         )
-        created = await import_test_cases(self.db, self.project.id, [tc])
+        created, _skipped = await import_test_cases(self.db, self.project.id, [tc])
         result = await self.db.execute(
             select(db_models.TestStep)
             .where(db_models.TestStep.case_id == created[0].id)
@@ -258,7 +258,7 @@ class TestImportTestCases:
             "1.点击【新增】 2.在【名称】框输入数据 3.点击【保存】",
             "1.保存成功 2.列表刷新 3.数据显示正确",
         )
-        created = await import_test_cases(self.db, self.project.id, [tc])
+        created, _skipped = await import_test_cases(self.db, self.project.id, [tc])
         result = await self.db.execute(
             select(db_models.TestStep)
             .where(db_models.TestStep.case_id == created[0].id)
@@ -284,7 +284,7 @@ class TestImportTestCases:
             expected_result="1. 页面展示",
             priority="高",
         )
-        created = await import_test_cases(self.db, self.project.id, [tc])
+        created, _skipped = await import_test_cases(self.db, self.project.id, [tc])
         assert len(created) == 1
         leaf = await self.db.get(m.Module, created[0].module_id)
         assert leaf is not None
@@ -306,7 +306,46 @@ class TestImportTestCases:
             expected_result="1. 展示成功",
             priority="中",
         )
-        created = await import_test_cases(self.db, self.project.id, [tc])
+        created, _skipped = await import_test_cases(self.db, self.project.id, [tc])
         leaf = await self.db.get(db_models.Module, created[0].module_id)
         assert leaf.name == "首页"
         assert leaf.parent_id is None
+
+    @pytest.mark.asyncio
+    async def test_import_skips_duplicate_title(self):
+        """同项目同模块同 title 第二次导入应 skip。"""
+        tc = self._make_gen_tc(
+            "TC-DUP",
+            "1.打开页面",
+            "1.成功",
+        )
+        created1, skipped1 = await import_test_cases(self.db, self.project.id, [tc])
+        assert len(created1) == 1 and skipped1 == 0
+        created2, skipped2 = await import_test_cases(self.db, self.project.id, [tc])
+        assert len(created2) == 0 and skipped2 == 1
+
+    @pytest.mark.asyncio
+    async def test_import_parent_module_id(self):
+        """parent_module_id 时一级挂在指定父模块下。"""
+        from app import db_models as m
+
+        root = m.Module(project_id=self.project.id, name="已有根", parent_id=None)
+        self.db.add(root)
+        await self.db.flush()
+
+        tc = GenTestCase(
+            test_case_id="TC-PAR",
+            module="子功能",
+            title="挂载用例",
+            preconditions="",
+            test_steps="1. 操作",
+            expected_result="1. 通过",
+            priority="中",
+        )
+        created, skipped = await import_test_cases(
+            self.db, self.project.id, [tc], parent_module_id=root.id,
+        )
+        assert skipped == 0 and len(created) == 1
+        leaf = await self.db.get(m.Module, created[0].module_id)
+        assert leaf.name == "子功能"
+        assert leaf.parent_id == root.id

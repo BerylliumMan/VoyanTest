@@ -180,11 +180,20 @@ async def get_history_detail(
     if not record:
         raise HTTPException(404, "记录不存在")
     _check_session_ownership(record, user)
-    if record.status != "completed":
-        raise HTTPException(400, f"分析未完成，状态: {record.status}")
+    # cancelled/failed may still have partial results worth reviewing
 
     db_fps = await crud.gen.list_gen_functional_points(db, session_id)
     db_tcs = await crud.gen.list_gen_test_cases(db, session_id)
+
+    import json as _json
+    filenames: list[str] = []
+    if record.filenames:
+        try:
+            filenames = _json.loads(record.filenames)
+        except Exception:
+            filenames = [record.filename] if record.filename else []
+    elif record.filename:
+        filenames = [record.filename]
 
     fps = [
         {"id": fp.fp_id, "module": fp.module, "name": fp.name, "category": fp.category, "description": fp.description}
@@ -193,17 +202,27 @@ async def get_history_detail(
     tcs = [
         GenPreviewItem(
             test_case_id=tc.test_case_id,
-            module=tc.module,
+            module=tc.module or "",
             title=tc.title,
             preconditions=tc.preconditions or "",
             test_steps=tc.test_steps or "",
             expected_result=tc.expected_result or "",
             priority=tc.priority or "中",
+            selected=not bool(getattr(tc, "validation_errors", None)),
+            validation_errors=getattr(tc, "validation_errors", None) or "",
         )
         for tc in db_tcs
     ]
     return GenPreviewResponse(
         session_id=session_id,
+        filename=record.filename or "",
+        filenames=filenames if isinstance(filenames, list) else [],
+        status=record.status or "",
+        error_message=record.error_message or "",
+        progress=int(record.progress or 0),
+        progress_message=record.progress_message or "",
+        functional_points_count=record.functional_points_count or len(fps),
+        test_cases_count=record.test_cases_count or len(tcs),
         functional_points=fps,
         test_cases=tcs,
     )

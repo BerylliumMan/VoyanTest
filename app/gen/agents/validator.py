@@ -192,11 +192,20 @@ def validate_test_cases(
         if uncovered:
             warnings.append(f"{len(uncovered)}/{len(fp_titles)} 个功能点未被覆盖: {', '.join(list(uncovered)[:5])}")
 
+    annotated_invalid: list = []
+    for tc, vr in invalid_cases:
+        err_text = "; ".join(vr.warnings)
+        if hasattr(tc, "validation_errors"):
+            tc.validation_errors = err_text
+        elif isinstance(tc, dict):
+            tc["validation_errors"] = err_text
+        annotated_invalid.append(tc)
+
     return {
         "passed": len(test_cases) == 0 or len(invalid_cases) <= len(test_cases) // 2,
         "warnings": warnings,
         "valid_count": len(valid_cases),
         "invalid_count": len(invalid_cases),
         "valid_cases": [tc for tc, _ in valid_cases],
-        "invalid_cases": [tc for tc, _ in invalid_cases],
+        "invalid_cases": annotated_invalid,
     }

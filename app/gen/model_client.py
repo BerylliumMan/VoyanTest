@@ -17,9 +17,16 @@ _ai_config_cache: dict | None = None
 _ai_config_lock = asyncio.Lock()
 
 
-async def get_context_budget() -> int:
-    """获取已配置的上下文窗口大小（tokens），用于请求分片预算。"""
-    config = await _load_ai_config()
+async def get_context_budget(
+    agent_type: str | None = None,
+    agent_id: int | None = None,
+) -> int:
+    """获取已配置的上下文窗口大小（tokens），用于请求分片预算。
+
+    When ``agent_id`` / ``agent_type`` is provided, prefer that Agent's merged
+    ``max_context_tokens`` (falls back to global AIConfig).
+    """
+    config = await _load_ai_config(agent_type=agent_type, agent_id=agent_id)
     return config.get('max_context_tokens', 131072)
 
 

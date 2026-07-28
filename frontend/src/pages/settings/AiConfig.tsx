@@ -8,8 +8,11 @@ import styles from './style/index.module.less';
 /* 预设的提示词键与中文标签 */
 const PRESET_PROMPT_KEYS: { key: string; label: string; category: string }[] = [
   { key: 'fp_extract', label: '测试项提取', category: 'generation' },
+  { key: 'fp_extract_flow', label: '流程手册提取', category: 'generation' },
   { key: 'tc_generate', label: '功能用例生成', category: 'generation' },
   { key: 'tc_generate_ui', label: 'UI自动化用例生成', category: 'generation' },
+  { key: 'tc_generate_flow', label: '流程手册UI用例生成', category: 'generation' },
+  { key: 'cdp_convert', label: '录制事件转步骤', category: 'recording' },
   { key: 'operation_translate', label: '操作指令翻译', category: 'execution' },
   { key: 'verify_expected', label: '预期结果验证', category: 'verification' },
 ];
@@ -33,6 +36,7 @@ function AiConfig() {
   const [prompts, setPrompts] = useState<PromptListItem[]>([]);
   const [promptsLoading, setPromptsLoading] = useState(false);
   const [selectedPromptKey, setSelectedPromptKey] = useState<string>('');
+  const [syncingSeed, setSyncingSeed] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -107,6 +111,22 @@ function AiConfig() {
       .finally(() => setPromptsLoading(false));
   };
 
+  const handleSyncSeed = async () => {
+    setSyncingSeed(true);
+    try {
+      const res = await axios.post('/api/config/prompts/sync-seed', null, {
+        params: { activate: true },
+      });
+      Message.success(res.data?.message || '种子提示词已同步并激活');
+      fetchPrompts();
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      Message.error(err?.response?.data?.detail || '同步失败');
+    } finally {
+      setSyncingSeed(false);
+    }
+  };
+
   /* 标签页切换 */
   const handleTabChange = (key: string) => {
     if (key === 'prompts') {
@@ -170,7 +190,13 @@ function AiConfig() {
       </Tabs.TabPane>
 
       <Tabs.TabPane key="prompts" title="提示词管理">
-        <Card>
+        <Card
+          extra={
+            <Button loading={syncingSeed} onClick={handleSyncSeed}>
+              从种子同步并激活
+            </Button>
+          }
+        >
           <Spin loading={promptsLoading} className={styles.fullWidth}>
             <div className={styles.promptManager}>
               {/* 左侧：提示词列表 */}

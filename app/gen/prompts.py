@@ -130,11 +130,77 @@ TC_GENERATE_UI_PROMPT = """你是资深的 UI 自动化测试工程师。请为�
 ]
 """
 
+FP_EXTRACT_FLOW_PROMPT = """你是资深的 UI 自动化测试工程师。请仔细阅读**操作手册 / 流程文档**（含文字与截图），提取文档中描述的**操作流程**（SOP），而不是细粒度测试项。
+
+【流程定义】
+- 一个「流程」= 文档中一段完整的业务操作路径（如：新增客户、审批通过、导出报表）。
+- 以文档章节、编号步骤或连续截图序列为单位；同一主路径不要拆成正常/异常/边界多项。
+- **禁止**为了覆盖率虚构文档未写明的异常、校验、边界场景。
+
+【提取规则】
+1. module 格式固定为「一级」或「一级——二级」（中文破折号 ——），取自文档章节标题。
+2. name = 流程名称（简洁，与文档用语一致）。
+3. desc = 该流程关键步骤的一句摘要（可含控件名），勿写成完整步骤列表。
+4. category 可用「操作流程」或「其他」。
+5. priority：核心主路径 P0，次要 P1/P2。
+6. **禁止**把上传文件名、图片文件名、分隔标记当作 module。
+7. 截图中的按钮/输入框文案应体现在 desc 或 name 的语义中，但本阶段不输出逐步操作。
+
+【输出要求 — 必须严格遵守】
+- 只输出一个 JSON 对象，不要 Markdown、解释或 ``` 包裹
+- 字段：module / name / category / desc / priority
+
+输出格式：
+{"functional_points":[{"module":"一级——二级","name":"流程名","category":"操作流程","desc":"步骤摘要","priority":"P0|P1|P2"}]}
+"""
+
+TC_GENERATE_FLOW_PROMPT = """你是资深的 UI 自动化测试工程师。请根据以下**操作流程**（来自操作手册的文字与截图），生成**浏览器可执行的 UI 自动化用例**。
+
+流程详情：
+{fp_descriptions}
+
+【数量硬指标 — 必须严格遵守】
+- 本批有 N 个流程时，JSON 数组**通常恰好 N 条**（每个流程 1 条主路径用例）。
+- **禁止**为同一流程再造异常/边界用例，除非文档正文明确写出该分支。
+- 每条必须带 fp_name（与流程 name 一致），scenario_type 填「文档流程」。
+
+【忠实还原 — 必须遵守】
+- 步骤顺序、控件文案、输入示例必须来自文档/截图；禁止臆造文档未出现的页面或按钮。
+- 截图可见的按钮、输入框、提示文案优先用【】原样标注。
+- 文档未写清的细节可写「按页面实际」类保守表述，但不要发明新步骤。
+
+【设计要求 — UI 自动化】
+- module 与流程详情中的模块路径一致
+- 每一步单一浏览器操作；steps 与 expected **长度必须相等**；expected 为页面可观测结果
+- precondition 写清起始页面或登录态
+- 允许语义：打开页面、点击、输入、选择、勾选、等待出现、断言文案/元素/URL
+
+【输出要求】
+- 只输出 JSON 数组，无 Markdown / ``` / 解释
+- 字段名英文
+
+输出格式：
+[
+  {
+    "fp_name": "对应流程名称",
+    "title": "用例标题（与文档流程名一致或加「-文档流程」）",
+    "module": "所属业务模块",
+    "priority": "P0 | P1 | P2",
+    "precondition": "前置条件（页面/登录态）",
+    "steps": ["打开【…】页面", "在【…】输入 …", "点击【…】按钮"],
+    "expected": ["…页加载完成", "输入框显示 …", "出现 … 或跳转至 …"],
+    "scenario_type": "文档流程"
+  }
+]
+"""
+
 # Number of test items to bundle into a single Phase-2 batch.
 # Smaller batches reduce truncation and improve per-item coverage.
 FP_BATCH_SIZE = 2
 # Minimum test cases expected per test item (normal + exception + boundary).
 MIN_TCS_PER_ITEM = 3
+# Flow-manual mode: one main-path case per extracted flow.
+MIN_TCS_PER_FLOW = 1
 
 
 def get_default_prompts() -> dict:
@@ -144,6 +210,10 @@ def get_default_prompts() -> dict:
             "label": "测试项提取",
             "content": FP_EXTRACT_PROMPT.strip(),
         },
+        "fp_extract_flow": {
+            "label": "流程手册提取",
+            "content": FP_EXTRACT_FLOW_PROMPT.strip(),
+        },
         "tc_generate": {
             "label": "功能用例生成",
             "content": TC_GENERATE_PROMPT.strip(),
@@ -152,23 +222,52 @@ def get_default_prompts() -> dict:
             "label": "UI自动化用例生成",
             "content": TC_GENERATE_UI_PROMPT.strip(),
         },
+        "tc_generate_flow": {
+            "label": "流程手册UI用例生成",
+            "content": TC_GENERATE_FLOW_PROMPT.strip(),
+        },
     }
 
 
-def pick_tc_prompt_key(skills: list | None) -> str:
-    """Choose TC prompt key from Agent skills (UI skill wins when present)."""
+def pick_fp_prompt_key(skills: list | None) -> str:
+    """Choose FP extract prompt key from Agent skills."""
     skills = skills or []
+    if "fp_extract_flow" in skills:
+        return "fp_extract_flow"
+    return "fp_extract"
+
+
+def pick_tc_prompt_key(skills: list | None) -> str:
+    """Choose TC prompt key from Agent skills (flow > UI > functional)."""
+    skills = skills or []
+    if "tc_generate_flow" in skills:
+        return "tc_generate_flow"
     if "tc_generate_ui" in skills:
         return "tc_generate_ui"
     return "tc_generate"
 
 
+def min_tcs_per_item(skills: list | None = None, *, tc_prompt_key: str | None = None) -> int:
+    """Minimum TCs expected per FP/flow for supplemental generation."""
+    if tc_prompt_key == "tc_generate_flow":
+        return MIN_TCS_PER_FLOW
+    skills = skills or []
+    if "tc_generate_flow" in skills or "fp_extract_flow" in skills:
+        return MIN_TCS_PER_FLOW
+    return MIN_TCS_PER_ITEM
+
+
 __all__ = [
     "FP_EXTRACT_PROMPT",
+    "FP_EXTRACT_FLOW_PROMPT",
     "TC_GENERATE_PROMPT",
     "TC_GENERATE_UI_PROMPT",
+    "TC_GENERATE_FLOW_PROMPT",
     "FP_BATCH_SIZE",
     "MIN_TCS_PER_ITEM",
+    "MIN_TCS_PER_FLOW",
     "get_default_prompts",
+    "pick_fp_prompt_key",
     "pick_tc_prompt_key",
+    "min_tcs_per_item",
 ]

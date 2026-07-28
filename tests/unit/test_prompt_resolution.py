@@ -29,9 +29,12 @@ class TestSeedData:
         keys = set(get_seed_prompts())
         expected = {
             "fp_extract",
+            "fp_extract_flow",
             "tc_generate",
             "tc_generate_ui",
+            "tc_generate_flow",
             "operation_translate",
+            "cdp_convert",
             "verify_expected",
         }
         assert keys == expected, f"种子 key: {keys}"

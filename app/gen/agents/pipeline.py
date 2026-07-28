@@ -70,7 +70,8 @@ class Pipeline:
         warnings.extend(v_result["warnings"])
         if not v_result["passed"]:
             warnings.append(f"质量校验: {v_result['valid_count']}/{len(tcs)} 个用例通过")
-        tcs = v_result["valid_cases"]
+        # Keep invalid cases (with validation_errors) so users can fix & import
+        tcs = list(v_result["valid_cases"]) + list(v_result.get("invalid_cases") or [])
 
         return {
             "functional_points": fps,

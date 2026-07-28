@@ -184,6 +184,7 @@ async def _run_startup_init():
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER",
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress INTEGER DEFAULT 0",
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress_message VARCHAR(500)",
+            "ALTER TABLE gen_test_cases ADD COLUMN IF NOT EXISTS validation_errors TEXT",
         ):
             try:
                 async with engine.begin() as conn:

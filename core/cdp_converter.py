@@ -257,19 +257,32 @@ async def convert_events_to_steps(
             if agent_def is None:
                 agent_def = await get_active_by_type(db, agent_type)
 
-            # Optional DB prompt template; else agent system_prompt + default schema
+            from app.runtime_config import resolve_prompt_for_agent
+
+            resolved_body = None
             for prompt_key in ("cdp_convert", "recording_convert"):
-                pt = await get_prompt_template_by_key(db, prompt_key)
-                if pt and (pt.content or "").strip():
-                    body = pt.content.strip()
-                    role = (agent_def.system_prompt or "").strip() if agent_def else ""
-                    system_prompt = f"{role}\n\n{body}" if role else body
-                    break
-            else:
-                if agent_def and (agent_def.system_prompt or "").strip():
-                    system_prompt = (
-                        f"{agent_def.system_prompt.strip()}\n\n{CDP_TO_STEPS_PROMPT}"
+                try:
+                    body = await resolve_prompt_for_agent(
+                        db, agent_type, prompt_key, agent_id=agent_id,
                     )
+                    if body and str(body).strip():
+                        resolved_body = str(body).strip()
+                        break
+                except Exception:
+                    logger.debug("resolve %s failed", prompt_key, exc_info=True)
+                    pt = await get_prompt_template_by_key(db, prompt_key)
+                    if pt and (pt.content or "").strip():
+                        role = (agent_def.system_prompt or "").strip() if agent_def else ""
+                        body = pt.content.strip()
+                        resolved_body = f"{role}\n\n{body}" if role else body
+                        break
+
+            if resolved_body:
+                system_prompt = resolved_body
+            elif agent_def and (agent_def.system_prompt or "").strip():
+                system_prompt = (
+                    f"{agent_def.system_prompt.strip()}\n\n{CDP_TO_STEPS_PROMPT}"
+                )
     except Exception:
         logger.debug("recording Agent 解析失败，回退全局配置", exc_info=True)
         if client is None:

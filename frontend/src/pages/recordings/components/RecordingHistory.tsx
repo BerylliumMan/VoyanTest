@@ -24,7 +24,7 @@ interface HistorySession {
 }
 
 interface RecordingHistoryProps {
-  onLoadSession: (sessionId: string) => void;
+  onLoadSession: (sessionId: string, url?: string) => void;
 }
 
 const RecordingHistory: React.FC<RecordingHistoryProps> = ({ onLoadSession }) => {
@@ -93,7 +93,7 @@ const RecordingHistory: React.FC<RecordingHistoryProps> = ({ onLoadSession }) =>
           <Button
             size="small"
             type="primary"
-            onClick={() => onLoadSession(record.session_id)}
+            onClick={() => onLoadSession(record.session_id, record.url)}
           >
             重新加载
           </Button>

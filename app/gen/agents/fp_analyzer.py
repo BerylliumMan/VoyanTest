@@ -19,11 +19,18 @@ class FPAnalyzer(BaseAgent[Any, list]):
         agent_type = self.config.get("agent_type", "generation")
         agent_id = self.config.get("agent_id")
         prompts = self.config.get("prompts", {})
+        fp_key = self.config.get("fp_prompt_key") or "fp_extract"
         fp_prompt = prompts.get("fp_extract") if prompts else None
+        if fp_prompt is None and prompts:
+            fp_prompt = prompts.get(fp_key)
         if fp_prompt is None and db is not None:
             from app.runtime_config import resolve_prompt_for_agent
+            from app.gen.prompts import pick_fp_prompt_key
+            fp_key = self.config.get("fp_prompt_key") or pick_fp_prompt_key(
+                self.config.get("skills")
+            )
             fp_prompt = await resolve_prompt_for_agent(
-                db, agent_type, "fp_extract", agent_id=agent_id,
+                db, agent_type, fp_key, agent_id=agent_id,
             )
 
         text = None

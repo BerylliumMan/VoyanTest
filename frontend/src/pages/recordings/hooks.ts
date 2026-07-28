@@ -167,8 +167,8 @@ export function useRecordings() {
     }
   }, [sessionId]);
 
-  const convertToSteps = useCallback(async (): Promise<boolean> => {
-    if (!sessionId) return false;
+  const convertToSteps = useCallback(async (): Promise<{ ok: boolean; count: number }> => {
+    if (!sessionId) return { ok: false, count: 0 };
     setConverting(true);
     try {
       const data = await apiRequest<{ steps?: TestStep[] }>(
@@ -181,13 +181,36 @@ export function useRecordings() {
       );
       const newSteps: TestStep[] = Array.isArray(data?.steps) ? data.steps : [];
       setSteps(newSteps);
-      return true;
+      return { ok: true, count: newSteps.length };
     } catch {
-      return false;
+      return { ok: false, count: 0 };
     } finally {
       setConverting(false);
     }
   }, [sessionId]);
+
+  const loadHistorySession = useCallback(async (sid: string, sessionUrl?: string): Promise<boolean> => {
+    if (!sid) return false;
+    setLoading(true);
+    try {
+      const data = await apiRequest<RecordedEvent[]>(
+        { method: 'GET', url: `/api/recordings/${sid}/events` },
+        { showSuccess: false, showError: false }
+      );
+      setSessionId(sid);
+      setStatus('stopped');
+      setEvents(Array.isArray(data) ? data : []);
+      setSteps([]);
+      if (sessionUrl !== undefined) {
+        setUrl(sessionUrl || '');
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   return {
     t,
@@ -205,6 +228,7 @@ export function useRecordings() {
     stopRecording,
     refreshEvents,
     convertToSteps,
+    loadHistorySession,
   };
 }
 

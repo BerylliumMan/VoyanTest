@@ -28,15 +28,15 @@ def split_numbered_items(text: str) -> list[str]:
     # 1. foo\n2. bar — need >=2 hits; a single hit usually means \Z swallowed inline numbers
     if "\n" in text:
         matches = re.findall(
-            r"(?:^|\n)\s*\d+[\.、]\s+(.+?)(?=\n\s*\d+[\.、]\s+|\Z)",
+            r"(?:^|\n)\s*\d+[\.、]\s*(.+?)(?=\n\s*\d+[\.、]\s*|\Z)",
             text,
             re.S,
         )
         if len(matches) >= 2:
             return _clean(matches)
-    # 1. foo 2. bar  (space required after marker; avoids splitting "2.0")
+    # 1.foo 2.bar  (optional space after marker; next item must be spaced)
     matches = re.findall(
-        r"(?:^|\s)\d+[\.、]\s+(.+?)(?=\s+\d+[\.、]\s+|\Z)",
+        r"(?:^|\s)\d+[\.、]\s*(.+?)(?=\s+\d+[\.、]\s*|\Z)",
         text,
         re.S,
     )
@@ -56,7 +56,7 @@ def _split_expected_results(text: str) -> list[str]:
 
 
 def align_expected_to_steps(steps: list[str], results: list[str]) -> list[str]:
-    """Align expected results to steps: trim extras, right-align when shorter."""
+    """Align expected results to steps: merge extras; repeat last when shorter."""
     if not steps:
         return []
     if len(results) > len(steps):
@@ -64,8 +64,8 @@ def align_expected_to_steps(steps: list[str], results: list[str]) -> list[str]:
         extras = results[len(steps) - 1 :]
         return base + ["；".join(extras)]
     if len(results) < len(steps):
-        # 预期更少时右对齐：常见于模型只给最后几步写断言
-        return [""] * (len(steps) - len(results)) + list(results)
+        last = results[-1] if results else ""
+        return list(results) + [last] * (len(steps) - len(results))
     return list(results)
 
 
@@ -113,10 +113,16 @@ async def resolve_module_for_import(
     db: AsyncSession,
     project_id: int,
     module_path: str,
+    parent_module_id: int | None = None,
 ) -> db_models.Module:
-    """Resolve ``一级`` / ``一级——二级`` into the leaf Module (create parents as needed)."""
+    """Resolve ``一级`` / ``一级——二级`` into the leaf Module (create parents as needed).
+
+    When ``parent_module_id`` is set, the primary segment is created under that module.
+    """
     primary, secondary = split_module_path(module_path)
-    l1 = await _find_or_create_module(db, project_id, primary, parent_id=None)
+    l1 = await _find_or_create_module(
+        db, project_id, primary, parent_id=parent_module_id,
+    )
     if not secondary:
         return l1
     return await _find_or_create_module(db, project_id, secondary, parent_id=l1.id)
@@ -127,59 +133,63 @@ async def import_test_cases(
     project_id: int,
     test_cases: list,  # list of gen.models.TestCase (gentestcases format)
     selected_ids: list[str] | None = None,  # list of test_case_id strings to import, None = all
-) -> list[db_models.TestCase]:
+    parent_module_id: int | None = None,
+) -> tuple[list[db_models.TestCase], int]:
     """Import gentestcases test cases into uitest-work DB.
 
-    Args:
-        db: SQLAlchemy session
-        project_id: Target project ID
-        test_cases: List of gentestcases TestCase dataclass instances
-        selected_ids: Optional list of test_case_id strings to import. If None, import all.
-
     Returns:
-        List of created uitest-work TestCase ORM objects.
+        (created_orm_list, skipped_count) — skips when same project+module+title exists.
     """
     created = []
+    skipped = 0
     selected_set = set(selected_ids) if selected_ids else None
 
     for gen_tc in test_cases:
-        # Skip if not selected
         if selected_set is not None and gen_tc.test_case_id not in selected_set:
             continue
 
-        # Find or create L1 / L2 modules from path like 「一级——二级」
         module_name = normalize_module_path(
             gen_tc.module.strip() if gen_tc.module else "通用"
         )
-        module = await resolve_module_for_import(db, project_id, module_name)
+        module = await resolve_module_for_import(
+            db, project_id, module_name, parent_module_id=parent_module_id,
+        )
 
-        # Build description from preconditions
+        title = gen_tc.title.strip() if gen_tc.title else f"Test Case {gen_tc.test_case_id}"
+        existing = await db.execute(
+            select(db_models.TestCase).where(
+                db_models.TestCase.project_id == project_id,
+                db_models.TestCase.module_id == module.id,
+                db_models.TestCase.name == title,
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none():
+            skipped += 1
+            logger.info("Skip duplicate import: %s / %s", module_name, title)
+            continue
+
         description = ""
         if gen_tc.preconditions:
             description = f"前置条件：{gen_tc.preconditions}"
 
-        # Map priority
-        priority = PRIORITY_MAP.get(gen_tc.priority.strip(), "medium")
+        priority = PRIORITY_MAP.get((gen_tc.priority or "").strip(), "medium")
 
-        # Create uitest-work TestCase
         project_case_number = await get_next_project_case_number(db, project_id)
         tc = db_models.TestCase(
             project_id=project_id,
             module_id=module.id,
             project_case_number=project_case_number,
-            name=gen_tc.title.strip() if gen_tc.title else f"Test Case {gen_tc.test_case_id}",
+            name=title,
             description=description,
             priority=priority,
         )
         db.add(tc)
         await db.flush()
 
-        # Split test_steps and expected_results into TestStep records
         steps_text = _split_numbered_steps(gen_tc.test_steps)
         results_text = _align_expected_to_steps(
             steps_text, _split_expected_results(gen_tc.expected_result)
         )
-        created_steps = []
         for idx, step_text in enumerate(steps_text, start=1):
             step = db_models.TestStep(
                 case_id=tc.id,
@@ -188,10 +198,9 @@ async def import_test_cases(
                 parsed_result=results_text[idx - 1],
             )
             db.add(step)
-            created_steps.append(step)
 
         created.append(tc)
         logger.info("Imported %s → TestCase id=%d (%s)", gen_tc.test_case_id, tc.id, tc.name)
 
     await db.commit()
-    return created
+    return created, skipped

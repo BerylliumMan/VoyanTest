@@ -127,6 +127,11 @@ def invalidate_agent_cache(agent_type: Optional[str] = None) -> None:
         agent_type: 指定要失效的类型；为 None 时清空全部缓存。
                     传入类型时同时清除该类型与所有 id: 缓存项。
     """
+    global _global_config_cache, _global_config_cached_at
+    # Always drop merged global AIConfig cache so model/api_key updates apply immediately
+    _global_config_cache = None
+    _global_config_cached_at = 0
+
     if agent_type is not None:
         if agent_type in _config_cache:
             del _config_cache[agent_type]

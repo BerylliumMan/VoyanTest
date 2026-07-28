@@ -139,7 +139,7 @@ async def test_extract_fps_chunks_when_over_budget(monkeypatch):
 
     calls = {"n": 0}
 
-    async def fake_budget():
+    async def fake_budget(**kwargs):
         return 20_000
 
     async def fake_cont(**kwargs):

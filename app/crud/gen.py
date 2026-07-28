@@ -219,6 +219,7 @@ async def persist_gen_session_results(
                     module=tc.module, title=tc.title,
                     preconditions=tc.preconditions, test_steps=tc.test_steps,
                     expected_result=tc.expected_result, priority=tc.priority,
+                    validation_errors=getattr(tc, "validation_errors", None) or None,
                 ))
 
     await db.commit()

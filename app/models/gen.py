@@ -56,6 +56,7 @@ class GenTestCase(Base):
     test_steps = Column(Text, nullable=True)
     expected_result = Column(Text, nullable=True)
     priority = Column(String(20), nullable=True)
+    validation_errors = Column(Text, nullable=True)
 
 
 # ----------------------------
