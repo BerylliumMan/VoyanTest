@@ -41,12 +41,22 @@ async def run_test_case_endpoint(
     background_tasks: BackgroundTasks,
     user=Depends(get_current_user),
     environment_id: Optional[int] = None,
+    backend: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
-    """运行单个测试用例 - 创建单用例批次"""
+    """运行单个测试用例 - 创建单用例批次
+
+    Query ``backend``: ``playwright_mcp``（默认）| ``browser_use``（试点 NL Agent）。
+    """
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
+
+    if backend is not None and backend not in ("playwright_mcp", "browser_use"):
+        raise HTTPException(
+            status_code=400,
+            detail="backend must be playwright_mcp or browser_use",
+        )
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
@@ -60,7 +70,7 @@ async def run_test_case_endpoint(
     user_id = getattr(user, "id", None)
     batch_id = batch.id
 
-    if await BrowserPool.is_active(project_id):
+    if await BrowserPool.is_active(project_id) and backend != "browser_use":
         from app.routers.testcase import execution as _exec
 
         async def _run_with_existing_browser() -> None:
@@ -87,14 +97,21 @@ async def run_test_case_endpoint(
 
         async def _run_and_notify() -> None:
             try:
-                await _exec.run_test_case(case_id, batch_id, environment_id=environment_id)
+                await _exec.run_test_case(
+                    case_id, batch_id, environment_id=environment_id, backend=backend,
+                )
             finally:
                 if user_id:
                     await notify_batch_completed(batch_id, user_id)
 
         background_tasks.add_task(_run_and_notify)
 
-    return {"id": batch_id, "status": "running", "batch_id": batch_id}
+    return {
+        "id": batch_id,
+        "status": "running",
+        "batch_id": batch_id,
+        "backend": backend or "default",
+    }
 
 
 @router.post("/{case_id}/run-debug")

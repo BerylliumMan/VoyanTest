@@ -20,6 +20,7 @@ class BatchCaseIdsRequest(BaseModel):
     agent_name: Optional[str] = None
     init_case_ids: List[int] = []
     environment_id: Optional[int] = None
+    backend: Optional[str] = None  # playwright_mcp | browser_use
 
 
 class DebugRunRequest(BaseModel):

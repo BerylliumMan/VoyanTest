@@ -21,6 +21,7 @@ from agent.models import (
 )
 
 from core.llm_wrapper import create_openai_client, generate_tool_call, _resolve_config as _llm_resolve_config
+from core.step_executor import HYBRID_SETTLE_SECONDS
 
 logger = logging.getLogger("agent.manager")
 
@@ -36,14 +37,14 @@ class AgentSession:
     async def send(self, msg: WSMessage):
         await self._send(msg.model_dump_json())
 
-    async def request(self, msg: WSMessage) -> dict:
+    async def request(self, msg: WSMessage, timeout: float = 180) -> dict:
         """Send and wait for a reply with matching run_id."""
         key = msg.run_id
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[key] = fut
         await self.send(msg)
         try:
-            return await asyncio.wait_for(fut, timeout=180)
+            return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(key, None)
             raise
@@ -166,30 +167,56 @@ class AgentManager:
     async def execute_on_agent(self, agent_id: str, run_id: str,
                                 case_name: str, steps: List[dict],
                                 output_dir: Optional[str] = None,
-                                base_url_override: Optional[str] = None) -> dict:
+                                base_url_override: Optional[str] = None,
+                                backend: Optional[str] = None,
+                                *,
+                                navigate_base_url: bool = True,
+                                manage_busy: bool = True) -> dict:
         """Execute all steps via the agent. Server handles LLM, agent handles browser.
 
         Serialized per agent so batch/init cases never overlap on the same browser.
         Returns a full step results list compatible with the existing report format.
+
+        ``backend``: ``playwright_mcp`` (default) or ``browser_use`` (client-local NL agent).
+        ``navigate_base_url``: when False, skip BASE URL navigation (batch follow-up cases).
+        ``manage_busy``: when False, caller owns ``_agent_busy`` for the whole job lifecycle.
         """
-        self._agent_busy.add(agent_id)
+        if manage_busy:
+            self._agent_busy.add(agent_id)
         try:
             async with self._run_lock_for(agent_id):
                 return await self._execute_on_agent_unlocked(
                     agent_id, run_id, case_name, steps,
                     output_dir=output_dir,
                     base_url_override=base_url_override,
+                    backend=backend,
+                    navigate_base_url=navigate_base_url,
                 )
         finally:
-            self._agent_busy.discard(agent_id)
+            if manage_busy:
+                self._agent_busy.discard(agent_id)
 
     async def _execute_on_agent_unlocked(
         self, agent_id: str, run_id: str,
         case_name: str, steps: List[dict],
         output_dir: Optional[str] = None,
         base_url_override: Optional[str] = None,
+        backend: Optional[str] = None,
+        navigate_base_url: bool = True,
     ) -> dict:
         """Inner implementation; caller must hold ``_run_lock_for(agent_id)``."""
+        from app.runtime_config import execution_backend_config
+
+        selected = (backend or execution_backend_config.backend or "playwright_mcp").strip()
+        if selected == "browser_use":
+            return await self._execute_on_agent_browser_use(
+                agent_id, run_id, case_name, steps,
+                base_url_override=base_url_override if navigate_base_url else None,
+                max_steps_per_nl=execution_backend_config.max_steps_per_nl,
+                headless=execution_backend_config.headless,
+                navigate_base_url=navigate_base_url,
+            )
+
         session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
@@ -205,17 +232,22 @@ class AgentManager:
             await session.send(WSMessage(
                 type=WSMessageType.RUN_START, agent_id=agent_id,
                 run_id=run_id,
-                payload={"case_id": run_id, "case_name": case_name,
-                         "steps": steps,
-                         "base_url": base_url_override or ""},
+                payload={
+                    "case_id": run_id,
+                    "case_name": case_name,
+                    "steps": steps,
+                    "base_url": (base_url_override or "") if navigate_base_url else "",
+                    "backend": "playwright_mcp",
+                    "navigate_base_url": navigate_base_url,
+                },
             ))
 
             llm_client = await create_openai_client()
             _, _, model = await _llm_resolve_config()
 
-            # 等待浏览器就绪后，由 Playwright MCP 直接导航到 BASE URL（不经 LLM）
+            # 等待浏览器就绪；仅首个用例（或显式要求时）导航 BASE URL
             await self._get_snapshot(session, agent_id, run_id)
-            if base_url_override:
+            if navigate_base_url and base_url_override:
                 logger.info("Playwright navigating to BASE URL: %s", base_url_override)
                 nav_result = await self.send_act(
                     agent_id,
@@ -231,6 +263,11 @@ class AgentManager:
                         "BASE URL Playwright navigation failed: %s",
                         nav_result.get("error") or "unknown",
                     )
+            elif not navigate_base_url:
+                logger.info(
+                    "Batch follow-up case %r — skip BASE URL navigation (keep session)",
+                    case_name,
+                )
             else:
                 logger.warning(
                     "No BASE URL for run %s — browser may stay on about:blank",
@@ -266,13 +303,14 @@ class AgentManager:
                 tool_call = await generate_tool_call(desc, snap, expected_result=expected_result, client=llm_client, model=model, base_url=base_url_override or None)
 
                 # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
-                if (tool_call.action or "").lower() in ("error", "done"):
+                action_lower = (tool_call.action or "").lower()
+                if action_lower in ("error", "done"):
                     result = {
-                        "success": False if (tool_call.action or "").lower() == "error" else True,
+                        "success": False if action_lower == "error" else True,
                         "action": f"{tool_call.action}({tool_call.value or ''})",
                         "error": (
                             tool_call.value or "LLM 无法确定本步操作"
-                            if (tool_call.action or "").lower() == "error"
+                            if action_lower == "error"
                             else None
                         ),
                         "duration_ms": 0,
@@ -283,18 +321,70 @@ class AgentManager:
                         session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
                     )
 
+                # Hybrid relocate: on error/MCP fail, refresh snapshot and retry once
+                if not result.get("success") and action_lower != "done":
+                    logger.info(
+                        "Hybrid relocate (agent): step %s failed; refreshing snapshot",
+                        step_order,
+                    )
+                    await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+                    snap = await self._get_snapshot(session, agent_id, run_id)
+                    tool_call = await generate_tool_call(
+                        desc, snap,
+                        expected_result=expected_result,
+                        client=llm_client,
+                        model=model,
+                        base_url=base_url_override or None,
+                    )
+                    action_lower = (tool_call.action or "").lower()
+                    if action_lower in ("error", "done"):
+                        result = {
+                            "success": False if action_lower == "error" else True,
+                            "action": f"{tool_call.action}({tool_call.value or ''})",
+                            "error": (
+                                tool_call.value or "LLM 无法确定本步操作"
+                                if action_lower == "error"
+                                else None
+                            ),
+                            "duration_ms": 0,
+                            "relocate_attempted": True,
+                        }
+                    else:
+                        result = await self._execute_step(
+                            session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
+                        )
+                        result["relocate_attempted"] = True
+
                 # 4. Verify expected result if step succeeded
                 if result.get("success") and expected_result:
                     try:
-                        post_snap = await self._get_snapshot(session, agent_id, run_id)
                         from core.llm_wrapper import verify_expected_result
+                        post_snap = await self._get_snapshot(session, agent_id, run_id)
                         verification = await asyncio.wait_for(
                             verify_expected_result(expected_result, post_snap, client=llm_client, model=model),
                             timeout=30,
                         )
                         if not verification.passed:
-                            result["success"] = False
-                            result["error"] = f"Expected result verification failed: {verification.reason}"
+                            logger.info(
+                                "Hybrid assert retry (agent): step %s L2 failed; refreshing",
+                                step_order,
+                            )
+                            await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+                            post_snap = await self._get_snapshot(session, agent_id, run_id)
+                            verification = await asyncio.wait_for(
+                                verify_expected_result(
+                                    expected_result, post_snap, client=llm_client, model=model,
+                                ),
+                                timeout=30,
+                            )
+                            result["assert_retry_attempted"] = True
+                            if not verification.passed:
+                                result["success"] = False
+                                result["error"] = (
+                                    f"Expected result verification failed: {verification.reason}"
+                                )
+                            else:
+                                result["verification"] = verification.reason
                         else:
                             result["verification"] = verification.reason
                     except asyncio.TimeoutError:
@@ -382,6 +472,76 @@ class AgentManager:
             session.agent.status = AgentStatus.ONLINE
 
         return step_results
+
+    async def _execute_on_agent_browser_use(
+        self,
+        agent_id: str,
+        run_id: str,
+        case_name: str,
+        steps: List[dict],
+        *,
+        base_url_override: Optional[str] = None,
+        max_steps_per_nl: int = 20,
+        headless: bool = True,
+        navigate_base_url: bool = True,
+    ) -> list:
+        """Client-local browser-use: server sends NL steps + LLM config, waits for RUN_COMPLETE."""
+        session = await self.get_session(agent_id)
+        if not session:
+            raise ValueError(f"Agent {agent_id} not connected")
+
+        caps = session.agent.capabilities or []
+        if "browser_use" not in caps:
+            raise ValueError(
+                f"Agent {agent_id} 未声明 browser_use 能力。"
+                "请升级客户端并安装 browser-use 后重连。"
+            )
+
+        key, base, model = await _llm_resolve_config()
+        session.agent.status = AgentStatus.BUSY
+        # Generous timeout: open URL + each NL step may take many agent turns
+        timeout = max(600.0, 120.0 * max(1, len(steps)) + 180.0)
+        try:
+            payload = await session.request(
+                WSMessage(
+                    type=WSMessageType.RUN_START,
+                    agent_id=agent_id,
+                    run_id=run_id,
+                    payload={
+                        "case_id": run_id,
+                        "case_name": case_name,
+                        "steps": steps,
+                        "base_url": (base_url_override or "") if navigate_base_url else "",
+                        "backend": "browser_use",
+                        "max_steps_per_nl": max_steps_per_nl,
+                        "headless": headless,
+                        "navigate_base_url": navigate_base_url,
+                        "llm": {
+                            "api_key": key,
+                            "api_base": base,
+                            "model": model,
+                        },
+                    },
+                ),
+                timeout=timeout,
+            )
+            steps_out = payload.get("steps") if isinstance(payload, dict) else None
+            if not isinstance(steps_out, list):
+                err = (payload or {}).get("error") if isinstance(payload, dict) else "invalid RUN_COMPLETE"
+                raise RuntimeError(f"Agent browser-use 未返回步骤结果: {err}")
+            logger.info(
+                "browser-use client run %s finished status=%s steps=%s",
+                run_id, payload.get("status"), len(steps_out),
+            )
+            return steps_out
+        finally:
+            try:
+                await session.send(WSMessage(
+                    type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id,
+                ))
+            except Exception:
+                logger.debug("RUN_END after browser-use failed", exc_info=True)
+            session.agent.status = AgentStatus.ONLINE
 
     async def _get_snapshot(self, session: AgentSession, agent_id: str, run_id: str) -> str:
         text = ""
@@ -606,6 +766,15 @@ class AgentManager:
                         case_id, exc_info=True,
                     )
 
+                # Batch follow-ups keep browser session: only seq=0 (or no seq) navigates
+                navigate = True
+                if isinstance(goal, dict) and goal.get("batch_id") is not None:
+                    _seq = goal.get("seq")
+                    try:
+                        navigate = _seq is None or int(_seq) == 0
+                    except (TypeError, ValueError):
+                        navigate = True
+
                 async def _run_with_fallback(
                     _base_url=base_url,
                     _agent_id=agent_id,
@@ -614,12 +783,16 @@ class AgentManager:
                     _case_id=case_id,
                     _steps=steps,
                     _run_row_id=run_row_id,
+                    _navigate=navigate,
                 ):
                     try:
+                        # manage_busy=False: poller holds _agent_busy until DB update finishes
                         result = await self.execute_on_agent(
                             _agent_id, _run_id,
                             _tc.name or f"Case #{_case_id}", _steps,
                             base_url_override=_base_url,
+                            navigate_base_url=_navigate,
+                            manage_busy=False,
                         )
                         async with AsyncSessionLocal() as _edb:
                             await _edb.execute(

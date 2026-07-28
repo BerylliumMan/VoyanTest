@@ -7,7 +7,9 @@
 重启后重置为默认值。
 """
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -18,6 +20,21 @@ class HealingConfig(BaseModel):
 
 
 healing_config = HealingConfig()
+
+
+class ExecutionBackendConfig(BaseModel):
+    """服务端 UI 执行后端（内存配置，重启恢复默认）。
+
+    - playwright_mcp: 现有 NL → LLM tool_call → Playwright MCP
+    - browser_use: NL 步骤交给 browser-use Agent 多轮观察执行（试点）
+    """
+
+    backend: Literal["playwright_mcp", "browser_use"] = "playwright_mcp"
+    max_steps_per_nl: int = Field(default=20, ge=3, le=50)
+    headless: bool = True
+
+
+execution_backend_config = ExecutionBackendConfig()
 
 
 def render_prompt_variables(template: str, **variables: str) -> str:

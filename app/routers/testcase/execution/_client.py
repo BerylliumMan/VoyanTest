@@ -146,13 +146,29 @@ async def _create_pending_execution(
 
 
 @router.post("/{case_id}/run-client")
-async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), agent_name: Optional[str] = None, environment_id: Optional[int] = None, db: AsyncSession = Depends(get_async_db)) -> dict:
-    """Run a test case on a connected client agent via WebSocket."""
+async def run_test_case_on_client(
+    case_id: int,
+    user=Depends(get_current_user),
+    agent_name: Optional[str] = None,
+    environment_id: Optional[int] = None,
+    backend: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """Run a test case on a connected client agent via WebSocket.
+
+    Query ``backend``: ``playwright_mcp``（默认）| ``browser_use``（客户端本地 NL Agent）。
+    """
     from agent.manager import agent_manager
 
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
+
+    if backend is not None and backend not in ("playwright_mcp", "browser_use"):
+        raise HTTPException(
+            status_code=400,
+            detail="backend must be playwright_mcp or browser_use",
+        )
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
@@ -180,6 +196,15 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
         agent = matched[0]
     else:
         agent = agents[0]
+
+    if backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Agent '{agent.name}' 未声明 browser_use 能力。"
+                "请在客户端安装 browser-use 并重启 Agent。"
+            ),
+        )
 
     # 同 worker 路径：显式 OTA skill 时走 AgentBridge
     active_agent_def_same = active_agent_def or (await crud_agent_definition.get_active_by_type(db, "execution"))
@@ -247,6 +272,7 @@ async def run_test_case_on_client(case_id: int, user=Depends(get_current_user), 
             step_results = await agent_manager.execute_on_agent(
                 agent.id, run_id, db_case.name, steps, output_dir=output_dir,
                 base_url_override=base_url_override,
+                backend=backend,
             )
             all_passed = all(r["success"] for r in step_results)
             status = "passed" if all_passed else "failed"
@@ -412,10 +438,32 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         agent = matched[0]
     else:
         agent = agents[0]
+
+    if body.backend is not None and body.backend not in ("playwright_mcp", "browser_use"):
+        raise HTTPException(status_code=400, detail="backend must be playwright_mcp or browser_use")
+    if body.backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Agent '{agent.name}' 未声明 browser_use 能力。"
+                "请在客户端安装 browser-use 并重启 Agent。"
+            ),
+        )
+
     case_ids = body.case_ids
     init_case_ids = body.init_case_ids or []
     if not case_ids:
         raise HTTPException(status_code=400, detail="No test case IDs provided")
+
+    # 严格顺序：初始化用例在前（去重），再跑主用例（排除已作为 init 的 id）
+    ordered_ids: list[int] = []
+    seen: set[int] = set()
+    for cid in list(init_case_ids) + list(case_ids):
+        if cid in seen:
+            continue
+        seen.add(cid)
+        ordered_ids.append(cid)
+    init_set = set(init_case_ids)
 
     async def _load_case_info(cid: int) -> Optional[dict]:
         tc = await crud.get_test_case(db, cid)
@@ -426,13 +474,24 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
             for s in sorted(steps_raw, key=lambda x: x.step_order)
         ]
-        return {"id": tc.id, "name": tc.name, "project_id": tc.project_id, "steps": steps, "is_init": cid in init_case_ids}
+        return {
+            "id": tc.id,
+            "name": tc.name,
+            "project_id": tc.project_id,
+            "steps": steps,
+            "is_init": cid in init_set,
+        }
 
-    all_case_ids = init_case_ids + case_ids
-    case_infos = [await _load_case_info(cid) for cid in all_case_ids]
+    case_infos = [await _load_case_info(cid) for cid in ordered_ids]
     case_infos = [c for c in case_infos if c]
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
+
+    logger.info(
+        "Client batch order (%s cases): %s",
+        len(case_infos),
+        [(c["id"], c["name"], "init" if c["is_init"] else "main") for c in case_infos],
+    )
 
     allowed_ids = get_user_project_filter(user)
     project_id = case_infos[0]["project_id"]
@@ -456,16 +515,25 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
 
     async def _run_batch() -> None:
         _all_success = True
-        for info in case_infos:
+        for idx, info in enumerate(case_infos):
             case_id = info["id"]
             steps = info["steps"]
             if not steps:
+                logger.warning("Skip case %s — no steps", case_id)
                 continue
+
+            # 仅第一个用例导航 BASE URL；后续复用同一浏览器会话（保留登录态）
+            navigate_base = idx == 0
 
             run_id = uuid.uuid4().hex[:12]
             start_time = tz_now()
             output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
             await _asyncio.to_thread(_ensure_dir, output_dir)
+
+            logger.info(
+                "Client batch case %s/%s: id=%s name=%r init=%s navigate=%s",
+                idx + 1, len(case_infos), case_id, info["name"], info.get("is_init"), navigate_base,
+            )
 
             # 检查是否有活跃 execution AgentDefinition — 显式 OTA 时走桥接
             try:
@@ -475,13 +543,17 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     if should_use_ota_agent(active_agent_def) and body.agent_name:
                         from core.agent_bridge import AgentBridge
                         bridge = AgentBridge(agent_manager, _ad_db, active_agent_def)
-                        await bridge.orchestrate(
-                            case_id=case_id,
-                            agent_id=body.agent_name,
-                            goal={"type": "client_exec", "case_id": case_id, "agent_name": body.agent_name},
-                            environment_id=body.environment_id,
-                            existing_batch_id=batch.id,
-                        )
+                        agent_manager._agent_busy.add(agent.id)
+                        try:
+                            await bridge.orchestrate(
+                                case_id=case_id,
+                                agent_id=body.agent_name,
+                                goal={"type": "client_exec", "case_id": case_id, "agent_name": body.agent_name},
+                                environment_id=body.environment_id,
+                                existing_batch_id=batch.id,
+                            )
+                        finally:
+                            agent_manager._agent_busy.discard(agent.id)
                         continue
             except Exception:
                 logger.exception("AgentDefinition check failed for batch case %s", case_id)
@@ -505,15 +577,19 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             except Exception:
                 logger.exception("Failed to create AgentRun record for batch case %s", case_id)
 
+            case_failed = False
             try:
                 step_results = await agent_manager.execute_on_agent(
                     agent.id, run_id, info["name"], steps, output_dir=output_dir,
                     base_url_override=base_url_override,
+                    backend=getattr(body, "backend", None),
+                    navigate_base_url=navigate_base,
                 )
                 all_passed = all(r["success"] for r in step_results)
                 status = "passed" if all_passed else "failed"
                 if not all_passed:
                     _all_success = False
+                    case_failed = True
 
                 report = {
                     "test_case_id": case_id,
@@ -544,6 +620,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             except Exception:
                 logger.exception("Agent run failed for case %s", case_id)
                 _all_success = False
+                case_failed = True
                 end_time = tz_now()
 
                 # 更新 AgentRun 状态为失败
@@ -562,6 +639,25 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     batch_id=batch.id,
                     is_init=info.get("is_init", False),
                 )
+
+            # 初始化用例失败则中止后续，避免在未登录会话上乱序继续
+            if case_failed and info.get("is_init"):
+                logger.warning(
+                    "Init case %s failed — abort remaining %s case(s) in batch",
+                    case_id, len(case_infos) - idx - 1,
+                )
+                for remaining in case_infos[idx + 1:]:
+                    await save_run_results(
+                        remaining["id"], "failed", tz_now(), tz_now(), 0.0,
+                        None, None,
+                        [{
+                            "level": "error",
+                            "message": f"因初始化用例 {case_id} 失败而跳过",
+                        }],
+                        batch_id=batch.id,
+                        is_init=remaining.get("is_init", False),
+                    )
+                break
 
         async with db_mod.AsyncSessionLocal() as _db:
             _result = await _db.execute(

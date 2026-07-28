@@ -21,6 +21,9 @@ from core.verification_strategy import VERIFICATION_STRATEGY as strategy
 
 logger = logging.getLogger(__name__)
 
+# Hybrid mode C: settle UI (toast/dropdown) before snapshot re-observe
+HYBRID_SETTLE_SECONDS = 0.8
+
 # ---------------------------------------------------------------------------
 # URL / step sanitising
 # ---------------------------------------------------------------------------
@@ -264,6 +267,59 @@ async def _llm_tool_and_run(
     return tool_call, exec_result
 
 
+async def _llm_tool_and_run_with_relocate(
+    *,
+    desc: str,
+    snapshot: str,
+    expected_result: str | None,
+    mcp_manager,
+    llm_client,
+    model: str | None,
+    system_prompt_override: str | None,
+    step_timeout_ms: int,
+):
+    """Run `_llm_tool_and_run`; on failure, settle + refresh snapshot + retry once.
+
+    Triggers when LLM returns action=error or MCP execution fails.
+    Returns (tool_call, exec_result, relocate_attempted).
+    """
+    tool_call, exec_result = await _llm_tool_and_run(
+        desc=desc,
+        snapshot=snapshot,
+        expected_result=expected_result,
+        mcp_manager=mcp_manager,
+        llm_client=llm_client,
+        model=model,
+        system_prompt_override=system_prompt_override,
+        step_timeout_ms=step_timeout_ms,
+    )
+    if exec_result.get('success'):
+        return tool_call, exec_result, False
+
+    logger.info(
+        "Hybrid relocate: first attempt failed (%s); refreshing snapshot",
+        (exec_result.get('error') or '')[:120],
+    )
+    await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+    try:
+        snapshot = await mcp_manager.get_dom_snapshot()
+    except Exception as exc:
+        logger.warning("Hybrid relocate: snapshot refresh failed: %s", exc, exc_info=True)
+        return tool_call, exec_result, True
+
+    tool_call2, exec_result2 = await _llm_tool_and_run(
+        desc=desc,
+        snapshot=snapshot,
+        expected_result=expected_result,
+        mcp_manager=mcp_manager,
+        llm_client=llm_client,
+        model=model,
+        system_prompt_override=system_prompt_override,
+        step_timeout_ms=step_timeout_ms,
+    )
+    return tool_call2, exec_result2, True
+
+
 def _format_action(tool_call) -> str:
     if tool_call is None:
         return ''
@@ -314,6 +370,7 @@ async def execute_step_mcp(
         thinking_parts: list[str] = []
         tool_call = None
         exec_result: dict[str, Any]
+        relocate_attempted = False
 
         # Custom/Ant dropdowns often need: open combobox → click option
         if label and option and option not in (snapshot or ""):
@@ -321,7 +378,7 @@ async def execute_step_mcp(
                 f"点击字段或标签为「{label}」的下拉框/组合框以展开选项列表。"
                 f"不要查找文案「下拉框」或「{label}下拉框」。"
             )
-            tool_call, exec_result = await _llm_tool_and_run(
+            tool_call, exec_result, open_relocated = await _llm_tool_and_run_with_relocate(
                 desc=open_desc,
                 snapshot=snapshot,
                 expected_result=None,
@@ -331,6 +388,7 @@ async def execute_step_mcp(
                 system_prompt_override=system_prompt_override,
                 step_timeout_ms=step_timeout_ms,
             )
+            relocate_attempted = relocate_attempted or open_relocated
             if tool_call is not None:
                 actions_log.append(_format_action(tool_call))
                 if tool_call.thinking:
@@ -339,6 +397,7 @@ async def execute_step_mcp(
                 result['thinking'] = ' | '.join(thinking_parts) or '展开下拉失败'
                 result['action'] = ' → '.join(actions_log)
                 result['error'] = exec_result.get('error', '展开下拉失败')
+                result['relocate_attempted'] = relocate_attempted
                 await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
                 result['duration_ms'] = (time.monotonic() - t_start) * 1000
                 return result
@@ -347,7 +406,7 @@ async def execute_step_mcp(
                 f"在已展开的下拉列表中点击选项「{option}」。"
                 f"不要查找文案「下拉框」。"
             )
-            tool_call, exec_result = await _llm_tool_and_run(
+            tool_call, exec_result, pick_relocated = await _llm_tool_and_run_with_relocate(
                 desc=pick_desc,
                 snapshot=snapshot,
                 expected_result=expected_result,
@@ -357,8 +416,9 @@ async def execute_step_mcp(
                 system_prompt_override=system_prompt_override,
                 step_timeout_ms=step_timeout_ms,
             )
+            relocate_attempted = relocate_attempted or pick_relocated
         else:
-            tool_call, exec_result = await _llm_tool_and_run(
+            tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
                 desc=desc,
                 snapshot=snapshot,
                 expected_result=expected_result,
@@ -368,6 +428,9 @@ async def execute_step_mcp(
                 system_prompt_override=system_prompt_override,
                 step_timeout_ms=step_timeout_ms,
             )
+
+        if relocate_attempted:
+            result['relocate_attempted'] = True
 
         if tool_call is not None:
             actions_log.append(_format_action(tool_call))
@@ -432,8 +495,8 @@ async def execute_step_mcp(
 
                 if not verified:
                     try:
-                        post_snapshot = await mcp_manager.get_dom_snapshot()
                         from core.llm_wrapper import verify_expected_result
+                        post_snapshot = await mcp_manager.get_dom_snapshot()
                         verification = await asyncio.wait_for(
                             verify_expected_result(
                                 expected_result,
@@ -445,11 +508,32 @@ async def execute_step_mcp(
                             timeout=30,
                         )
                         if not verification.passed:
-                            result['success'] = False
-                            result['error'] = f"预期结果验证失败: {verification.reason}"
-                            await _capture_screenshot(
-                                mcp_manager, screenshot_dir, step_number, result,
+                            # Hybrid: settle + re-snapshot + re-verify once
+                            logger.info(
+                                "Hybrid assert retry: L2 failed (%s); refreshing snapshot",
+                                (verification.reason or '')[:120],
                             )
+                            await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+                            post_snapshot = await mcp_manager.get_dom_snapshot()
+                            verification = await asyncio.wait_for(
+                                verify_expected_result(
+                                    expected_result,
+                                    post_snapshot,
+                                    step_description=raw_desc,
+                                    client=llm_client,
+                                    model=model,
+                                ),
+                                timeout=30,
+                            )
+                            result['assert_retry_attempted'] = True
+                            if not verification.passed:
+                                result['success'] = False
+                                result['error'] = f"预期结果验证失败: {verification.reason}"
+                                await _capture_screenshot(
+                                    mcp_manager, screenshot_dir, step_number, result,
+                                )
+                            else:
+                                result['verification'] = verification.reason
                         else:
                             result['verification'] = verification.reason
                     except asyncio.TimeoutError:

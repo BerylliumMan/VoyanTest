@@ -208,11 +208,13 @@ async def run_test_case(
     environment_id: int | None = None,
     debug_mode: bool = False,
     run_id: int | None = None,
+    backend: str | None = None,
 ):
     """Execute a test case using LLM + Playwright MCP (npx subprocess).
 
     Backward-compatible wrapper that creates its own PlaywrightMCPManager.
     ``run_id`` 用于调试模式等已预创建 TestRun 的场景，保证 WS 广播 id 一致。
+    ``backend`` 可选覆盖运行时配置：``playwright_mcp`` | ``browser_use``。
     """
     from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
@@ -242,11 +244,11 @@ async def run_test_case(
         async with BrowserPool.project_lock(project_id):
             return await _run_test_case_unlocked(
                 case_id, batch_id, browser_type, headless, base_url_override,
-                debug_mode=debug_mode, run_id=run_id,
+                debug_mode=debug_mode, run_id=run_id, backend=backend,
             )
     return await _run_test_case_unlocked(
         case_id, batch_id, browser_type, headless, base_url_override,
-        debug_mode=debug_mode, run_id=run_id,
+        debug_mode=debug_mode, run_id=run_id, backend=backend,
     )
 
 
@@ -259,8 +261,29 @@ async def _run_test_case_unlocked(
     *,
     debug_mode: bool = False,
     run_id: int | None = None,
+    backend: str | None = None,
 ):
+    from app.runtime_config import execution_backend_config
     from core.playwright_manager import PlaywrightMCPManager
+
+    selected = (backend or execution_backend_config.backend or "playwright_mcp").strip()
+
+    # Scheme B: optional browser-use backend (server-side only)
+    if selected == "browser_use":
+        from core.browser_use_runner import run_test_case_via_browser_use
+
+        logger.info(
+            "Using browser-use backend for case %s (max_steps_per_nl=%s)",
+            case_id, execution_backend_config.max_steps_per_nl,
+        )
+        return await run_test_case_via_browser_use(
+            case_id,
+            batch_id=batch_id,
+            run_id=run_id,
+            base_url_override=base_url_override,
+            headless=execution_backend_config.headless if execution_backend_config.headless is not None else headless,
+            max_steps_per_nl=execution_backend_config.max_steps_per_nl,
+        )
 
     mcp_manager = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
     start_time = tz_now()
@@ -435,6 +458,43 @@ async def run_batch_test_cases(
         precreated_run_ids = await precreate_pending_runs(
             batch_db, case_ids, batch_id, init_case_ids=init_case_ids
         )
+
+        # Scheme B: browser-use batch — per-case session, skip Playwright MCP pool
+        from app.runtime_config import execution_backend_config as _exec_backend
+        if _exec_backend.backend == "browser_use":
+            from core.browser_use_runner import run_test_case_via_browser_use
+
+            results = []
+            for case_id in (init_case_ids or []) + case_ids:
+                _rid = precreated_run_ids.get(case_id)
+                try:
+                    result = await run_test_case_via_browser_use(
+                        case_id,
+                        batch_id=batch_id,
+                        run_id=_rid,
+                        base_url_override=base_url_override,
+                        headless=_exec_backend.headless,
+                        max_steps_per_nl=_exec_backend.max_steps_per_nl,
+                    )
+                    results.append(result)
+                    logger.info(
+                        "Batch browser-use case %s finished: %s",
+                        case_id, (result or {}).get("status"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Batch browser-use case %s failed", case_id)
+                    await _record_batch_case_failure(
+                        batch_db, precreated_run_ids, case_id, batch_id,
+                        message=f"browser-use executor exception: {exc}",
+                    )
+                    results.append({
+                        "case_id": case_id,
+                        "status": "failed",
+                        "error": str(exc),
+                        "batch_id": batch_id,
+                        "backend": "browser_use",
+                    })
+            return results
 
         # 创建或复用浏览器
         try:
