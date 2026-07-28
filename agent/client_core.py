@@ -369,12 +369,17 @@ class AgentClient:
             args.extend(['--viewport-size', '1920x1080'])
         args.append('--isolated')
         import sys as _sys
+        import subprocess as _sp
         proc_kwargs = dict(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        if _sys.platform != 'win32':
+        if _sys.platform == 'win32':
+            # Hide the black console window from bundled node.exe (console subsystem).
+            # Does not affect Chromium visibility (separate process).
+            proc_kwargs['creationflags'] = _sp.CREATE_NO_WINDOW
+        else:
             proc_kwargs['preexec_fn'] = os.setsid
         self._mcp_process = await asyncio.create_subprocess_exec(
             *args, **proc_kwargs,
