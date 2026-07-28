@@ -292,7 +292,8 @@ async def run_test_case_on_client(
                 base_url_override=base_url_override,
                 backend=backend,
             )
-            all_passed = all(r["success"] for r in step_results)
+            # empty list: all([]) is True in Python — treat as failed
+            all_passed = bool(step_results) and all(r.get("success") for r in step_results)
             status = "passed" if all_passed else "failed"
             if not all_passed:
                 _all_success = False
@@ -603,7 +604,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     backend=getattr(body, "backend", None),
                     navigate_base_url=navigate_base,
                 )
-                all_passed = all(r["success"] for r in step_results)
+                # empty list: all([]) is True — must not mark batch as success
+                all_passed = bool(step_results) and all(r.get("success") for r in step_results)
                 status = "passed" if all_passed else "failed"
                 if not all_passed:
                     _all_success = False

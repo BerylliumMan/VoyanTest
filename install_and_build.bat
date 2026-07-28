@@ -34,9 +34,18 @@ if %errorlevel% neq 0 (
 echo Done
 echo.
 
+echo [2b/4] Verifying browser-use system_prompts...
+python -c "import browser_use.agent.system_prompts; print('system_prompts OK')"
+if %errorlevel% neq 0 (
+    echo [ERROR] browser-use installed but system_prompts missing. Re-copy wheels and reinstall.
+    pause
+    exit /b 1
+)
+echo.
+
 echo [3/4] Building Agent GUI...
 if exist VoyanTest-Agent.spec del VoyanTest-Agent.spec
-REM windowed GUI build; jaraco/pefile needed for pkg_resources on Windows
+REM windowed GUI build; must collect-all browser_use for system_prompts/*.md
 python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import agent.models ^
   --hidden-import agent.client_core ^
@@ -45,8 +54,10 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import agent.gui.config_dialog ^
   --hidden-import agent.gui.config_store ^
   --hidden-import core.browser_use_exec ^
+  --hidden-import core.browser_use_prompts ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
+  --hidden-import browser_use.agent.system_prompts ^
   --hidden-import customtkinter ^
   --hidden-import pystray ^
   --hidden-import PIL ^
@@ -62,13 +73,16 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import pefile ^
   --hidden-import win32ctypes ^
   --hidden-import win32ctypes.pywin32 ^
+  --collect-all browser_use ^
   --collect-all customtkinter ^
   --collect-all jaraco ^
   --collect-all setuptools ^
+  --copy-metadata browser-use ^
   --copy-metadata jaraco.text ^
   --copy-metadata setuptools ^
   --add-data "agent;agent" ^
   --add-data "core\browser_use_exec.py;core" ^
+  --add-data "core\browser_use_prompts;core\browser_use_prompts" ^
   --add-data "core\__init__.py;core" ^
   agent\gui\app.py
 if %errorlevel% neq 0 (
