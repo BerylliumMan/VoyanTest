@@ -207,11 +207,13 @@ async def _compute_batch_status(db: AsyncSession, batch, preloaded_runs: list = 
         )
         runs = runs_result.scalars().all()
     if not runs:
-        # 超过 30 秒仍无 TestRun 记录 → 后台任务已死
+        # 超过阈值仍无 TestRun → 后台任务可能已死。
+        # browser-use / 客户端 NL 跑完才落库，阈值需远大于 30s，
+        # 否则轮询 GET /batches/{id} 会把仍在执行的批次误判为 failed。
         created = batch.created_at
         if created and created.tzinfo is None:
             created = created.replace(tzinfo=now.tzinfo)
-        if created and (now - created).total_seconds() > 30:
+        if created and (now - created).total_seconds() > 900:
             batch.status = "failed"
             batch.finished_at = now
         else:

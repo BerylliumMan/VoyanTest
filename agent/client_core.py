@@ -803,7 +803,11 @@ class AgentClient:
 
             if navigate or self._bu_browser is None:
                 await self._stop_bu_browser()
-                self._bu_browser = BrowserSession(headless=headless, keep_alive=True)
+                self._bu_browser = BrowserSession(
+                    headless=headless,
+                    keep_alive=True,
+                    enable_default_extensions=False,
+                )
                 self._log_info("browser-use: new browser session")
             else:
                 self._log_info("browser-use: reuse browser session (batch follow-up)")

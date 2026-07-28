@@ -1,35 +1,76 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo  VoyanTest Agent - Offline Build
+echo  VoyanTest Agent - Offline Build [GUI]
 echo ========================================
 echo.
 
-echo [1/3] Installing dependencies from local wheels...
+echo [1/4] Installing browser-use extensions cache offline...
+set "EXT_SRC=%~dp0browseruse_extensions"
+set "EXT_DST=%USERPROFILE%\.config\browseruse\extensions"
+if not exist "%EXT_SRC%\ddkjiahejlhfcafbddmgiahcphecmpfh\manifest.json" (
+    echo [WARN] browseruse_extensions missing - first run may need online download.
+) else (
+    if not exist "%EXT_DST%" mkdir "%EXT_DST%"
+    xcopy /E /I /Y "%EXT_SRC%\*" "%EXT_DST%\" >nul
+    echo Extensions installed to %EXT_DST%
+)
+echo.
+
+echo [2/4] Installing dependencies from local wheels...
+REM Top-level + Windows PyInstaller helpers (pefile / pywin32-ctypes) + jaraco for pkg_resources.
 python -m pip install --no-index --find-links=wheels --no-warn-script-location ^
   httpx websockets openpyxl pyinstaller pydantic rich customtkinter pystray pillow ^
-  browser-use playwright openai
+  browser-use playwright openai setuptools ^
+  jaraco.text jaraco.functools jaraco.context jaraco.collections more-itertools ^
+  pefile pywin32-ctypes colorama darkdetect packaging altgraph pyinstaller-hooks-contrib ^
+  backports.tarfile typer-slim autocommand
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to install dependencies from wheels\
-    echo Make sure wheels\ contains browser-use and its dependencies.
+    echo Make sure wheels\ is complete. See requirements_agent.txt
     pause
     exit /b 1
 )
 echo Done
 echo.
 
-echo [2/3] Building Agent...
+echo [3/4] Building Agent GUI...
 if exist VoyanTest-Agent.spec del VoyanTest-Agent.spec
-python -m PyInstaller --onefile --console --name VoyanTest-Agent ^
+REM windowed GUI build; jaraco/pefile needed for pkg_resources on Windows
+python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import agent.models ^
   --hidden-import agent.client_core ^
+  --hidden-import agent.cli_entry ^
+  --hidden-import agent.gui.app ^
+  --hidden-import agent.gui.config_dialog ^
+  --hidden-import agent.gui.config_store ^
   --hidden-import core.browser_use_exec ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
+  --hidden-import customtkinter ^
+  --hidden-import pystray ^
+  --hidden-import PIL ^
+  --hidden-import PIL.Image ^
+  --hidden-import PIL.ImageDraw ^
+  --hidden-import jaraco ^
+  --hidden-import jaraco.text ^
+  --hidden-import jaraco.functools ^
+  --hidden-import jaraco.context ^
+  --hidden-import jaraco.collections ^
+  --hidden-import more_itertools ^
+  --hidden-import pkg_resources ^
+  --hidden-import pefile ^
+  --hidden-import win32ctypes ^
+  --hidden-import win32ctypes.pywin32 ^
+  --collect-all customtkinter ^
+  --collect-all jaraco ^
+  --collect-all setuptools ^
+  --copy-metadata jaraco.text ^
+  --copy-metadata setuptools ^
   --add-data "agent;agent" ^
   --add-data "core\browser_use_exec.py;core" ^
   --add-data "core\__init__.py;core" ^
-  agent\client.py
+  agent\gui\app.py
 if %errorlevel% neq 0 (
     echo [ERROR] Build failed
     pause
@@ -38,14 +79,15 @@ if %errorlevel% neq 0 (
 echo Done
 echo.
 
-echo [3/3] Cleaning up...
+echo [4/4] Cleaning up...
 if exist VoyanTest-Agent.spec del VoyanTest-Agent.spec
 if exist build rmdir /s /q build
 
 echo.
 echo ========================================
 echo  Build successful!
-echo  Output: dist\VoyanTest-Agent.exe
+echo  Output: dist\VoyanTest-Agent.exe [GUI]
 echo  Also keep node.exe / node_modules / chromium next to the exe.
+echo  Extensions cache: %%USERPROFILE%%\.config\browseruse\extensions
 echo ========================================
 pause
