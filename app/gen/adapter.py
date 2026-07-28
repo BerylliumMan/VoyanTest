@@ -17,16 +17,45 @@ def split_numbered_items(text: str) -> list[str]:
 
     Prefers newline-delimited ``1. xxx`` items; falls back to inline items that
     require whitespace after the numbering marker (so ``版本2.0`` stays intact).
+
+    Bare markers (``1.\\n2.\\n3.``) or collapsed ``1.2.3.4.`` are treated as empty
+    so they are not shown as fake expected text.
     """
     if not text or not str(text).strip():
         return []
     text = str(text).strip()
 
+    # Collapsed junk like "1.2.3.4.5." or "1. 2. 3. 4." — not real content
+    if re.fullmatch(r"(?:\d+[\.、]\s*)+", text):
+        return []
+
     def _clean(items: list[str]) -> list[str]:
         return [re.sub(r"\s+", " ", m).strip() for m in items if m.strip()]
 
-    # 1. foo\n2. bar — need >=2 hits; a single hit usually means \Z swallowed inline numbers
+    # Newline form: use explicit indices when present (``3. xxx`` → slot 3)
     if "\n" in text:
+        indexed_map: dict[int, str] = {}
+        sequential: list[str] = []
+        saw_marker = False
+        for ln in text.splitlines():
+            m = re.match(r"^\s*(\d+)[\.、]\s*(.*)$", ln)
+            if m:
+                saw_marker = True
+                idx = int(m.group(1))
+                body = (m.group(2) or "").strip()
+                indexed_map[idx] = body
+                sequential.append(body)
+            elif ln.strip():
+                sequential.append(ln.strip())
+        if saw_marker and indexed_map:
+            # Bare "1.\n2.\n3." → all empty bodies
+            if not any(v for v in indexed_map.values()):
+                return []
+            max_i = max(indexed_map)
+            if max_i <= len(indexed_map) + 5 and max_i <= 200:
+                return [indexed_map.get(i, "") for i in range(1, max_i + 1)]
+            return sequential
+
         matches = re.findall(
             r"(?:^|\n)\s*\d+[\.、]\s*(.+?)(?=\n\s*\d+[\.、]\s*|\Z)",
             text,
@@ -34,16 +63,20 @@ def split_numbered_items(text: str) -> list[str]:
         )
         if len(matches) >= 2:
             return _clean(matches)
-    # 1.foo 2.bar  (optional space after marker; next item must be spaced)
+        return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # Inline: 1.foo 2.bar  (optional space after marker; next item must be spaced)
     matches = re.findall(
         r"(?:^|\s)\d+[\.、]\s*(.+?)(?=\s+\d+[\.、]\s*|\Z)",
         text,
         re.S,
     )
     if matches:
-        return _clean(matches)
-    if "\n" in text:
-        return [ln.strip() for ln in text.splitlines() if ln.strip()]
+        cleaned = _clean(matches)
+        # Single match that is itself only numbering junk
+        if len(cleaned) == 1 and re.fullmatch(r"(?:\d+[\.、]\s*)+", cleaned[0]):
+            return []
+        return cleaned
     return [text]
 
 

@@ -215,7 +215,7 @@ class TestImportTestCases:
 
     @pytest.mark.asyncio
     async def test_import_more_steps_than_results(self):
-        """3 steps, 1 result — last result repeated."""
+        """3 steps, 1 result — right-align onto the last step (no invent/repeat)."""
         tc = self._make_gen_tc("TC-002",
             "1.打开页面 2.输入数据 3.点击保存",
             "1.页面提示保存成功",
@@ -228,8 +228,8 @@ class TestImportTestCases:
         )
         steps_db = result.scalars().all()
         assert len(steps_db) == 3
-        assert steps_db[0].parsed_result == "页面提示保存成功"
-        assert steps_db[1].parsed_result == "页面提示保存成功"
+        assert steps_db[0].parsed_result == ""
+        assert steps_db[1].parsed_result == ""
         assert steps_db[2].parsed_result == "页面提示保存成功"
 
     @pytest.mark.asyncio

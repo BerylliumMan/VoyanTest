@@ -483,6 +483,16 @@ def _to_numbered_text(parts: list[str]) -> str:
     return "\n".join(f"{i + 1}. {p}" for i, p in enumerate(parts))
 
 
+def _to_numbered_expected(parts: list[str]) -> str:
+    """Serialize expected results; omit empty slots (no bare ``1. 2. 3.`` junk).
+
+    Non-empty items keep their 1-based step index so import can right-align /
+    index-map correctly. All-empty → ``\"\"``.
+    """
+    lines = [f"{i + 1}. {p.strip()}" for i, p in enumerate(parts) if (p or "").strip()]
+    return "\n".join(lines)
+
+
 def _normalize_tc_item(item: dict) -> dict:
     """Normalize TC field names (handle Chinese, camelCase, snake_case)."""
     from app.gen.adapter import align_expected_to_steps
@@ -542,9 +552,10 @@ def _normalize_tc_item(item: dict) -> dict:
         expected = align_expected_to_steps(steps, expected)
         # Keep empty expected as-is — do not invent neutral placeholders
         normalized["test_steps"] = _to_numbered_text(steps)
-        normalized["expected_result"] = _to_numbered_text(expected)
+        # Never persist bare "1.\n2.\n3." — UI collapses them to "1.2.3.4…"
+        normalized["expected_result"] = _to_numbered_expected(expected)
     elif expected:
-        normalized["expected_result"] = _to_numbered_text(expected)
+        normalized["expected_result"] = _to_numbered_expected(expected)
 
     return normalized
 
