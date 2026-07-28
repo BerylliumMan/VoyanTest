@@ -555,6 +555,8 @@ async def generate_test_cases_for_fps(
                 + f"。\n请为以上每个流程各生成 {per_item} 条文档主路径 UI 用例，"
                 f"JSON 数组合计至少 {min_needed} 条；"
                 f"scenario_type 填「文档流程」；禁止扩异常/边界。"
+                f"expected 只能摘录文档/截图中已写明的断言；"
+                f"文档未写明则填「文档未写明预期」，禁止自编「页加载完成」等通用预期。"
             )
         else:
             user_hint = (
