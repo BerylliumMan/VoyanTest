@@ -247,7 +247,7 @@ async def extract_functional_points(
             progress_callback(0, 0, f"提取到 {len(fps)} 个测试项")
         return fps
 
-    max_ctx = await get_context_budget()
+    max_ctx = await get_context_budget(agent_type=agent_type, agent_id=agent_id)
     budget = chunk_token_budget(max_ctx)
 
     if content_parts is not None:
@@ -423,13 +423,16 @@ async def generate_test_cases_for_fps(
     agent_type: str = "generation",
     agent_id: int | None = None,
     cancel_checker=None,
+    min_tcs_per_item: int = MIN_TCS_PER_ITEM,
+    flow_mode: bool = False,
 ) -> dict:
     """Generate test cases for test items in batches of ``FP_BATCH_SIZE``.
 
-    If a batch yields fewer than ``len(batch) * MIN_TCS_PER_ITEM`` cases, one
+    If a batch yields fewer than ``len(batch) * min_tcs_per_item`` cases, one
     supplemental generation pass is attempted and results are merged by title.
     """
     tc_prompt = tc_prompt or TC_GENERATE_PROMPT
+    per_item = max(1, int(min_tcs_per_item or MIN_TCS_PER_ITEM))
     all_tcs: list[TestCase] = []
     warnings: list[str] = []
     tc_counter = 0
@@ -455,7 +458,24 @@ async def generate_test_cases_for_fps(
             msg = f"正在为 {batch[0].name} 生成用例 ({step + 1}/{total_steps})"
             progress_callback(step, total_steps, msg)
 
-        min_needed = len(batch) * MIN_TCS_PER_ITEM
+        min_needed = len(batch) * per_item
+        if flow_mode:
+            user_hint = (
+                f"本批操作流程共 {len(batch)} 个，名称："
+                + "、".join(fp.name for fp in batch)
+                + f"。\n请为以上每个流程各生成 {per_item} 条文档主路径 UI 用例，"
+                f"JSON 数组合计至少 {min_needed} 条；"
+                f"scenario_type 填「文档流程」；禁止扩异常/边界。"
+            )
+        else:
+            user_hint = (
+                f"本批测试项共 {len(batch)} 个，名称："
+                + "、".join(fp.name for fp in batch)
+                + f"。\n请为以上每个测试项各生成至少 {per_item} 条用例"
+                f"（正常/异常/边界各至少 1 条），"
+                f"JSON 数组合计至少 {min_needed} 条；"
+                f"每条必须带 fp_name 与 scenario_type。"
+            )
         tcs = await _generate_batch_once(
             batch=batch,
             tc_prompt=tc_prompt,
@@ -463,14 +483,7 @@ async def generate_test_cases_for_fps(
             agent_type=agent_type,
             agent_id=agent_id,
             tc_counter=tc_counter,
-            user_hint=(
-                f"本批测试项共 {len(batch)} 个，名称："
-                + "、".join(fp.name for fp in batch)
-                + f"。\n请为以上每个测试项各生成至少 {MIN_TCS_PER_ITEM} 条用例"
-                f"（正常/异常/边界各至少 1 条），"
-                f"JSON 数组合计至少 {min_needed} 条；"
-                f"每条必须带 fp_name 与 scenario_type。"
-            ),
+            user_hint=user_hint,
         )
 
         if tcs and len(tcs) < min_needed:
@@ -480,6 +493,21 @@ async def generate_test_cases_for_fps(
                 len(tcs),
                 min_needed,
             )
+            if flow_mode:
+                extra_hint = (
+                    f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
+                    f"请继续为以下流程各补 1 条文档主路径用例："
+                    + "、".join(fp.name for fp in batch)
+                    + "。不要扩异常/边界；不要重复已有标题；scenario_type=文档流程。"
+                )
+            else:
+                extra_hint = (
+                    f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
+                    f"请继续为以下测试项补齐："
+                    + "、".join(fp.name for fp in batch)
+                    + f"。每个测试项至少 {per_item} 条（正常/异常/边界），"
+                    f"不要重复已有标题；每条必须带 fp_name 与 scenario_type。"
+                )
             extra = await _generate_batch_once(
                 batch=batch,
                 tc_prompt=tc_prompt,
@@ -487,13 +515,7 @@ async def generate_test_cases_for_fps(
                 agent_type=agent_type,
                 agent_id=agent_id,
                 tc_counter=tc_counter + len(tcs),
-                user_hint=(
-                    f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
-                    f"请继续为以下测试项补齐："
-                    + "、".join(fp.name for fp in batch)
-                    + f"。每个测试项至少 {MIN_TCS_PER_ITEM} 条（正常/异常/边界），"
-                    f"不要重复已有标题；每条必须带 fp_name 与 scenario_type。"
-                ),
+                user_hint=extra_hint,
             )
             if extra:
                 tcs = _merge_tcs_by_title(tcs, extra)
@@ -512,9 +534,10 @@ async def generate_test_cases_for_fps(
             tc_counter += len(tcs)
             all_tcs.extend(tcs)
             if len(tcs) < min_needed:
+                unit = "流程" if flow_mode else "测试项"
                 warnings.append(
                     f"Batch {idx + 1} ({fp_names}) 仅生成 {len(tcs)} 条用例，"
-                    f"低于期望 {min_needed} 条（每测试项至少 {MIN_TCS_PER_ITEM} 条）"
+                    f"低于期望 {min_needed} 条（每{unit}至少 {per_item} 条）"
                 )
             logger.info("Batch %d generated %d test cases for: %s", idx + 1, len(tcs), fp_names)
 

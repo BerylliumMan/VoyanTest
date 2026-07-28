@@ -81,7 +81,8 @@ interface HookReturn {
   startRecording: (targetUrl: string) => Promise<boolean>;
   stopRecording: () => Promise<boolean>;
   refreshEvents: () => Promise<boolean>;
-  convertToSteps: () => Promise<boolean>;
+  convertToSteps: () => Promise<{ ok: boolean; count: number }>;
+  loadHistorySession: (sid: string, url?: string) => Promise<boolean>;
 }
 
 interface HookHandle {
@@ -115,6 +116,13 @@ const mountHook = () => {
 describe('useRecordings', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Mount effect 会打 /current；默认 404，避免吞掉后续 Once 队列
+    mocks.axiosDefault.mockImplementation((config: { url?: string; method?: string }) => {
+      if (config?.url === '/api/recordings/current') {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      return Promise.resolve({ data: {} });
+    });
   });
 
   afterEach(() => {
@@ -134,18 +142,19 @@ describe('useRecordings', () => {
   });
 
   it('startRecording 成功后创建 session，状态变为 recording', async () => {
-    mockedAxios.post.mockResolvedValueOnce({
+    const { get } = mountHook();
+    await act(async () => {});
+    mocks.axiosDefault.mockResolvedValueOnce({
       data: { session_id: 'sess-abc-123', status: 'recording' },
     });
 
-    const { get } = mountHook();
     let ok = false;
     await act(async () => {
       ok = await get().startRecording('https://example.com/login');
     });
 
     expect(ok).toBe(true);
-    expect(mockedAxios.post).toHaveBeenCalledWith(
+    expect(mocks.axiosDefault).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'POST',
         url: '/api/recordings/start',
@@ -158,9 +167,12 @@ describe('useRecordings', () => {
   });
 
   it('startRecording 失败时返回 false，状态保持 idle', async () => {
-    mockedAxios.post.mockRejectedValueOnce(new Error('network down'));
-
     const { get } = mountHook();
+    await act(async () => {});
+    mocks.axiosDefault.mockImplementationOnce(() =>
+      Promise.reject(new Error('network down'))
+    );
+
     let ok = true;
     await act(async () => {
       ok = await get().startRecording('https://example.com');
@@ -174,29 +186,33 @@ describe('useRecordings', () => {
 
   it('startRecording 对空 URL 直接返回 false，不调用后端', async () => {
     const { get } = mountHook();
+    await act(async () => {});
+    vi.clearAllMocks();
     let ok = true;
     await act(async () => {
       ok = await get().startRecording('   ');
     });
 
     expect(ok).toBe(false);
-    expect(mockedAxios.post).not.toHaveBeenCalled();
+    expect(mocks.axiosDefault).not.toHaveBeenCalledWith(
+      expect.objectContaining({ url: '/api/recordings/start' })
+    );
   });
 
   it('stopRecording 成功后将状态置为 stopped', async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: { session_id: 'sess-1', status: 'stopped' },
-    });
-    mockedAxios.get.mockResolvedValueOnce({ data: [] });
-
     const { get } = mountHook();
-    // 先启动一个 session
-    mockedAxios.post.mockResolvedValueOnce({
+    await act(async () => {});
+
+    mocks.axiosDefault.mockResolvedValueOnce({
       data: { session_id: 'sess-1', status: 'recording' },
     });
     await act(async () => {
       await get().startRecording('https://example.com');
     });
+
+    mocks.axiosDefault
+      .mockResolvedValueOnce({ data: { session_id: 'sess-1', status: 'stopped' } })
+      .mockResolvedValueOnce({ data: [] });
 
     let ok = false;
     await act(async () => {
@@ -204,7 +220,7 @@ describe('useRecordings', () => {
     });
 
     expect(ok).toBe(true);
-    expect(mockedAxios.post).toHaveBeenCalledWith(
+    expect(mocks.axiosDefault).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'POST',
         url: '/api/recordings/sess-1/stop',
@@ -249,12 +265,12 @@ describe('useRecordings', () => {
     ];
     mockedAxios.post.mockResolvedValueOnce({ data: { steps: fakeSteps } });
 
-    let ok = false;
+    let result = { ok: false, count: 0 };
     await act(async () => {
-      ok = await get().convertToSteps();
+      result = await get().convertToSteps();
     });
 
-    expect(ok).toBe(true);
+    expect(result).toEqual({ ok: true, count: 2 });
     expect(mockedAxios.post).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'POST',
@@ -268,13 +284,17 @@ describe('useRecordings', () => {
 
   it('convertToSteps 在没有 sessionId 时直接返回 false', async () => {
     const { get } = mountHook();
-    let ok = true;
+    await act(async () => {});
+    vi.clearAllMocks();
+    let result = { ok: true, count: 1 };
     await act(async () => {
-      ok = await get().convertToSteps();
+      result = await get().convertToSteps();
     });
 
-    expect(ok).toBe(false);
-    expect(mockedAxios.post).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, count: 0 });
+    expect(mocks.axiosDefault).not.toHaveBeenCalledWith(
+      expect.objectContaining({ url: expect.stringContaining('/convert') })
+    );
     expect(get().steps).toEqual([]);
   });
 
@@ -288,12 +308,12 @@ describe('useRecordings', () => {
     });
 
     mockedAxios.post.mockRejectedValueOnce(new Error('convert fail'));
-    let ok = true;
+    let result = { ok: true, count: 1 };
     await act(async () => {
-      ok = await get().convertToSteps();
+      result = await get().convertToSteps();
     });
 
-    expect(ok).toBe(false);
+    expect(result).toEqual({ ok: false, count: 0 });
     expect(get().steps).toEqual([]);
     expect(get().converting).toBe(false);
   });

@@ -74,6 +74,7 @@ function AgentDefinitions() {
   const [editing, setEditing] = useState<AgentDefinition | null>(null);
   const [form] = Form.useForm();
   const watchedAgentType = Form.useWatch('agent_type', form);
+  const watchedSkills: string[] = Form.useWatch('skills', form) || [];
   const [submitLoading, setSubmitLoading] = useState(false);
   const [promptOptions, setPromptOptions] = useState<PromptOption[]>([]);
 
@@ -101,6 +102,11 @@ function AgentDefinitions() {
     form.resetFields();
     if (record) {
       const llm = record.llm_config || {};
+      const overrides = record.prompt_overrides || {};
+      const overrideFields: Record<string, string> = {};
+      Object.entries(overrides).forEach(([k, v]) => {
+        overrideFields[`override__${k}`] = v;
+      });
       form.setFieldsValue({
         name: record.name,
         agent_type: record.agent_type,
@@ -113,6 +119,7 @@ function AgentDefinitions() {
         llm_api_base: llm.api_base || '',
         llm_provider: llm.provider || 'openai',
         is_active: record.is_active,
+        ...overrideFields,
       });
     }
     setVisible(true);
@@ -131,6 +138,16 @@ function AgentDefinitions() {
     return cfg;
   };
 
+  const buildPromptOverrides = (values: Record<string, unknown>): Record<string, string> => {
+    const skills = (values.skills as string[]) || [];
+    const overrides: Record<string, string> = {};
+    for (const skill of skills) {
+      const raw = String(values[`override__${skill}`] ?? '').trim();
+      if (raw) overrides[skill] = raw;
+    }
+    return overrides;
+  };
+
   const handleSubmit = async () => {
     const values = await form.validate();
     setSubmitLoading(true);
@@ -141,6 +158,7 @@ function AgentDefinitions() {
       description: values.description || '',
       skills: values.skills || [],
       llm_config: buildLlmConfig(values),
+      prompt_overrides: buildPromptOverrides(values),
       system_prompt: values.system_prompt || '',
       is_active: values.is_active || false,
     };
@@ -359,6 +377,31 @@ function AgentDefinitions() {
               }))}
             />
           </Form.Item>
+
+          {watchedSkills.length > 0 && (
+            <>
+              <div className={styles.sectionTitle}>技能提示词覆盖</div>
+              <Collapse className={styles.advancedSection}>
+                {watchedSkills.map((skill) => {
+                  const meta = promptOptions.find((p) => p.key === skill);
+                  return (
+                    <CollapseItem
+                      key={skill}
+                      name={skill}
+                      header={`${meta?.name || skill}（留空则用全局模板）`}
+                    >
+                      <Form.Item field={`override__${skill}`} noStyle>
+                        <Input.TextArea
+                          rows={6}
+                          placeholder="留空则使用全局 PromptTemplate；填写后优先生效"
+                        />
+                      </Form.Item>
+                    </CollapseItem>
+                  );
+                })}
+              </Collapse>
+            </>
+          )}
 
           <div className={styles.sectionTitle}>
             {t['agent_definitions.form.llm_config']}

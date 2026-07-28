@@ -46,3 +46,4 @@ class TestCase:
     test_steps: str = ""
     expected_result: str = ""
     priority: str = "中"
+    validation_errors: str = ""

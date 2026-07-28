@@ -266,6 +266,23 @@ _INJECT_RECORDER_SCRIPT = r"""
   }
 
   var _input_timers = {};
+  var _input_latest = {};
+
+  window.__CDP_RECORDER_FLUSH__ = function () {
+    var keys = Object.keys(_input_timers);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (_input_timers[k]) {
+        clearTimeout(_input_timers[k]);
+        delete _input_timers[k];
+      }
+      var pending = _input_latest[k];
+      if (pending) {
+        report("input", {selector: pending.selector, value: pending.value, tag: pending.tag});
+        delete _input_latest[k];
+      }
+    }
+  };
 
   document.addEventListener("click", function (ev) {
     var el = ev.target;
@@ -300,10 +317,12 @@ _INJECT_RECORDER_SCRIPT = r"""
     var tag = (el.tagName || "").toLowerCase();
     if (tag !== "input" && tag !== "textarea") return;
     var key = describe(el) || tag;
+    _input_latest[key] = {selector: key, value: el.value, tag: tag};
     if (_input_timers[key]) clearTimeout(_input_timers[key]);
     _input_timers[key] = setTimeout(function() {
       report("input", {selector: key, value: el.value, tag: tag});
       delete _input_timers[key];
+      delete _input_latest[key];
     }, 500);
   }, true);
 
@@ -321,6 +340,7 @@ _INJECT_RECORDER_SCRIPT = r"""
         clearTimeout(_input_timers[key]);
         delete _input_timers[key];
       }
+      delete _input_latest[key];
       report("input", {selector: key, value: el.value, tag: tag});
     }
   }, true);
@@ -385,6 +405,7 @@ class CDPRecordingSession:
         self._attached_manager: Any = None  # PlaywrightMCPManager reference
         self._last_page_url: str = ""
         self._last_page_title: str = ""
+        self.last_event_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Public read-only properties
@@ -471,6 +492,14 @@ class CDPRecordingSession:
             )
             return True
 
+        # Flush pending debounced input events before tearing down CDP
+        try:
+            await self._flush_pending_inputs()
+        except Exception as exc:
+            logger.warning(
+                f"CDPRecordingSession[{self._session_id}]: flush inputs failed: {exc}"
+            )
+
         try:
             await self._disable_domains()
         except Exception as exc:  # noqa: BLE001 - 停止录制时关闭域是 best-effort
@@ -492,6 +521,23 @@ class CDPRecordingSession:
             f"{self.elapsed_seconds:.1f}s)."
         )
         return True
+
+    async def _flush_pending_inputs(self) -> None:
+        """Ask the page to flush debounced input timers via injected API."""
+        if self._ws is None:
+            return
+        await self._send_cdp(
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "typeof window.__CDP_RECORDER_FLUSH__ === 'function' "
+                    "&& window.__CDP_RECORDER_FLUSH__()"
+                ),
+                "returnByValue": True,
+            },
+        )
+        # Allow console/Runtime events from flush to be ingested
+        await asyncio.sleep(0.15)
 
     def collect_events(self) -> list[RecordedEvent]:
         """Return a copy of the recorded events and clear the internal buffer.
@@ -557,6 +603,7 @@ class CDPRecordingSession:
             page_title=str(event_data.get("page_title") or self._last_page_title or ""),
         )
         self._events.append(event)
+        self.last_event_at = time.time()
         logger.debug(
             f"CDPRecordingSession[{self._session_id}]: recorded {event.event_type} "
             f"selector={event.selector!r} value={event.value!r}"

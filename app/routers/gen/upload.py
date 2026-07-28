@@ -29,6 +29,33 @@ logger = logging.getLogger(__name__)
 # 跟踪无 session 绑定的 orphan task（兼容旧逻辑，新任务按 session 注册）
 _gen_tasks: set = set()
 
+
+def map_gen_progress(current: int, total: int, message: str, *, floor: int = 0) -> int:
+    """Map pipeline / chunk / batch progress into a 5–100% range (monotonic via floor)."""
+    msg = message or ""
+    total = max(0, int(total or 0))
+    current = max(0, int(current or 0))
+    frac = (current / total) if total > 0 else 0.0
+    frac = max(0.0, min(1.0, frac))
+
+    # Prefer message-based stages so Phase1 chunk totals of 4 don't hit pipeline map
+    if "校验" in msg:
+        mapped = 96 + int(frac * 4)
+    elif "用例" in msg or "生成" in msg or "Batch" in msg:
+        mapped = 55 + int(frac * 40)
+    elif "测试项" in msg or "功能点" in msg or "分段" in msg:
+        mapped = 15 + int(frac * 40)
+    elif "解析" in msg or "正在提取:" in msg:
+        mapped = 5 + int(frac * 10)
+    elif "提取" in msg:
+        mapped = 15 + int(frac * 40)
+    elif total == 4 and current in (1, 2, 3, 4):
+        mapped = {1: 12, 2: 20, 3: 55, 4: 96}[current]
+    else:
+        mapped = max(floor, 10)
+
+    return max(floor, max(0, min(100, int(mapped))))
+
 router = APIRouter()
 
 # 魔术字节签名对照表
@@ -64,13 +91,14 @@ async def list_generation_agents(
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> list[dict]:
-    """List generation AgentDefinitions for the gen page picker (non-admin)."""
+    """List generation AgentDefinitions for the gen page picker (non-admin).
+
+    Returns all generation agents (including inactive) so users can pick
+    specialized modes like flow-manual without activating them globally.
+    """
     from app.crud.agent_definition import list_agent_definitions
 
     agents = await list_agent_definitions(db, agent_type="generation")
-    # Prefer enabled agents for the picker; fall back to all if none enabled
-    enabled = [a for a in agents if a.is_active]
-    source = enabled or agents
     return [
         {
             "id": a.id,
@@ -79,7 +107,7 @@ async def list_generation_agents(
             "skills": a.skills or [],
             "is_active": bool(a.is_active),
         }
-        for a in source
+        for a in agents
     ]
 
 
@@ -98,7 +126,7 @@ async def upload_and_analyze(
 
     # Resolve generation agent early (validate before starting background work)
     from app.crud.agent_definition import get_active_by_type, get_agent_definition
-    from app.gen.prompts import pick_tc_prompt_key
+    from app.gen.prompts import pick_fp_prompt_key, pick_tc_prompt_key, min_tcs_per_item
 
     selected_agent = None
     if agent_id is not None:
@@ -110,7 +138,9 @@ async def upload_and_analyze(
 
     resolved_agent_id = selected_agent.id if selected_agent else None
     resolved_skills = list(selected_agent.skills or []) if selected_agent else []
+    fp_prompt_key = pick_fp_prompt_key(resolved_skills)
     tc_prompt_key = pick_tc_prompt_key(resolved_skills)
+    min_tcs = min_tcs_per_item(resolved_skills, tc_prompt_key=tc_prompt_key)
 
     filenames = [f.filename or f"file_{i}" for i, f in enumerate(files)]
 
@@ -149,6 +179,8 @@ async def upload_and_analyze(
     async def _set_progress(percent: int, message: str) -> None:
         percent = max(0, min(100, int(percent)))
         async with _lock:
+            # Monotonic: never move the bar backwards
+            percent = max(int(session.progress or 0), percent)
             session.progress = percent
             session.progress_message = message
         # 节流写入 DB，便于多 worker / 重启后 status 仍可读
@@ -170,24 +202,15 @@ async def upload_and_analyze(
                 logger.debug("persist gen progress failed", exc_info=True)
 
     def _progress_callback(current: int, total: int, message: str) -> None:
-        """Sync callback used by gen pipeline; schedule async session update."""
-        if total and total > 0:
-            percent = int(current / total * 100)
-        else:
-            # Heuristic by message keywords for UI stepper
-            if "用例" in (message or "") or "校验" in (message or ""):
-                percent = 75
-            elif "测试项" in (message or "") or "功能点" in (message or "") or "提取" in (message or ""):
-                percent = 45
-            elif "解析" in (message or ""):
-                percent = 15
-            else:
-                percent = max(session.progress, 10)
+        """Map pipeline / chunk / batch progress into a monotonic 5–100% range."""
+        floor = int(getattr(session, "progress", 0) or 0)
+        mapped = map_gen_progress(current, total, message or "", floor=floor)
+
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_set_progress(percent, message or ""))
+            loop.create_task(_set_progress(mapped, message or ""))
         except RuntimeError:
-            session.progress = percent
+            session.progress = max(floor, mapped)
             session.progress_message = message or ""
 
     async def _run_full_analysis() -> None:
@@ -233,16 +256,16 @@ async def upload_and_analyze(
                 try:
                     if selected_agent:
                         logger.info(
-                            "Generation via AgentDefinition id=%s name=%s skills=%s tc_key=%s",
+                            "Generation via AgentDefinition id=%s name=%s skills=%s fp_key=%s tc_key=%s",
                             selected_agent.id, selected_agent.name,
-                            selected_agent.skills, tc_prompt_key,
+                            selected_agent.skills, fp_prompt_key, tc_prompt_key,
                         )
                     else:
                         logger.warning(
                             "No generation AgentDefinition; using PromptTemplate defaults"
                         )
                     fp_prompt = await resolve_prompt_for_agent(
-                        pdb, "generation", "fp_extract", agent_id=resolved_agent_id,
+                        pdb, "generation", fp_prompt_key, agent_id=resolved_agent_id,
                     )
                     tc_prompt = await resolve_prompt_for_agent(
                         pdb, "generation", tc_prompt_key, agent_id=resolved_agent_id,
@@ -260,14 +283,21 @@ async def upload_and_analyze(
                 prompts={"fp_extract": fp_prompt, "tc_generate": tc_prompt},
                 agent_id=resolved_agent_id,
                 skills=resolved_skills,
+                fp_prompt_key=fp_prompt_key,
                 tc_prompt_key=tc_prompt_key,
+                min_tcs_per_item=min_tcs,
                 content_parts=content_parts,
                 cancel_checker=cancel_checker,
             )
             _raise_if_cancelled()
             if agent_name and not result.get("error"):
                 warnings_out = list(result.get("warnings") or [])
-                mode = "UI自动化" if tc_prompt_key == "tc_generate_ui" else "功能用例"
+                if tc_prompt_key == "tc_generate_flow":
+                    mode = "流程手册UI用例"
+                elif tc_prompt_key == "tc_generate_ui":
+                    mode = "UI自动化"
+                else:
+                    mode = "功能用例"
                 warnings_out.insert(0, f"使用 AI Agent：{agent_name}（{mode}）")
                 result["warnings"] = warnings_out
 

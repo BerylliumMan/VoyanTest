@@ -88,6 +88,7 @@ const Recordings: React.FC = () => {
     stopRecording,
     refreshEvents,
     convertToSteps,
+    loadHistorySession,
   } = useRecordings();
 
   // 仅 UI 局部状态：手动刷新按钮的 loading
@@ -162,15 +163,25 @@ const Recordings: React.FC = () => {
   };
 
   const handleConvert = async () => {
-    const ok = await convertToSteps();
-    if (ok) {
+    const result = await convertToSteps();
+    if (result.ok) {
       Message.success(
-        steps.length > 0
-          ? t['recordings.steps_generated'].replace('{count}', String(steps.length))
+        result.count > 0
+          ? t['recordings.steps_generated'].replace('{count}', String(result.count))
           : t['recordings.steps_empty']
       );
     } else {
       Message.error(t['recordings.convert_failed']);
+    }
+  };
+
+  const handleLoadHistory = async (sid: string, sessionUrl?: string) => {
+    const ok = await loadHistorySession(sid, sessionUrl);
+    setShowHistory(false);
+    if (ok) {
+      Message.success(t['recordings.history_loaded'] || '已加载历史录制');
+    } else {
+      Message.error(t['recordings.history_load_failed'] || '加载历史录制失败');
     }
   };
 
@@ -350,11 +361,7 @@ const Recordings: React.FC = () => {
         {showHistory && (
           <Card className={styles.cardMargin}>
             <RecordingHistory
-              onLoadSession={(sid) => {
-                setShowHistory(false);
-                setUrl('');
-                Message.info('会话 ID: ' + sid);
-              }}
+              onLoadSession={handleLoadHistory}
             />
           </Card>
         )}

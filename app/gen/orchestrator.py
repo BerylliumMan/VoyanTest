@@ -39,7 +39,9 @@ async def two_phase_analyze(
     db = None,
     agent_id: int | None = None,
     skills: list | None = None,
+    fp_prompt_key: str | None = None,
     tc_prompt_key: str | None = None,
+    min_tcs_per_item: int | None = None,
     content_parts: list | None = None,
     cancel_checker=None,
 ) -> dict:
@@ -49,13 +51,27 @@ async def two_phase_analyze(
     (``[{type:text|image,...}, ...]``) for vision-capable Phase 1.
     """
     from app.gen.agents.pipeline import Pipeline
+    from app.gen.prompts import (
+        min_tcs_per_item as _min_tcs,
+        pick_fp_prompt_key,
+        pick_tc_prompt_key,
+    )
+
+    skills = skills or []
+    fp_key = fp_prompt_key or pick_fp_prompt_key(skills)
+    tc_key = tc_prompt_key or pick_tc_prompt_key(skills)
+    min_tcs = min_tcs_per_item if min_tcs_per_item is not None else _min_tcs(
+        skills, tc_prompt_key=tc_key,
+    )
     config = {
         "project_description": project_description,
         "db": db,
         "agent_type": "generation",
         "agent_id": agent_id,
-        "skills": skills or [],
-        "tc_prompt_key": tc_prompt_key,
+        "skills": skills,
+        "fp_prompt_key": fp_key,
+        "tc_prompt_key": tc_key,
+        "min_tcs_per_item": min_tcs,
         "progress_callback": progress_callback,
         "cancel_checker": cancel_checker,
     }

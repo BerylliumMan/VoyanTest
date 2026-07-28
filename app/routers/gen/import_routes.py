@@ -65,11 +65,18 @@ async def import_test_cases(
         raise HTTPException(403, "无权限操作该项目")
 
     from app.gen.adapter import import_test_cases as do_import
-    created = await do_import(db, body.project_id, test_cases_data, body.selected_ids)
+    created, skipped = await do_import(
+        db,
+        body.project_id,
+        test_cases_data,
+        body.selected_ids,
+        parent_module_id=body.parent_module_id,
+    )
 
     await crud.increment_imported_count(db, body.session_id, body.project_id, len(created))
 
     return GenImportResponse(
         imported_count=len(created),
+        skipped_count=skipped,
         test_case_ids=[tc.id for tc in created],
     )

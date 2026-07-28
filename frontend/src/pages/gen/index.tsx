@@ -1,13 +1,14 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useHistory } from 'react-router-dom';
 import {
   Card, Upload, Button, Message, Typography, Space, Select,
-  Table, Tag, Progress, Divider, Collapse, Input, Spin, List,
+  Table, Tag, Progress, Divider, Collapse, Input, Spin, List, Modal,
 } from '@arco-design/web-react';
 import type { UploadItem } from '@arco-design/web-react/es/Upload/interface';
 import {
   IconUpload, IconCheck, IconClose, IconLoading,
   IconThunderbolt, IconSave, IconHistory, IconFile, IconCode,
-  IconStar,
+  IconStar, IconPause,
 } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
@@ -92,12 +93,14 @@ interface GenAgent {
 }
 
 const agentModeLabel = (agent: GenAgent): string => {
+  if ((agent.skills || []).includes('tc_generate_flow')) return '流程手册UI用例';
   if ((agent.skills || []).includes('tc_generate_ui')) return 'UI自动化用例';
   return '功能用例';
 };
 
 const GenPage: React.FC = () => {
   const t = useLocale();
+  const history = useHistory();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
   const [genAgents, setGenAgents] = useState<GenAgent[]>([]);
@@ -105,6 +108,7 @@ const GenPage: React.FC = () => {
   const [description, setDescription] = useState('');
   const [fileList, setFileList] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus | null>(null);
   const [functionalPoints, setFunctionalPoints] = useState<FunctionalPoint[]>([]);
@@ -214,7 +218,8 @@ const GenPage: React.FC = () => {
             pollTimer.current = null;
           }
           setUploading(false);
-          await loadPreview(sid);
+          Message.success('分析完成，正在打开详情');
+          history.push(`/gen-history-detail/${sid}`);
         } else if (status.status === 'failed') {
           if (pollTimer.current) {
             clearInterval(pollTimer.current);
@@ -234,6 +239,36 @@ const GenPage: React.FC = () => {
         logger.error('Polling error:', err);
       }
     }, 2000);
+  };
+
+  const handleStop = () => {
+    if (!sessionId) return;
+    Modal.confirm({
+      title: '停止分析',
+      content: '确定要停止该分析任务吗？',
+      onOk: async () => {
+        setStopping(true);
+        try {
+          await axios.post(`/api/gen/history/${sessionId}/cancel`);
+          Message.success('已停止分析');
+          if (pollTimer.current) {
+            clearInterval(pollTimer.current);
+            pollTimer.current = null;
+          }
+          setUploading(false);
+          setAnalysisStatus((prev) =>
+            prev
+              ? { ...prev, status: 'cancelled', message: '分析已停止' }
+              : { status: 'cancelled', progress: 100, message: '分析已停止' },
+          );
+        } catch (e: unknown) {
+          const err = e as { response?: { data?: { detail?: string } } };
+          Message.error(err?.response?.data?.detail || '停止失败');
+        } finally {
+          setStopping(false);
+        }
+      },
+    });
   };
 
   const loadPreview = async (sid: string) => {
@@ -380,10 +415,36 @@ const GenPage: React.FC = () => {
                 icon={<IconThunderbolt />}
                 loading={uploading}
                 onClick={handleUpload}
-                disabled={!selectedProject || fileList.length === 0}
+                disabled={!selectedProject || fileList.length === 0 || uploading}
               >
                 开始分析
               </Button>
+              {(analysisStatus?.status === 'analyzing' || analysisStatus?.status === 'pending') && sessionId && (
+                <Button
+                  status="warning"
+                  icon={<IconPause />}
+                  loading={stopping}
+                  onClick={handleStop}
+                >
+                  停止分析
+                </Button>
+              )}
+              {sessionId && analysisStatus?.status === 'cancelled' && (
+                <Button
+                  icon={<IconHistory />}
+                  onClick={() => history.push(`/gen-history-detail/${sessionId}`)}
+                >
+                  查看记录
+                </Button>
+              )}
+              {sessionId && analysisStatus?.status === 'failed' && (
+                <Button
+                  icon={<IconHistory />}
+                  onClick={() => history.push(`/gen-history-detail/${sessionId}`)}
+                >
+                  查看记录
+                </Button>
+              )}
               {testCases.length > 0 && (
                 <>
                   <Button
@@ -501,12 +562,18 @@ const GenPage: React.FC = () => {
                     <IconCheck className={styles.successIconLarge} aria-hidden />
                     <div className={styles.resultTitle}>
                       <Text className={styles.successTitle}>
-                        分析完成
+                        分析完成，正在跳转详情…
                       </Text>
                     </div>
-                    <Text className={styles.mutedText}>
-                      共提取 {functionalPoints.length} 个测试项，生成 {testCases.length} 个测试用例
-                    </Text>
+                    {sessionId && (
+                      <Button
+                        type="primary"
+                        className={styles.tagMarginRight}
+                        onClick={() => history.push(`/gen-history-detail/${sessionId}`)}
+                      >
+                        打开详情
+                      </Button>
+                    )}
                   </div>
                 </Card>
               )}

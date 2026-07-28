@@ -30,10 +30,19 @@ class GenPreviewItem(BaseModel):
     expected_result: str
     priority: str
     selected: bool = True
+    validation_errors: str = ""
 
 
 class GenPreviewResponse(BaseModel):
     session_id: str
+    filename: str = ""
+    filenames: list[str] = []
+    status: str = ""
+    error_message: str = ""
+    progress: int = 0
+    progress_message: str = ""
+    functional_points_count: int = 0
+    test_cases_count: int = 0
     functional_points: list[dict]
     test_cases: list[GenPreviewItem]
 
@@ -42,10 +51,12 @@ class GenImportRequest(BaseModel):
     session_id: str
     project_id: int
     selected_ids: list[str] | None = None  # None = import all
+    parent_module_id: int | None = None
 
 
 class GenImportResponse(BaseModel):
     imported_count: int
+    skipped_count: int = 0
     test_case_ids: list[int]
 
 
@@ -77,3 +88,4 @@ class GenTestCaseUpdate(BaseModel):
     test_steps: Optional[str] = None
     expected_result: Optional[str] = None
     priority: Optional[str] = None
+    validation_errors: Optional[str] = None

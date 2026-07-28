@@ -39,10 +39,19 @@ interface TestCase {
   expected_result: string;
   priority: string;
   selected: boolean;
+  validation_errors?: string;
 }
 
 interface GenPreviewResponse {
   session_id: string;
+  filename?: string;
+  filenames?: string[];
+  status?: string;
+  error_message?: string;
+  progress?: number;
+  progress_message?: string;
+  functional_points_count?: number;
+  test_cases_count?: number;
   functional_points: FunctionalPoint[];
   test_cases: TestCase[];
 }
@@ -94,6 +103,8 @@ const getStatusTag = (status: string) => {
       return <Tag color="red">失败</Tag>;
     case 'analyzing':
       return <Tag color="blue">分析中</Tag>;
+    case 'cancelled':
+      return <Tag color="orange">已停止</Tag>;
     default:
       return <Tag color="gray">{status}</Tag>;
   }
@@ -184,35 +195,25 @@ const GenHistoryDetailPage: React.FC = () => {
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
   const [viewMode, setViewMode] = useState<'summary' | 'cases'>('summary');
   const [selectedPrimary, setSelectedPrimary] = useState<string | null>(null);
+  const [projectModules, setProjectModules] = useState<{ id: number; name: string; parent_id: number | null }[]>([]);
+  const [parentModuleId, setParentModuleId] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
       setError(null);
       try {
-        const [previewRes, historyRes] = await Promise.all([
-          axios.get<GenPreviewResponse>(`/api/gen/history/${id}`),
-          axios.get<{ items: HistoryItem[] }>('/api/gen/history', {
-            params: { page: 1, page_size: 1 },
-          }),
-        ]);
-
-        setPreviewData(previewRes.data);
-
-        const matchedItem = historyRes.data.items.find(
-          (item) => item.id === id
-        );
-        if (matchedItem) {
-          setHistoryItem(matchedItem);
-        } else {
-          setHistoryItem({
-            id,
-            filename: `会话 ${id.slice(0, 8)}...`,
-            status: 'completed',
-            functional_points_count: previewRes.data.functional_points.length,
-            test_cases_count: previewRes.data.test_cases.length,
-          });
-        }
+        const previewRes = await axios.get<GenPreviewResponse>(`/api/gen/history/${id}`);
+        const data = previewRes.data;
+        setPreviewData(data);
+        setHistoryItem({
+          id,
+          filename: data.filename || `会话 ${id.slice(0, 8)}...`,
+          status: data.status || 'completed',
+          functional_points_count:
+            data.functional_points_count ?? data.functional_points.length,
+          test_cases_count: data.test_cases_count ?? data.test_cases.length,
+        });
       } catch (err: unknown) {
         const axiosError = err as { response?: { status?: number; data?: { detail?: string } } };
         const detail = axiosError?.response?.data?.detail || '加载失败';
@@ -259,6 +260,21 @@ const GenHistoryDetailPage: React.FC = () => {
     fetchProjects();
   }, []);
 
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setProjectModules([]);
+      setParentModuleId(undefined);
+      return;
+    }
+    axios
+      .get(`/api/projects/${selectedProjectId}/modules`)
+      .then((res) => {
+        const mods = (res.data || []) as { id: number; name: string; parent_id: number | null }[];
+        setProjectModules(mods.filter((m) => m.parent_id == null));
+      })
+      .catch(() => setProjectModules([]));
+  }, [selectedProjectId]);
+
   const handleImport = async (mode: 'all' | 'selected' | 'module') => {
     if (!selectedProjectId) {
       Message.warning('请先选择项目');
@@ -286,12 +302,22 @@ const GenHistoryDetailPage: React.FC = () => {
     }
     setImportLoading(true);
     try {
-      const res = await axios.post<{ imported_count: number; test_case_ids: number[] }>('/api/gen/import', {
+      const res = await axios.post<{
+        imported_count: number;
+        skipped_count?: number;
+        test_case_ids: number[];
+      }>('/api/gen/import', {
         session_id: id,
         project_id: selectedProjectId,
         selected_ids: selectedIds,
+        parent_module_id: parentModuleId ?? null,
       });
-      Message.success(`成功导入 ${res.data.imported_count} 条测试用例`);
+      const skipped = res.data.skipped_count || 0;
+      Message.success(
+        skipped > 0
+          ? `成功导入 ${res.data.imported_count} 条，跳过重复 ${skipped} 条`
+          : `成功导入 ${res.data.imported_count} 条测试用例`,
+      );
       setSelectedRowKeys([]);
     } catch {
       Message.error('导入失败');
@@ -356,6 +382,7 @@ const GenHistoryDetailPage: React.FC = () => {
         ...values,
         test_steps: testSteps,
         expected_result: expectedResult,
+        validation_errors: '',
       });
       Message.success('更新成功');
       setEditModalVisible(false);
@@ -542,7 +569,19 @@ const GenHistoryDetailPage: React.FC = () => {
       title: '标题',
       dataIndex: 'title',
       width: 200,
-      render: (val: string) => <TruncateText text={val} maxWidth={180} />,
+      render: (val: string, record: TestCase) => (
+        <Space size={4}>
+          {record.validation_errors ? <Tag color="red">校验失败</Tag> : null}
+          <TruncateText text={val} maxWidth={160} />
+        </Space>
+      ),
+    },
+    {
+      title: '校验问题',
+      dataIndex: 'validation_errors',
+      width: 180,
+      render: (val: string) =>
+        val ? <TruncateText text={val} maxWidth={160} /> : <Text type="secondary">-</Text>,
     },
     {
       title: '前置条件',
@@ -671,6 +710,20 @@ const GenHistoryDetailPage: React.FC = () => {
                 {projects && projects.map((p) => (
                   <Select.Option key={p.id} value={p.id}>
                     {p.name}
+                  </Select.Option>
+                ))}
+              </Select>
+              <Select
+                placeholder="挂到已有一级模块下（可选）"
+                className={styles.projectSelect}
+                value={parentModuleId}
+                onChange={(val) => setParentModuleId(val as number)}
+                allowClear
+                disabled={!selectedProjectId}
+              >
+                {projectModules.map((m) => (
+                  <Select.Option key={m.id} value={m.id}>
+                    {m.name}
                   </Select.Option>
                 ))}
               </Select>

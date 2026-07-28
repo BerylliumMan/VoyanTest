@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gen.prompts import (
     FP_EXTRACT_PROMPT,
+    FP_EXTRACT_FLOW_PROMPT,
     TC_GENERATE_PROMPT,
     TC_GENERATE_UI_PROMPT,
+    TC_GENERATE_FLOW_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,7 +30,7 @@ DEFAULT_AGENTS: list[dict] = [
         "agent_type": "recording",
         "description": "CDP 录制引擎 — 录制用户在浏览器中的操作并生成测试步骤",
         "skills": [
-            "operation_translate"
+            "cdp_convert"
         ],
         "llm_config": {"temperature": 0.1, "max_tokens": 4096},
         "is_active": 1,
@@ -137,12 +139,31 @@ DEFAULT_AGENTS: list[dict] = [
         "thinking_config": {},
         "system_prompt": "你是 UI 自动化用例生成专家。流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出可操作步骤与可观测预期，每个测试项至少 3 条，优先主路径与关键异常 UI，避免纯接口/后台逻辑。",
         "prompt_overrides": {}
+    },
+    {
+        "name": "流程手册用例生成助手",
+        "agent_type": "generation",
+        "description": "按操作手册/流程图文忠实生成 UI 可执行用例（不强制异常边界）",
+        "skills": [
+            "fp_extract_flow",
+            "tc_generate_flow"
+        ],
+        "llm_config": {},
+        "is_active": 0,
+        "tools": [],
+        "goal": "忠实还原操作手册中的主路径为可执行 UI 步骤",
+        "constraints": [],
+        "thinking_config": {},
+        "system_prompt": "你是流程手册用例生成专家。流程：(1) fp_extract_flow 从文档与截图抽取操作流程单元；(2) tc_generate_flow 为每个流程生成 1 条文档主路径 UI 用例。禁止脱离文档臆造异常/边界；步骤与控件文案必须来自原文或截图。",
+        "prompt_overrides": {}
     }
 ]
 
 
 def get_seed_prompts() -> dict[str, dict]:
     """All skill prompt templates to seed (key → metadata + content)."""
+    from core.cdp_converter import CDP_TO_STEPS_PROMPT
+
     return {
         "fp_extract": {
             "name": "测试项提取",
@@ -150,6 +171,13 @@ def get_seed_prompts() -> dict[str, dict]:
             "content": FP_EXTRACT_PROMPT.strip(),
             "variables": [],
             "description": "强制 JSON 输出细粒度测试项列表",
+        },
+        "fp_extract_flow": {
+            "name": "流程手册提取",
+            "category": "generation",
+            "content": FP_EXTRACT_FLOW_PROMPT.strip(),
+            "variables": [],
+            "description": "从操作手册图文抽取操作流程单元（非异常边界密度）",
         },
         "tc_generate": {
             "name": "功能用例生成",
@@ -165,12 +193,26 @@ def get_seed_prompts() -> dict[str, dict]:
             "variables": ["fp_descriptions", "fps", "csv_header"],
             "description": "UI 自动化用例 JSON（每测试项至少 3 条）",
         },
+        "tc_generate_flow": {
+            "name": "流程手册UI用例生成",
+            "category": "generation",
+            "content": TC_GENERATE_FLOW_PROMPT.strip(),
+            "variables": ["fp_descriptions", "fps", "csv_header"],
+            "description": "按手册主路径生成 UI 用例（每流程通常 1 条）",
+        },
         "operation_translate": {
             "name": "操作指令翻译",
             "category": "execution",
             "content": OPERATION_TRANSLATE_PROMPT.strip(),
             "variables": ["step", "url"],
             "description": "将自然语言步骤转换为 MCP 浏览器操作",
+        },
+        "cdp_convert": {
+            "name": "录制事件转步骤",
+            "category": "recording",
+            "content": CDP_TO_STEPS_PROMPT.strip(),
+            "variables": [],
+            "description": "将 CDP 录制事件时间线转换为自然语言测试步骤 JSON",
         },
         "verify_expected": {
             "name": "预期结果验证",
@@ -211,10 +253,16 @@ async def seed_prompt_templates(db: AsyncSession) -> int:
     return created
 
 
-async def sync_prompt_templates_from_seed(db: AsyncSession) -> int:
-    """If active prompt content differs from seed, create+activate a new version.
+async def sync_prompt_templates_from_seed(
+    db: AsyncSession,
+    *,
+    activate: bool = False,
+) -> int:
+    """Push seed prompt bodies into DB.
 
-    Returns number of keys updated.
+    When ``activate`` is False (startup default): if active content differs from
+    seed, create a **new inactive** version so user edits stay active.
+    When ``activate`` is True (explicit admin action): create+activate seed.
     """
     from app.crud.prompt_template import (
         activate_prompt_version,
@@ -229,7 +277,6 @@ async def sync_prompt_templates_from_seed(db: AsyncSession) -> int:
         if active and (active.content or "").strip() == desired:
             continue
         if active is None:
-            # seed_prompt_templates should have created it; skip here
             continue
         pt = await create_prompt_template(
             db,
@@ -240,9 +287,15 @@ async def sync_prompt_templates_from_seed(db: AsyncSession) -> int:
             variables=meta["variables"],
             description=meta["description"],
         )
-        await activate_prompt_version(db, key, pt.version)
+        if activate:
+            await activate_prompt_version(db, key, pt.version)
+            logger.info("提示词 %s 已同步并激活 seed v%d", key, pt.version)
+        else:
+            logger.info(
+                "提示词 %s 已写入 seed 草稿 v%d（未激活，保留用户活跃版）",
+                key, pt.version,
+            )
         updated += 1
-        logger.info("提示词 %s 已同步到 seed v%d", key, pt.version)
     return updated
 
 
@@ -258,20 +311,49 @@ async def seed_default_agents(db: AsyncSession) -> int:
     return len(DEFAULT_AGENTS)
 
 
+async def ensure_named_seed_agents(db: AsyncSession) -> int:
+    """Idempotently insert seed Agents missing by name (for existing DBs).
+
+    Does not activate new agents (is_active from seed data, flow helper is 0).
+    """
+    from app import db_models
+
+    created = 0
+    for agent_data in DEFAULT_AGENTS:
+        name = agent_data.get("name") or ""
+        if not name:
+            continue
+        existing = await db.execute(
+            select(db_models.AgentDefinition)
+            .where(db_models.AgentDefinition.name == name)
+            .limit(1)
+        )
+        if existing.scalar_one_or_none():
+            continue
+        db.add(db_models.AgentDefinition(**agent_data))
+        created += 1
+        logger.info("已补种缺失 Agent: %s (is_active=%s)", name, agent_data.get("is_active"))
+    return created
+
+
 async def seed_defaults(db: AsyncSession) -> None:
     """Seed prompts + agents for a fresh database (idempotent).
 
-    Also syncs generation prompt bodies to the latest seed content so existing
-    deployments pick up test-item wording without manual edits.
+    Startup only inserts **missing** prompt keys; does not activate seed over
+    user-edited active templates. Use sync_prompt_templates_from_seed(activate=True)
+    for an explicit upgrade. Also upserts missing Agents by name.
     """
     n_prompts = await seed_prompt_templates(db)
-    n_synced = await sync_prompt_templates_from_seed(db)
+    n_drafts = await sync_prompt_templates_from_seed(db, activate=False)
     n_agents = await seed_default_agents(db)
-    if n_prompts or n_synced or n_agents:
+    n_named = await ensure_named_seed_agents(db)
+    if n_prompts or n_drafts or n_agents or n_named:
         await db.commit()
         if n_prompts:
             logger.info("已创建 %d 个默认提示词模板", n_prompts)
-        if n_synced:
-            logger.info("已同步 %d 个提示词模板到最新种子内容", n_synced)
+        if n_drafts:
+            logger.info("已写入 %d 个种子提示词草稿（未覆盖活跃版）", n_drafts)
         if n_agents:
             logger.info("已创建 %d 个默认 AI Agent", n_agents)
+        if n_named:
+            logger.info("已按名称补种 %d 个 AI Agent", n_named)

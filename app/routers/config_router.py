@@ -112,7 +112,10 @@ async def update_ai_config(
 
     # 清除 AI 配置缓存，确保下次调用加载新配置
     from app.gen.model_client import invalidate_ai_config_cache
+    from app.agent_resolver import invalidate_agent_cache
+
     invalidate_ai_config_cache()
+    invalidate_agent_cache()
 
     return AIConfigResponse(
         model=row.model,
@@ -299,6 +302,24 @@ async def activate_prompt(
     if not row:
         raise HTTPException(404, f"版本 {body.version} 不存在")
     return {"message": f"{key} 已切换到 version {body.version}"}
+
+
+@router.post("/prompts/sync-seed")
+async def sync_prompts_from_seed(
+    activate: bool = True,
+    db: AsyncSession = Depends(get_async_db),
+    admin = Depends(require_admin),
+) -> dict:
+    """从代码种子写入提示词版本；默认激活（覆盖当前活跃内容）。"""
+    from app.seed_defaults import sync_prompt_templates_from_seed
+
+    n = await sync_prompt_templates_from_seed(db, activate=activate)
+    await db.commit()
+    return {
+        "message": f"已同步 {n} 个提示词" + ("并激活" if activate else "（草稿未激活）"),
+        "updated": n,
+        "activated": activate,
+    }
 
 
 @router.get("/prompts/{key}/preview")

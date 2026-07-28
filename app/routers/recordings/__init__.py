@@ -47,6 +47,8 @@ from .state import (
     get_session_for_user,
     create_session,
     stop_session as state_stop_session,
+    touch_session_activity,
+    finalize_recording_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,7 +88,11 @@ async def get_current_recording(
         url=state.url or "",
         page_title=state.page_title or "",
         elapsed_seconds=time.time() - (state.start_time or time.time()),
-        events_count=state.events_count or 0,
+        events_count=(
+            int(getattr(state.cdp_session_ref, "events_count", 0) or 0)
+            if state.cdp_session_ref is not None
+            else (state.events_count or 0)
+        ),
     )
 
 
@@ -219,58 +225,10 @@ async def stop_recording(
             detail=f"录制会话状态非 recording (当前: {state.status})，无法停止",
         )
 
-    cdp_session = state.cdp_session_ref
-    stop_fn = getattr(cdp_session, "stop_recording", None) if cdp_session is not None else None
-    if stop_fn is not None:
-        try:
-            await stop_fn()
-        except (RuntimeError, ConnectionError, OSError) as exc:
-            # CDP 会话停止失败（子进程已死 / websocket 断），不影响 HTTP 状态
-            logger.warning(
-                "停止 CDP 录制失败 (session_id=%s): %s", session_id, exc
-            )
-
-    # Agent-based recording: tell agent to kill its Chrome process
-    is_agent = getattr(cdp_session, '_is_agent_recording', False) if cdp_session is not None else False
-    if is_agent:
-        agent_id = getattr(cdp_session, '_agent_id', None)
-        if agent_id:
-            from agent.manager import agent_manager
-            try:
-                await agent_manager.stop_agent_recording(agent_id)
-            except Exception as exc:
-                logger.warning("Agent 停止录制失败 (agent_id=%s): %s", agent_id, exc)
-
+    await finalize_recording_session(state, reason="user_stop")
     await state_stop_session(session_id)
 
-    # 更新 DB 历史
-    try:
-        async with AsyncSessionLocal() as _db:
-            _rec = (await _db.execute(
-                select(db_models.RecordingSession).where(
-                    db_models.RecordingSession.session_id == session_id
-                )
-            )).scalar_one_or_none()
-            if _rec:
-                if _rec.user_id != user.id:
-                    raise HTTPException(status_code=404, detail="Recording session not found")
-                _rec.status = "stopped"
-                _rec.ended_at = datetime.utcnow()
-                _rec.events_count = int(getattr(cdp_session, "events_count", 0) or 0)
-                # 持久化事件数据（供历史查看）
-                if cdp_session is not None:
-                    import json
-                    get_events = getattr(cdp_session, "get_events", None)
-                    if get_events:
-                        raw = get_events()
-                        if raw:
-                            _rec.events_data = json.dumps([e.to_dict() for e in raw], ensure_ascii=False)
-                await _db.commit()
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("无法更新录制会话历史", exc_info=True)
-
+    cdp_session = state.cdp_session_ref
     elapsed = 0.0
     events_count = 0
     if cdp_session is not None:
@@ -389,6 +347,7 @@ async def get_recorded_events(
         )
         return []
 
+    await touch_session_activity(session_id, events_count=len(raw_events))
     return [RecordedEventResponse(**e.to_dict()) for e in raw_events]
 
 
