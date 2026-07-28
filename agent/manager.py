@@ -65,6 +65,16 @@ class AgentManager:
         self.sessions: Dict[str, AgentSession] = {}
         self._pending: Dict[str, asyncio.Future] = {}
         self._lock = asyncio.Lock()
+        # One client browser run at a time per agent (init must finish before next case).
+        self._agent_run_locks: Dict[str, asyncio.Lock] = {}
+        self._agent_busy: set[str] = set()
+
+    def _run_lock_for(self, agent_id: str) -> asyncio.Lock:
+        lock = self._agent_run_locks.get(agent_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._agent_run_locks[agent_id] = lock
+        return lock
 
     # ---- session management ----
 
@@ -159,8 +169,27 @@ class AgentManager:
                                 base_url_override: Optional[str] = None) -> dict:
         """Execute all steps via the agent. Server handles LLM, agent handles browser.
 
+        Serialized per agent so batch/init cases never overlap on the same browser.
         Returns a full step results list compatible with the existing report format.
         """
+        self._agent_busy.add(agent_id)
+        try:
+            async with self._run_lock_for(agent_id):
+                return await self._execute_on_agent_unlocked(
+                    agent_id, run_id, case_name, steps,
+                    output_dir=output_dir,
+                    base_url_override=base_url_override,
+                )
+        finally:
+            self._agent_busy.discard(agent_id)
+
+    async def _execute_on_agent_unlocked(
+        self, agent_id: str, run_id: str,
+        case_name: str, steps: List[dict],
+        output_dir: Optional[str] = None,
+        base_url_override: Optional[str] = None,
+    ) -> dict:
+        """Inner implementation; caller must hold ``_run_lock_for(agent_id)``."""
         session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
@@ -459,93 +488,161 @@ class AgentManager:
             await asyncio.sleep(2)
 
     async def _poll_once(self):
-        """检查一次待执行队列，取回属于本 worker 的 agent 的任务。"""
+        """检查一次待执行队列，取回属于本 worker 的 agent 的任务。
+
+        Per-agent serialization: skip agents whose run lock is held, claim the
+        oldest pending row (ORDER BY id) so init cases created first run first,
+        and await execution (via lock inside execute_on_agent / explicit lock for OTA).
+        """
         from app.database import AsyncSessionLocal
         from app.db_models import AgentRun
         async with AsyncSessionLocal() as db:
             for agent_id in list(self.sessions.keys()):
+                # Do not claim another job while this agent still has a run in flight
+                if agent_id in self._agent_busy or self._run_lock_for(agent_id).locked():
+                    continue
                 result = await db.execute(
-                    text("SELECT id, goal FROM agent_runs WHERE status='pending' AND goal->>'type'='client_exec' AND (goal->>'agent_name')=:name LIMIT 1 FOR UPDATE SKIP LOCKED"),
+                    text(
+                        "SELECT id, goal FROM agent_runs "
+                        "WHERE status='pending' AND goal->>'type'='client_exec' "
+                        "AND (goal->>'agent_name')=:name "
+                        "ORDER BY COALESCE((goal->>'seq')::int, id) ASC, id ASC LIMIT 1 "
+                        "FOR UPDATE SKIP LOCKED"
+                    ),
                     {"name": agent_id},
                 )
                 row = result.first()
-                if row:
-                    run_id = str(row[0])
-                    goal = row[1] or {}
-                    case_id = goal.get("case_id")
-                    if case_id:
-                        run_row_id = row[0]
-                        await db.execute(
-                            text("UPDATE agent_runs SET status='running' WHERE id=:id"),
-                            {"id": row[0]},
-                        )
-                        await db.commit()
-                        logger.info("Poller picked up pending exec: run=%s case=%s agent=%s", run_id, case_id, agent_id)
+                if not row:
+                    continue
+                run_id = str(row[0])
+                goal = row[1] or {}
+                case_id = goal.get("case_id")
+                if not case_id:
+                    continue
+                run_row_id = row[0]
+                await db.execute(
+                    text("UPDATE agent_runs SET status='running' WHERE id=:id"),
+                    {"id": row[0]},
+                )
+                await db.commit()
+                logger.info(
+                    "Poller picked up pending exec: run=%s case=%s agent=%s",
+                    run_id, case_id, agent_id,
+                )
+                # Reserve agent before scheduling so the next poll cannot claim another job
+                self._agent_busy.add(agent_id)
 
-                        # 检查是否有 AI Agent（AgentDefinition）配置 — 须显式 OTA skill
-                        try:
-                            from app.crud import agent_definition as _cad
-                            from core.agent_ota import should_use_ota_agent
-                            _def = await _cad.get_active_by_type(db, "execution")
-                            if should_use_ota_agent(_def):
-                                from core.agent_bridge import AgentBridge
-                                bridge = AgentBridge(self, db, _def)
-                                _batch_id = goal.get("batch_id") if isinstance(goal, dict) else None
-                                await bridge.orchestrate(
-                                    case_id=int(case_id), agent_id=agent_id, goal=goal,
-                                    existing_run_id=run_row_id,
-                                    existing_batch_id=_batch_id,
-                                    environment_id=(goal.get("environment_id") if isinstance(goal, dict) else None),
-                                )
-                                return
-                        except Exception as _abe:
-                            logger.warning("Poller AgentBridge attempt failed, falling back: %s", _abe)
+                async def _finish_busy(_aid=agent_id):
+                    self._agent_busy.discard(_aid)
 
-                        # 回退：传统 execute_on_agent 路径
-                        from app import crud
-                        from app.models import TestCase as _TC
-                        tc = await crud.get_test_case(db, int(case_id))
-                        if tc:
-                            steps_db = await crud.get_steps_for_case(db, int(case_id))
-                            steps = [{"step_order": s.step_order, "description": s.description, "expected_result": getattr(s, 'parsed_result', '')} for s in steps_db]
-                            env_id = goal.get("environment_id") if isinstance(goal, dict) else None
-                            base_url = None
+                # 检查是否有 AI Agent（AgentDefinition）配置 — 须显式 OTA skill
+                try:
+                    from app.crud import agent_definition as _cad
+                    from core.agent_ota import should_use_ota_agent
+                    _def = await _cad.get_active_by_type(db, "execution")
+                    if should_use_ota_agent(_def):
+                        from core.agent_bridge import AgentBridge
+                        bridge = AgentBridge(self, db, _def)
+                        _batch_id = goal.get("batch_id") if isinstance(goal, dict) else None
+
+                        async def _run_ota(
+                            _bridge=bridge,
+                            _case_id=int(case_id),
+                            _agent_id=agent_id,
+                            _goal=goal,
+                            _run_row_id=run_row_id,
+                            _batch_id=_batch_id,
+                        ):
                             try:
-                                if env_id:
-                                    from app.crud.environment import get_environment as _ge
-                                    _env = await _ge(db, int(env_id))
-                                    if _env and (_env.base_url or "").strip():
-                                        base_url = _env.base_url.strip()
-                                if not base_url and getattr(tc, "project_id", None):
-                                    _proj = await crud.get_project(db, tc.project_id)
-                                    if _proj and (getattr(_proj, "base_url", None) or "").strip():
-                                        base_url = _proj.base_url.strip()
-                            except Exception:
-                                logger.warning("Poller failed to resolve BASE URL for case %s", case_id, exc_info=True)
+                                await _bridge.orchestrate(
+                                    case_id=_case_id,
+                                    agent_id=_agent_id,
+                                    goal=_goal,
+                                    existing_run_id=_run_row_id,
+                                    existing_batch_id=_batch_id,
+                                    environment_id=(
+                                        _goal.get("environment_id")
+                                        if isinstance(_goal, dict) else None
+                                    ),
+                                )
+                            finally:
+                                await _finish_busy(_agent_id)
 
-                            async def _run_with_fallback(_base_url=base_url):
-                                try:
-                                    result = await self.execute_on_agent(
-                                        agent_id, run_id,
-                                        tc.name or f"Case #{case_id}", steps,
-                                        base_url_override=_base_url,
-                                    )
-                                    async with AsyncSessionLocal() as _edb:
-                                        await _edb.execute(
-                                            text("UPDATE agent_runs SET status='completed', result=:res WHERE id=:id"),
-                                            {"res": json.dumps(result), "id": run_row_id},
-                                        )
-                                        await _edb.commit()
-                                except Exception as exc:
-                                    logger.error("Poller execute_on_agent failed: %s", exc)
-                                    async with AsyncSessionLocal() as _edb:
-                                        await _edb.execute(
-                                            text("UPDATE agent_runs SET status='failed', error=:err WHERE id=:id"),
-                                            {"err": str(exc), "id": run_row_id},
-                                        )
-                                        await _edb.commit()
-                            asyncio.create_task(_run_with_fallback())
-                        self.sessions[agent_id].agent.status = AgentStatus.ONLINE
+                        asyncio.create_task(_run_ota())
+                        continue
+                except Exception as _abe:
+                    logger.warning("Poller AgentBridge attempt failed, falling back: %s", _abe)
+
+                # 回退：传统 execute_on_agent 路径（内部已按 agent 串行加锁）
+                from app import crud
+                tc = await crud.get_test_case(db, int(case_id))
+                if not tc:
+                    await _finish_busy(agent_id)
+                    continue
+                steps_db = await crud.get_steps_for_case(db, int(case_id))
+                steps = [
+                    {
+                        "step_order": s.step_order,
+                        "description": s.description,
+                        "expected_result": getattr(s, "parsed_result", ""),
+                    }
+                    for s in steps_db
+                ]
+                env_id = goal.get("environment_id") if isinstance(goal, dict) else None
+                base_url = None
+                try:
+                    if env_id:
+                        from app.crud.environment import get_environment as _ge
+                        _env = await _ge(db, int(env_id))
+                        if _env and (_env.base_url or "").strip():
+                            base_url = _env.base_url.strip()
+                    if not base_url and getattr(tc, "project_id", None):
+                        _proj = await crud.get_project(db, tc.project_id)
+                        if _proj and (getattr(_proj, "base_url", None) or "").strip():
+                            base_url = _proj.base_url.strip()
+                except Exception:
+                    logger.warning(
+                        "Poller failed to resolve BASE URL for case %s",
+                        case_id, exc_info=True,
+                    )
+
+                async def _run_with_fallback(
+                    _base_url=base_url,
+                    _agent_id=agent_id,
+                    _run_id=run_id,
+                    _tc=tc,
+                    _case_id=case_id,
+                    _steps=steps,
+                    _run_row_id=run_row_id,
+                ):
+                    try:
+                        result = await self.execute_on_agent(
+                            _agent_id, _run_id,
+                            _tc.name or f"Case #{_case_id}", _steps,
+                            base_url_override=_base_url,
+                        )
+                        async with AsyncSessionLocal() as _edb:
+                            await _edb.execute(
+                                text(
+                                    "UPDATE agent_runs SET status='completed', result=:res WHERE id=:id"
+                                ),
+                                {"res": json.dumps(result), "id": _run_row_id},
+                            )
+                            await _edb.commit()
+                    except Exception as exc:
+                        logger.error("Poller execute_on_agent failed: %s", exc)
+                        async with AsyncSessionLocal() as _edb:
+                            await _edb.execute(
+                                text(
+                                    "UPDATE agent_runs SET status='failed', error=:err WHERE id=:id"
+                                ),
+                                {"err": str(exc), "id": _run_row_id},
+                            )
+                            await _edb.commit()
+                    finally:
+                        await _finish_busy(_agent_id)
+
+                asyncio.create_task(_run_with_fallback())
 
 
 # Global singleton
