@@ -98,6 +98,8 @@ async def _ensure_agent_def_id(db: AsyncSession) -> int:
 async def _create_pending_execution(
     db: AsyncSession, case_id: int, agent_name: str | None, db_case, batch_id: int | None = None,
     environment_id: Optional[int] = None,
+    is_init: bool = False,
+    seq: int | None = None,
 ) -> dict:
     """在 DB 中创建待执行记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
     from app.db_models import AgentRun
@@ -120,6 +122,10 @@ async def _create_pending_execution(
         goal["batch_id"] = batch_id
     if environment_id:
         goal["environment_id"] = environment_id
+    if is_init:
+        goal["is_init"] = True
+    if seq is not None:
+        goal["seq"] = int(seq)
 
     ar = AgentRun(
         agent_definition_id=dummy_def_id,
@@ -354,29 +360,49 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         db_agent = await _find_online_agent_in_db(db, body.agent_name)
         if not db_agent:
             raise HTTPException(status_code=400, detail="No client agents available")
-        # 跨 worker：创建统一 RunBatch，为每个用例创建待执行记录
+        # 跨 worker：创建统一 RunBatch；初始化用例先入队，再入队主用例（按 id 顺序执行）
         from app.db_models import RunBatch
         queued = []
         tc0 = None
-        for cid in (body.case_ids or []):
+        init_ids = list(body.init_case_ids or [])
+        main_ids = list(body.case_ids or [])
+        ordered_ids: list[int] = []
+        seen: set[int] = set()
+        for cid in init_ids + main_ids:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            ordered_ids.append(cid)
+        init_set = set(init_ids)
+        for cid in ordered_ids:
             tc = await crud.get_test_case(db, cid)
             if tc and tc0 is None:
                 tc0 = tc
-        batch = RunBatch(status="running", project_id=tc0.project_id if tc0 else 0,
-                         total_cases=len(body.case_ids or []), triggered_by=body.agent_name)
+        batch = RunBatch(
+            status="running",
+            project_id=tc0.project_id if tc0 else 0,
+            total_cases=len(ordered_ids),
+            triggered_by=body.agent_name,
+        )
         db.add(batch)
         await db.commit()
         await db.refresh(batch)
-        for cid in (body.case_ids or []):
+        for seq, cid in enumerate(ordered_ids):
             tc = await crud.get_test_case(db, cid)
             if tc:
                 pend = await _create_pending_execution(
                     db, cid, body.agent_name, tc,
                     batch_id=batch.id, environment_id=body.environment_id,
+                    is_init=cid in init_set, seq=seq,
                 )
                 queued.append(cid)
         if queued:
-            return {"status": "queued", "case_ids": queued, "agent_name": body.agent_name, "message": f"{len(queued)} cases queued for batch #{batch.id}"}
+            return {
+                "status": "queued",
+                "case_ids": queued,
+                "agent_name": body.agent_name,
+                "message": f"{len(queued)} cases queued for batch #{batch.id} (init first)",
+            }
         raise HTTPException(status_code=400, detail="No test cases to queue")
     
     if body.agent_name:
