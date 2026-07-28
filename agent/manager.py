@@ -529,10 +529,17 @@ class AgentManager:
             if not isinstance(steps_out, list):
                 err = (payload or {}).get("error") if isinstance(payload, dict) else "invalid RUN_COMPLETE"
                 raise RuntimeError(f"Agent browser-use 未返回步骤结果: {err}")
+            status = (payload or {}).get("status") if isinstance(payload, dict) else None
+            err = (payload or {}).get("error") if isinstance(payload, dict) else None
             logger.info(
-                "browser-use client run %s finished status=%s steps=%s",
-                run_id, payload.get("status"), len(steps_out),
+                "browser-use client run %s finished status=%s steps=%s err=%s",
+                run_id, status, len(steps_out), (str(err)[:200] if err else None),
             )
+            # Empty steps + failed/error must not look like "all passed" to callers
+            if (status in ("failed", "error") or err) and not steps_out:
+                raise RuntimeError(
+                    f"Agent browser-use 执行失败: {err or status or 'unknown'}"
+                )
             return steps_out
         finally:
             try:

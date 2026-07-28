@@ -8,9 +8,50 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_system_prompt_override() -> str | None:
+    """Return override text when browser_use cannot load its packaged prompts.
+
+    PyInstaller / incomplete installs often miss ``browser_use.agent.system_prompts``.
+    Prefer the real package; fall back to vendored copies under ``core/browser_use_prompts``.
+    """
+    try:
+        import browser_use.agent.system_prompts  # noqa: F401
+        return None
+    except Exception:
+        pass
+
+    # Installed package layout but importlib.resources failed (frozen apps)
+    try:
+        import browser_use
+
+        pkg = Path(browser_use.__file__).resolve().parent
+        for rel in (
+            ("agent", "system_prompts", "system_prompt.md"),
+            ("agent", "system_prompt.md"),
+        ):
+            p = pkg.joinpath(*rel)
+            if p.is_file():
+                logger.warning("browser-use system_prompts 模块缺失，改用文件: %s", p)
+                return p.read_text(encoding="utf-8")
+    except Exception:
+        logger.debug("scan installed browser_use prompts failed", exc_info=True)
+
+    vendored = Path(__file__).resolve().parent / "browser_use_prompts" / "system_prompt.md"
+    if vendored.is_file():
+        logger.warning("browser-use system_prompts 缺失，使用内置回退模板: %s", vendored)
+        return vendored.read_text(encoding="utf-8")
+
+    raise RuntimeError(
+        "browser-use 缺少 system_prompts（No module named "
+        "'browser_use.agent.system_prompts'）。请用离线包 wheels 重装 browser-use，"
+        "或重新执行 install_and_build.bat（需 --collect-all browser_use）。"
+    )
 
 
 def build_step_task(
@@ -129,6 +170,15 @@ async def execute_nl_steps_browser_use(
     from browser_use import Agent, BrowserSession
 
     step_results: list[dict] = []
+    prompt_override = resolve_system_prompt_override()
+    agent_common = {
+        "llm": llm,
+        "use_vision": "auto",
+        "max_failures": 2,
+    }
+    if prompt_override is not None:
+        agent_common["override_system_message"] = prompt_override
+
     # Disable default extensions: sync download can block the asyncio loop
     # (WS heartbeat dies → server unregisters the agent mid-run).
     browser = browser_session or BrowserSession(
@@ -145,11 +195,9 @@ async def execute_nl_steps_browser_use(
                     f"Open this URL exactly (copy as-is):\n{base_url}\n"
                     "Wait until the page has basically loaded, then call done with success=true."
                 ),
-                llm=llm,
                 browser_session=browser,
-                use_vision="auto",
-                max_failures=2,
                 max_actions_per_step=5,
+                **agent_common,
             )
             try:
                 await open_agent.run(max_steps=8)
@@ -187,11 +235,9 @@ async def execute_nl_steps_browser_use(
             logger.info("--- browser-use Step %s: %s ---", order, desc)
             agent = Agent(
                 task=task,
-                llm=llm,
                 browser_session=browser,
-                use_vision="auto",
-                max_failures=2,
                 max_actions_per_step=8,
+                **agent_common,
             )
             try:
                 history = await agent.run(max_steps=max_steps_per_nl)
