@@ -35,6 +35,55 @@ def _sanitize_step(desc: str) -> str:
     return desc
 
 
+# 「单位下拉框选择【汉东省院】」/「在【单位】下拉中选择【汉东省院】」
+_DROPDOWN_SELECT_RE = re.compile(
+    r"(?:"
+    r"(?:在)?【(?P<label1>[^】]{1,40})】(?:的)?(?:下拉框|下拉菜单|下拉|选择器)\s*(?:中)?\s*(?:选择|选)\s*【(?P<option1>[^】]+)】"
+    r"|"
+    r"(?P<label2>[^【\n]{1,40}?)(?:下拉框|下拉菜单|下拉)\s*(?:中)?\s*(?:选择|选)\s*【(?P<option2>[^】]+)】"
+    r"|"
+    r"(?:选择|选中)\s*【(?P<option3>[^】]+)】"
+    r")"
+)
+
+
+def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
+    """Extract (field_label, option_text) from a dropdown-select NL step."""
+    m = _DROPDOWN_SELECT_RE.search((desc or "").strip())
+    if not m:
+        return None, None
+    label = (m.groupdict().get("label1") or m.groupdict().get("label2") or "").strip()
+    option = (
+        m.groupdict().get("option1")
+        or m.groupdict().get("option2")
+        or m.groupdict().get("option3")
+        or ""
+    ).strip()
+    if not option:
+        return None, None
+    # Strip trailing control-type words from label
+    label = re.sub(r"(?:下拉框|下拉菜单|下拉|选择器)$", "", label).strip(" ：:，,")
+    return (label or None), option
+
+
+def normalize_step_description(desc: str) -> str:
+    """Rewrite ambiguous control phrasing so LLM does not getByText('…下拉框')."""
+    desc = _sanitize_step(desc or "")
+    label, option = parse_dropdown_select(desc)
+    if option and label:
+        return (
+            f"在标签或字段名为「{label}」的下拉框/组合框中选择选项「{option}」。"
+            f"不要查找页面文案「下拉框」或「{label}下拉框」；"
+            f"应匹配字段「{label}」或选项「{option}」。"
+        )
+    if option and not label:
+        return (
+            f"在当前已展开的下拉列表中点击选项「{option}」。"
+            f"不要查找文案「下拉框」。"
+        )
+    return desc
+
+
 # ---------------------------------------------------------------------------
 # Screenshot capture
 # ---------------------------------------------------------------------------
@@ -164,6 +213,67 @@ async def _level1_verify(mcp_manager, conditions: list) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _llm_tool_and_run(
+    *,
+    desc: str,
+    snapshot: str,
+    expected_result: str | None,
+    mcp_manager,
+    llm_client,
+    model: str | None,
+    system_prompt_override: str | None,
+    step_timeout_ms: int,
+):
+    """Generate one tool call from NL+snapshot and execute it via MCP."""
+    from core.llm_wrapper import generate_tool_call
+
+    try:
+        tool_call = await asyncio.wait_for(
+            generate_tool_call(
+                desc,
+                snapshot,
+                expected_result=expected_result,
+                client=llm_client,
+                model=model,
+                system_prompt=system_prompt_override,
+            ),
+            timeout=100,
+        )
+    except asyncio.TimeoutError:
+        return None, {'success': False, 'error': 'LLM 生成操作指令超时'}
+
+    if tool_call is None:
+        return None, {'success': False, 'error': 'LLM 生成操作指令超时'}
+
+    if tool_call.action == 'error':
+        return tool_call, {
+            'success': False,
+            'error': f"LLM 无法确定操作: {tool_call.value}",
+        }
+
+    try:
+        exec_result = await asyncio.wait_for(
+            mcp_manager.execute_tool_call(tool_call.model_dump()),
+            timeout=step_timeout_ms / 1000.0,
+        )
+    except asyncio.TimeoutError:
+        exec_result = {
+            'success': False,
+            'error': f'Step execution timeout after {step_timeout_ms}ms',
+        }
+    return tool_call, exec_result
+
+
+def _format_action(tool_call) -> str:
+    if tool_call is None:
+        return ''
+    return (
+        f"{tool_call.action}"
+        + (f"({tool_call.selector})" if tool_call.selector else "")
+        + (f" = {tool_call.value}" if tool_call.value else "")
+    )
+
+
 async def execute_step_mcp(
     step: dict,
     mcp_manager,
@@ -176,19 +286,19 @@ async def execute_step_mcp(
 ) -> dict:
     """Execute a single NL test step via Playwright MCP.
 
-    1. Take accessibility snapshot (browser_snapshot)
-    2. LLM generates tool call from step description + snapshot + expected result
-    3. Execute tool call via MCP
-    4. Return structured result
+    Dropdown steps like「单位下拉框选择【汉东省院】」are normalized and may run as
+    open-then-select (two MCP actions) when the option is not yet visible.
     """
     step_number = step['step_order']
-    desc = _sanitize_step(step['description'])
+    raw_desc = _sanitize_step(step.get('description') or '')
+    desc = normalize_step_description(raw_desc)
     expected_result = step.get('expected_result')
+    label, option = parse_dropdown_select(raw_desc)
     t_start = time.monotonic()
 
     result: dict[str, Any] = {
         'step_number': step_number,
-        'original_description': desc,
+        'original_description': raw_desc,
         'success': False,
         'thinking': '',
         'action': '',
@@ -199,63 +309,100 @@ async def execute_step_mcp(
     }
 
     try:
-        # 1. Get accessibility snapshot via MCP
         snapshot = await mcp_manager.get_dom_snapshot()
+        actions_log: list[str] = []
+        thinking_parts: list[str] = []
+        tool_call = None
+        exec_result: dict[str, Any]
 
-        # 2. LLM generates tool call
-        from core.llm_wrapper import generate_tool_call
-
-        try:
-            tool_call = await asyncio.wait_for(
-                generate_tool_call(desc, snapshot, expected_result=expected_result, client=llm_client, model=model, system_prompt=system_prompt_override),
-                timeout=100,
+        # Custom/Ant dropdowns often need: open combobox → click option
+        if label and option and option not in (snapshot or ""):
+            open_desc = (
+                f"点击字段或标签为「{label}」的下拉框/组合框以展开选项列表。"
+                f"不要查找文案「下拉框」或「{label}下拉框」。"
             )
-        except asyncio.TimeoutError:
-            tool_call = None
+            tool_call, exec_result = await _llm_tool_and_run(
+                desc=open_desc,
+                snapshot=snapshot,
+                expected_result=None,
+                mcp_manager=mcp_manager,
+                llm_client=llm_client,
+                model=model,
+                system_prompt_override=system_prompt_override,
+                step_timeout_ms=step_timeout_ms,
+            )
+            if tool_call is not None:
+                actions_log.append(_format_action(tool_call))
+                if tool_call.thinking:
+                    thinking_parts.append(tool_call.thinking)
+            if not exec_result.get('success'):
+                result['thinking'] = ' | '.join(thinking_parts) or '展开下拉失败'
+                result['action'] = ' → '.join(actions_log)
+                result['error'] = exec_result.get('error', '展开下拉失败')
+                await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+                result['duration_ms'] = (time.monotonic() - t_start) * 1000
+                return result
+            snapshot = await mcp_manager.get_dom_snapshot()
+            pick_desc = (
+                f"在已展开的下拉列表中点击选项「{option}」。"
+                f"不要查找文案「下拉框」。"
+            )
+            tool_call, exec_result = await _llm_tool_and_run(
+                desc=pick_desc,
+                snapshot=snapshot,
+                expected_result=expected_result,
+                mcp_manager=mcp_manager,
+                llm_client=llm_client,
+                model=model,
+                system_prompt_override=system_prompt_override,
+                step_timeout_ms=step_timeout_ms,
+            )
+        else:
+            tool_call, exec_result = await _llm_tool_and_run(
+                desc=desc,
+                snapshot=snapshot,
+                expected_result=expected_result,
+                mcp_manager=mcp_manager,
+                llm_client=llm_client,
+                model=model,
+                system_prompt_override=system_prompt_override,
+                step_timeout_ms=step_timeout_ms,
+            )
+
+        if tool_call is not None:
+            actions_log.append(_format_action(tool_call))
+            if tool_call.thinking:
+                thinking_parts.append(tool_call.thinking)
+            result['next_goal'] = tool_call.next_goal or ''
+
+        result['thinking'] = ' | '.join(thinking_parts) or (
+            f"Execute: {tool_call.action}" if tool_call else ''
+        )
+        result['action'] = ' → '.join(a for a in actions_log if a)
 
         if tool_call is None:
-            result['error'] = 'LLM 生成操作指令超时'
+            result['error'] = exec_result.get('error') or 'LLM 生成操作指令超时'
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+            result['duration_ms'] = (time.monotonic() - t_start) * 1000
             return result
-
-        result['thinking'] = tool_call.thinking or f"Execute: {tool_call.action}"
-        result['action'] = (
-            f"{tool_call.action}"
-            + (f"({tool_call.selector})" if tool_call.selector else "")
-            + (f" = {tool_call.value}" if tool_call.value else "")
-        )
-        result['next_goal'] = tool_call.next_goal or ''
 
         if tool_call.action == 'error':
-            result['error'] = f"LLM 无法确定操作: {tool_call.value}"
+            result['error'] = exec_result.get('error') or f"LLM 无法确定操作: {tool_call.value}"
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+            result['duration_ms'] = (time.monotonic() - t_start) * 1000
             return result
 
-        # 3. Execute via MCP
-        try:
-            exec_result = await asyncio.wait_for(
-                mcp_manager.execute_tool_call(tool_call.model_dump()),
-                timeout=step_timeout_ms / 1000.0,
-            )
-        except asyncio.TimeoutError:
-            exec_result = {
-                'success': False,
-                'error': f'Step execution timeout after {step_timeout_ms}ms',
-            }
-
-        result['success'] = exec_result['success']
-        if not exec_result['success']:
+        result['success'] = bool(exec_result.get('success'))
+        if not result['success']:
             result['error'] = exec_result.get('error', '未知错误')
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
         elif expected_result:
-            # 3层级联验证：Level 0 确定性检查 → Level 1 结构化条件 → Level 2 LLM 比对
             mcp_error = exec_result.get('error')
             action_type = tool_call.action
 
             if strategy.should_verify(action_type, mcp_error):
                 verified = False
 
-                # Level 0: 确定性廉价检查（goto URL 比对 / fill 值比对）
                 try:
                     level0_pass = await _level0_verify(mcp_manager, tool_call)
                     if level0_pass:
@@ -264,12 +411,13 @@ async def execute_step_mcp(
                 except Exception as exc:
                     logger.debug("Level 0 verification error (non-fatal): %s", exc)
 
-                # Level 1: LLM 生成结构化验证条件 → 浏览器确定性评估
                 if not verified:
                     try:
                         from core.llm_wrapper import generate_verification_conditions
                         conditions = await asyncio.wait_for(
-                            generate_verification_conditions(expected_result, client=llm_client, model=model),
+                            generate_verification_conditions(
+                                expected_result, client=llm_client, model=model,
+                            ),
                             timeout=15,
                         )
                         if conditions:
@@ -282,26 +430,34 @@ async def execute_step_mcp(
                     except Exception as exc:
                         logger.debug("Level 1 验证跳过: %s", exc)
 
-                # Level 2: 完整 LLM 比对 —— 仅当 Level 0+1 均未通过时回退
                 if not verified:
                     try:
                         post_snapshot = await mcp_manager.get_dom_snapshot()
                         from core.llm_wrapper import verify_expected_result
                         verification = await asyncio.wait_for(
-                            verify_expected_result(expected_result, post_snapshot, step_description=desc, client=llm_client, model=model),
+                            verify_expected_result(
+                                expected_result,
+                                post_snapshot,
+                                step_description=raw_desc,
+                                client=llm_client,
+                                model=model,
+                            ),
                             timeout=30,
                         )
                         if not verification.passed:
                             result['success'] = False
                             result['error'] = f"预期结果验证失败: {verification.reason}"
-                            await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+                            await _capture_screenshot(
+                                mcp_manager, screenshot_dir, step_number, result,
+                            )
                         else:
                             result['verification'] = verification.reason
                     except asyncio.TimeoutError:
                         logger.warning("步骤 %s 预期结果验证超时", step_number)
                     except Exception as exc:
-                        logger.warning("步骤 %s 预期结果验证异常: %s", step_number, exc, exc_info=True)
-            # else: should_verify 返回 False —— 信任 MCP 执行结果，跳过验证
+                        logger.warning(
+                            "步骤 %s 预期结果验证异常: %s", step_number, exc, exc_info=True,
+                        )
 
     except Exception as exc:
         result['error'] = f'步骤执行异常: {exc}'

@@ -221,13 +221,24 @@ async def _run_test_case_in_browser_impl(
         llm_client = await create_openai_client(agent_type="execution")
         _, _, resolved_model = await _resolve_llm_config()
 
-        # Resolve execution system prompt via AgentDefinition priority chain
-        system_prompt_override = None
+        # Step-by-step translation needs the ref-based MCP schema (SYSTEM_PROMPT).
+        # Do NOT use resolve_prompt_for_agent(..., "execution_system"): missing
+        # template falls back to "请根据以下内容分析" and Agent OTA system_prompt
+        # biases toward getByText('…下拉框'), causing TimeoutError.
+        from core.llm_wrapper import SYSTEM_PROMPT
+        from app.runtime_config import get_prompt
+
+        system_prompt_override = SYSTEM_PROMPT
         try:
-            from app.runtime_config import resolve_prompt_for_agent
-            system_prompt_override = await resolve_prompt_for_agent(db, "execution", "execution_system")
+            seeded = await get_prompt(db, "execution_system")
+            if (
+                seeded
+                and "请根据以下内容分析" not in seeded
+                and ("OUTPUT SCHEMA" in seeded or "accessibility snapshot" in seeded)
+            ):
+                system_prompt_override = seeded
         except Exception:
-            logger.debug("Failed to resolve execution system prompt, using default", exc_info=True)
+            logger.debug("execution_system prompt unavailable, using SYSTEM_PROMPT", exc_info=True)
 
         # ------------------------------------------------------------------
         # Execute steps
