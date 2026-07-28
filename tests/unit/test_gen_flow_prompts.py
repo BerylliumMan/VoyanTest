@@ -25,3 +25,25 @@ def test_min_tcs_per_item_flow_vs_default():
     assert min_tcs_per_item(tc_prompt_key="tc_generate_flow") == 1
     assert min_tcs_per_item(["tc_generate_ui"]) == 3
     assert min_tcs_per_item(None) == 3
+
+
+def test_flow_prompts_require_boxed_ui_and_vision():
+    from app.gen.prompts import FP_EXTRACT_FLOW_PROMPT, TC_GENERATE_FLOW_PROMPT
+
+    for text in (FP_EXTRACT_FLOW_PROMPT, TC_GENERATE_FLOW_PROMPT):
+        assert "红框" in text or "色框" in text
+        assert "截图" in text
+
+
+def test_compact_parts_keep_images_prefers_images():
+    from app.gen.feature_extractor import compact_parts_keep_images
+
+    parts = [
+        {"type": "text", "text": "说明文字" * 500},
+        {"type": "image", "ext": "png", "b64": "aaa"},
+        {"type": "text", "text": "更多文字" * 500},
+        {"type": "image", "ext": "png", "b64": "bbb"},
+    ]
+    # Tiny budget: should still try to keep at least one image
+    out = compact_parts_keep_images(parts, budget=2000)
+    assert any(p.get("type") == "image" for p in out)

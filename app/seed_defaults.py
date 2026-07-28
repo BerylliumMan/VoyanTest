@@ -154,7 +154,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "忠实还原操作手册中的主路径为可执行 UI 步骤",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是流程手册用例生成专家。流程：(1) fp_extract_flow 从文档与截图抽取操作流程单元；(2) tc_generate_flow 为每个流程生成 1 条文档主路径 UI 用例。禁止脱离文档臆造异常/边界；步骤与控件文案必须来自原文或截图。",
+        "system_prompt": "你是流程手册用例生成专家。流程：(1) fp_extract_flow 从图文手册抽取操作流程，必须结合截图红框/色框/高亮读出操作目标；(2) tc_generate_flow 为每个流程生成 1 条文档主路径 UI 用例，生成时须再次对照手册截图与框选区域。禁止脱离文档臆造异常/边界；步骤与控件文案必须来自原文或截图框选。",
         "prompt_overrides": {}
     }
 ]
@@ -257,12 +257,14 @@ async def sync_prompt_templates_from_seed(
     db: AsyncSession,
     *,
     activate: bool = False,
+    keys: set[str] | None = None,
 ) -> int:
     """Push seed prompt bodies into DB.
 
     When ``activate`` is False (startup default): if active content differs from
     seed, create a **new inactive** version so user edits stay active.
     When ``activate`` is True (explicit admin action): create+activate seed.
+    ``keys`` limits which prompt keys are considered (None = all seed keys).
     """
     from app.crud.prompt_template import (
         activate_prompt_version,
@@ -272,6 +274,8 @@ async def sync_prompt_templates_from_seed(
 
     updated = 0
     for key, meta in get_seed_prompts().items():
+        if keys is not None and key not in keys:
+            continue
         active = await get_prompt_template_by_key(db, key)
         desired = (meta["content"] or "").strip()
         if active and (active.content or "").strip() == desired:
@@ -297,6 +301,36 @@ async def sync_prompt_templates_from_seed(
             )
         updated += 1
     return updated
+
+
+# Product-owned flow-manual prompts: auto-activate seed upgrades on startup.
+_FLOW_PROMPT_KEYS = frozenset({"fp_extract_flow", "tc_generate_flow"})
+_FLOW_AGENT_NAME = "流程手册用例生成助手"
+
+
+async def ensure_flow_agent_system_prompt(db: AsyncSession) -> bool:
+    """Keep flow-manual Agent system_prompt aligned with seed (idempotent)."""
+    from app import db_models
+
+    seed = next((a for a in DEFAULT_AGENTS if a.get("name") == _FLOW_AGENT_NAME), None)
+    if not seed:
+        return False
+    desired = (seed.get("system_prompt") or "").strip()
+    if not desired:
+        return False
+    row = await db.execute(
+        select(db_models.AgentDefinition)
+        .where(db_models.AgentDefinition.name == _FLOW_AGENT_NAME)
+        .limit(1)
+    )
+    agent = row.scalar_one_or_none()
+    if agent is None:
+        return False
+    if (agent.system_prompt or "").strip() == desired:
+        return False
+    agent.system_prompt = desired
+    logger.info("已更新 Agent「%s」system_prompt（图文/框选说明）", _FLOW_AGENT_NAME)
+    return True
 
 
 async def seed_default_agents(db: AsyncSession) -> int:
@@ -344,15 +378,26 @@ async def seed_defaults(db: AsyncSession) -> None:
     for an explicit upgrade. Also upserts missing Agents by name.
     """
     n_prompts = await seed_prompt_templates(db)
-    n_drafts = await sync_prompt_templates_from_seed(db, activate=False)
+    non_flow_keys = set(get_seed_prompts()) - _FLOW_PROMPT_KEYS
+    n_drafts = await sync_prompt_templates_from_seed(
+        db, activate=False, keys=non_flow_keys,
+    )
+    # Flow-manual prompts are product-owned; activate seed upgrades so vision
+    # instructions (boxed UI regions) take effect without admin UI step.
+    n_flow = await sync_prompt_templates_from_seed(
+        db, activate=True, keys=_FLOW_PROMPT_KEYS,
+    )
     n_agents = await seed_default_agents(db)
     n_named = await ensure_named_seed_agents(db)
-    if n_prompts or n_drafts or n_agents or n_named:
+    flow_sp = await ensure_flow_agent_system_prompt(db)
+    if n_prompts or n_drafts or n_flow or n_agents or n_named or flow_sp:
         await db.commit()
         if n_prompts:
             logger.info("已创建 %d 个默认提示词模板", n_prompts)
         if n_drafts:
             logger.info("已写入 %d 个种子提示词草稿（未覆盖活跃版）", n_drafts)
+        if n_flow:
+            logger.info("已激活 %d 个流程手册提示词种子版", n_flow)
         if n_agents:
             logger.info("已创建 %d 个默认 AI Agent", n_agents)
         if n_named:

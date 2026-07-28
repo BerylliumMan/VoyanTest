@@ -60,6 +60,7 @@ class Pipeline:
         tcs = await self.tc_generator.run({
             "fps": fps,
             "project_description": self.config.get("project_description", ""),
+            "content_parts": content_parts,
         })
         warnings = list(getattr(self.tc_generator, "last_warnings", None) or [])
 

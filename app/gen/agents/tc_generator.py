@@ -56,6 +56,7 @@ class TCGenerator(BaseAgent[dict, list[dict]]):
             cancel_checker=self.config.get("cancel_checker"),
             min_tcs_per_item=int(min_tcs),
             flow_mode=int(min_tcs) <= 1,
+            content_parts=input_data.get("content_parts"),
         )
         self.last_warnings = result.get("warnings", [])
         return result.get("test_cases", [])
