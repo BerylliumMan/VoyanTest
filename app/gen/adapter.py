@@ -56,7 +56,7 @@ def _split_expected_results(text: str) -> list[str]:
 
 
 def align_expected_to_steps(steps: list[str], results: list[str]) -> list[str]:
-    """Align expected results to steps: merge extras; repeat last when shorter."""
+    """Align expected results to steps: merge extras; right-pad shorter with empty."""
     if not steps:
         return []
     if len(results) > len(steps):
@@ -64,8 +64,8 @@ def align_expected_to_steps(steps: list[str], results: list[str]) -> list[str]:
         extras = results[len(steps) - 1 :]
         return base + ["；".join(extras)]
     if len(results) < len(steps):
-        last = results[-1] if results else ""
-        return list(results) + [last] * (len(steps) - len(results))
+        # Right-align: sparse expected usually applies to later steps; do not invent text.
+        return [""] * (len(steps) - len(results)) + list(results)
     return list(results)
 
 

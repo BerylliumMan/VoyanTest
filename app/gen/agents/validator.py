@@ -96,11 +96,10 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
             result.fail(f"step_{i}_action", f"步骤 {i + 1} 操作 '{action}' 不在合法操作列表中")
 
         expected = (step.get("parsed_result") or step.get("expected") or "").strip()
-        # 只校验最后一步的预期结果（LLM 通常不生成中间步骤的预期结果）
-        if not expected and i < len(steps) - 1:
-            pass  # 中间步骤允许没有预期结果
-        elif not expected:
-            result.fail(f"step_{i}_expected", f"步骤 {i + 1} 预期结果不能为空")
+        # Allow empty expected on any step (flow manuals often omit undocumented asserts).
+        # Empty is preferred over invented placeholders.
+        if not expected:
+            pass
 
     # Check 4: Steps have basic sanity (description length)
     for i, step in enumerate(steps):

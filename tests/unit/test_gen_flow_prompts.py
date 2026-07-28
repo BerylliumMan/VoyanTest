@@ -47,8 +47,9 @@ def test_ui_and_flow_tc_prompts_forbid_dropdown_control_words():
 def test_flow_tc_expected_must_come_from_document():
     from app.gen.prompts import TC_GENERATE_FLOW_PROMPT
 
-    assert "文档未写明预期" in TC_GENERATE_FLOW_PROMPT
-    assert "禁止」自行编写" in TC_GENERATE_FLOW_PROMPT or "禁止**自行编写" in TC_GENERATE_FLOW_PROMPT or "禁止自行编写" in TC_GENERATE_FLOW_PROMPT
+    assert '""' in TC_GENERATE_FLOW_PROMPT or "空字符串" in TC_GENERATE_FLOW_PROMPT
+    assert "禁止自行编写" in TC_GENERATE_FLOW_PROMPT or "禁止**自行编写" in TC_GENERATE_FLOW_PROMPT
+    assert "文档未写明预期" in TC_GENERATE_FLOW_PROMPT  # mentioned as forbidden placeholder
 
 
 def test_compact_parts_keep_images_prefers_images():
