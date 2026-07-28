@@ -524,25 +524,28 @@ def _normalize_tc_item(item: dict) -> dict:
     while steps and not steps[-1]:
         steps.pop()
     expected = _listify_field(expected_raw)
+    # Treat placeholder phrases as empty (must not invent expected for flow manuals)
+    _EMPTY_EXPECTED_MARKERS = {
+        "文档未写明预期",
+        "文档未写明",
+        "无",
+        "无预期",
+        "暂无",
+        "按页面实际",
+        "界面状态符合当前操作预期",
+    }
+    expected = [
+        "" if (not e) or (e.strip() in _EMPTY_EXPECTED_MARKERS) else e
+        for e in expected
+    ]
     if steps:
         expected = align_expected_to_steps(steps, expected)
-        # Intermediate empty expected: fill with neutral observable default for UI exec
-        filled = []
-        for i, (s, e) in enumerate(zip(steps, expected)):
-            if e.strip():
-                filled.append(e)
-            elif i < len(steps) - 1:
-                filled.append("界面状态符合当前操作预期")
-            else:
-                filled.append(e)
-        expected = filled
+        # Keep empty expected as-is — do not invent neutral placeholders
         normalized["test_steps"] = _to_numbered_text(steps)
         normalized["expected_result"] = _to_numbered_text(expected)
     elif expected:
         normalized["expected_result"] = _to_numbered_text(expected)
 
-    if normalized.get("test_steps") and not normalized.get("expected_result"):
-        normalized["expected_result"] = normalized["test_steps"]
     return normalized
 
 
