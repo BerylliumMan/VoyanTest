@@ -361,7 +361,8 @@ async def _run_startup_init():
 
     # Check for missing columns across all models and add them
     try:
-        from sqlalchemy import inspect, text
+        # 勿在此函数内再 import text：会遮蔽模块级 text，导致前面全部 DDL 报 UnboundLocalError
+        from sqlalchemy import inspect
         from app.models.project import Environment
         async with engine.connect() as _conn:
             def _check_cols(sync_conn):
