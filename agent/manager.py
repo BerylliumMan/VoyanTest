@@ -28,19 +28,37 @@ logger = logging.getLogger("agent.manager")
 _LOCATOR_FAIL_HINTS = (
     "not found",
     "no element",
+    "no popup",
+    "no modal",
+    "no dialog",
+    "no alert",
+    "no matching",
     "locator",
     "timeout",
     "timed out",
     "unable to find",
+    "unable to locate",
+    "cannot find",
+    "can't find",
+    "could not find",
+    "cannot proceed",
+    "can't proceed",
     "strict mode violation",
     "waiting for",
     "does not exist",
+    "isn't visible",
+    "is not visible",
+    "not visible",
     "找不到",
     "无法定位",
     "定位失败",
-    "element is not",
     "无法确定本步",
     "无法确定",
+    "看不到",
+    "不存在",
+    "没有找到",
+    "未找到",
+    "element is not",
 )
 
 
@@ -52,7 +70,30 @@ def _is_locator_failure(result: dict | None) -> bool:
     low = err.lower()
     if "verification failed" in low or "expected result verification" in low or "断言" in err:
         return False
-    return any(h in low for h in _LOCATOR_FAIL_HINTS)
+    # LLM soft-fail: action=error(...) means it refused / cannot do the step
+    action = (result.get("action") or "").strip().lower()
+    if action == "error" or action.startswith("error("):
+        return True
+    if any(h in low for h in _LOCATOR_FAIL_HINTS):
+        return True
+    # "No xxx found" / "none ... found" — common LLM phrasing (≠ substring "not found")
+    if "found" in low and (
+        low.startswith("no ")
+        or " no " in low
+        or "none " in low
+        or "没有" in err
+        or "未找到" in err
+    ):
+        return True
+    return False
+
+
+def _should_hybrid_browser_use_fallback(
+    *, hybrid: bool, result: dict | None, action_lower: str
+) -> bool:
+    if not hybrid or not result or result.get("success") or action_lower == "done":
+        return False
+    return _is_locator_failure(result)
 
 
 class AgentSession:
@@ -395,11 +436,8 @@ class AgentManager:
 
                 # Hybrid: locator failure → same-browser browser-use for this NL step only
                 step_backend = "playwright_mcp"
-                if (
-                    hybrid
-                    and not result.get("success")
-                    and action_lower != "done"
-                    and _is_locator_failure(result)
+                if _should_hybrid_browser_use_fallback(
+                    hybrid=hybrid, result=result, action_lower=action_lower
                 ):
                     logger.info(
                         "Hybrid browser-use fallback: step %s after MCP locator failure: %s",
@@ -429,6 +467,16 @@ class AgentManager:
                             "fallback_error": fb.get("error"),
                         }
                         step_backend = "browser_use_fallback"
+                elif (
+                    hybrid
+                    and not result.get("success")
+                    and action_lower != "done"
+                ):
+                    logger.info(
+                        "Hybrid skip browser-use for step %s (not classified as locator failure): %s",
+                        step_order,
+                        (result.get("error") or result.get("action") or "")[:200],
+                    )
 
                 # 4. Verify expected result if step succeeded
                 if result.get("success") and expected_result:

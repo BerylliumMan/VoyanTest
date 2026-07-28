@@ -422,6 +422,68 @@ class AgentClient:
             except Exception:
                 pass
 
+    async def _is_exec_cdp_alive(self) -> bool:
+        """Probe hybrid Chromium CDP; False if process exited or port refused."""
+        http = self._exec_cdp_http
+        if not http:
+            return False
+        proc = self._exec_chrome_process
+        if proc is not None and proc.returncode is not None:
+            self._log_warning(
+                f"Hybrid Chromium already exited code={proc.returncode}"
+            )
+            return False
+
+        def _probe() -> bool:
+            import urllib.error
+            import urllib.request
+
+            try:
+                with urllib.request.urlopen(f"{http.rstrip('/')}/json/version", timeout=2) as resp:
+                    return 200 <= getattr(resp, "status", 200) < 300
+            except (urllib.error.URLError, TimeoutError, OSError):
+                return False
+
+        try:
+            return await asyncio.to_thread(_probe)
+        except Exception:
+            return False
+
+    async def _ensure_mcp_session(self, *, shared_cdp: bool) -> None:
+        """Start MCP or restart if the reused browser/CDP session is dead."""
+        if not self._mcp_process:
+            await self._start_mcp(shared_cdp=shared_cdp)
+            return
+
+        self._log_info("Reusing existing MCP subprocess (browser stays open)")
+        need_restart = False
+        reason = ""
+
+        if shared_cdp:
+            if not await self._is_exec_cdp_alive():
+                need_restart = True
+                reason = "hybrid CDP browser closed or unreachable"
+
+        if not need_restart:
+            try:
+                snap = await asyncio.wait_for(
+                    self._mcp_call_tool("snapshot", "", ""), timeout=10
+                )
+                if not snap.get("success"):
+                    need_restart = True
+                    reason = (
+                        "MCP snapshot failed: "
+                        + str(snap.get("error") or snap.get("text") or "unknown")[:160]
+                    )
+            except Exception as exc:
+                need_restart = True
+                reason = f"MCP not responding: {exc}"
+
+        if need_restart:
+            self._log_warning(f"Existing browser session unusable ({reason}) — restarting")
+            await self._stop_mcp()
+            await self._start_mcp(shared_cdp=shared_cdp)
+
     async def _start_mcp(self, *, shared_cdp: bool = False):
         # 清理可能残留的旧 MCP；hybrid 共用 Chromium 时不要 pkill chrome
         try:
@@ -810,22 +872,7 @@ class AgentClient:
             )
             self._emit_status('busy')
             try:
-                if not self._mcp_process:
-                    await self._start_mcp(shared_cdp=shared_cdp)
-                else:
-                    self._log_info("Reusing existing MCP subprocess (browser stays open)")
-                    # hybrid reuse requires CDP endpoint still alive
-                    if shared_cdp and not self._exec_cdp_http:
-                        self._log_warning("Hybrid CDP missing on reuse — restarting with shared CDP")
-                        await self._stop_mcp()
-                        await self._start_mcp(shared_cdp=True)
-                    else:
-                        try:
-                            await asyncio.wait_for(self._mcp_call_tool("snapshot", "", ""), timeout=10)
-                        except Exception:
-                            self._log_warning("Existing MCP not responding, restarting")
-                            await self._stop_mcp()
-                            await self._start_mcp(shared_cdp=shared_cdp)
+                await self._ensure_mcp_session(shared_cdp=shared_cdp)
 
                 # BASE URL 由 Playwright MCP 直接导航，不经 LLM（批量后续用例可跳过）
                 navigate = payload.get("navigate_base_url", True)
@@ -834,9 +881,22 @@ class AgentClient:
                     self._log_info(f"Playwright navigating to BASE URL: {base_url}")
                     nav = await self._mcp_call_tool("goto", "", base_url)
                     if not nav.get("success"):
-                        self._log_warning(
-                            f"BASE URL navigation failed: {nav.get('error') or nav.get('text') or 'unknown'}"
-                        )
+                        err_text = str(nav.get("error") or nav.get("text") or "unknown")
+                        # 浏览器被手动关闭时，snapshot 偶发仍“成功”，goto 才暴露 ECONNREFUSED
+                        if shared_cdp and (
+                            "ECONNREFUSED" in err_text
+                            or "connect ECONNREFUSED" in err_text
+                            or not await self._is_exec_cdp_alive()
+                        ):
+                            self._log_warning(
+                                "BASE URL navigation hit dead CDP — restarting MCP+Chromium and retrying once"
+                            )
+                            await self._stop_mcp()
+                            await self._start_mcp(shared_cdp=True)
+                            nav = await self._mcp_call_tool("goto", "", base_url)
+                            err_text = str(nav.get("error") or nav.get("text") or "unknown")
+                        if not nav.get("success"):
+                            self._log_warning(f"BASE URL navigation failed: {err_text}")
                 elif not navigate:
                     self._log_info("Skip BASE URL navigation (batch follow-up, keep session)")
             except Exception as e:
