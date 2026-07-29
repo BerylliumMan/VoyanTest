@@ -4,13 +4,26 @@
 - ``app/routers/`` 模块通过 HTTP API 写入。
 - ``core/runner/`` 模块在用例执行时读取。
 
-重启后重置为默认值。
+``execution_backend`` 会持久化到 ``data/execution_backend.json``（Docker 数据卷），
+避免换镜像/重启后静默回到 playwright_mcp。
 """
 
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+_EXEC_BACKEND_PATH = Path(
+    os.environ.get("VOYANTEST_EXEC_BACKEND_FILE", "data/execution_backend.json")
+)
 
 
 class HealingConfig(BaseModel):
@@ -23,7 +36,7 @@ healing_config = HealingConfig()
 
 
 class ExecutionBackendConfig(BaseModel):
-    """服务端 UI 执行后端（内存配置，重启恢复默认）。
+    """服务端 UI 执行后端。
 
     - playwright_mcp: 现有 NL → LLM tool_call → Playwright MCP
     - browser_use: NL 步骤交给 browser-use Agent 多轮观察执行（试点）
@@ -36,6 +49,50 @@ class ExecutionBackendConfig(BaseModel):
 
 
 execution_backend_config = ExecutionBackendConfig()
+
+
+def load_execution_backend_config() -> ExecutionBackendConfig:
+    """从磁盘加载执行后端配置；文件缺失或损坏时保留当前内存默认。"""
+    global execution_backend_config
+    path = _EXEC_BACKEND_PATH
+    try:
+        if not path.is_file():
+            return execution_backend_config
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        execution_backend_config = ExecutionBackendConfig.model_validate(raw)
+        logger.info(
+            "Loaded execution backend from %s: backend=%s",
+            path,
+            execution_backend_config.backend,
+        )
+    except Exception as exc:
+        logger.warning("Failed to load execution backend from %s: %s", path, exc)
+    return execution_backend_config
+
+
+def save_execution_backend_config(cfg: ExecutionBackendConfig | None = None) -> None:
+    """将执行后端配置写入磁盘。"""
+    global execution_backend_config
+    if cfg is not None:
+        execution_backend_config = cfg
+    path = _EXEC_BACKEND_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            execution_backend_config.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "Saved execution backend to %s: backend=%s",
+            path,
+            execution_backend_config.backend,
+        )
+    except Exception as exc:
+        logger.warning("Failed to save execution backend to %s: %s", path, exc)
+
+
+# 模块导入时尝试恢复（容器挂载 data 卷后可保留 hybrid）
+load_execution_backend_config()
 
 
 def render_prompt_variables(template: str, **variables: str) -> str:

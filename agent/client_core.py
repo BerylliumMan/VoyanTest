@@ -432,22 +432,65 @@ class AgentClient:
             self._log_warning(
                 f"Hybrid Chromium already exited code={proc.returncode}"
             )
+            self._exec_cdp_http = None
             return False
 
+        # Parse host/port for a cheap TCP probe (works when HTTP hangs oddly on Windows)
+        host, port = "127.0.0.1", None
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(http)
+            host = parsed.hostname or "127.0.0.1"
+            port = int(parsed.port or 0) or None
+        except Exception:
+            port = None
+
         def _probe() -> bool:
+            import socket
             import urllib.error
             import urllib.request
 
+            if port:
+                try:
+                    with socket.create_connection((host, port), timeout=1.5):
+                        pass
+                except OSError:
+                    return False
             try:
-                with urllib.request.urlopen(f"{http.rstrip('/')}/json/version", timeout=2) as resp:
+                with urllib.request.urlopen(
+                    f"{http.rstrip('/')}/json/version", timeout=2
+                ) as resp:
                     return 200 <= getattr(resp, "status", 200) < 300
             except (urllib.error.URLError, TimeoutError, OSError):
                 return False
 
         try:
-            return await asyncio.to_thread(_probe)
+            ok = await asyncio.to_thread(_probe)
         except Exception:
-            return False
+            ok = False
+        if not ok:
+            # Stale URL after user closed the window — clear so next check is honest
+            self._exec_cdp_http = None
+        return ok
+
+    @staticmethod
+    def _looks_like_dead_browser(err_text: str) -> bool:
+        low = (err_text or "").lower()
+        keys = (
+            "econnrefused",
+            "websocket url",
+            "initializeserver",
+            "target closed",
+            "browser has been closed",
+            "browser closed",
+            "connect failed",
+            "connection refused",
+            "net::err_",
+            "cdp",
+            "chromium has crashed",
+        )
+        return any(k in low for k in keys)
 
     async def _ensure_mcp_session(self, *, shared_cdp: bool) -> None:
         """Start MCP or restart if the reused browser/CDP session is dead."""
@@ -459,21 +502,27 @@ class AgentClient:
         need_restart = False
         reason = ""
 
+        # Switching into hybrid (or Chrome closed) while MCP still running
         if shared_cdp:
             if not await self._is_exec_cdp_alive():
                 need_restart = True
                 reason = "hybrid CDP browser closed or unreachable"
+        elif self._exec_chrome_process is not None:
+            # Leftover hybrid Chrome state while now on plain MCP
+            if self._exec_chrome_process.returncode is not None:
+                self._exec_cdp_http = None
 
         if not need_restart:
             try:
                 snap = await asyncio.wait_for(
                     self._mcp_call_tool("snapshot", "", ""), timeout=10
                 )
-                if not snap.get("success"):
+                snap_err = str(snap.get("error") or snap.get("text") or "")
+                if not snap.get("success") or self._looks_like_dead_browser(snap_err):
                     need_restart = True
                     reason = (
                         "MCP snapshot failed: "
-                        + str(snap.get("error") or snap.get("text") or "unknown")[:160]
+                        + (snap_err or "unknown")[:160]
                     )
             except Exception as exc:
                 need_restart = True
@@ -483,6 +532,11 @@ class AgentClient:
             self._log_warning(f"Existing browser session unusable ({reason}) — restarting")
             await self._stop_mcp()
             await self._start_mcp(shared_cdp=shared_cdp)
+
+    async def _restart_mcp_for_dead_browser(self, *, shared_cdp: bool, why: str) -> None:
+        self._log_warning(f"{why} — restarting MCP+browser")
+        await self._stop_mcp()
+        await self._start_mcp(shared_cdp=shared_cdp)
 
     async def _start_mcp(self, *, shared_cdp: bool = False):
         # 清理可能残留的旧 MCP；hybrid 共用 Chromium 时不要 pkill chrome
@@ -884,15 +938,20 @@ class AgentClient:
                         err_text = str(nav.get("error") or nav.get("text") or "unknown")
                         # 浏览器被手动关闭时，snapshot 偶发仍“成功”，goto 才暴露 ECONNREFUSED
                         if shared_cdp and (
-                            "ECONNREFUSED" in err_text
-                            or "connect ECONNREFUSED" in err_text
+                            self._looks_like_dead_browser(err_text)
                             or not await self._is_exec_cdp_alive()
                         ):
-                            self._log_warning(
-                                "BASE URL navigation hit dead CDP — restarting MCP+Chromium and retrying once"
+                            await self._restart_mcp_for_dead_browser(
+                                shared_cdp=True,
+                                why="BASE URL navigation hit dead CDP/browser",
                             )
-                            await self._stop_mcp()
-                            await self._start_mcp(shared_cdp=True)
+                            nav = await self._mcp_call_tool("goto", "", base_url)
+                            err_text = str(nav.get("error") or nav.get("text") or "unknown")
+                        elif (not shared_cdp) and self._looks_like_dead_browser(err_text):
+                            await self._restart_mcp_for_dead_browser(
+                                shared_cdp=False,
+                                why="BASE URL navigation hit dead browser",
+                            )
                             nav = await self._mcp_call_tool("goto", "", base_url)
                             err_text = str(nav.get("error") or nav.get("text") or "unknown")
                         if not nav.get("success"):

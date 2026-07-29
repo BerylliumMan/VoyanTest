@@ -395,8 +395,12 @@ async def update_execution_backend(
     cfg: ExecutionBackendConfig, admin=Depends(require_admin),
 ) -> ExecutionBackendConfig:
     """切换执行后端。hybrid 仅客户端 Agent：MCP 默认，定位失败同浏览器 browser-use 救场。"""
-    from app.runtime_config import execution_backend_config as _rt
+    from app.runtime_config import (
+        execution_backend_config as _rt,
+        save_execution_backend_config,
+    )
     _rt.backend = cfg.backend
     _rt.max_steps_per_nl = cfg.max_steps_per_nl
     _rt.headless = cfg.headless
+    save_execution_backend_config(_rt)
     return _rt
