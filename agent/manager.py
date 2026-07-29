@@ -870,19 +870,20 @@ class AgentManager:
         for attempt in range(3):
             try:
                 msg = WSMessage(type=WSMessageType.GET_SNAPSHOT, agent_id=agent_id, run_id=run_id)
-                payload = await session.request(msg)
+                # Keep short: dead browser must not block the agent for minutes
+                payload = await session.request(msg, timeout=25)
                 text = payload.get("text", "")
-                if text and "(page not available)" not in text and "(snapshot unavailable)" not in text:
+                if text and "(page not available)" not in text and "(snapshot unavailable)" not in text and "(snapshot timeout)" not in text and "(browser ready)" not in text:
                     return text
             except Exception as exc:
                 logger.debug(f"Snapshot attempt {attempt + 1}/3 failed: {exc}")
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
         return text or "(snapshot unavailable)"
 
     async def _get_screenshot(self, session: AgentSession, agent_id: str, run_id: str) -> dict:
         try:
             msg = WSMessage(type=WSMessageType.GET_SCREENSHOT, agent_id=agent_id, run_id=run_id)
-            payload = await session.request(msg)
+            payload = await session.request(msg, timeout=30)
             return payload
         except Exception as exc:
             logger.debug(f"Screenshot request failed: {exc}")
@@ -895,7 +896,7 @@ class AgentManager:
                 type=WSMessageType.STEP_EXECUTE, agent_id=agent_id, run_id=run_id,
                 payload={"step_order": step_order, "description": description, "tool_call": tool_call},
             )
-            payload = await session.request(msg)
+            payload = await session.request(msg, timeout=90)
             return payload
         except asyncio.TimeoutError:
             return {"success": False, "error": "Step timeout", "action": "", "duration_ms": 0}
