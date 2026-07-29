@@ -33,6 +33,15 @@ cp -a "$STAGE/static" /tmp/voyantest-incr-ctx/static
 cat > /tmp/voyantest-incr-ctx/Dockerfile <<'DOCKER'
 FROM voyantest:latest
 WORKDIR /app
+# Playwright MCP 需要 npx/@playwright/mcp；旧镜像可能缺 Node
+RUN if ! command -v npx >/dev/null 2>&1; then \
+      apt-get update -qq \
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates gnupg \
+      && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs \
+      && rm -rf /var/lib/apt/lists/* \
+      && node -v && npm -v; \
+    else node -v && npm -v; fi
 COPY app/ app/
 COPY core/ core/
 COPY agent/ agent/
