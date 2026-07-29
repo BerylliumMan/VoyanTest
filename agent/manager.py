@@ -300,6 +300,14 @@ class AgentManager:
             )
             hybrid = False
 
+        logger.info(
+            "Client agent run backend selected=%s hybrid=%s agent=%s caps=%s",
+            selected,
+            hybrid,
+            agent_id,
+            session.agent.capabilities or [],
+        )
+
         session.agent.status = AgentStatus.BUSY
         step_results = []
         consecutive_failures = 0
@@ -476,6 +484,14 @@ class AgentManager:
                         "Hybrid skip browser-use for step %s (not classified as locator failure): %s",
                         step_order,
                         (result.get("error") or result.get("action") or "")[:200],
+                    )
+                elif not hybrid and not result.get("success") and action_lower != "done":
+                    logger.info(
+                        "No browser-use fallback for step %s (selected_backend=%s hybrid_inactive); "
+                        "set Settings→执行后端 to hybrid if desired. error=%s",
+                        step_order,
+                        selected,
+                        (result.get("error") or "")[:160],
                     )
 
                 # 4. Verify expected result if step succeeded
