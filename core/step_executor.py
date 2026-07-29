@@ -488,6 +488,17 @@ async def execute_step_mcp(
                 )
                 relocate_attempted = relocate_attempted or open_relocated
                 open_tc = tool_call
+                open_fp = None
+                if tool_call is not None and is_learnable_action(getattr(tool_call, "action", None)):
+                    try:
+                        open_fp = extract_from_snapshot(
+                            snapshot,
+                            str(getattr(tool_call, "selector", "") or ""),
+                            action=str(getattr(tool_call, "action", "click")),
+                            value=getattr(tool_call, "value", None),
+                        )
+                    except Exception:
+                        open_fp = None
                 if tool_call is not None:
                     actions_log.append(_format_action(tool_call))
                     if tool_call.thinking:
@@ -517,6 +528,7 @@ async def execute_step_mcp(
                     step_timeout_ms=step_timeout_ms,
                 )
                 relocate_attempted = relocate_attempted or pick_relocated
+                result["_open_fp"] = open_fp
             else:
                 tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
                     desc=desc,
