@@ -353,10 +353,15 @@ async def execute_step_mcp(
     """
     from core.locator_memory import (
         bump_hit_count,
+        build_plan_blob,
         extract_from_snapshot,
+        extract_page_url,
         is_learnable_action,
+        page_url_hint,
         try_replay_mcp,
+        try_replay_plan_mcp,
     )
+    from core.step_intent import preview_step_resolution
 
     step_number = step['step_order']
     raw_desc = _sanitize_step(step.get('description') or '')
@@ -364,6 +369,9 @@ async def execute_step_mcp(
     expected_result = step.get('expected_result')
     label, option = parse_dropdown_select(raw_desc)
     t_start = time.monotonic()
+    cacheable = step.get("cacheable", True)
+    if cacheable is None:
+        cacheable = True
 
     result: dict[str, Any] = {
         'step_number': step_number,
@@ -376,20 +384,33 @@ async def execute_step_mcp(
         'screenshot_path': None,
         'duration_ms': 0,
         'locator_replay': False,
+        'plan_replay': False,
         'learned_locator': None,
         'invalidate_learned_locator': False,
+        'failure_kind': None,
+        'preview': None,
     }
 
+    memory_mode = "read_write"
     memory_enabled = True
+    preview_enabled = False
     try:
         from app.runtime_config import healing_config as _hc
         memory_enabled = bool(getattr(_hc, "locator_memory_enabled", True))
+        memory_mode = getattr(_hc, "locator_memory_mode", None) or (
+            "read_write" if memory_enabled else "off"
+        )
+        if not memory_enabled:
+            memory_mode = "off"
+        preview_enabled = bool(getattr(_hc, "locator_preview_enabled", False))
     except Exception:
-        memory_enabled = True
+        memory_mode = "read_write" if memory_enabled else "off"
 
-    cached_fp = step.get("learned_locator") if memory_enabled else None
+    cached_fp = step.get("learned_locator") if memory_mode != "off" and cacheable else None
     if not isinstance(cached_fp, dict):
         cached_fp = None
+    # read_only: allow replay; write only when read_write
+    can_write_memory = memory_mode == "read_write" and cacheable
 
     try:
         snapshot = await mcp_manager.get_dom_snapshot()
