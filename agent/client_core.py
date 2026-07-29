@@ -859,16 +859,55 @@ class AgentClient:
 
     async def _mcp_tools_call(self, tool_name: str, arguments: dict) -> dict:
         """Call an MCP tool by exact name (e.g. browser_tabs)."""
-        await self._mcp_send("tools/call", {"name": tool_name, "arguments": arguments or {}})
+        if not self._mcp_process_alive():
+            return {
+                "success": False,
+                "error": "MCP stdout closed / process dead (browser closed by user?)",
+            }
+        if not self._mcp_stdin or not self._mcp_stdout:
+            return {"success": False, "error": "MCP session pipes not ready"}
         try:
-            resp = await self._mcp_recv()
-            result = resp.get("result", {})
+            await self._mcp_send(
+                "tools/call", {"name": tool_name, "arguments": arguments or {}},
+            )
+        except Exception as exc:
+            await self._invalidate_mcp_session(f"MCP stdin write failed: {exc}")
+            return {"success": False, "error": f"MCP write failed: {exc}"}
+        try:
+            # Keep timeout modest so a closed browser does not freeze the WS loop
+            resp = await self._mcp_recv(timeout=45)
+            if not resp:
+                await self._invalidate_mcp_session("MCP empty response / stdout closed")
+                return {
+                    "success": False,
+                    "error": "MCP empty response (browser closed by user?)",
+                }
+            # Notifications / unrelated messages: require matching id when present
+            result = resp.get("result")
+            if result is None and resp.get("error"):
+                err = resp.get("error")
+                err_text = (
+                    err.get("message") if isinstance(err, dict) else str(err)
+                )
+                if self._looks_like_dead_browser(str(err_text)):
+                    await self._invalidate_mcp_session(str(err_text))
+                return {"success": False, "error": str(err_text)}
+            if not isinstance(result, dict):
+                await self._invalidate_mcp_session("MCP malformed tools/call result")
+                return {"success": False, "error": "MCP empty response"}
             is_error = result.get("isError", False)
             content = result.get("content", [])
             text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-            return {"success": not is_error, "text": text, "_content": content}
+            out = {"success": not is_error, "text": text, "_content": content}
+            if (not out["success"]) and self._looks_like_dead_browser(text):
+                await self._invalidate_mcp_session(text[:160])
+            return out
         except asyncio.TimeoutError:
+            await self._invalidate_mcp_session("MCP tool call timed out")
             return {"success": False, "error": "MCP tool call timed out"}
+        except Exception as exc:
+            await self._invalidate_mcp_session(f"MCP recv failed: {exc}")
+            return {"success": False, "error": f"MCP recv failed: {exc}"}
     async def _mcp_screenshot_base64(self) -> Optional[str]:
         """Take a screenshot via MCP and return base64-encoded PNG.
 
