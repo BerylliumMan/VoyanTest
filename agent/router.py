@@ -68,7 +68,20 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
     session = None
 
     async def _send(raw: str):
-        await ws.send_text(raw)
+        # Avoid Starlette ASGI crash when client already disconnected
+        try:
+            from starlette.websockets import WebSocketState
+            if getattr(ws, "client_state", None) != WebSocketState.CONNECTED:
+                raise ConnectionError(
+                    f"Agent WebSocket already closed (state={getattr(ws, 'client_state', None)})"
+                )
+        except ImportError:
+            pass
+        try:
+            await ws.send_text(raw)
+        except RuntimeError as exc:
+            # e.g. Unexpected ASGI message 'websocket.send' after websocket.close
+            raise ConnectionError(f"Agent WebSocket send failed: {exc}") from exc
 
     async def _sync_to_db(name: str, ip: str, hostname: str):
         """Create or update AgentDB record for this WebSocket agent."""
