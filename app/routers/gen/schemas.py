@@ -69,11 +69,14 @@ class GenHistoryItem(BaseModel):
     project_description: str
     status: str
     error_message: str
+    progress: int = 0
+    progress_message: str = ""
     functional_points_count: int
     test_cases_count: int
     imported_count: int
     created_at: datetime
     completed_at: Optional[datetime]
+    can_retry: bool = False
 
 
 class GenHistoryListResponse(BaseModel):

@@ -908,6 +908,30 @@ class TestResponseParserFpHelpers:
         # Default start_index=0 → TC-001
         assert tcs[0].test_case_id == "TC-001"
 
+    def test_sanitize_ui_step_patterns(self):
+        from app.gen.response_parser import _sanitize_ui_step
+
+        assert _sanitize_ui_step("单位下拉框选择【汉东省院】") == "在【单位】中选择【汉东省院】"
+        assert _sanitize_ui_step("点击【单位下拉框】") == "点击【单位】"
+        assert _sanitize_ui_step("点击登录按钮") == "点击【登录】"
+        assert _sanitize_ui_step("在用户名输入框输入 admin") == "在【用户名】输入 admin"
+        assert _sanitize_ui_step("用户名输入框输入 admin") == "在【用户名】输入 admin"
+        # Already good steps stay unchanged
+        assert _sanitize_ui_step("在【用户名】输入 admin") == "在【用户名】输入 admin"
+        assert _sanitize_ui_step("点击【登录】") == "点击【登录】"
+
+    def test_normalize_tc_sanitizes_steps(self):
+        from app.gen.response_parser import _normalize_tc_item
+
+        tc = _normalize_tc_item({
+            "title": "t",
+            "module": "m",
+            "steps": ["单位下拉框选择【汉东省院】", "点击登录按钮"],
+            "expected": ["ok", "ok"],
+        })
+        assert "在【单位】中选择【汉东省院】" in tc["test_steps"]
+        assert "点击【登录】" in tc["test_steps"]
+
     def test_looks_truncated_unbalanced_braces(self):
         from app.gen.response_parser import looks_truncated_fp_output
 

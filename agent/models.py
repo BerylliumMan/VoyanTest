@@ -51,6 +51,7 @@ class WSMessageType(str, Enum):
     SCREENSHOT_RESULT = "screenshot_result"
     STEP_RESULT = "step_result"
     RUN_COMPLETE = "run_complete"
+    RUN_LOG = "run_log"  # Agent → Server: fire-and-forget progress log (no ACK)
     RECORDING_READY = "recording_ready"
     RECORDING_EVENTS = "recording_events"
     ERROR = "error"

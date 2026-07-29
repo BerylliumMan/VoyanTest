@@ -11,8 +11,29 @@ from .manager import agent_manager
 from app.tz import now as tz_now
 
 logger = logging.getLogger(__name__)
+run_log_logger = logging.getLogger("agent.run_log")
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
+
+
+def _log_agent_run_log(agent_id: str, run_id: str | None, payload: dict) -> None:
+    """Forward Agent RUN_LOG to server logs (does not resolve pending requests)."""
+    level = str((payload or {}).get("level") or "info").lower()
+    message = str((payload or {}).get("message") or "").strip()
+    if not message:
+        return
+    step = (payload or {}).get("step_order")
+    backend = (payload or {}).get("backend") or ""
+    prefix = f"[agent={agent_id} run={run_id or '-'}]"
+    if step is not None and step != "":
+        prefix += f" [step={step}]"
+    if backend:
+        prefix += f" [{backend}]"
+    line = f"{prefix} {message}"
+    log_fn = getattr(run_log_logger, level, None)
+    if not callable(log_fn):
+        log_fn = run_log_logger.info
+    log_fn(line)
 
 
 # ---- HTTP: Agent listing ----
@@ -91,6 +112,10 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
             elif msg.type == WSMessageType.HEARTBEAT:
                 await agent_manager.heartbeat(agent_id)
                 await _sync_to_db(agent_name, "", "")
+
+            elif msg.type == WSMessageType.RUN_LOG:
+                # Fire-and-forget progress logs — do NOT session.resolve / resolve_pending
+                _log_agent_run_log(agent_id, msg.run_id, msg.payload or {})
 
             elif msg.type in (WSMessageType.STEP_RESULT, WSMessageType.SNAPSHOT_RESULT,
                               WSMessageType.SCREENSHOT_RESULT, WSMessageType.RUN_COMPLETE,

@@ -344,7 +344,17 @@ async def execute_step_mcp(
 
     Dropdown steps like「单位下拉框选择【汉东省院】」are normalized and may run as
     open-then-select (two MCP actions) when the option is not yet visible.
+
+    When ``step['learned_locator']`` is set and locator memory is enabled, try
+    direct MCP replay (skip LLM). Expected-result failure invalidates cache.
     """
+    from core.locator_memory import (
+        bump_hit_count,
+        extract_from_snapshot,
+        is_learnable_action,
+        try_replay_mcp,
+    )
+
     step_number = step['step_order']
     raw_desc = _sanitize_step(step.get('description') or '')
     desc = normalize_step_description(raw_desc)
@@ -362,84 +372,131 @@ async def execute_step_mcp(
         'error': None,
         'screenshot_path': None,
         'duration_ms': 0,
+        'locator_replay': False,
+        'learned_locator': None,
+        'invalidate_learned_locator': False,
     }
+
+    memory_enabled = True
+    try:
+        from app.runtime_config import healing_config as _hc
+        memory_enabled = bool(getattr(_hc, "locator_memory_enabled", True))
+    except Exception:
+        memory_enabled = True
+
+    cached_fp = step.get("learned_locator") if memory_enabled else None
+    if not isinstance(cached_fp, dict):
+        cached_fp = None
 
     try:
         snapshot = await mcp_manager.get_dom_snapshot()
         actions_log: list[str] = []
         thinking_parts: list[str] = []
         tool_call = None
-        exec_result: dict[str, Any]
+        exec_result: dict[str, Any] = {"success": False}
         relocate_attempted = False
+        used_replay = False
 
-        # Custom/Ant dropdowns often need: open combobox → click option
-        if label and option and option not in (snapshot or ""):
-            open_desc = (
-                f"点击字段或标签为「{label}」的下拉框/组合框以展开选项列表。"
-                f"不要查找文案「下拉框」或「{label}下拉框」。"
-            )
-            tool_call, exec_result, open_relocated = await _llm_tool_and_run_with_relocate(
-                desc=open_desc,
+        # Fast path: replay learned locator (skip LLM)
+        if cached_fp and not (label and option):
+            replay = await try_replay_mcp(
+                mcp_manager,
+                cached_fp,
                 snapshot=snapshot,
-                expected_result=None,
-                mcp_manager=mcp_manager,
-                llm_client=llm_client,
-                model=model,
-                system_prompt_override=system_prompt_override,
-                step_timeout_ms=step_timeout_ms,
+                step_description=raw_desc,
             )
-            relocate_attempted = relocate_attempted or open_relocated
-            if tool_call is not None:
+            if replay.get("success") and not replay.get("skipped"):
+                used_replay = True
+                result["locator_replay"] = True
+                tc = replay.get("tool_call") or {}
+
+                class _ReplayTC:
+                    pass
+
+                tool_call = _ReplayTC()
+                tool_call.action = tc.get("action")
+                tool_call.selector = tc.get("selector")
+                tool_call.value = tc.get("value")
+                tool_call.thinking = tc.get("thinking") or ""
+                tool_call.next_goal = ""
+                exec_result = replay.get("exec_result") or {"success": True}
                 actions_log.append(_format_action(tool_call))
-                if tool_call.thinking:
-                    thinking_parts.append(tool_call.thinking)
-            if not exec_result.get('success'):
-                result['thinking'] = ' | '.join(thinking_parts) or '展开下拉失败'
-                result['action'] = ' → '.join(actions_log)
-                result['error'] = exec_result.get('error', '展开下拉失败')
-                result['relocate_attempted'] = relocate_attempted
-                await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
-                result['duration_ms'] = (time.monotonic() - t_start) * 1000
-                return result
-            snapshot = await mcp_manager.get_dom_snapshot()
-            pick_desc = (
-                f"在已展开的下拉列表中点击选项「{option}」。"
-                f"不要查找文案「下拉框」。"
-            )
-            tool_call, exec_result, pick_relocated = await _llm_tool_and_run_with_relocate(
-                desc=pick_desc,
-                snapshot=snapshot,
-                expected_result=expected_result,
-                mcp_manager=mcp_manager,
-                llm_client=llm_client,
-                model=model,
-                system_prompt_override=system_prompt_override,
-                step_timeout_ms=step_timeout_ms,
-            )
-            relocate_attempted = relocate_attempted or pick_relocated
-        else:
-            tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
-                desc=desc,
-                snapshot=snapshot,
-                expected_result=expected_result,
-                mcp_manager=mcp_manager,
-                llm_client=llm_client,
-                model=model,
-                system_prompt_override=system_prompt_override,
-                step_timeout_ms=step_timeout_ms,
-            )
+                thinking_parts.append(tool_call.thinking)
+            elif not replay.get("skipped"):
+                result["invalidate_learned_locator"] = True
+                logger.info(
+                    "locator_memory replay MCP fail step=%s: %s",
+                    step_number, (replay.get("error") or "")[:120],
+                )
+
+        if not used_replay:
+            if label and option and option not in (snapshot or ""):
+                open_desc = (
+                    f"点击字段或标签为「{label}」的下拉框/组合框以展开选项列表。"
+                    f"不要查找文案「下拉框」或「{label}下拉框」。"
+                )
+                tool_call, exec_result, open_relocated = await _llm_tool_and_run_with_relocate(
+                    desc=open_desc,
+                    snapshot=snapshot,
+                    expected_result=None,
+                    mcp_manager=mcp_manager,
+                    llm_client=llm_client,
+                    model=model,
+                    system_prompt_override=system_prompt_override,
+                    step_timeout_ms=step_timeout_ms,
+                )
+                relocate_attempted = relocate_attempted or open_relocated
+                if tool_call is not None:
+                    actions_log.append(_format_action(tool_call))
+                    if tool_call.thinking:
+                        thinking_parts.append(tool_call.thinking)
+                if not exec_result.get('success'):
+                    result['thinking'] = ' | '.join(thinking_parts) or '展开下拉失败'
+                    result['action'] = ' → '.join(actions_log)
+                    result['error'] = exec_result.get('error', '展开下拉失败')
+                    result['relocate_attempted'] = relocate_attempted
+                    await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+                    result['duration_ms'] = (time.monotonic() - t_start) * 1000
+                    return result
+                snapshot = await mcp_manager.get_dom_snapshot()
+                pick_desc = (
+                    f"在已展开的下拉列表中点击选项「{option}」。"
+                    f"不要查找文案「下拉框」。"
+                )
+                tool_call, exec_result, pick_relocated = await _llm_tool_and_run_with_relocate(
+                    desc=pick_desc,
+                    snapshot=snapshot,
+                    expected_result=expected_result,
+                    mcp_manager=mcp_manager,
+                    llm_client=llm_client,
+                    model=model,
+                    system_prompt_override=system_prompt_override,
+                    step_timeout_ms=step_timeout_ms,
+                )
+                relocate_attempted = relocate_attempted or pick_relocated
+            else:
+                tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
+                    desc=desc,
+                    snapshot=snapshot,
+                    expected_result=expected_result,
+                    mcp_manager=mcp_manager,
+                    llm_client=llm_client,
+                    model=model,
+                    system_prompt_override=system_prompt_override,
+                    step_timeout_ms=step_timeout_ms,
+                )
 
         if relocate_attempted:
             result['relocate_attempted'] = True
 
-        if tool_call is not None:
+        if tool_call is not None and not used_replay:
             actions_log.append(_format_action(tool_call))
-            if tool_call.thinking:
+            if getattr(tool_call, "thinking", None):
                 thinking_parts.append(tool_call.thinking)
-            result['next_goal'] = tool_call.next_goal or ''
+            result['next_goal'] = getattr(tool_call, "next_goal", None) or ''
 
         result['thinking'] = ' | '.join(thinking_parts) or (
-            f"Execute: {tool_call.action}" if tool_call else ''
+            f"Execute: {getattr(tool_call, 'action', '')}" if tool_call else ''
         )
         result['action'] = ' → '.join(a for a in actions_log if a)
 
@@ -449,8 +506,10 @@ async def execute_step_mcp(
             result['duration_ms'] = (time.monotonic() - t_start) * 1000
             return result
 
-        if tool_call.action == 'error':
-            result['error'] = exec_result.get('error') or f"LLM 无法确定操作: {tool_call.value}"
+        if getattr(tool_call, "action", None) == 'error':
+            result['error'] = exec_result.get('error') or (
+                f"LLM 无法确定操作: {getattr(tool_call, 'value', None)}"
+            )
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
             result['duration_ms'] = (time.monotonic() - t_start) * 1000
             return result
@@ -459,9 +518,11 @@ async def execute_step_mcp(
         if not result['success']:
             result['error'] = exec_result.get('error', '未知错误')
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
+            if used_replay:
+                result["invalidate_learned_locator"] = True
         elif expected_result:
             mcp_error = exec_result.get('error')
-            action_type = tool_call.action
+            action_type = getattr(tool_call, "action", None)
 
             if strategy.should_verify(action_type, mcp_error):
                 verified = False
@@ -508,7 +569,6 @@ async def execute_step_mcp(
                             timeout=30,
                         )
                         if not verification.passed:
-                            # Hybrid: settle + re-snapshot + re-verify once
                             logger.info(
                                 "Hybrid assert retry: L2 failed (%s); refreshing snapshot",
                                 (verification.reason or '')[:120],
@@ -529,6 +589,8 @@ async def execute_step_mcp(
                             if not verification.passed:
                                 result['success'] = False
                                 result['error'] = f"预期结果验证失败: {verification.reason}"
+                                if used_replay:
+                                    result["invalidate_learned_locator"] = True
                                 await _capture_screenshot(
                                     mcp_manager, screenshot_dir, step_number, result,
                                 )
@@ -542,6 +604,23 @@ async def execute_step_mcp(
                         logger.warning(
                             "步骤 %s 预期结果验证异常: %s", step_number, exc, exc_info=True,
                         )
+
+        if result["success"] and memory_enabled and tool_call is not None:
+            action = getattr(tool_call, "action", None)
+            selector = getattr(tool_call, "selector", None)
+            value = getattr(tool_call, "value", None)
+            if is_learnable_action(action) and selector:
+                try:
+                    fp = extract_from_snapshot(
+                        snapshot, str(selector), action=str(action), value=value,
+                    )
+                    if fp:
+                        if used_replay and cached_fp:
+                            result["learned_locator"] = bump_hit_count(cached_fp)
+                        else:
+                            result["learned_locator"] = fp
+                except Exception as exc:
+                    logger.debug("learn locator failed: %s", exc)
 
     except Exception as exc:
         result['error'] = f'步骤执行异常: {exc}'

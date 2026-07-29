@@ -8,10 +8,127 @@ import base64
 import logging
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[str], Any]  # sync or returns awaitable
+
+
+def _emit_progress(on_progress: ProgressCallback | None, message: str) -> None:
+    """Fire progress callback; never raise into the execution path."""
+    if not on_progress or not message:
+        return
+    try:
+        on_progress(message)
+    except Exception:
+        logger.debug("on_progress failed", exc_info=True)
+
+
+def _truncate(text: str, limit: int = 300) -> str:
+    text = (text or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _summarize_agent_output(output: Any) -> str:
+    """Short summary of browser-use AgentOutput for server logs."""
+    parts: list[str] = []
+    try:
+        state = getattr(output, "current_state", None)
+        if state is not None:
+            thinking = getattr(state, "thinking", None) or getattr(state, "evaluation_previous_goal", None)
+            goal = getattr(state, "next_goal", None)
+            if thinking:
+                parts.append(f"think={_truncate(str(thinking), 120)}")
+            if goal:
+                parts.append(f"goal={_truncate(str(goal), 120)}")
+        actions = getattr(output, "action", None) or getattr(output, "actions", None)
+        if actions:
+            names: list[str] = []
+            for a in (actions if isinstance(actions, (list, tuple)) else [actions]):
+                name = getattr(a, "name", None) or type(a).__name__
+                # browser-use often uses model dump with one key = action type
+                if hasattr(a, "model_dump"):
+                    try:
+                        dumped = a.model_dump(exclude_none=True)
+                        if isinstance(dumped, dict) and dumped:
+                            name = next(iter(dumped.keys()))
+                    except Exception:
+                        pass
+                names.append(str(name))
+            if names:
+                parts.append("actions=" + ",".join(names[:6]))
+    except Exception:
+        return _truncate(str(output), 200)
+    return _truncate("; ".join(parts) if parts else str(output), 300)
+
+
+def _make_new_step_callback(
+    on_progress: ProgressCallback | None,
+    *,
+    step_order: int,
+) -> Callable[..., Any] | None:
+    if not on_progress:
+        return None
+
+    def _cb(browser_state: Any, output: Any, bu_step: int) -> None:
+        summary = _summarize_agent_output(output)
+        _emit_progress(
+            on_progress,
+            f"NL step {step_order} agent-turn {bu_step}: {summary}",
+        )
+
+    return _cb
+
+
+def attach_browser_use_log_handler(
+    *,
+    on_progress: ProgressCallback | None,
+    logger_names: tuple[str, ...] = ("browser_use", "bubus"),
+) -> list[tuple[logging.Logger, logging.Handler]]:
+    """Attach temporary handlers that forward library logs to on_progress.
+
+    Returns list of (logger, handler) to remove later via ``detach_browser_use_log_handlers``.
+    """
+    if not on_progress:
+        return []
+
+    class _ProgressHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                msg = self.format(record)
+                # Skip extremely noisy debug noise if somehow attached at DEBUG
+                if record.levelno < logging.INFO:
+                    return
+                _emit_progress(on_progress, f"[{record.name}] {_truncate(msg, 400)}")
+            except Exception:
+                pass
+
+    attached: list[tuple[logging.Logger, logging.Handler]] = []
+    handler = _ProgressHandler(level=logging.INFO)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    for name in logger_names:
+        lg = logging.getLogger(name)
+        lg.addHandler(handler)
+        # Ensure INFO from library is not filtered if root is WARNING-only for that logger
+        if lg.level == logging.NOTSET or lg.level > logging.INFO:
+            lg.setLevel(logging.INFO)
+        attached.append((lg, handler))
+    return attached
+
+
+def detach_browser_use_log_handlers(
+    attached: list[tuple[logging.Logger, logging.Handler]],
+) -> None:
+    for lg, handler in attached:
+        try:
+            lg.removeHandler(handler)
+        except Exception:
+            pass
 
 
 def resolve_system_prompt_override() -> str | None:
@@ -60,6 +177,7 @@ def build_step_task(
     expected_result: str | None,
     step_order: int,
     base_url: str | None,
+    learned_locator: dict | None = None,
 ) -> str:
     expected = (expected_result or "").strip()
     expected_block = (
@@ -69,16 +187,27 @@ def build_step_task(
     )
     base = (
         f"当前步骤编号: {step_order}\n"
-        f"步骤描述:\n{description}\n\n"
+        f"步骤描述（权威，用例已正确 — 请忠实执行，禁止自行改写意图）:\n{description}\n\n"
         f"{expected_block}\n"
         "规则:\n"
-        "- 只完成本步骤，不要擅自执行后续无关操作\n"
-        "- 若页面未打开且需要导航，可先打开相关页面\n"
+        "- 语义保真：【】/「」内文案是页面真实控件名；提交≠确定≠保存；查询≠搜索；禁止点「看起来差不多」的控件\n"
+        "- 只完成本步骤一个主操作，不要擅自执行后续步骤、填未提及的字段、或提前提交表单\n"
+        "- 禁止臆造输入值；只能使用步骤中写明的文本/选项\n"
+        "- 若存在多个同样像的目标：先等待关键文案出现或报告失败，禁止随机点一个\n"
+        "- 除非步骤明确要求打开/跳转/进入，否则不要离开当前页或关闭弹窗\n"
+        "- 若页面未打开且步骤需要导航，可先打开相关页面\n"
         "- 下拉框/树选择/联想选项：输入文字后必须再点击匹配项完成选择，仅输入不算完成\n"
-        "- 优先少步完成；看到目标选项就立刻点击，不要反复探索\n"
+        "- 若点击打开了新浏览器标签页：立刻 switch 到新标签再继续（运行时也会自动切换）\n"
+        "- 优先少步完成；看到目标选项就立刻点击，不要反复探索无关区域\n"
         "- 完成后必须 done：成功则 success=true，失败则 success=false 并说明原因\n"
-        "- 判断成败时只依据页面真实可见内容，不要臆造文案\n"
+        "- 判断成败时只依据页面真实可见内容与本步预期，不要臆造文案\n"
     )
+    hint = ""
+    if learned_locator:
+        from core.locator_memory import format_hint_for_agent
+        hint = format_hint_for_agent(learned_locator)
+    if hint:
+        base += f"- {hint}\n"
     if base_url:
         base = f"测试环境 BASE URL: {base_url}\n\n" + base
     return base
@@ -86,6 +215,128 @@ def build_step_task(
 
 # Back-compat aliases used by unit tests
 _build_step_task = build_step_task
+
+
+async def list_browser_use_page_ids(session) -> list[str]:
+    """Return page targetIds currently known to the BrowserSession."""
+    if session is None:
+        return []
+    getter = getattr(session, "_cdp_get_all_pages", None)
+    if not callable(getter):
+        return []
+    try:
+        pages = await getter()
+    except Exception as exc:
+        logger.warning("browser-use list pages failed: %s", exc)
+        return []
+    ids: list[str] = []
+    for p in pages or []:
+        tid = p.get("targetId") if isinstance(p, dict) else None
+        if tid:
+            ids.append(tid)
+    return ids
+
+
+async def switch_browser_use_to_newest_tab_if_opened(
+    session,
+    *,
+    page_ids_before: list[str] | None = None,
+    settle_seconds: float = 0.5,
+) -> bool:
+    """If page count grew, focus the newest page (align with MCP auto-tab switch).
+
+    browser-use's click watchdog tries this with a short 0.1s wait and then may
+    stay on the old tab if the popup is slow. We re-check after settle.
+    """
+    import asyncio
+
+    if session is None:
+        return False
+    before = list(page_ids_before or [])
+    if settle_seconds > 0:
+        await asyncio.sleep(settle_seconds)
+    after = await list_browser_use_page_ids(session)
+    if not after:
+        return False
+    before_set = set(before)
+    if before:
+        new_ids = [tid for tid in after if tid not in before_set]
+        if not new_ids:
+            return False
+        newest_id = new_ids[-1]
+    else:
+        if len(after) < 2:
+            return False
+        newest_id = after[-1]
+
+    focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
+    if focus == newest_id:
+        return False
+
+    bus = getattr(session, "event_bus", None)
+    if bus is None:
+        return False
+    try:
+        from browser_use.browser.events import SwitchTabEvent
+
+        event = bus.dispatch(SwitchTabEvent(target_id=newest_id))
+        await event
+        logger.info("browser-use switched to new tab %s", newest_id[-8:])
+        return True
+    except Exception as exc:
+        logger.warning("browser-use new-tab switch failed: %s", exc, exc_info=True)
+        return False
+
+
+def enable_browser_use_auto_switch_new_tabs(session) -> None:
+    """Arm a TabCreatedEvent listener that focuses newly created pages.
+
+    Ignored until ``arm_browser_use_auto_switch_new_tabs`` is called, so initial
+    connect TabCreated events do not steal focus.
+    """
+    if session is None:
+        return
+    state = getattr(session, "_voyantest_tab_auto", None)
+    if state is not None:
+        return
+
+    state = {"armed": False}
+    session._voyantest_tab_auto = state
+    bus = getattr(session, "event_bus", None)
+    if bus is None:
+        return
+
+    async def _on_tab_created(event) -> None:
+        if not state.get("armed"):
+            return
+        tid = getattr(event, "target_id", None)
+        if not tid:
+            return
+        focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
+        if tid == focus:
+            return
+        try:
+            from browser_use.browser.events import SwitchTabEvent
+
+            ev = bus.dispatch(SwitchTabEvent(target_id=tid))
+            await ev
+            logger.info("browser-use auto-switched on TabCreated %s", str(tid)[-8:])
+        except Exception as exc:
+            logger.warning("browser-use TabCreated auto-switch failed: %s", exc)
+
+    try:
+        from browser_use.browser.events import TabCreatedEvent
+
+        bus.on(TabCreatedEvent, _on_tab_created)
+    except Exception as exc:
+        logger.warning("failed to register TabCreated auto-switch: %s", exc)
+
+
+def arm_browser_use_auto_switch_new_tabs(session) -> None:
+    """Start auto-switching after session warmup / BASE URL open."""
+    state = getattr(session, "_voyantest_tab_auto", None)
+    if isinstance(state, dict):
+        state["armed"] = True
 
 
 def create_browser_use_llm_from_config(
@@ -282,6 +533,7 @@ async def execute_nl_steps_browser_use(
     stop_browser: bool = True,
     screenshots_dir: str | None = None,
     cdp_url: str | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> list[dict]:
     """Run NL steps with a shared browser-use session. No DB side effects.
 
@@ -291,12 +543,13 @@ async def execute_nl_steps_browser_use(
     ``stop_browser``: when False, leave the session open for the next case.
     ``screenshots_dir``: if set, also write PNGs there (server-side runs).
     ``cdp_url``: attach to existing Chromium (hybrid MCP fallback); implies no stop.
+    ``on_progress``: optional sync callback for step / agent-turn progress lines.
     """
     from browser_use import Agent
 
     step_results: list[dict] = []
     prompt_override = resolve_system_prompt_override()
-    agent_common = {
+    agent_common: dict[str, Any] = {
         "llm": llm,
         "use_vision": "auto",
         "max_failures": 2,
@@ -307,6 +560,8 @@ async def execute_nl_steps_browser_use(
     if cdp_url:
         stop_browser = False
 
+    log_handlers = attach_browser_use_log_handler(on_progress=on_progress)
+
     # Disable default extensions: sync download can block the asyncio loop
     # (WS heartbeat dies → server unregisters the agent mid-run).
     browser = browser_session or create_browser_session(
@@ -315,10 +570,12 @@ async def execute_nl_steps_browser_use(
         enable_default_extensions=False,
         cdp_url=cdp_url,
     )
+    enable_browser_use_auto_switch_new_tabs(browser)
     try:
         if base_url:
             # Keep URL alone on a line: browser-use URL extraction may swallow
             # trailing Chinese punctuation into the navigate target.
+            _emit_progress(on_progress, f"Opening BASE URL: {base_url}")
             open_agent = Agent(
                 task=(
                     f"Open this URL exactly (copy as-is):\n{base_url}\n"
@@ -326,12 +583,19 @@ async def execute_nl_steps_browser_use(
                 ),
                 browser_session=browser,
                 max_actions_per_step=5,
+                register_new_step_callback=_make_new_step_callback(
+                    on_progress, step_order=0,
+                ),
                 **agent_common,
             )
             try:
                 await open_agent.run(max_steps=8)
             except Exception as exc:
                 logger.warning("browser-use 打开 BASE URL 失败: %s", exc, exc_info=True)
+                _emit_progress(on_progress, f"BASE URL open failed: {exc}")
+
+        # After warmup: auto-focus newly created tabs (target=_blank / window.open).
+        arm_browser_use_auto_switch_new_tabs(browser)
 
         failed_step: int | None = None
         for step in steps:
@@ -355,52 +619,106 @@ async def execute_nl_steps_browser_use(
                 continue
 
             t0 = time.monotonic()
-            task = build_step_task(
-                description=desc,
-                expected_result=expected,
-                step_order=order,
-                base_url=base_url,
-            )
-            logger.info("--- browser-use Step %s: %s ---", order, desc)
-            agent = Agent(
-                task=task,
-                browser_session=browser,
-                max_actions_per_step=8,
-                **agent_common,
-            )
+            cached_fp = step.get("learned_locator") if isinstance(step.get("learned_locator"), dict) else None
+            memory_enabled = True
             try:
-                history = await agent.run(max_steps=max_steps_per_nl)
-                fields = history_to_step_fields(history)
-                # One continuation if we hit max_steps but made partial progress
-                if (not fields["success"]) and _is_max_steps_incomplete(fields.get("error")):
-                    cont_budget = max(10, min(20, int(max_steps_per_nl)))
-                    logger.info(
-                        "browser-use step %s hit max_steps, continue +%s",
-                        order, cont_budget,
-                    )
-                    cont_task = (
-                        "继续完成尚未完成的操作，不要从头开始。\n"
-                        f"原步骤:\n{desc}\n\n"
-                        f"上次进度/原因:\n{fields.get('error') or ''}\n\n"
-                        "若是下拉/树选择，直接点击已出现的匹配选项。"
-                        "完成后 done(success=true)；仍无法完成则 done(success=false)。"
-                    )
-                    cont_agent = Agent(
-                        task=cont_task,
-                        browser_session=browser,
-                        max_actions_per_step=8,
-                        **agent_common,
-                    )
-                    history = await cont_agent.run(max_steps=cont_budget)
+                from app.runtime_config import healing_config as _hc
+                memory_enabled = bool(getattr(_hc, "locator_memory_enabled", True))
+            except Exception:
+                memory_enabled = True
+
+            used_replay = False
+            fields: dict[str, Any] | None = None
+            if memory_enabled and cached_fp:
+                from core.locator_memory import try_replay_browser_use
+                replay = await try_replay_browser_use(
+                    browser, cached_fp, step_description=desc,
+                )
+                if replay.get("success") and not replay.get("skipped"):
+                    used_replay = True
+                    fields = {
+                        "success": True,
+                        "thinking": "locator_memory browser-use CDP replay",
+                        "action": "browser_use_replay",
+                        "error": None,
+                    }
+
+            if not used_replay:
+                task = build_step_task(
+                    description=desc,
+                    expected_result=expected,
+                    step_order=order,
+                    base_url=base_url,
+                    learned_locator=cached_fp if memory_enabled else None,
+                )
+                logger.info("--- browser-use Step %s: %s ---", order, desc)
+                _emit_progress(
+                    on_progress,
+                    f"--- Step {order} start: {_truncate(desc, 160)} ---",
+                )
+                pages_before = await list_browser_use_page_ids(browser)
+                step_cb = _make_new_step_callback(on_progress, step_order=int(order) or 0)
+                agent_kwargs = dict(agent_common)
+                if step_cb is not None:
+                    agent_kwargs["register_new_step_callback"] = step_cb
+                agent = Agent(
+                    task=task,
+                    browser_session=browser,
+                    max_actions_per_step=8,
+                    **agent_kwargs,
+                )
+                try:
+                    history = await agent.run(max_steps=max_steps_per_nl)
                     fields = history_to_step_fields(history)
-            except Exception as exc:
-                logger.exception("browser-use step %s failed", order)
-                fields = {
-                    "success": False,
-                    "thinking": "",
-                    "action": "browser_use",
-                    "error": str(exc),
-                }
+                    if (not fields["success"]) and _is_max_steps_incomplete(fields.get("error")):
+                        cont_budget = max(10, min(20, int(max_steps_per_nl)))
+                        logger.info(
+                            "browser-use step %s hit max_steps, continue +%s",
+                            order, cont_budget,
+                        )
+                        _emit_progress(
+                            on_progress,
+                            f"Step {order} hit max_steps, continue +{cont_budget}",
+                        )
+                        cont_task = (
+                            "继续完成尚未完成的操作，不要从头开始。\n"
+                            f"原步骤:\n{desc}\n\n"
+                            f"上次进度/原因:\n{fields.get('error') or ''}\n\n"
+                            "若是下拉/树选择，直接点击已出现的匹配选项。"
+                            "完成后 done(success=true)；仍无法完成则 done(success=false)。"
+                        )
+                        cont_agent = Agent(
+                            task=cont_task,
+                            browser_session=browser,
+                            max_actions_per_step=8,
+                            **agent_kwargs,
+                        )
+                        history = await cont_agent.run(max_steps=cont_budget)
+                        fields = history_to_step_fields(history)
+                except Exception as exc:
+                    logger.exception("browser-use step %s failed", order)
+                    _emit_progress(on_progress, f"Step {order} exception: {exc}")
+                    fields = {
+                        "success": False,
+                        "thinking": "",
+                        "action": "browser_use",
+                        "error": str(exc),
+                    }
+
+                try:
+                    await switch_browser_use_to_newest_tab_if_opened(
+                        browser,
+                        page_ids_before=pages_before,
+                        settle_seconds=0.5,
+                    )
+                except Exception as exc:
+                    logger.warning("post-step new-tab switch failed: %s", exc)
+            else:
+                logger.info("--- browser-use Step %s: locator replay ---", order)
+                _emit_progress(on_progress, f"--- Step {order}: locator replay ---")
+                pages_before = await list_browser_use_page_ids(browser)
+
+            assert fields is not None
 
             ss_path, ss_b64 = None, None
             # Always capture on failure; also on success for report consistency
@@ -422,9 +740,16 @@ async def execute_nl_steps_browser_use(
                 "backend": "browser_use",
             }
             step_results.append(result)
+            status = "passed" if result["success"] else "failed"
+            err_bit = f" — {_truncate(str(result.get('error') or ''), 160)}" if not result["success"] else ""
+            _emit_progress(
+                on_progress,
+                f"--- Step {order} {status} ({result['duration_ms']:.0f}ms){err_bit} ---",
+            )
             if not result["success"]:
                 failed_step = order
     finally:
+        detach_browser_use_log_handlers(log_handlers)
         if stop_browser:
             try:
                 if hasattr(browser, "stop"):

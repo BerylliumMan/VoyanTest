@@ -157,7 +157,14 @@ class PlaywrightMCPManager:
         """Execute a PlaywrightMCPToolCall via MCP.
 
         Maps LLM action names to MCP tool names and builds the correct arguments.
+        After click, auto-focus a newly opened tab (target=_blank / window.open).
         """
+        from core.mcp_tabs import (
+            list_tab_count,
+            should_watch_for_new_tab,
+            switch_to_new_tab_if_opened,
+        )
+
         action = tool_call.get('action', '')
         selector = tool_call.get('selector')
         value = tool_call.get('value')
@@ -170,6 +177,14 @@ class PlaywrightMCPManager:
             return {'success': False, 'error': f"Unknown action: {action}"}
 
         try:
+            watch_tabs = should_watch_for_new_tab(action)
+            count_before = 1
+            if watch_tabs:
+                try:
+                    count_before = await list_tab_count(self.call_tool)
+                except Exception as exc:
+                    logger.warning("Pre-click tab list failed: %s", exc)
+
             args = self._build_mcp_args(action, selector, value)
             result = await self.call_tool(mcp_tool, args)
 
@@ -178,6 +193,17 @@ class PlaywrightMCPManager:
                     'success': False,
                     'error': result.get('text') or result.get('error', 'MCP call failed'),
                 }
+
+            if watch_tabs:
+                try:
+                    await switch_to_new_tab_if_opened(
+                        self.call_tool,
+                        count_before=count_before,
+                        result_text=result.get('text') or '',
+                    )
+                except Exception as exc:
+                    logger.warning("New-tab switch after click failed: %s", exc)
+
             return {'success': True, 'error': None}
         except (RuntimeError, ConnectionError, OSError, ValueError, TypeError, KeyError) as exc:
             # 参数构建 / MCP 调用 / 字段缺失等失败统一返回结构化错误

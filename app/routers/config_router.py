@@ -381,6 +381,7 @@ async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)
     _rt.enabled = cfg.enabled
     _rt.max_retries = cfg.max_retries
     _rt.threshold = cfg.threshold
+    _rt.locator_memory_enabled = cfg.locator_memory_enabled
     return _rt
 
 

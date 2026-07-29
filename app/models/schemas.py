@@ -82,6 +82,7 @@ class TestStepBase(BaseModel):
     retry_delay: float = Field(default=1.0, ge=0.0)
     assertions: list[dict] = Field(default_factory=list)
     healed_selector: Optional[str] = None
+    learned_locator: Optional[dict] = None
 
 class ModuleBase(BaseModel):
     project_id: int
@@ -112,6 +113,7 @@ class TestStepUpdate(BaseModel):
     retry_delay: Optional[float] = None
     assertions: Optional[list[dict]] = None
     healed_selector: Optional[str] = None
+    learned_locator: Optional[dict] = None
 
 class TestCaseUpdate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)

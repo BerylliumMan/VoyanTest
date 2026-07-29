@@ -36,6 +36,7 @@ class TestSeedData:
             "operation_translate",
             "cdp_convert",
             "verify_expected",
+            "execution_system",
         }
         assert keys == expected, f"种子 key: {keys}"
 

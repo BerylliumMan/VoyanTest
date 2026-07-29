@@ -187,12 +187,14 @@ async def _run_test_case_in_browser_impl(
             healed = (getattr(s, "healed_selector", None) or "").strip()
             if healed:
                 desc = f"{desc}（优先使用选择器: {healed}）"
+            learned = getattr(s, "learned_locator", None)
             step_list.append({
                 'id': s.id,
                 'step_order': s.step_order,
                 'description': desc,
                 'expected_result': s.parsed_result,
                 'healed_selector': healed or None,
+                'learned_locator': learned if isinstance(learned, dict) else None,
             })
         step_list.sort(key=lambda x: x['step_order'])
 
@@ -555,6 +557,14 @@ async def _run_test_case_in_browser_impl(
                     'screenshot_path': last_result.get('screenshot_path'),
                 })
                 step_results.append(last_result)
+                if last_result.get("invalidate_learned_locator"):
+                    try:
+                        step_obj.learned_locator = None
+                        step_dict["learned_locator"] = None
+                        await db.commit()
+                        logger.info("Cleared learned_locator for step %s after failed replay", step_obj.id)
+                    except SQLAlchemyError as db_exc:
+                        logger.warning("清除 learned_locator 失败: %s", db_exc, exc_info=True)
             elif last_result is not None:
                 # 步骤成功
                 run_log_entries.append({
@@ -564,6 +574,20 @@ async def _run_test_case_in_browser_impl(
                     'screenshot_path': last_result.get('screenshot_path'),
                 })
                 step_results.append(last_result)
+                learned = last_result.get("learned_locator")
+                if isinstance(learned, dict):
+                    try:
+                        step_obj.learned_locator = learned
+                        step_dict["learned_locator"] = learned
+                        await db.commit()
+                        logger.info(
+                            "Saved learned_locator for step %s (%s %s)",
+                            step_obj.id,
+                            learned.get("role"),
+                            learned.get("name"),
+                        )
+                    except SQLAlchemyError as db_exc:
+                        logger.warning("保存 learned_locator 失败: %s", db_exc, exc_info=True)
 
             # ==============================================================
             # 步骤成功后的断言验证

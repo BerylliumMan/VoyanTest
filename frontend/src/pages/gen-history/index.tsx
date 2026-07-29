@@ -1,11 +1,31 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Card, Table, Button, Message, Tag, Space, Modal, Typography, Select } from '@arco-design/web-react';
-import { IconDelete, IconEye, IconRefresh, IconImport, IconDownload, IconPause } from '@arco-design/web-react/icon';
+import {
+  Card,
+  Table,
+  Button,
+  Message,
+  Tag,
+  Space,
+  Modal,
+  Typography,
+  Select,
+  Progress,
+  Tooltip,
+} from '@arco-design/web-react';
+import {
+  IconDelete,
+  IconEye,
+  IconRefresh,
+  IconImport,
+  IconDownload,
+  IconPause,
+  IconSync,
+} from '@arco-design/web-react/icon';
 import { useHistory } from 'react-router-dom';
 import axios from 'axios';
 import styles from './style/index.module.less';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
 
 interface GenHistoryItem {
   id: string;
@@ -16,11 +36,14 @@ interface GenHistoryItem {
   project_description: string;
   status: string;
   error_message: string;
+  progress: number;
+  progress_message: string;
   functional_points_count: number;
   test_cases_count: number;
   imported_count: number;
   created_at: string;
   completed_at: string | null;
+  can_retry?: boolean;
 }
 
 interface Project {
@@ -39,6 +62,7 @@ const GenHistoryPage: React.FC = () => {
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
   const [importing, setImporting] = useState<string | null>(null);
   const [stopping, setStopping] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dataRef = useRef<GenHistoryItem[]>([]);
   dataRef.current = data;
@@ -113,6 +137,26 @@ const GenHistoryPage: React.FC = () => {
     });
   };
 
+  const handleRetry = (record: GenHistoryItem) => {
+    Modal.confirm({
+      title: '重新分析',
+      content: '将使用原上传文件重新分析，并覆盖本次会话已有结果。确定继续？',
+      onOk: async () => {
+        setRetrying(record.id);
+        try {
+          await axios.post(`/api/gen/history/${record.id}/retry`);
+          Message.success('已开始重新分析');
+          fetchData();
+        } catch (e: unknown) {
+          const err = e as { response?: { data?: { detail?: string } } };
+          Message.error(err?.response?.data?.detail || '重试失败');
+        } finally {
+          setRetrying(null);
+        }
+      },
+    });
+  };
+
   const handleDelete = (id: string) => {
     Modal.confirm({
       title: '确认删除',
@@ -176,6 +220,35 @@ const GenHistoryPage: React.FC = () => {
     }
   };
 
+  const renderProgress = (record: GenHistoryItem) => {
+    const pct = Math.max(0, Math.min(100, Number(record.progress) || 0));
+    const running = record.status === 'analyzing' || record.status === 'pending';
+    let status: 'success' | 'error' | 'normal' | undefined = 'normal';
+    if (record.status === 'completed') status = 'success';
+    else if (record.status === 'failed') status = 'error';
+    else if (record.status === 'cancelled') status = 'normal';
+
+    const tip =
+      record.progress_message ||
+      record.error_message ||
+      (running ? '分析中…' : record.status === 'completed' ? '分析完成' : '');
+
+    return (
+      <Tooltip content={tip || undefined}>
+        <div className={styles.progressCell}>
+          <Progress
+            percent={running && pct <= 0 ? 5 : pct}
+            size="small"
+            status={running ? undefined : status}
+            animation={running}
+            showText
+          />
+          {tip ? <div className={styles.progressMsg}>{tip}</div> : null}
+        </div>
+      </Tooltip>
+    );
+  };
+
   const columns = [
     {
       title: '分析时间',
@@ -206,6 +279,12 @@ const GenHistoryPage: React.FC = () => {
       render: (val: string) => getStatusTag(val),
     },
     {
+      title: '进度',
+      dataIndex: 'progress',
+      width: 200,
+      render: (_: unknown, record: GenHistoryItem) => renderProgress(record),
+    },
+    {
       title: '功能点',
       dataIndex: 'functional_points_count',
       width: 80,
@@ -220,9 +299,7 @@ const GenHistoryPage: React.FC = () => {
       dataIndex: 'imported_count',
       width: 80,
       render: (val: number, record: GenHistoryItem) => (
-        <span
-          className={val > 0 ? styles.importedCount : undefined}
-        >
+        <span className={val > 0 ? styles.importedCount : undefined}>
           {val} / {record.test_cases_count}
         </span>
       ),
@@ -230,7 +307,7 @@ const GenHistoryPage: React.FC = () => {
     {
       title: '操作',
       dataIndex: 'actions',
-      width: 240,
+      width: 280,
       render: (_: unknown, record: GenHistoryItem) => (
         <Space>
           {(record.status === 'analyzing' || record.status === 'pending') && (
@@ -244,12 +321,24 @@ const GenHistoryPage: React.FC = () => {
               aria-label="停止分析"
             />
           )}
+          {record.can_retry && (
+            <Button
+              type="text"
+              size="small"
+              icon={<IconSync />}
+              loading={retrying === record.id}
+              onClick={() => handleRetry(record)}
+              aria-label="重试"
+            >
+              重试
+            </Button>
+          )}
           <Button
             type="text"
             size="small"
             icon={<IconEye />}
             onClick={() => handleViewDetail(record.id)}
-            disabled={record.status !== 'completed'}
+            disabled={record.status === 'analyzing' || record.status === 'pending'}
             aria-label="查看"
           />
           <Button
@@ -306,7 +395,7 @@ const GenHistoryPage: React.FC = () => {
                 ...projects.map((p) => ({ label: p.name, value: p.id })),
               ]}
             />
-            <Button icon={<IconRefresh />} onClick={fetchData} loading={loading}>
+            <Button icon={<IconRefresh />} onClick={() => fetchData()} loading={loading}>
               刷新
             </Button>
           </Space>

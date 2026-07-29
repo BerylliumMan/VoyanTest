@@ -164,3 +164,4 @@ VoyanTest-Agent*
 agent-build-windows*
 chromium/
 my-session.json
+data/gen_uploads/

@@ -124,6 +124,10 @@ class AgentClient:
         # Callback hooks
         self._on_status_change = on_status_change
         self._on_log = on_log
+        # Active run for fire-and-forget RUN_LOG forwarding to server
+        self._active_run_id: Optional[str] = None
+        self._active_step_order: Optional[int] = None
+        self._active_backend: Optional[str] = None
 
     # ---- callback helpers ----
 
@@ -137,7 +141,7 @@ class AgentClient:
                 logger.warning("on_status_change callback failed", exc_info=True)
 
     def _emit_log(self, level: str, message: str) -> None:
-        """发出日志消息。调用 logger 并触发 on_log 回调。"""
+        """发出日志消息。调用 logger、on_log，并在有活跃 run 时回传 RUN_LOG。"""
         log_func = getattr(logger, level, logger.info)
         log_func(message)
         if self._on_log:
@@ -145,6 +149,37 @@ class AgentClient:
                 self._on_log(level, message)
             except Exception:
                 logger.warning("on_log callback failed", exc_info=True)
+        self._schedule_run_log(level, message)
+
+    def _schedule_run_log(self, level: str, message: str) -> None:
+        """Fire-and-forget RUN_LOG to server when a run is active."""
+        run_id = self._active_run_id
+        if not run_id or not self._ws or not message:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            loop.create_task(self._forward_run_log(level, message))
+        except Exception:
+            logger.debug("schedule RUN_LOG failed", exc_info=True)
+
+    async def _forward_run_log(self, level: str, message: str) -> None:
+        run_id = self._active_run_id
+        if not run_id:
+            return
+        payload = {
+            "level": level,
+            "message": message,
+            "backend": self._active_backend or "browser_use",
+        }
+        if self._active_step_order is not None:
+            payload["step_order"] = self._active_step_order
+        try:
+            await self._send(WSMessageType.RUN_LOG, run_id, payload)
+        except Exception:
+            logger.debug("forward RUN_LOG failed", exc_info=True)
 
     def _log_info(self, msg: str) -> None:
         self._emit_log("info", msg)
@@ -751,13 +786,44 @@ class AgentClient:
                 continue
 
     async def _mcp_call_tool(self, action: str, selector: str, value: str) -> dict:
+        from core.mcp_tabs import (
+            list_tab_count,
+            should_watch_for_new_tab,
+            switch_to_new_tab_if_opened,
+        )
+
         mcp_tool = _resolve_mcp_tool(action)
         if not mcp_tool:
             return {"success": False, "error": f"Unknown action: {action}"}
 
-        args = self._build_mcp_args(action, selector, value)
-        req_id = await self._mcp_send("tools/call", {"name": mcp_tool, "arguments": args})
+        watch_tabs = should_watch_for_new_tab(action)
+        count_before = 1
+        if watch_tabs:
+            try:
+                count_before = await list_tab_count(self._mcp_tools_call)
+            except Exception as exc:
+                logger.warning("Pre-click tab list failed: %s", exc)
 
+        args = self._build_mcp_args(action, selector, value)
+        result = await self._mcp_tools_call(mcp_tool, args)
+
+        if watch_tabs and result.get("success"):
+            try:
+                switched = await switch_to_new_tab_if_opened(
+                    self._mcp_tools_call,
+                    count_before=count_before,
+                    result_text=result.get("text") or "",
+                )
+                if switched:
+                    self._log_info("Focused newly opened browser tab after click")
+            except Exception as exc:
+                logger.warning("New-tab switch after click failed: %s", exc)
+
+        return result
+
+    async def _mcp_tools_call(self, tool_name: str, arguments: dict) -> dict:
+        """Call an MCP tool by exact name (e.g. browser_tabs)."""
+        await self._mcp_send("tools/call", {"name": tool_name, "arguments": arguments or {}})
         try:
             resp = await self._mcp_recv()
             result = resp.get("result", {})
@@ -767,7 +833,6 @@ class AgentClient:
             return {"success": not is_error, "text": text, "_content": content}
         except asyncio.TimeoutError:
             return {"success": False, "error": "MCP tool call timed out"}
-
     async def _mcp_screenshot_base64(self) -> Optional[str]:
         """Take a screenshot via MCP and return base64-encoded PNG.
 
@@ -1039,6 +1104,12 @@ class AgentClient:
         expected = payload.get("expected_result")
         max_steps = int(payload.get("max_steps_per_nl") or 20)
         t0 = time.monotonic()
+        prev_run = self._active_run_id
+        prev_step = self._active_step_order
+        prev_backend = self._active_backend
+        self._active_run_id = msg.run_id
+        self._active_step_order = int(step_order) if step_order else None
+        self._active_backend = "browser_use_fallback"
         self._log_info(
             f"Hybrid fallback step {step_order} via browser-use on CDP={self._exec_cdp_http}"
         )
@@ -1061,6 +1132,10 @@ class AgentClient:
                 api_base=llm_cfg.get("api_base"),
                 model=llm_cfg.get("model"),
             )
+
+            def _progress(line: str) -> None:
+                self._emit_log("info", line)
+
             # Attach to existing Chromium; never stop it
             results = await execute_nl_steps_browser_use(
                 [
@@ -1076,6 +1151,7 @@ class AgentClient:
                 max_steps_per_nl=max_steps,
                 stop_browser=False,
                 cdp_url=self._exec_cdp_http,
+                on_progress=_progress,
             )
             r = results[0] if results else {"success": False, "error": "empty result"}
             await self._send(
@@ -1119,10 +1195,20 @@ class AgentClient:
                     "backend": "browser_use_fallback",
                 },
             )
+        finally:
+            self._active_run_id = prev_run
+            self._active_step_order = prev_step
+            self._active_backend = prev_backend
 
     async def _handle_run_start_browser_use(self, msg: WSMessage):
         """Client-local browser-use: run all NL steps, reply RUN_COMPLETE."""
         payload = msg.payload or {}
+        prev_run = self._active_run_id
+        prev_step = self._active_step_order
+        prev_backend = self._active_backend
+        self._active_run_id = msg.run_id
+        self._active_step_order = None
+        self._active_backend = "browser_use"
         self._log_info(f"Run {msg.run_id} started — backend=browser_use")
         self._emit_status('busy')
         try:
@@ -1176,6 +1262,16 @@ class AgentClient:
             else:
                 self._log_info("browser-use: reuse browser session (batch follow-up)")
 
+            def _progress(line: str) -> None:
+                # Parse "--- Step N " to update step_order for RUN_LOG payload
+                m = re.match(r"--- Step (\d+)", line or "")
+                if m:
+                    try:
+                        self._active_step_order = int(m.group(1))
+                    except ValueError:
+                        pass
+                self._emit_log("info", line)
+
             step_results = await execute_nl_steps_browser_use(
                 steps,
                 llm=llm,
@@ -1184,6 +1280,7 @@ class AgentClient:
                 max_steps_per_nl=max_steps,
                 browser_session=self._bu_browser,
                 stop_browser=False,
+                on_progress=_progress,
             )
             status = (
                 "passed"
@@ -1210,6 +1307,9 @@ class AgentClient:
                 },
             )
         finally:
+            self._active_run_id = prev_run
+            self._active_step_order = prev_step
+            self._active_backend = prev_backend
             self._emit_status('idle')
 
     async def _handle_get_screenshot(self, run_id: str):

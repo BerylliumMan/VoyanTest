@@ -8,7 +8,7 @@ interface StepListProps {
   steps: Step[];
   onAdd: () => void;
   onRemove: (idx: number) => void;
-  onUpdate: (idx: number, field: string, value: string | number) => void;
+  onUpdate: (idx: number, field: string, value: string | number | null | Record<string, unknown>) => void;
   onInsert: (idx: number) => void;
   onCopy: (idx: number) => void;
   onPaste: (idx: number) => void;
@@ -58,6 +58,23 @@ const StepList: React.FC<StepListProps> = ({
             {step.healed_selector && (
               <div className={styles['healed-hint']}>
                 <IconTool /> 已修复: {step.healed_selector}
+              </div>
+            )}
+            {step.learned_locator && (
+              <div className={styles['healed-hint']}>
+                <IconTool /> 已记忆定位: {[
+                  (step.learned_locator as any).role,
+                  (step.learned_locator as any).name,
+                ].filter(Boolean).join(' / ') || '已缓存'}
+                <Button
+                  type="text"
+                  size="mini"
+                  status="warning"
+                  onClick={() => onUpdate(idx, 'learned_locator', null as any)}
+                  style={{ marginLeft: 8 }}
+                >
+                  清除
+                </Button>
               </div>
             )}
           </div>

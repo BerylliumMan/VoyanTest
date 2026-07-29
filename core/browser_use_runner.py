@@ -118,74 +118,105 @@ async def run_test_case_via_browser_use(
         run_uid = uuid.uuid4().hex[:12]
         output_dir = os.path.join("reports", f"run_{case_id}_{run_uid}_bu")
         await asyncio.to_thread(os.makedirs, output_dir, exist_ok=True)
+        log_file_path = os.path.join(output_dir, "run.log")
 
-        logger.info(
-            "Starting browser-use execution: case=%s name=%r steps=%s",
-            case_id, case_data.name, len(step_list),
+        case_logger = logging.getLogger(f"runner.browser_use.case_{case_id}")
+        case_logger.setLevel(logging.INFO)
+        case_logger.propagate = True
+        file_handler = await asyncio.to_thread(logging.FileHandler, log_file_path, encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         )
+        case_logger.addHandler(file_handler)
+        # Also capture core.browser_use_exec + library into the same file
+        bu_exec_logger = logging.getLogger("core.browser_use_exec")
+        bu_lib_logger = logging.getLogger("browser_use")
+        bu_exec_logger.addHandler(file_handler)
+        bu_lib_logger.addHandler(file_handler)
 
-        llm = await _create_browser_use_llm()
-        screenshots_dir = os.path.join(output_dir, "screenshots")
-        step_results = await execute_nl_steps_browser_use(
-            step_list,
-            llm=llm,
-            base_url=nav_url,
-            headless=headless,
-            max_steps_per_nl=max_steps_per_nl,
-            screenshots_dir=screenshots_dir,
-        )
-        # Drop base64 blobs from report JSON (paths already set)
-        for r in step_results:
-            r.pop("screenshot_base64", None)
-
-        test_status = (
-            "passed" if step_results and all(r["success"] for r in step_results) else "failed"
-        )
-        report = {
-            "test_case_id": case_id,
-            "test_case_name": case_data.name,
-            "status": test_status,
-            "backend": "browser_use",
-            "start_time": start_time.isoformat(),
-            "end_time": tz_now().isoformat(),
-            "duration": (tz_now() - start_time).total_seconds(),
-            "steps": step_results,
-        }
-        case_report_path = os.path.join(output_dir, "report.json")
-        await asyncio.to_thread(
-            lambda: open(case_report_path, "w", encoding="utf-8").write(
-                json.dumps(report, ensure_ascii=False, indent=2)
+        try:
+            case_logger.info(
+                "Starting browser-use execution: case=%s name=%r steps=%s",
+                case_id, case_data.name, len(step_list),
             )
-        )
+            logger.info(
+                "Starting browser-use execution: case=%s name=%r steps=%s",
+                case_id, case_data.name, len(step_list),
+            )
 
-        logs = []
-        for r in step_results:
-            logs.append({
-                "step_id": next(
-                    (s["id"] for s in step_list if s["step_order"] == r["step_number"]),
-                    None,
-                ),
-                "level": "INFO" if r["success"] else "ERROR",
-                "message": (
-                    f"[browser-use] 步骤{r['step_number']}: "
-                    + ("通过" if r["success"] else f"失败 — {r.get('error') or ''}")
-                ),
-                "screenshot_path": r.get("screenshot_path"),
-            })
+            llm = await _create_browser_use_llm()
+            screenshots_dir = os.path.join(output_dir, "screenshots")
 
-        end_time = tz_now()
-        await save_run_results(
-            case_id,
-            test_status,
-            start_time,
-            end_time,
-            (end_time - start_time).total_seconds(),
-            case_report_path,
-            os.path.join(output_dir, "run.log") if output_dir else None,
-            logs,
-            batch_id=batch_id,
-            run_id=run_id,
-        )
+            def _progress(line: str) -> None:
+                case_logger.info("%s", line)
+
+            step_results = await execute_nl_steps_browser_use(
+                step_list,
+                llm=llm,
+                base_url=nav_url,
+                headless=headless,
+                max_steps_per_nl=max_steps_per_nl,
+                screenshots_dir=screenshots_dir,
+                on_progress=_progress,
+            )
+            # Drop base64 blobs from report JSON (paths already set)
+            for r in step_results:
+                r.pop("screenshot_base64", None)
+
+            test_status = (
+                "passed" if step_results and all(r["success"] for r in step_results) else "failed"
+            )
+            report = {
+                "test_case_id": case_id,
+                "test_case_name": case_data.name,
+                "status": test_status,
+                "backend": "browser_use",
+                "start_time": start_time.isoformat(),
+                "end_time": tz_now().isoformat(),
+                "duration": (tz_now() - start_time).total_seconds(),
+                "steps": step_results,
+            }
+            case_report_path = os.path.join(output_dir, "report.json")
+            await asyncio.to_thread(
+                lambda: open(case_report_path, "w", encoding="utf-8").write(
+                    json.dumps(report, ensure_ascii=False, indent=2)
+                )
+            )
+
+            logs = []
+            for r in step_results:
+                logs.append({
+                    "step_id": next(
+                        (s["id"] for s in step_list if s["step_order"] == r["step_number"]),
+                        None,
+                    ),
+                    "level": "INFO" if r["success"] else "ERROR",
+                    "message": (
+                        f"[browser-use] 步骤{r['step_number']}: "
+                        + ("通过" if r["success"] else f"失败 — {r.get('error') or ''}")
+                    ),
+                    "screenshot_path": r.get("screenshot_path"),
+                })
+
+            end_time = tz_now()
+            case_logger.info("browser-use finished status=%s", test_status)
+            await save_run_results(
+                case_id,
+                test_status,
+                start_time,
+                end_time,
+                (end_time - start_time).total_seconds(),
+                case_report_path,
+                log_file_path,
+                logs,
+                batch_id=batch_id,
+                run_id=run_id,
+            )
+        finally:
+            case_logger.removeHandler(file_handler)
+            bu_exec_logger.removeHandler(file_handler)
+            bu_lib_logger.removeHandler(file_handler)
+            await asyncio.to_thread(file_handler.close)
 
     return {
         "case_id": case_id,
