@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
@@ -30,6 +30,14 @@ class PreviewPlanResponse(BaseModel):
     plan: List[PreviewPlanItem]
     total_estimated_actions: int
     warning: Optional[str] = None
+
+
+class StepIntentPreviewRequest(BaseModel):
+    """Observe-only Intent bind (Stagehand-style) against a provided AX snapshot."""
+
+    description: str = Field(..., min_length=1)
+    snapshot: str = Field(..., min_length=1, description="Accessibility snapshot text")
+    expected_result: Optional[str] = None
 
 
 @router.post("/preview-plan", response_model=PreviewPlanResponse)
@@ -68,3 +76,19 @@ async def preview_plan(req: PreviewPlanRequest, db: AsyncSession = Depends(get_a
         total_estimated_actions=len(plan_items),
         warning=None,
     )
+
+
+@router.post("/preview-step-intent")
+async def preview_step_intent(req: StepIntentPreviewRequest) -> dict[str, Any]:
+    """Dry-run: Intent + snapshot match without executing (no browser).
+
+    Useful for debugging understanding drift — returns candidates and whether vision would be needed.
+    """
+    from core.step_intent import preview_step_resolution
+
+    prev = await preview_step_resolution(
+        req.description,
+        req.snapshot,
+        expected_result=req.expected_result,
+    )
+    return prev.model_dump()
