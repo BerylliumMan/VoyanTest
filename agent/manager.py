@@ -955,6 +955,17 @@ class AgentManager:
                 "action": "browser_use_fallback",
                 "duration_ms": 0,
             }
+        except ConnectionError as exc:
+            logger.warning(
+                "browser-use fallback step %s aborted — agent disconnected: %s",
+                step_order, exc,
+            )
+            return {
+                "success": False,
+                "error": f"Agent disconnected: {exc}",
+                "action": "browser_use_fallback",
+                "duration_ms": 0,
+            }
         except Exception as exc:
             logger.exception("browser-use fallback step %s failed", step_order)
             return {
