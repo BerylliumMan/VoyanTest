@@ -517,8 +517,6 @@ async def execute_step_mcp(
                     step_timeout_ms=step_timeout_ms,
                 )
                 relocate_attempted = relocate_attempted or pick_relocated
-                # Stash open+pick for plan learning
-                open_tc = open_tc  # noqa: kept from open phase
             else:
                 tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
                     desc=desc,
