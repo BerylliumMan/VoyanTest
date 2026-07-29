@@ -381,27 +381,33 @@ class AgentManager:
                 desc = step["description"]
                 expected_result = step.get("expected_result")
                 cached_fp = step.get("learned_locator") if isinstance(step.get("learned_locator"), dict) else None
+                cacheable = bool(step.get("cacheable", True))
 
                 logger.info(f"--- Step {step_order}: {desc} ---")
 
                 # 1. Get DOM snapshot from agent's browser
                 snap = await self._get_snapshot(session, agent_id, run_id)
 
-                memory_enabled = True
+                memory_mode = "read_write"
                 try:
                     from app.runtime_config import healing_config as _hc
                     memory_enabled = bool(getattr(_hc, "locator_memory_enabled", True))
+                    memory_mode = getattr(_hc, "locator_memory_mode", None) or (
+                        "read_write" if memory_enabled else "off"
+                    )
+                    if not memory_enabled:
+                        memory_mode = "off"
                 except Exception:
-                    memory_enabled = True
+                    memory_mode = "read_write"
 
                 tool_call = None
                 result = None
                 used_replay = False
                 invalidate = False
 
-                # 1b. Try learned locator replay (skip LLM)
-                if memory_enabled and cached_fp:
-                    from core.locator_memory import try_replay_mcp
+                # 1b. Try learned plan/locator replay (skip LLM)
+                if memory_mode != "off" and cacheable and cached_fp:
+                    from core.locator_memory import try_replay_plan_mcp
 
                     class _Adapter:
                         def __init__(self, outer):
@@ -412,7 +418,12 @@ class AgentManager:
                                 session, agent_id, run_id, step_order, desc, tc,
                             )
 
-                    replay = await try_replay_mcp(
+                        async def get_dom_snapshot(self):
+                            return await self._outer._get_snapshot(
+                                session, agent_id, run_id,
+                            )
+
+                    replay = await try_replay_plan_mcp(
                         _Adapter(self),
                         cached_fp,
                         snapshot=snap or "",
