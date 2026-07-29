@@ -588,7 +588,6 @@ class AgentClient:
                     or self._looks_like_dead_browser(snap_err)
                     or "(page not available)" in snap_err
                     or "(snapshot" in snap_err
-                    or len((snap.get("text") or "").strip()) < 20
                 )
                 if bad_text:
                     need_restart = True
