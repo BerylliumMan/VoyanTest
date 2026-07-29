@@ -437,13 +437,40 @@ class AgentManager:
                     elif not replay.get("skipped"):
                         invalidate = True
 
-                # 2. LLM generates tool call when replay did not apply
+                # 2. Two-phase Intent + bind (Midscene-style); fall back to legacy on ambiguity
                 if not used_replay:
-                    tool_call = await generate_tool_call(
-                        desc, snap, expected_result=expected_result,
-                        client=llm_client, model=model,
-                        base_url=base_url_override or None,
+                    from core.step_intent import (
+                        generate_step_intent,
+                        intent_to_tool_call,
+                        match_intent_candidates,
                     )
+                    try:
+                        intent = await generate_step_intent(
+                            desc, snap, expected_result=expected_result,
+                            client=llm_client, model=model,
+                        )
+                        action_i = (intent.action or "").lower()
+                        if action_i in ("wait", "assert_text", "goto", "press_key", "error"):
+                            tool_call = intent_to_tool_call(intent, ref=None)
+                        else:
+                            cands = match_intent_candidates(snap, intent)
+                            if len(cands) == 1:
+                                tool_call = intent_to_tool_call(
+                                    intent, ref=cands[0]["ref"],
+                                )
+                            else:
+                                # Ambiguous / missing: one-shot with refs (Agent path has no vision MCP)
+                                tool_call = await generate_tool_call(
+                                    desc, snap, expected_result=expected_result,
+                                    client=llm_client, model=model,
+                                    base_url=base_url_override or None,
+                                )
+                    except Exception:
+                        tool_call = await generate_tool_call(
+                            desc, snap, expected_result=expected_result,
+                            client=llm_client, model=model,
+                            base_url=base_url_override or None,
+                        )
 
                     # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
                     action_lower = (tool_call.action or "").lower()
