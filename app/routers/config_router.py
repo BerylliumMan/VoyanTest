@@ -382,6 +382,13 @@ async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)
     _rt.max_retries = cfg.max_retries
     _rt.threshold = cfg.threshold
     _rt.locator_memory_enabled = cfg.locator_memory_enabled
+    _rt.locator_memory_mode = cfg.locator_memory_mode
+    _rt.locator_preview_enabled = cfg.locator_preview_enabled
+    # Keep boolean in sync with mode for older callers
+    if cfg.locator_memory_mode == "off":
+        _rt.locator_memory_enabled = False
+    elif not cfg.locator_memory_enabled:
+        _rt.locator_memory_mode = "off"
     return _rt
 
 
