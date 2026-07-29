@@ -53,6 +53,8 @@ RUN python -m playwright install chromium && \
     python -m playwright install-deps chromium
 
 # Copy backend source code
+# NOTE: app/static is in .dockerignore — frontend must come from frontend-builder only.
+# Copying a stale repo app/static here would wipe menus like 执行后端 / AI Agent.
 COPY app/ app/
 COPY core/ core/
 COPY agent/ agent/

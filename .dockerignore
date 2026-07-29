@@ -17,3 +17,7 @@ docs
 tests
 *.md
 !README.md
+# 仓库内 app/static 常为过期构建产物；正式镜像前端必须由 frontend-builder 产出。
+# 若 COPY app/ 带上旧 static，会盖掉镜像里正确的前端（设置/AI Agent 菜单消失）。
+app/static
+app/static/**
