@@ -598,21 +598,16 @@ class AgentManager:
                         (result.get("error") or "")[:160],
                     )
 
-                # 4. Verify expected result if step succeeded
+                # 4. Verify expected result if step succeeded (Skyvern-style when expected set)
                 if result.get("success") and expected_result:
                     try:
+                        from core.verification_strategy import VerificationStrategy
                         from core.llm_wrapper import verify_expected_result
-                        post_snap = await self._get_snapshot(session, agent_id, run_id)
-                        verification = await asyncio.wait_for(
-                            verify_expected_result(expected_result, post_snap, client=llm_client, model=model),
-                            timeout=30,
-                        )
-                        if not verification.passed:
-                            logger.info(
-                                "Hybrid assert retry (agent): step %s L2 failed; refreshing",
-                                step_order,
-                            )
-                            await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+
+                        action_type = (getattr(tool_call, "action", None) or "") if tool_call else ""
+                        if VerificationStrategy.should_verify(
+                            action_type, result.get("error"), has_expected=True,
+                        ):
                             post_snap = await self._get_snapshot(session, agent_id, run_id)
                             verification = await asyncio.wait_for(
                                 verify_expected_result(
@@ -620,22 +615,42 @@ class AgentManager:
                                 ),
                                 timeout=30,
                             )
-                            result["assert_retry_attempted"] = True
                             if not verification.passed:
-                                result["success"] = False
-                                result["error"] = (
-                                    f"Expected result verification failed: {verification.reason}"
+                                logger.info(
+                                    "Hybrid assert retry (agent): step %s L2 failed; refreshing",
+                                    step_order,
                                 )
-                                if used_replay:
+                                await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+                                post_snap = await self._get_snapshot(session, agent_id, run_id)
+                                verification = await asyncio.wait_for(
+                                    verify_expected_result(
+                                        expected_result, post_snap, client=llm_client, model=model,
+                                    ),
+                                    timeout=30,
+                                )
+                                result["assert_retry_attempted"] = True
+                                if not verification.passed:
+                                    result["success"] = False
+                                    result["error"] = (
+                                        f"Expected result verification failed: {verification.reason}"
+                                    )
+                                    failure_kind = "semantic_drift"
                                     invalidate = True
+                                else:
+                                    result["verification"] = verification.reason
                             else:
                                 result["verification"] = verification.reason
-                        else:
-                            result["verification"] = verification.reason
                     except asyncio.TimeoutError:
                         logger.warning(f"Step {step_order} verification timed out")
                     except Exception as exc:
                         logger.warning(f"Step {step_order} verification failed: {exc}")
+
+                if not result.get("success") and failure_kind is None:
+                    action_lower = (getattr(tool_call, "action", None) or "").lower() if tool_call else ""
+                    if action_lower == "error":
+                        failure_kind = "locator_miss"
+                    else:
+                        failure_kind = "action_fail"
 
                 # 失败步骤必须截图（含 LLM error/done 短路、验证失败、超时等未带回截图的场景）
                 if not result.get("success") and not result.get("screenshot_base64"):
@@ -676,13 +691,15 @@ class AgentManager:
                     "verification": result.get("verification"),
                     "backend": step_backend,
                     "locator_replay": used_replay,
+                    "plan_replay": used_plan_replay,
+                    "failure_kind": failure_kind,
                     "learned_locator": None,
                     "invalidate_learned_locator": False,
                 }
 
                 if invalidate or (used_replay and not step_result["success"]):
                     step_result["invalidate_learned_locator"] = True
-                elif step_result["success"] and memory_enabled and tool_call is not None:
+                elif step_result["success"] and can_write_memory and tool_call is not None:
                     from core.locator_memory import (
                         bump_hit_count,
                         extract_from_snapshot,
