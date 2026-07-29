@@ -434,6 +434,7 @@ class AgentManager:
                     )
                     if replay.get("success") and not replay.get("skipped"):
                         used_replay = True
+                        used_plan_replay = bool(replay.get("plan_replay"))
                         tc_dict = replay.get("tool_call") or {}
                         from core.llm_wrapper import PlaywrightMCPToolCall
                         tool_call = PlaywrightMCPToolCall(
@@ -450,6 +451,7 @@ class AgentManager:
                         )
                     elif not replay.get("skipped"):
                         invalidate = True
+                        failure_kind = "locator_miss"
 
                 # 2. Two-phase Intent + bind (Midscene-style); fall back to legacy on ambiguity
                 if not used_replay:
