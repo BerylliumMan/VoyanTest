@@ -1066,6 +1066,8 @@ class AgentClient:
                 f"Run {msg.run_id} started — launching browser backend={backend} shared_cdp={shared_cdp}"
             )
             self._emit_status('busy')
+            ready_ok = False
+            ready_err = ""
             try:
                 await self._ensure_mcp_session(shared_cdp=shared_cdp)
 
@@ -1097,15 +1099,41 @@ class AgentClient:
                             err_text = str(nav.get("error") or nav.get("text") or "unknown")
                         if not nav.get("success"):
                             self._log_warning(f"BASE URL navigation failed: {err_text}")
+                            ready_err = err_text
+                        else:
+                            ready_ok = True
+                    else:
+                        ready_ok = True
                 elif not navigate:
                     self._log_info("Skip BASE URL navigation (batch follow-up, keep session)")
+                    ready_ok = True
+                else:
+                    ready_ok = True
             except Exception as e:
+                ready_err = str(e)
                 self._log_error(f"Failed to start MCP for run {msg.run_id}: {e}")
                 self._emit_status('error')
                 await self._send(
                     WSMessageType.ERROR, msg.run_id,
-                    {"message": f"MCP start failed: {e}"},
+                    {"message": f"MCP start failed: {e}", "ready": False},
                 )
+            else:
+                # ACK so server can wait for browser ready before first snapshot
+                await self._send(
+                    WSMessageType.SNAPSHOT_RESULT,
+                    msg.run_id,
+                    {
+                        "text": "(browser ready)" if ready_ok else f"(browser not ready: {ready_err})",
+                        "ready": ready_ok,
+                        "error": ready_err or None,
+                    },
+                )
+                if not ready_ok and ready_err:
+                    self._emit_status('error')
+                    await self._send(
+                        WSMessageType.ERROR, msg.run_id,
+                        {"message": f"Browser not ready: {ready_err}", "ready": False},
+                    )
 
         elif msg.type == WSMessageType.RUN_END:
             self._log_info(f"Run {msg.run_id} ended — keep browser session for next case")
