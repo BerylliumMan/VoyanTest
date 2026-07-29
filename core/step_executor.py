@@ -745,5 +745,6 @@ async def execute_step_mcp(
         if not result.get('screenshot_path'):
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
 
+    result.pop("_open_fp", None)
     result['duration_ms'] = (time.monotonic() - t_start) * 1000
     return result

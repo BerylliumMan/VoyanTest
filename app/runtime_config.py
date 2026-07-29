@@ -32,6 +32,10 @@ class HealingConfig(BaseModel):
     threshold: float = 0.8
     # Remember successful element fingerprints and try direct replay next run.
     locator_memory_enabled: bool = True
+    # Midscene-style cache strategy: read_write | read_only | off
+    locator_memory_mode: Literal["read_write", "read_only", "off"] = "read_write"
+    # When True, attach Intent/match preview onto step results (debug).
+    locator_preview_enabled: bool = False
 
 
 healing_config = HealingConfig()
