@@ -231,6 +231,7 @@ async def run_test_case_on_client(
             "learned_locator": getattr(s, "learned_locator", None)
             if isinstance(getattr(s, "learned_locator", None), dict)
             else None,
+            "cacheable": bool(getattr(s, "cacheable", True)),
         }
         for s in sorted(steps_raw, key=lambda x: x.step_order)
     ]
