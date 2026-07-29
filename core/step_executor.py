@@ -227,20 +227,23 @@ async def _llm_tool_and_run(
     system_prompt_override: str | None,
     step_timeout_ms: int,
 ):
-    """Generate one tool call from NL+snapshot and execute it via MCP."""
-    from core.llm_wrapper import generate_tool_call
+    """Generate one tool call via two-phase Intent+bind (Midscene-style) and execute."""
+    from core.step_intent import resolve_tool_call_from_step
 
     try:
         tool_call = await asyncio.wait_for(
-            generate_tool_call(
+            resolve_tool_call_from_step(
                 desc,
                 snapshot,
                 expected_result=expected_result,
+                mcp_manager=mcp_manager,
                 client=llm_client,
                 model=model,
                 system_prompt=system_prompt_override,
+                use_vision_fallback=True,
+                timeout_ms=step_timeout_ms,
             ),
-            timeout=100,
+            timeout=120,
         )
     except asyncio.TimeoutError:
         return None, {'success': False, 'error': 'LLM 生成操作指令超时'}
