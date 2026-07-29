@@ -782,9 +782,47 @@ class AgentManager:
                     break
 
             # Notify agent of run end
-            await session.send(WSMessage(
-                type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id,
-            ))
+            try:
+                await session.send(WSMessage(
+                    type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id,
+                ))
+            except ConnectionError as exc:
+                logger.warning("RUN_END not sent (agent disconnected): %s", exc)
+
+        except ConnectionError as exc:
+            logger.error(
+                "Agent %s disconnected mid-run %s: %s", agent_id, run_id, exc,
+            )
+            if not step_results:
+                step_results.append({
+                    "step_number": 1,
+                    "original_description": case_name,
+                    "success": False,
+                    "thinking": "",
+                    "action": "",
+                    "next_goal": "",
+                    "error": f"Agent disconnected: {exc}",
+                    "screenshot_path": None,
+                    "duration_ms": 0,
+                })
+            elif step_results and step_results[-1].get("success"):
+                # Mark a trailing failure so the run is not reported as green
+                step_results.append({
+                    "step_number": (step_results[-1].get("step_number") or 0) + 1,
+                    "original_description": "(agent disconnected)",
+                    "success": False,
+                    "thinking": "",
+                    "action": "",
+                    "next_goal": "",
+                    "error": f"Agent disconnected: {exc}",
+                    "screenshot_path": None,
+                    "duration_ms": 0,
+                })
+            else:
+                # Annotate last failed step if needed
+                last = step_results[-1]
+                if not last.get("error"):
+                    last["error"] = f"Agent disconnected: {exc}"
 
         finally:
             session.agent.status = AgentStatus.ONLINE
