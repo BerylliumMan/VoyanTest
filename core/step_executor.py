@@ -421,9 +421,9 @@ async def execute_step_mcp(
         relocate_attempted = False
         used_replay = False
 
-        # Fast path: replay learned locator (skip LLM)
+        # Fast path: replay learned plan / locator (skip LLM)
         if cached_fp and not (label and option):
-            replay = await try_replay_mcp(
+            replay = await try_replay_plan_mcp(
                 mcp_manager,
                 cached_fp,
                 snapshot=snapshot,
@@ -432,6 +432,7 @@ async def execute_step_mcp(
             if replay.get("success") and not replay.get("skipped"):
                 used_replay = True
                 result["locator_replay"] = True
+                result["plan_replay"] = bool(replay.get("plan_replay"))
                 tc = replay.get("tool_call") or {}
 
                 class _ReplayTC:
@@ -444,14 +445,29 @@ async def execute_step_mcp(
                 tool_call.thinking = tc.get("thinking") or ""
                 tool_call.next_goal = ""
                 exec_result = replay.get("exec_result") or {"success": True}
-                actions_log.append(_format_action(tool_call))
+                if replay.get("actions_log"):
+                    actions_log.extend(replay["actions_log"])
+                else:
+                    actions_log.append(_format_action(tool_call))
                 thinking_parts.append(tool_call.thinking)
             elif not replay.get("skipped"):
                 result["invalidate_learned_locator"] = True
+                result["failure_kind"] = "locator_miss"
                 logger.info(
-                    "locator_memory replay MCP fail step=%s: %s",
+                    "locator_memory plan/replay MCP fail step=%s: %s",
                     step_number, (replay.get("error") or "")[:120],
                 )
+            # skipped=True → fall through to LLM without invalidate
+
+        if preview_enabled and not used_replay:
+            try:
+                prev = await preview_step_resolution(
+                    desc, snapshot, expected_result=expected_result,
+                    client=llm_client, model=model,
+                )
+                result["preview"] = prev.model_dump()
+            except Exception as exc:
+                logger.debug("step preview failed: %s", exc)
 
         if not used_replay:
             if label and option and option not in (snapshot or ""):
@@ -470,6 +486,7 @@ async def execute_step_mcp(
                     step_timeout_ms=step_timeout_ms,
                 )
                 relocate_attempted = relocate_attempted or open_relocated
+                open_tc = tool_call
                 if tool_call is not None:
                     actions_log.append(_format_action(tool_call))
                     if tool_call.thinking:
@@ -478,6 +495,7 @@ async def execute_step_mcp(
                     result['thinking'] = ' | '.join(thinking_parts) or '展开下拉失败'
                     result['action'] = ' → '.join(actions_log)
                     result['error'] = exec_result.get('error', '展开下拉失败')
+                    result['failure_kind'] = 'action_fail'
                     result['relocate_attempted'] = relocate_attempted
                     await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
                     result['duration_ms'] = (time.monotonic() - t_start) * 1000
@@ -498,6 +516,8 @@ async def execute_step_mcp(
                     step_timeout_ms=step_timeout_ms,
                 )
                 relocate_attempted = relocate_attempted or pick_relocated
+                # Stash open+pick for plan learning
+                result["_open_tc"] = open_tc
             else:
                 tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
                     desc=desc,
