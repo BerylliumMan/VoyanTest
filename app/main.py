@@ -199,6 +199,10 @@ async def _run_startup_init():
             "ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS max_context_tokens INTEGER DEFAULT 131072",
             "ai_configs.max_context_tokens 迁移",
         )
+        await _ddl(
+            "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS learned_locator JSONB",
+            "test_steps.learned_locator 迁移",
+        )
         try:
             async with engine.connect() as conn:
                 await conn.execution_options(isolation_level="AUTOCOMMIT")

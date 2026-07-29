@@ -239,6 +239,37 @@ async def delete_gen_session(db: AsyncSession, session_id: str) -> db_models.Gen
     return record
 
 
+async def clear_gen_session_results(
+    db: AsyncSession,
+    session_id: str,
+) -> db_models.GenSession | None:
+    """Clear FP/TC children and reset progress counters for a retry."""
+    record = await get_gen_session(db, session_id)
+    if record is None:
+        return None
+    await db.execute(
+        delete(db_models.GenFunctionalPoint).where(
+            db_models.GenFunctionalPoint.session_id == session_id
+        )
+    )
+    await db.execute(
+        delete(db_models.GenTestCase).where(
+            db_models.GenTestCase.session_id == session_id
+        )
+    )
+    record.status = "analyzing"
+    record.error_message = ""
+    record.progress = 0
+    record.progress_message = "准备重新分析"
+    record.functional_points_count = 0
+    record.test_cases_count = 0
+    record.imported_count = 0
+    record.completed_at = None
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
 # ----------------------------
 # GenFunctionalPoint CRUD
 # ----------------------------

@@ -223,7 +223,15 @@ async def run_test_case_on_client(
 
     steps_raw = await crud.get_steps_for_case(db, case_id)
     steps = [
-        {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
+        {
+            "id": s.id,
+            "step_order": s.step_order,
+            "description": s.description,
+            "expected_result": s.parsed_result,
+            "learned_locator": getattr(s, "learned_locator", None)
+            if isinstance(getattr(s, "learned_locator", None), dict)
+            else None,
+        }
         for s in sorted(steps_raw, key=lambda x: x.step_order)
     ]
 
@@ -292,6 +300,14 @@ async def run_test_case_on_client(
                 base_url_override=base_url_override,
                 backend=backend,
             )
+            try:
+                from core.locator_memory import persist_learned_locators_from_results
+                by_order = {s.step_order: s for s in steps_raw}
+                await persist_learned_locators_from_results(
+                    db, step_results, steps_by_order=by_order,
+                )
+            except Exception:
+                logger.warning("persist learned_locator after client exec failed", exc_info=True)
             # empty list: all([]) is True in Python — treat as failed
             all_passed = bool(step_results) and all(r.get("success") for r in step_results)
             status = "passed" if all_passed else "failed"
@@ -490,7 +506,15 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             return None
         steps_raw = await crud.get_steps_for_case(db, cid)
         steps = [
-            {"step_order": s.step_order, "description": s.description, "expected_result": s.parsed_result}
+            {
+                "id": s.id,
+                "step_order": s.step_order,
+                "description": s.description,
+                "expected_result": s.parsed_result,
+                "learned_locator": getattr(s, "learned_locator", None)
+                if isinstance(getattr(s, "learned_locator", None), dict)
+                else None,
+            }
             for s in sorted(steps_raw, key=lambda x: x.step_order)
         ]
         return {
@@ -604,6 +628,17 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     backend=getattr(body, "backend", None),
                     navigate_base_url=navigate_base,
                 )
+                try:
+                    from core.locator_memory import persist_learned_locators_from_results
+                    by_order = {s.step_order: s for s in steps_raw}
+                    await persist_learned_locators_from_results(
+                        db, step_results, steps_by_order=by_order,
+                    )
+                except Exception:
+                    logger.warning(
+                        "persist learned_locator after batch client exec failed",
+                        exc_info=True,
+                    )
                 # empty list: all([]) is True — must not mark batch as success
                 all_passed = bool(step_results) and all(r.get("success") for r in step_results)
                 status = "passed" if all_passed else "failed"

@@ -43,3 +43,5 @@ class TestStep(Base):
     retry_delay = Column(Float, default=1.0)
     assertions = Column(JSON, default=[])
     healed_selector = Column(String(500), nullable=True, default=None)
+    # Successful-run element fingerprint for faster replay (role/name/…); not ephemeral refs.
+    learned_locator = Column(JSON, nullable=True, default=None)

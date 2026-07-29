@@ -194,15 +194,38 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
     db_case.description = case.description
     db_case.module_id = case.module_id
 
+    # Preserve learned locators across step rewrite (match by step_order)
+    old_learned = {
+        s.step_order: getattr(s, "learned_locator", None)
+        for s in (db_case.steps or [])
+        if getattr(s, "learned_locator", None)
+    }
+    old_healed = {
+        s.step_order: getattr(s, "healed_selector", None)
+        for s in (db_case.steps or [])
+        if getattr(s, "healed_selector", None)
+    }
+
     # 删除旧步骤并创建新步骤（单事务）
     await delete_steps_for_case(db, case_id)
 
     for step_data in case.steps:
+        fields_set = getattr(step_data, "model_fields_set", None) or set()
+        if "learned_locator" in fields_set:
+            learned = step_data.learned_locator
+        else:
+            learned = old_learned.get(step_data.step_order)
+        if "healed_selector" in fields_set:
+            healed = step_data.healed_selector
+        else:
+            healed = getattr(step_data, "healed_selector", None) or old_healed.get(step_data.step_order)
         db_step = db_models.TestStep(
             case_id=case_id,
             step_order=step_data.step_order,
             description=step_data.description,
-            parsed_result=step_data.parsed_result
+            parsed_result=step_data.parsed_result,
+            healed_selector=healed,
+            learned_locator=learned,
         )
         db.add(db_step)
 

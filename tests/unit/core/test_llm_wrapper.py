@@ -1266,6 +1266,12 @@ class TestPrompts:
         assert "JSON" in SYSTEM_PROMPT
         assert "thinking" in SYSTEM_PROMPT
 
+    def test_system_prompt_semantic_fidelity(self):
+        assert "SEMANTIC FIDELITY" in SYSTEM_PROMPT
+        assert "Faithful execution" in SYSTEM_PROMPT
+        assert "提交≠确定≠保存" in SYSTEM_PROMPT or "提交" in SYSTEM_PROMPT
+        assert "action=\"error\"" in SYSTEM_PROMPT or 'action="error"' in SYSTEM_PROMPT
+
     def test_verify_prompt_is_non_empty_string(self):
         assert isinstance(VERIFY_PROMPT, str)
         assert len(VERIFY_PROMPT) > 100

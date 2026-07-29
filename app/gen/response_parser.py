@@ -493,6 +493,58 @@ def _to_numbered_expected(parts: list[str]) -> str:
     return "\n".join(lines)
 
 
+_CTRL_TYPE_SUFFIX = (
+    r"(?:下拉框|下拉菜单|下拉列表|选择器|输入框|文本框|文本域|编辑框|"
+    r"组合框|按钮|控件|弹窗|对话框|提示框)"
+)
+
+
+def _sanitize_ui_step(step: str) -> str:
+    """Rewrite common non-executable step phrasings into【visible-label】form.
+
+    Conservative: only touches well-known bad patterns that break locator matching.
+    """
+    s = (step or "").strip()
+    if not s:
+        return s
+
+    # 「单位下拉框选择【汉东省院】」→「在【单位】中选择【汉东省院】」
+    m = re.match(rf"^(.+?){_CTRL_TYPE_SUFFIX}\s*选择\s*【([^】]+)】\s*$", s)
+    if m:
+        field, opt = m.group(1).strip(), m.group(2).strip()
+        if field:
+            return f"在【{field}】中选择【{opt}】"
+
+    # 「点击【单位下拉框】」→「点击【单位】」；「点击登录按钮」→「点击【登录】」
+    m = re.match(rf"^点击【(.+?){_CTRL_TYPE_SUFFIX}】\s*$", s)
+    if m:
+        return f"点击【{m.group(1).strip()}】"
+    m = re.match(rf"^点击\s*(.+?){_CTRL_TYPE_SUFFIX}\s*$", s)
+    if m and "【" not in s:
+        label = m.group(1).strip(" ：:的")
+        if label:
+            return f"点击【{label}】"
+
+    # 「在用户名输入框输入 admin」/「用户名输入框输入 admin」→「在【用户名】输入 admin」
+    m = re.match(
+        rf"^(?:在\s*)?(.+?){_CTRL_TYPE_SUFFIX}\s*(?:中)?\s*(?:输入|填写|填入)\s*(.+)$",
+        s,
+    )
+    if m and "【" not in s:
+        field, value = m.group(1).strip(" ：:的"), m.group(2).strip()
+        if field and value:
+            return f"在【{field}】输入 {value}"
+
+    # Strip control-type suffixes stuck inside existing【】
+    def _strip_ctrl_in_brackets(match: re.Match) -> str:
+        inner = match.group(1)
+        cleaned = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", inner).strip()
+        return f"【{cleaned or inner}】"
+
+    s2 = re.sub(r"【([^】]+)】", _strip_ctrl_in_brackets, s)
+    return s2
+
+
 def _normalize_tc_item(item: dict) -> dict:
     """Normalize TC field names (handle Chinese, camelCase, snake_case)."""
     from app.gen.adapter import align_expected_to_steps
@@ -529,7 +581,7 @@ def _normalize_tc_item(item: dict) -> dict:
             expected_raw = item.get(c)
             break
 
-    steps = _listify_field(steps_raw)
+    steps = [_sanitize_ui_step(s) for s in _listify_field(steps_raw)]
     # Drop trailing empty steps only; keep middle empties rare
     while steps and not steps[-1]:
         steps.pop()

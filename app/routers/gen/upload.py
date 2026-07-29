@@ -144,15 +144,25 @@ async def upload_and_analyze(
 
     filenames = [f.filename or f"file_{i}" for i, f in enumerate(files)]
 
+    raw_bytes: list[bytes] = []
     file_contents = []
     for f in files:
         ext = _check_extension(f.filename or "")
         content = await f.read()
         _check_magic_bytes(content, ext)
+        raw_bytes.append(content)
         file_contents.append(BytesIO(content))
 
     from app.gen.models import AnalysisSession
+    from .storage import save_session_files
+
     session_id = str(uuid.uuid4())
+    try:
+        save_session_files(session_id, filenames, raw_bytes)
+    except Exception:
+        logger.exception("persist gen uploads failed session_id=%s", session_id)
+        raise HTTPException(500, "保存上传文件失败")
+
     session = AnalysisSession(
         session_id=session_id,
         filename=filenames[0] if filenames else "unknown",
@@ -174,6 +184,43 @@ async def upload_and_analyze(
         user_id=user.id,
     )
 
+    await launch_gen_analysis(
+        session_id=session_id,
+        session=session,
+        file_contents=file_contents,
+        filenames=filenames,
+        project_description=project_description,
+        selected_agent=selected_agent,
+        resolved_agent_id=resolved_agent_id,
+        resolved_skills=resolved_skills,
+        fp_prompt_key=fp_prompt_key,
+        tc_prompt_key=tc_prompt_key,
+        min_tcs=min_tcs,
+    )
+
+    return {
+        "session_id": session_id,
+        "status": "analyzing",
+        "agent_id": resolved_agent_id,
+        "tc_prompt_key": tc_prompt_key,
+    }
+
+
+async def launch_gen_analysis(
+    *,
+    session_id: str,
+    session,
+    file_contents: list,
+    filenames: list[str],
+    project_description: str,
+    selected_agent,
+    resolved_agent_id: int | None,
+    resolved_skills: list,
+    fp_prompt_key: str,
+    tc_prompt_key: str,
+    min_tcs: int,
+) -> None:
+    """Start background analysis for an in-memory ``AnalysisSession``."""
     _last_db_progress = {"t": 0.0, "p": -1}
 
     async def _set_progress(percent: int, message: str) -> None:
@@ -360,13 +407,6 @@ async def upload_and_analyze(
     await register_gen_task(session_id, task)
     _gen_tasks.add(task)
     task.add_done_callback(_gen_tasks.discard)
-
-    return {
-        "session_id": session_id,
-        "status": "analyzing",
-        "agent_id": resolved_agent_id,
-        "tc_prompt_key": tc_prompt_key,
-    }
 
 
 async def _update_db(session_id: str, status: str, error_msg: str, fp_count: int, tc_count: int,

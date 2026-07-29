@@ -31,7 +31,7 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
 
   const addStep = () => setSteps([...steps, { step_order: steps.length + 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0 }]);
   const removeStep = (idx: number) => setSteps(steps.filter((_, i) => i !== idx).map((s, i) => ({ ...s, step_order: i + 1 })));
-  const updateStep = (idx: number, field: string, value: string | number) => {
+  const updateStep = (idx: number, field: string, value: string | number | null | Record<string, unknown>) => {
     const newSteps = [...steps];
     newSteps[idx] = { ...newSteps[idx], [field]: value };
     setSteps(newSteps);

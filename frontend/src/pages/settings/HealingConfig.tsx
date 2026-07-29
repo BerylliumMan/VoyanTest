@@ -8,6 +8,7 @@ const HealingConfigPage: React.FC = () => {
   const [enabled, setEnabled] = useState(true);
   const [maxRetries, setMaxRetries] = useState(3);
   const [threshold, setThreshold] = useState(0.8);
+  const [locatorMemory, setLocatorMemory] = useState(true);
 
   useEffect(() => {
     apiGet<any>('/api/config/healing')
@@ -15,6 +16,7 @@ const HealingConfigPage: React.FC = () => {
         setEnabled(data.enabled ?? true);
         setMaxRetries(data.max_retries ?? 3);
         setThreshold(data.threshold ?? 0.8);
+        setLocatorMemory(data.locator_memory_enabled ?? true);
       })
       .catch(() => Message.error('加载自愈配置失败'))
       .finally(() => setLoading(false));
@@ -23,7 +25,12 @@ const HealingConfigPage: React.FC = () => {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await apiPut('/api/config/healing', { enabled, max_retries: maxRetries, threshold });
+      await apiPut('/api/config/healing', {
+        enabled,
+        max_retries: maxRetries,
+        threshold,
+        locator_memory_enabled: locatorMemory,
+      });
       Message.success('自愈配置已更新');
     } catch {
       Message.error('保存失败');
@@ -35,7 +42,7 @@ const HealingConfigPage: React.FC = () => {
   if (loading) return <Spin loading className="spin-center" />;
 
   return (
-    <Card title="自愈选择器配置">
+    <Card title="自愈与定位记忆">
       <Form layout="vertical" style={{ maxWidth: 500 }}>
         <Form.Item label="启用自愈">
           <Switch checked={enabled} onChange={setEnabled} />
@@ -48,6 +55,12 @@ const HealingConfigPage: React.FC = () => {
             <Slider value={threshold} min={0} max={1} step={0.05} onChange={setThreshold} style={{ width: 200 }} />
             <span>{(threshold * 100).toFixed(0)}%</span>
           </Space>
+        </Form.Item>
+        <Form.Item
+          label="步骤定位记忆"
+          extra="成功步骤记住元素指纹，下次优先直连跳过 LLM；断言失败会自动作废"
+        >
+          <Switch checked={locatorMemory} onChange={setLocatorMemory} />
         </Form.Item>
         <Button type="primary" onClick={handleSave} loading={saving}>保存</Button>
       </Form>

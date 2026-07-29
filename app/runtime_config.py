@@ -30,6 +30,8 @@ class HealingConfig(BaseModel):
     enabled: bool = True
     max_retries: int = 3
     threshold: float = 0.8
+    # Remember successful element fingerprints and try direct replay next run.
+    locator_memory_enabled: bool = True
 
 
 healing_config = HealingConfig()

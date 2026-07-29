@@ -55,6 +55,7 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import agent.gui.config_store ^
   --hidden-import core.browser_use_exec ^
   --hidden-import core.browser_use_prompts ^
+  --hidden-import core.mcp_tabs ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
   --hidden-import browser_use.agent.system_prompts ^
@@ -82,6 +83,7 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --copy-metadata setuptools ^
   --add-data "agent;agent" ^
   --add-data "core\browser_use_exec.py;core" ^
+  --add-data "core\mcp_tabs.py;core" ^
   --add-data "core\browser_use_prompts;core\browser_use_prompts" ^
   --add-data "core\__init__.py;core" ^
   agent\gui\app.py

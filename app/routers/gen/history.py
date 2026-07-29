@@ -29,8 +29,15 @@ from .state import (
     clear_gen_runtime,
     request_cancel_gen,
 )
+from .storage import delete_session_files, load_session_files, session_has_uploads
 
 router = APIRouter()
+
+
+def _session_can_retry(record) -> bool:
+    if record.status not in ("failed", "cancelled"):
+        return False
+    return session_has_uploads(record.id)
 
 
 def _check_session_ownership(record, user):
@@ -78,11 +85,14 @@ async def get_history(
                 project_description=item.project_description or "",
                 status=item.status,
                 error_message=item.error_message or "",
+                progress=int(item.progress or 0),
+                progress_message=item.progress_message or "",
                 functional_points_count=item.functional_points_count or 0,
                 test_cases_count=item.test_cases_count or 0,
                 imported_count=item.imported_count or 0,
                 created_at=item.created_at,
                 completed_at=item.completed_at,
+                can_retry=_session_can_retry(item),
             )
             for item in items
         ],
@@ -253,6 +263,7 @@ async def delete_history(
     await clear_gen_runtime(session_id)
 
     await crud.gen.delete_gen_session(db, session_id)
+    delete_session_files(session_id)
     return {"message": "删除成功"}
 
 
@@ -291,6 +302,91 @@ async def cancel_analysis(
         completed_at=datetime.now(),
     )
     return {"message": "已停止分析", "status": "cancelled"}
+
+
+@router.post("/history/{session_id}/retry")
+async def retry_analysis(
+    session_id: str,
+    agent_id: Optional[int] = Query(None, description="可选：指定生成 Agent"),
+    db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+) -> dict:
+    """Re-run analysis for a failed/cancelled session using persisted uploads."""
+    from io import BytesIO
+
+    from app.crud.agent_definition import get_active_by_type, get_agent_definition
+    from app.gen.models import AnalysisSession
+    from app.gen.prompts import min_tcs_per_item, pick_fp_prompt_key, pick_tc_prompt_key
+    from .upload import launch_gen_analysis
+
+    record = await crud.gen.get_gen_session(db, session_id)
+    if not record:
+        raise HTTPException(404, "记录不存在")
+    _check_session_ownership(record, user)
+
+    if record.status in ("analyzing", "pending"):
+        raise HTTPException(400, "分析进行中，请先停止后再重试")
+    if record.status not in ("failed", "cancelled"):
+        raise HTTPException(400, f"当前状态不可重试：{record.status}")
+
+    loaded = load_session_files(session_id)
+    if not loaded:
+        raise HTTPException(400, "原始上传文件已丢失，请重新上传分析")
+    filenames, raw_bytes = loaded
+
+    selected_agent = None
+    if agent_id is not None:
+        selected_agent = await get_agent_definition(db, agent_id)
+        if selected_agent is None or selected_agent.agent_type != "generation":
+            raise HTTPException(400, f"无效的生成 Agent id={agent_id}")
+    else:
+        selected_agent = await get_active_by_type(db, "generation")
+
+    resolved_agent_id = selected_agent.id if selected_agent else None
+    resolved_skills = list(selected_agent.skills or []) if selected_agent else []
+    fp_prompt_key = pick_fp_prompt_key(resolved_skills)
+    tc_prompt_key = pick_tc_prompt_key(resolved_skills)
+    min_tcs = min_tcs_per_item(resolved_skills, tc_prompt_key=tc_prompt_key)
+
+    await clear_gen_runtime(session_id)
+    async with _lock:
+        _sessions.pop(session_id, None)
+
+    await crud.gen.clear_gen_session_results(db, session_id)
+
+    session = AnalysisSession(
+        session_id=session_id,
+        filename=filenames[0] if filenames else (record.filename or "unknown"),
+        filenames=filenames,
+        project_description=record.project_description or "",
+        status="analyzing",
+        progress=0,
+        progress_message="准备重新分析",
+    )
+    async with _lock:
+        _sessions[session_id] = session
+
+    file_contents = [BytesIO(b) for b in raw_bytes]
+    await launch_gen_analysis(
+        session_id=session_id,
+        session=session,
+        file_contents=file_contents,
+        filenames=filenames,
+        project_description=record.project_description or "",
+        selected_agent=selected_agent,
+        resolved_agent_id=resolved_agent_id,
+        resolved_skills=resolved_skills,
+        fp_prompt_key=fp_prompt_key,
+        tc_prompt_key=tc_prompt_key,
+        min_tcs=min_tcs,
+    )
+    return {
+        "session_id": session_id,
+        "status": "analyzing",
+        "agent_id": resolved_agent_id,
+        "tc_prompt_key": tc_prompt_key,
+        "message": "已开始重新分析",
+    }
 
 
 @router.put("/history/{session_id}/test-cases/{test_case_id}")

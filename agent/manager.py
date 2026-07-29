@@ -380,36 +380,97 @@ class AgentManager:
                 step_order = step["step_order"]
                 desc = step["description"]
                 expected_result = step.get("expected_result")
+                cached_fp = step.get("learned_locator") if isinstance(step.get("learned_locator"), dict) else None
 
                 logger.info(f"--- Step {step_order}: {desc} ---")
 
                 # 1. Get DOM snapshot from agent's browser
                 snap = await self._get_snapshot(session, agent_id, run_id)
 
-                # 2. LLM generates tool call from step description + snapshot + expected result
-                tool_call = await generate_tool_call(desc, snap, expected_result=expected_result, client=llm_client, model=model, base_url=base_url_override or None)
+                memory_enabled = True
+                try:
+                    from app.runtime_config import healing_config as _hc
+                    memory_enabled = bool(getattr(_hc, "locator_memory_enabled", True))
+                except Exception:
+                    memory_enabled = True
 
-                # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
-                action_lower = (tool_call.action or "").lower()
-                if action_lower in ("error", "done"):
-                    result = {
-                        "success": False if action_lower == "error" else True,
-                        "action": f"{tool_call.action}({tool_call.value or ''})",
-                        "error": (
-                            tool_call.value or "LLM 无法确定本步操作"
-                            if action_lower == "error"
-                            else None
-                        ),
-                        "duration_ms": 0,
-                    }
-                else:
-                    # 3. Send tool call to agent for execution
-                    result = await self._execute_step(
-                        session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
+                tool_call = None
+                result = None
+                used_replay = False
+                invalidate = False
+
+                # 1b. Try learned locator replay (skip LLM)
+                if memory_enabled and cached_fp:
+                    from core.locator_memory import try_replay_mcp
+
+                    class _Adapter:
+                        def __init__(self, outer):
+                            self._outer = outer
+
+                        async def execute_tool_call(self, tc):
+                            return await self._outer._execute_step(
+                                session, agent_id, run_id, step_order, desc, tc,
+                            )
+
+                    replay = await try_replay_mcp(
+                        _Adapter(self),
+                        cached_fp,
+                        snapshot=snap or "",
+                        step_description=desc,
+                    )
+                    if replay.get("success") and not replay.get("skipped"):
+                        used_replay = True
+                        tc_dict = replay.get("tool_call") or {}
+                        from core.llm_wrapper import PlaywrightMCPToolCall
+                        tool_call = PlaywrightMCPToolCall(
+                            action=tc_dict.get("action") or "click",
+                            selector=tc_dict.get("selector"),
+                            value=tc_dict.get("value"),
+                            thinking=tc_dict.get("thinking") or "locator_memory replay",
+                            next_goal="",
+                        )
+                        result = replay.get("exec_result") or {"success": True}
+                        result.setdefault(
+                            "action",
+                            f"{tool_call.action}({tool_call.selector})",
+                        )
+                    elif not replay.get("skipped"):
+                        invalidate = True
+
+                # 2. LLM generates tool call when replay did not apply
+                if not used_replay:
+                    tool_call = await generate_tool_call(
+                        desc, snap, expected_result=expected_result,
+                        client=llm_client, model=model,
+                        base_url=base_url_override or None,
                     )
 
+                    # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
+                    action_lower = (tool_call.action or "").lower()
+                    if action_lower in ("error", "done"):
+                        result = {
+                            "success": False if action_lower == "error" else True,
+                            "action": f"{tool_call.action}({tool_call.value or ''})",
+                            "error": (
+                                tool_call.value or "LLM 无法确定本步操作"
+                                if action_lower == "error"
+                                else None
+                            ),
+                            "duration_ms": 0,
+                        }
+                    else:
+                        # 3. Send tool call to agent for execution
+                        result = await self._execute_step(
+                            session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
+                        )
+
                 # Hybrid relocate: on error/MCP fail, refresh snapshot and retry once
-                if not result.get("success") and action_lower != "done":
+                action_lower = (getattr(tool_call, "action", None) or "").lower() if tool_call else ""
+                if (
+                    not used_replay
+                    and not result.get("success")
+                    and action_lower != "done"
+                ):
                     logger.info(
                         "Hybrid relocate (agent): step %s failed; refreshing snapshot",
                         step_order,
@@ -522,6 +583,8 @@ class AgentManager:
                                 result["error"] = (
                                     f"Expected result verification failed: {verification.reason}"
                                 )
+                                if used_replay:
+                                    invalidate = True
                             else:
                                 result["verification"] = verification.reason
                         else:
@@ -558,17 +621,45 @@ class AgentManager:
 
                 step_result = {
                     "step_number": step_order,
+                    "step_id": step.get("id"),
                     "original_description": desc,
                     "success": result.get("success", False),
-                    "thinking": tool_call.thinking or "",
+                    "thinking": (tool_call.thinking if tool_call else "") or "",
                     "action": result.get("action", ""),
-                    "next_goal": tool_call.next_goal or "",
+                    "next_goal": (tool_call.next_goal if tool_call else "") or "",
                     "error": result.get("error"),
                     "duration_ms": result.get("duration_ms", 0),
                     "screenshot_path": screenshot_path,
                     "verification": result.get("verification"),
                     "backend": step_backend,
+                    "locator_replay": used_replay,
+                    "learned_locator": None,
+                    "invalidate_learned_locator": False,
                 }
+
+                if invalidate or (used_replay and not step_result["success"]):
+                    step_result["invalidate_learned_locator"] = True
+                elif step_result["success"] and memory_enabled and tool_call is not None:
+                    from core.locator_memory import (
+                        bump_hit_count,
+                        extract_from_snapshot,
+                        is_learnable_action,
+                    )
+                    action = tool_call.action
+                    selector = tool_call.selector
+                    if is_learnable_action(action) and selector:
+                        fp = extract_from_snapshot(
+                            snap or "",
+                            str(selector),
+                            action=str(action),
+                            value=tool_call.value,
+                        )
+                        if fp:
+                            if used_replay and cached_fp:
+                                step_result["learned_locator"] = bump_hit_count(cached_fp)
+                            else:
+                                step_result["learned_locator"] = fp
+
                 step_results.append(step_result)
 
                 log_msg = (
@@ -642,6 +733,11 @@ class AgentManager:
         session.agent.status = AgentStatus.BUSY
         # Generous timeout: open URL + each NL step may take many agent turns
         timeout = max(600.0, 120.0 * max(1, len(steps)) + 180.0)
+        logger.info(
+            "browser-use client run started run_id=%s agent=%s case=%r steps=%s "
+            "max_steps_per_nl=%s headless=%s (progress via RUN_LOG)",
+            run_id, agent_id, case_name, len(steps), max_steps_per_nl, headless,
+        )
         try:
             payload = await session.request(
                 WSMessage(
@@ -944,9 +1040,13 @@ class AgentManager:
                 steps_db = await crud.get_steps_for_case(db, int(case_id))
                 steps = [
                     {
+                        "id": s.id,
                         "step_order": s.step_order,
                         "description": s.description,
                         "expected_result": getattr(s, "parsed_result", ""),
+                        "learned_locator": getattr(s, "learned_locator", None)
+                        if isinstance(getattr(s, "learned_locator", None), dict)
+                        else None,
                     }
                     for s in steps_db
                 ]
@@ -996,6 +1096,18 @@ class AgentManager:
                             navigate_base_url=_navigate,
                             manage_busy=False,
                         )
+                        try:
+                            from core.locator_memory import persist_learned_locators_from_results
+                            async with AsyncSessionLocal() as _ldb:
+                                from app import crud as _crud
+                                _steps_db = await _crud.get_steps_for_case(_ldb, int(_case_id))
+                                await persist_learned_locators_from_results(
+                                    _ldb,
+                                    result if isinstance(result, list) else [],
+                                    steps_by_order={s.step_order: s for s in _steps_db},
+                                )
+                        except Exception:
+                            logger.warning("poller persist learned_locator failed", exc_info=True)
                         async with AsyncSessionLocal() as _edb:
                             await _edb.execute(
                                 text(
