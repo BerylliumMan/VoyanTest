@@ -1118,21 +1118,23 @@ class AgentClient:
                     {"message": f"MCP start failed: {e}", "ready": False},
                 )
             else:
-                # ACK so server can wait for browser ready before first snapshot
+                # Single ACK so server.request(RUN_START) unblocks exactly once
                 await self._send(
                     WSMessageType.SNAPSHOT_RESULT,
                     msg.run_id,
                     {
-                        "text": "(browser ready)" if ready_ok else f"(browser not ready: {ready_err})",
+                        "text": (
+                            "(browser ready)" if ready_ok
+                            else f"(browser not ready: {ready_err})"
+                        ),
                         "ready": ready_ok,
                         "error": ready_err or None,
                     },
                 )
-                if not ready_ok and ready_err:
+                if not ready_ok:
                     self._emit_status('error')
-                    await self._send(
-                        WSMessageType.ERROR, msg.run_id,
-                        {"message": f"Browser not ready: {ready_err}", "ready": False},
+                    self._log_warning(
+                        f"Browser not ready for run {msg.run_id}: {ready_err or 'unknown'}"
                     )
 
         elif msg.type == WSMessageType.RUN_END:
