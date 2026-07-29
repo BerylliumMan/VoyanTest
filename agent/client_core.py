@@ -525,12 +525,40 @@ class AgentClient:
             "net::err_",
             "cdp",
             "chromium has crashed",
+            "mcp tool call timed out",
+            "mcp stdout closed",
+            "mcp empty response",
+            "no response",
+            "page not available",
+            "snapshot timeout",
+            "snapshot unavailable",
+            "browser closed by user",
         )
         return any(k in low for k in keys)
 
+    def _mcp_process_alive(self) -> bool:
+        proc = self._mcp_process
+        if proc is None:
+            return False
+        return proc.returncode is None
+
+    async def _invalidate_mcp_session(self, why: str = "") -> None:
+        """Drop a dead/desynced MCP session so the next call starts fresh."""
+        if why:
+            self._log_warning(f"Invalidating MCP session: {why}")
+        try:
+            await self._stop_mcp()
+        except Exception as exc:
+            self._log_warning(f"MCP invalidate stop failed: {exc}")
+
     async def _ensure_mcp_session(self, *, shared_cdp: bool) -> None:
         """Start MCP or restart if the reused browser/CDP session is dead."""
-        if not self._mcp_process:
+        if not self._mcp_process_alive():
+            if self._mcp_process is not None:
+                self._log_warning(
+                    f"MCP process already exited code={self._mcp_process.returncode} — restarting"
+                )
+                await self._invalidate_mcp_session("process exited")
             await self._start_mcp(shared_cdp=shared_cdp)
             return
 
@@ -551,14 +579,22 @@ class AgentClient:
         if not need_restart:
             try:
                 snap = await asyncio.wait_for(
-                    self._mcp_call_tool("snapshot", "", ""), timeout=10
+                    self._mcp_call_tool("snapshot", "", ""), timeout=8
                 )
                 snap_err = str(snap.get("error") or snap.get("text") or "")
-                if not snap.get("success") or self._looks_like_dead_browser(snap_err):
+                # Empty / unavailable snapshots after user closed the window
+                bad_text = (
+                    not snap.get("success")
+                    or self._looks_like_dead_browser(snap_err)
+                    or "(page not available)" in snap_err
+                    or "(snapshot" in snap_err
+                    or len((snap.get("text") or "").strip()) < 20
+                )
+                if bad_text:
                     need_restart = True
                     reason = (
                         "MCP snapshot failed: "
-                        + (snap_err or "unknown")[:160]
+                        + (snap_err or "empty/unavailable")[:160]
                     )
             except Exception as exc:
                 need_restart = True
@@ -566,12 +602,12 @@ class AgentClient:
 
         if need_restart:
             self._log_warning(f"Existing browser session unusable ({reason}) — restarting")
-            await self._stop_mcp()
+            await self._invalidate_mcp_session(reason)
             await self._start_mcp(shared_cdp=shared_cdp)
 
     async def _restart_mcp_for_dead_browser(self, *, shared_cdp: bool, why: str) -> None:
         self._log_warning(f"{why} — restarting MCP+browser")
-        await self._stop_mcp()
+        await self._invalidate_mcp_session(why)
         await self._start_mcp(shared_cdp=shared_cdp)
 
     async def _start_mcp(self, *, shared_cdp: bool = False):
