@@ -672,10 +672,35 @@ async def execute_step_mcp(
             try:
                 if used_replay and cached_fp:
                     result["learned_locator"] = bump_hit_count(cached_fp)
+                elif result.get("_open_fp") and is_learnable_action(action) and selector:
+                    pick_fp = extract_from_snapshot(
+                        snapshot, str(selector), action=str(action), value=value,
+                    )
+                    open_fp = result.pop("_open_fp", None)
+                    if open_fp and pick_fp:
+                        result["learned_locator"] = build_plan_blob(
+                            [
+                                {
+                                    "action": open_fp.get("action"),
+                                    "role": open_fp.get("role"),
+                                    "name": open_fp.get("name"),
+                                    "value": open_fp.get("value"),
+                                },
+                                {
+                                    "action": pick_fp.get("action"),
+                                    "role": pick_fp.get("role"),
+                                    "name": pick_fp.get("name"),
+                                    "value": pick_fp.get("value"),
+                                },
+                            ],
+                            page_url_hint=page_url_hint(extract_page_url(snapshot)),
+                        )
+                    elif pick_fp:
+                        result["learned_locator"] = pick_fp
                 elif open_tc is not None and is_learnable_action(
                     getattr(open_tc, "action", None),
                 ) and is_learnable_action(action):
-                    # Dropdown open → pick: store Midscene-style plan
+                    # Fallback plan build from tool_calls
                     plan_steps = []
                     for tc in (open_tc, tool_call):
                         sel = getattr(tc, "selector", None)
