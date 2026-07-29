@@ -56,6 +56,8 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import core.browser_use_exec ^
   --hidden-import core.browser_use_prompts ^
   --hidden-import core.mcp_tabs ^
+  --hidden-import core.locator_memory ^
+  --hidden-import core.step_intent ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
   --hidden-import browser_use.agent.system_prompts ^
