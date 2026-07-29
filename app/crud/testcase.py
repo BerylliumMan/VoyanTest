@@ -205,6 +205,10 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
         for s in (db_case.steps or [])
         if getattr(s, "healed_selector", None)
     }
+    old_cacheable = {
+        s.step_order: getattr(s, "cacheable", True)
+        for s in (db_case.steps or [])
+    }
 
     # 删除旧步骤并创建新步骤（单事务）
     await delete_steps_for_case(db, case_id)
@@ -219,6 +223,10 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
             healed = step_data.healed_selector
         else:
             healed = getattr(step_data, "healed_selector", None) or old_healed.get(step_data.step_order)
+        if "cacheable" in fields_set:
+            cacheable = bool(getattr(step_data, "cacheable", True))
+        else:
+            cacheable = bool(old_cacheable.get(step_data.step_order, True))
         db_step = db_models.TestStep(
             case_id=case_id,
             step_order=step_data.step_order,
@@ -226,6 +234,7 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
             parsed_result=step_data.parsed_result,
             healed_selector=healed,
             learned_locator=learned,
+            cacheable=cacheable,
         )
         db.add(db_step)
 
