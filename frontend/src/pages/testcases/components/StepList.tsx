@@ -1,5 +1,5 @@
 import React from 'react';
-import { Button, Tag, Input, Typography, Space } from '@arco-design/web-react';
+import { Button, Tag, Input, Typography, Space, Switch } from '@arco-design/web-react';
 import { IconMenu, IconPlus, IconCopy, IconDelete, IconTool } from '@arco-design/web-react/icon';
 import { Step } from '../types';
 import styles from '../style/components.module.less';
@@ -8,7 +8,7 @@ interface StepListProps {
   steps: Step[];
   onAdd: () => void;
   onRemove: (idx: number) => void;
-  onUpdate: (idx: number, field: string, value: string | number | null | Record<string, unknown>) => void;
+  onUpdate: (idx: number, field: string, value: string | number | boolean | null | Record<string, unknown>) => void;
   onInsert: (idx: number) => void;
   onCopy: (idx: number) => void;
   onPaste: (idx: number) => void;
