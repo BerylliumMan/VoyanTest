@@ -105,14 +105,24 @@ class AgentSession:
         self._pending: Dict[str, asyncio.Future] = {}
 
     async def send(self, msg: WSMessage):
-        await self._send(msg.model_dump_json())
+        try:
+            await self._send(msg.model_dump_json())
+        except ConnectionError:
+            raise
+        except Exception as exc:
+            # Normalize disconnected transport into ConnectionError for callers
+            raise ConnectionError(f"Agent send failed: {exc}") from exc
 
     async def request(self, msg: WSMessage, timeout: float = 180) -> dict:
         """Send and wait for a reply with matching run_id."""
         key = msg.run_id
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[key] = fut
-        await self.send(msg)
+        try:
+            await self.send(msg)
+        except Exception:
+            self._pending.pop(key, None)
+            raise
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
