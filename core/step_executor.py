@@ -420,6 +420,7 @@ async def execute_step_mcp(
         exec_result: dict[str, Any] = {"success": False}
         relocate_attempted = False
         used_replay = False
+        open_tc = None
 
         # Fast path: replay learned plan / locator (skip LLM)
         if cached_fp and not (label and option):
