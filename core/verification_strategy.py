@@ -61,16 +61,20 @@ class VerificationStrategy:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def should_verify(action: str, mcp_error: str | None = None) -> bool:
+    def should_verify(
+        action: str,
+        mcp_error: str | None = None,
+        *,
+        has_expected: bool = False,
+    ) -> bool:
         """根据操作类型和 MCP 执行结果决定是否需要验证。
 
-        Args:
-            action: 操作类型（click / goto / fill / select / hover / drag 等）
-            mcp_error: MCP 执行器的错误信息，None 表示执行成功
-
-        Returns:
-            True 表示需要执行验证
+        When ``has_expected`` is True (step declares expected_result), always verify
+        after a successful action — Skyvern-style actor→validator separation.
         """
+        if has_expected and not mcp_error:
+            return True
+
         # 导航/点击/交互类 — 始终验证
         if action in _NAVIGATE_ACTIONS:
             return True
@@ -84,7 +88,6 @@ class VerificationStrategy:
         # 未知操作 — 保守策略：默认验证
         logger.debug("未知操作类型 %r，采用保守策略：默认验证", action)
         return True
-
     # ------------------------------------------------------------------
     # get_verification_scope — 确定验证范围
     # ------------------------------------------------------------------
