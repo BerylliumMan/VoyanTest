@@ -83,6 +83,8 @@ class TestStepBase(BaseModel):
     assertions: list[dict] = Field(default_factory=list)
     healed_selector: Optional[str] = None
     learned_locator: Optional[dict] = None
+    # Midscene-style: when False, never read/write locator memory for this step
+    cacheable: bool = True
 
 class ModuleBase(BaseModel):
     project_id: int
@@ -114,6 +116,8 @@ class TestStepUpdate(BaseModel):
     assertions: Optional[list[dict]] = None
     healed_selector: Optional[str] = None
     learned_locator: Optional[dict] = None
+    # Midscene-style: when False, never read/write locator memory for this step
+    cacheable: bool = True
 
 class TestCaseUpdate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
