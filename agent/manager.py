@@ -165,8 +165,16 @@ class AgentManager:
         return agent
 
     async def unregister(self, agent_id: str):
+        session = None
         async with self._lock:
-            self.sessions.pop(agent_id, None)
+            session = self.sessions.pop(agent_id, None)
+        # Allow a new run after disconnect; fail any in-flight waits
+        self._agent_busy.discard(agent_id)
+        if session is not None:
+            for _key, fut in list(session._pending.items()):
+                if fut and not fut.done():
+                    fut.set_exception(ConnectionError(f"Agent {agent_id} disconnected"))
+            session._pending.clear()
         logger.info(f"Agent unregistered: {agent_id}")
 
     async def heartbeat(self, agent_id: str):
