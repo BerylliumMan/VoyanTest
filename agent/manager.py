@@ -1036,6 +1036,12 @@ class AgentManager:
             for agent_id in list(self.sessions.keys()):
                 # Do not claim another job while this agent still has a run in flight
                 if agent_id in self._agent_busy or self._run_lock_for(agent_id).locked():
+                    logger.debug(
+                        "Poller skip agent=%s (busy=%s lock=%s)",
+                        agent_id,
+                        agent_id in self._agent_busy,
+                        self._run_lock_for(agent_id).locked(),
+                    )
                     continue
                 result = await db.execute(
                     text(
