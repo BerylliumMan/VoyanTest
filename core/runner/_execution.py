@@ -195,6 +195,7 @@ async def _run_test_case_in_browser_impl(
                 'expected_result': s.parsed_result,
                 'healed_selector': healed or None,
                 'learned_locator': learned if isinstance(learned, dict) else None,
+                'cacheable': bool(getattr(s, "cacheable", True)),
             })
         step_list.sort(key=lambda x: x['step_order'])
 
