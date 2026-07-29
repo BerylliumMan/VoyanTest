@@ -65,6 +65,9 @@ const StepList: React.FC<StepListProps> = ({
                 <IconTool /> 已记忆定位: {[
                   (step.learned_locator as any).role,
                   (step.learned_locator as any).name,
+                  Array.isArray((step.learned_locator as any).plan)
+                    ? `plan×${(step.learned_locator as any).plan.length}`
+                    : null,
                 ].filter(Boolean).join(' / ') || '已缓存'}
                 <Button
                   type="text"
@@ -77,6 +80,16 @@ const StepList: React.FC<StepListProps> = ({
                 </Button>
               </div>
             )}
+            <div className={styles['healed-hint']} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Switch
+                size="small"
+                checked={step.cacheable !== false}
+                onChange={(v) => onUpdate(idx, 'cacheable', v)}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                可缓存定位
+              </Typography.Text>
+            </div>
           </div>
           <Button type="text" icon={<IconPlus />} onClick={() => onInsert(idx)} title={t['step.insert_above']} aria-label="插入步骤" />
           <Button type="text" icon={<IconCopy />} onClick={() => onCopy(idx)} title={t['step.copy']} aria-label="复制步骤" />
