@@ -399,11 +399,14 @@ class AgentManager:
                         memory_mode = "off"
                 except Exception:
                     memory_mode = "read_write"
+                can_write_memory = memory_mode == "read_write" and cacheable
 
                 tool_call = None
                 result = None
                 used_replay = False
+                used_plan_replay = False
                 invalidate = False
+                failure_kind = None
 
                 # 1b. Try learned plan/locator replay (skip LLM)
                 if memory_mode != "off" and cacheable and cached_fp:
