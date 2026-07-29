@@ -1430,16 +1430,37 @@ class AgentClient:
     async def _handle_get_snapshot(self, run_id: str):
         try:
             text = "(page not available)"
-            if self._mcp_process:
+            if not self._mcp_process_alive():
+                # Browser was closed — try one silent restart for the next command
+                try:
+                    shared = self._exec_cdp_http is not None
+                    await self._ensure_mcp_session(shared_cdp=shared)
+                except Exception as exc:
+                    self._log_warning(f"Snapshot: failed to recover browser: {exc}")
+            if self._mcp_process_alive():
                 try:
                     result = await asyncio.wait_for(
                         self._mcp_call_tool("snapshot", "", ""), timeout=15
                     )
-                    text = result.get("text", "(empty page)")
+                    text = result.get("text") or result.get("error") or "(empty page)"
+                    if (
+                        not result.get("success")
+                        and self._looks_like_dead_browser(str(text))
+                    ):
+                        shared = self._exec_cdp_http is not None
+                        await self._restart_mcp_for_dead_browser(
+                            shared_cdp=shared,
+                            why="snapshot hit dead browser",
+                        )
+                        result = await asyncio.wait_for(
+                            self._mcp_call_tool("snapshot", "", ""), timeout=15
+                        )
+                        text = result.get("text") or result.get("error") or "(empty page)"
                     if len(text) > 8000:
                         text = text[:8000] + "\n\n[... TRUNCATED]"
                 except asyncio.TimeoutError:
                     text = "(snapshot timeout)"
+                    await self._invalidate_mcp_session("snapshot timeout")
                 except Exception:
                     text = "(snapshot unavailable)"
             await self._send(
@@ -1467,8 +1488,13 @@ class AgentClient:
         )
 
         try:
-            if not self._mcp_process:
-                raise RuntimeError("MCP subprocess not started")
+            if not self._mcp_process_alive():
+                shared = self._exec_cdp_http is not None
+                self._log_warning("Step execute: MCP dead — restarting browser")
+                await self._ensure_mcp_session(shared_cdp=shared)
+
+            if not self._mcp_process_alive():
+                raise RuntimeError("MCP subprocess not started (browser closed?)")
 
             if action == "error":
                 result.thinking = value or "LLM reported error for this step"
@@ -1485,6 +1511,18 @@ class AgentClient:
 
             else:
                 mcp_result = await self._mcp_call_tool(action, selector, value)
+                if (
+                    not mcp_result.get("success")
+                    and self._looks_like_dead_browser(
+                        str(mcp_result.get("error") or mcp_result.get("text") or "")
+                    )
+                ):
+                    shared = self._exec_cdp_http is not None
+                    await self._restart_mcp_for_dead_browser(
+                        shared_cdp=shared,
+                        why=f"step {step_order} hit dead browser",
+                    )
+                    mcp_result = await self._mcp_call_tool(action, selector, value)
                 result.success = mcp_result.get("success", False)
                 if not result.success:
                     result.error = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
@@ -1494,7 +1532,10 @@ class AgentClient:
             result.error = str(e)
             result.success = False
             self._emit_status('error')
-            result.screenshot_base64 = await self._mcp_screenshot_base64()
+            try:
+                result.screenshot_base64 = await self._mcp_screenshot_base64()
+            except Exception:
+                pass
 
         result.duration_ms = (time.monotonic() - t_start) * 1000
         await self._send(
