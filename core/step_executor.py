@@ -545,6 +545,7 @@ async def execute_step_mcp(
 
         if tool_call is None:
             result['error'] = exec_result.get('error') or 'LLM 生成操作指令超时'
+            result['failure_kind'] = 'action_fail'
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
             result['duration_ms'] = (time.monotonic() - t_start) * 1000
             return result
@@ -553,6 +554,7 @@ async def execute_step_mcp(
             result['error'] = exec_result.get('error') or (
                 f"LLM 无法确定操作: {getattr(tool_call, 'value', None)}"
             )
+            result['failure_kind'] = 'locator_miss'
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
             result['duration_ms'] = (time.monotonic() - t_start) * 1000
             return result
@@ -560,6 +562,7 @@ async def execute_step_mcp(
         result['success'] = bool(exec_result.get('success'))
         if not result['success']:
             result['error'] = exec_result.get('error', '未知错误')
+            result['failure_kind'] = 'action_fail'
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
             if used_replay:
                 result["invalidate_learned_locator"] = True
@@ -567,7 +570,9 @@ async def execute_step_mcp(
             mcp_error = exec_result.get('error')
             action_type = getattr(tool_call, "action", None)
 
-            if strategy.should_verify(action_type, mcp_error):
+            if strategy.should_verify(
+                action_type, mcp_error, has_expected=bool(expected_result),
+            ):
                 verified = False
 
                 try:
@@ -632,8 +637,8 @@ async def execute_step_mcp(
                             if not verification.passed:
                                 result['success'] = False
                                 result['error'] = f"预期结果验证失败: {verification.reason}"
-                                if used_replay:
-                                    result["invalidate_learned_locator"] = True
+                                result['failure_kind'] = 'semantic_drift'
+                                result["invalidate_learned_locator"] = True
                                 await _capture_screenshot(
                                     mcp_manager, screenshot_dir, step_number, result,
                                 )
@@ -648,25 +653,57 @@ async def execute_step_mcp(
                             "步骤 %s 预期结果验证异常: %s", step_number, exc, exc_info=True,
                         )
 
-        if result["success"] and memory_enabled and tool_call is not None:
+        if result["success"] and can_write_memory and tool_call is not None:
             action = getattr(tool_call, "action", None)
             selector = getattr(tool_call, "selector", None)
             value = getattr(tool_call, "value", None)
-            if is_learnable_action(action) and selector:
-                try:
+            try:
+                if used_replay and cached_fp:
+                    result["learned_locator"] = bump_hit_count(cached_fp)
+                elif open_tc is not None and is_learnable_action(
+                    getattr(open_tc, "action", None),
+                ) and is_learnable_action(action):
+                    # Dropdown open → pick: store Midscene-style plan
+                    plan_steps = []
+                    for tc in (open_tc, tool_call):
+                        sel = getattr(tc, "selector", None)
+                        act = getattr(tc, "action", None)
+                        if not sel or not act:
+                            continue
+                        fp = extract_from_snapshot(
+                            snapshot, str(sel), action=str(act),
+                            value=getattr(tc, "value", None),
+                        )
+                        if fp:
+                            plan_steps.append({
+                                "action": fp.get("action"),
+                                "role": fp.get("role"),
+                                "name": fp.get("name"),
+                                "value": fp.get("value"),
+                            })
+                    if len(plan_steps) >= 2:
+                        result["learned_locator"] = build_plan_blob(
+                            plan_steps,
+                            page_url_hint=page_url_hint(extract_page_url(snapshot)),
+                        )
+                    elif is_learnable_action(action) and selector:
+                        fp = extract_from_snapshot(
+                            snapshot, str(selector), action=str(action), value=value,
+                        )
+                        if fp:
+                            result["learned_locator"] = fp
+                elif is_learnable_action(action) and selector:
                     fp = extract_from_snapshot(
                         snapshot, str(selector), action=str(action), value=value,
                     )
                     if fp:
-                        if used_replay and cached_fp:
-                            result["learned_locator"] = bump_hit_count(cached_fp)
-                        else:
-                            result["learned_locator"] = fp
-                except Exception as exc:
-                    logger.debug("learn locator failed: %s", exc)
+                        result["learned_locator"] = fp
+            except Exception as exc:
+                logger.debug("learn locator/plan failed: %s", exc)
 
     except Exception as exc:
         result['error'] = f'步骤执行异常: {exc}'
+        result['failure_kind'] = 'action_fail'
         logger.warning("步骤 %s 异常: %s", step_number, exc, exc_info=True)
         if not result.get('screenshot_path'):
             await _capture_screenshot(mcp_manager, screenshot_dir, step_number, result)
