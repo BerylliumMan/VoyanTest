@@ -333,3 +333,116 @@ async def try_replay_browser_use(
     except Exception as exc:
         logger.warning("locator_memory browser-use replay failed: %s", exc, exc_info=True)
         return {"success": False, "skipped": True, "error": str(exc)}
+
+
+def normalize_learned_blob(blob: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize v1 fingerprint or v2 plan blob."""
+    if not isinstance(blob, dict):
+        return None
+    return blob
+
+
+def get_plan_steps(blob: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return plan action list; v1 single fingerprint becomes one-step plan."""
+    blob = normalize_learned_blob(blob)
+    if not blob:
+        return []
+    plan = blob.get("plan")
+    if isinstance(plan, list) and plan:
+        return [p for p in plan if isinstance(p, dict)]
+    # v1: flat fingerprint
+    if blob.get("role") or blob.get("name") or blob.get("action"):
+        return [{
+            "action": blob.get("action") or "click",
+            "role": blob.get("role"),
+            "name": blob.get("name"),
+            "value": blob.get("value"),
+        }]
+    return []
+
+
+def build_plan_blob(
+    steps: list[dict[str, Any]],
+    *,
+    page_url_hint: str = "",
+    hit_count: int = 1,
+) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "plan": steps,
+        "page_url_hint": page_url_hint or "",
+        "hit_count": hit_count,
+        "source": "playwright_mcp",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def try_replay_plan_mcp(
+    mcp_manager,
+    learned: dict[str, Any],
+    *,
+    snapshot: str,
+    step_description: str = "",
+) -> dict[str, Any]:
+    """Replay multi-step plan by rebinding each fingerprint to current snapshot.
+
+    On any step failure returns success=False (caller should invalidate + LLM fallback).
+    """
+    plan = get_plan_steps(learned)
+    if not plan:
+        return {"success": False, "skipped": True, "error": "empty plan"}
+
+    # Soft URL gate using top-level hint if present
+    if learned.get("page_url_hint") and not url_hint_ok(
+        {"page_url_hint": learned.get("page_url_hint")}, snapshot,
+    ):
+        return {"success": False, "skipped": True, "error": "plan url hint mismatch"}
+
+    actions_log: list[str] = []
+    last_tool: dict[str, Any] | None = None
+    last_exec: dict[str, Any] | None = None
+    current_snap = snapshot
+
+    for i, step_fp in enumerate(plan):
+        fp = {
+            "action": step_fp.get("action") or "click",
+            "role": step_fp.get("role"),
+            "name": step_fp.get("name"),
+            "value": step_fp.get("value"),
+            "page_url_hint": learned.get("page_url_hint") or "",
+        }
+        # Only enforce step-description name check on the last/primary target
+        desc = step_description if i == len(plan) - 1 else ""
+        one = await try_replay_mcp(
+            mcp_manager, fp, snapshot=current_snap, step_description=desc,
+        )
+        if one.get("skipped") or not one.get("success"):
+            return {
+                "success": False,
+                "skipped": bool(one.get("skipped")),
+                "error": one.get("error") or f"plan step {i + 1} failed",
+                "plan_index": i,
+            }
+        tc = one.get("tool_call") or {}
+        actions_log.append(f"{tc.get('action')}({tc.get('selector')})")
+        last_tool = tc
+        last_exec = one.get("exec_result") or {"success": True}
+        if i < len(plan) - 1:
+            try:
+                current_snap = await mcp_manager.get_dom_snapshot()
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "skipped": False,
+                    "error": f"snapshot refresh after plan step {i + 1}: {exc}",
+                }
+
+    return {
+        "success": True,
+        "skipped": False,
+        "error": None,
+        "tool_call": last_tool,
+        "exec_result": last_exec,
+        "plan_replay": True,
+        "actions_log": actions_log,
+    }
