@@ -323,19 +323,28 @@ class AgentManager:
         failed_step_number = None
 
         try:
-            # Notify agent of run start（仅拉起浏览器，不经 LLM）
-            await session.send(WSMessage(
-                type=WSMessageType.RUN_START, agent_id=agent_id,
-                run_id=run_id,
-                payload={
-                    "case_id": run_id,
-                    "case_name": case_name,
-                    "steps": steps,
-                    "base_url": (base_url_override or "") if navigate_base_url else "",
-                    "backend": "hybrid" if hybrid else "playwright_mcp",
-                    "navigate_base_url": navigate_base_url,
-                },
-            ))
+            # Wait until client browser/MCP is ready (ACK via SNAPSHOT_RESULT)
+            ready = await session.request(
+                WSMessage(
+                    type=WSMessageType.RUN_START, agent_id=agent_id,
+                    run_id=run_id,
+                    payload={
+                        "case_id": run_id,
+                        "case_name": case_name,
+                        "steps": steps,
+                        "base_url": (base_url_override or "") if navigate_base_url else "",
+                        "backend": "hybrid" if hybrid else "playwright_mcp",
+                        "navigate_base_url": navigate_base_url,
+                    },
+                ),
+                timeout=90,
+            )
+            if isinstance(ready, dict) and ready.get("ready") is False:
+                err = ready.get("error") or ready.get("message") or ready.get("text") or "browser not ready"
+                logger.error("Agent %s browser failed to start: %s", agent_id, err)
+                raise RuntimeError(f"Agent browser failed to start: {err}")
+            if isinstance(ready, dict) and ready.get("message") and "MCP start failed" in str(ready.get("message")):
+                raise RuntimeError(str(ready.get("message")))
 
             llm_client = await create_openai_client()
             _, _, model = await _llm_resolve_config()
