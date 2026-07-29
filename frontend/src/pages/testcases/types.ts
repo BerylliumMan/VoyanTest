@@ -40,6 +40,8 @@ export interface Step {
   retry_delay?: number;
   healed_selector?: string;
   learned_locator?: Record<string, unknown> | null;
+  /** When false, skip locator/plan cache replay & learning for this step */
+  cacheable?: boolean;
 }
 
 export interface Project {
