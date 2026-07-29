@@ -203,6 +203,10 @@ async def _run_startup_init():
             "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS learned_locator JSONB",
             "test_steps.learned_locator 迁移",
         )
+        await _run(
+            "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS cacheable BOOLEAN DEFAULT TRUE",
+            "test_steps.cacheable 迁移",
+        )
         try:
             async with engine.connect() as conn:
                 await conn.execution_options(isolation_level="AUTOCOMMIT")
