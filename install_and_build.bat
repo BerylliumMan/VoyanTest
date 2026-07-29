@@ -86,6 +86,8 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --add-data "agent;agent" ^
   --add-data "core\browser_use_exec.py;core" ^
   --add-data "core\mcp_tabs.py;core" ^
+  --add-data "core\locator_memory.py;core" ^
+  --add-data "core\step_intent.py;core" ^
   --add-data "core\browser_use_prompts;core\browser_use_prompts" ^
   --add-data "core\__init__.py;core" ^
   agent\gui\app.py
