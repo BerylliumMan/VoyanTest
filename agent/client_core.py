@@ -392,6 +392,7 @@ class AgentClient:
             "--no-default-browser-check",
             "--no-sandbox",
             "--disable-gpu",
+            "--disable-popup-blocking",
             "--disable-features=ChromeWhatsNewUI,ChromeWhatsNew",
             "--disable-sync",
             "--disable-background-networking",
