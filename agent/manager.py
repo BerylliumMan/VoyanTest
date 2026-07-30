@@ -1018,12 +1018,34 @@ class AgentManager:
                 # Keep short: dead browser must not block the agent for minutes
                 payload = await session.request(msg, timeout=25)
                 text = payload.get("text", "")
+                if self._snapshot_indicates_browser_closed(text):
+                    return text
                 if text and "(page not available)" not in text and "(snapshot unavailable)" not in text and "(snapshot timeout)" not in text and "(browser ready)" not in text:
                     return text
             except Exception as exc:
                 logger.debug(f"Snapshot attempt {attempt + 1}/3 failed: {exc}")
                 await asyncio.sleep(2)
         return text or "(snapshot unavailable)"
+
+    @staticmethod
+    def _snapshot_indicates_browser_closed(text: str | None) -> bool:
+        t = text or ""
+        low = t.lower()
+        return (
+            "(browser closed by user)" in low
+            or "浏览器已关闭" in t
+        )
+
+    @staticmethod
+    def _error_indicates_browser_closed(err: str | None) -> bool:
+        t = err or ""
+        low = t.lower()
+        return (
+            "浏览器已关闭" in t
+            or "browser closed by user" in low
+            or "browser has been closed" in low
+            or "target closed" in low
+        )
 
     async def _get_screenshot(self, session: AgentSession, agent_id: str, run_id: str) -> dict:
         try:
