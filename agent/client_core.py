@@ -131,6 +131,10 @@ class AgentClient:
         self._active_step_order: Optional[int] = None
         self._active_backend: Optional[str] = None
 
+    # Mid-run: closing the browser must abort the case (do not auto-relaunch).
+    BROWSER_CLOSED_USER_MSG = "浏览器已关闭，用例执行已中断"
+    BROWSER_CLOSED_SNAPSHOT_MARK = "(browser closed by user)"
+
     # ---- callback helpers ----
 
     def _emit_status(self, status: str) -> None:
