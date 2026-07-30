@@ -372,6 +372,8 @@ def maximize_browser_session(session) -> None:
         logger.debug("clear window_size failed", exc_info=True)
     try:
         args = [a for a in (list(getattr(profile, "args", None) or [])) if a != "--start-maximized"]
+        if "--disable-popup-blocking" not in args:
+            args.append("--disable-popup-blocking")
         args.append("--start-maximized")
         profile.args = args
     except Exception:
