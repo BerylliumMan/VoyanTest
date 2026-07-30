@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 # 点击页面空白处 / 单击空白区域 / 点击外侧关闭下拉 …
 _BLANK_CLICK_RE = re.compile(
     r"(?:"
-    r"(?:点击|单击|点一下|点下).{0,16}(?:页面)?(?:空白|空处|空余)(?:处|区域|地方|位置)?"
+    r"(?:点击|单击|点一下|点下).{0,16}(?:页面)?空白(?:处|区域|地方|位置)"
+    r"|(?:点击|单击|点一下|点下).{0,16}(?:空处|空余处)"
     r"|(?:点击|单击).{0,12}(?:页面外|外侧|外部|外面|遮罩|蒙层|蒙版)"
-    r"|click\s+(?:on\s+)?(?:the\s+)?(?:blank|empty|outside)\b"
+    r"|click\s+(?:on\s+)?(?:the\s+)?(?:blank|empty)\s+(?:area|space|region)\b"
     r"|click\s+outside\b"
     r")",
     re.IGNORECASE,
