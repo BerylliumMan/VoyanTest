@@ -1032,17 +1032,6 @@ class AgentClient:
             return {'key': value or 'Escape'}
         elif action in ('hover', 'browser_hover'):
             return {'element': selector or '', 'target': selector or ''}
-        elif action in ('scroll', 'browser_mouse_wheel'):
-            delta = 400
-            if value:
-                v = str(value).strip().lower()
-                if v.isdigit() or (v.startswith('-') and v[1:].isdigit()):
-                    delta = int(v)
-                elif v in ('up', 'pageup'):
-                    delta = -400
-                elif v in ('down', 'pagedown'):
-                    delta = 400
-            return {'deltaY': delta}
         return {}
 
     # ---- messaging ----
