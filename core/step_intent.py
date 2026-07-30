@@ -383,7 +383,7 @@ async def resolve_tool_call_from_step(
         )
 
     action = (intent.action or "").lower()
-    if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot"):
+    if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside"):
         return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
     if action == "error" or intent.ambiguous:
         return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)

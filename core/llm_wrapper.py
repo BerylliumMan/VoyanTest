@@ -143,6 +143,7 @@ the "selector" field. Prefer action="error" / action="wait" over guessing the wr
 ACTIONS available (maps to Playwright MCP tools):
 - "goto": Navigate to a URL. selector=null, value=URL.
 - "click": Click an element by its ref. selector=ref, value=null.
+- "click_blank": Click empty / outside page area (dismiss dropdown/overlay). selector=null, value=null.
 - "fill": Type text into an input field by ref. selector=ref, value=text.
 - "select": Select dropdown option by ref. selector=ref, value=option value/text.
 - "hover": Mouse hover over an element. selector=ref, value=null.
