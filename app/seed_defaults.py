@@ -399,10 +399,12 @@ async def sync_prompt_templates_from_seed(
 # Product-owned prompts: auto-activate seed upgrades on startup.
 _FLOW_PROMPT_KEYS = frozenset({"fp_extract_flow", "tc_generate_flow"})
 _UI_GEN_PROMPT_KEYS = frozenset({"tc_generate_ui"})
+_FUNC_GEN_PROMPT_KEYS = frozenset({"fp_extract", "tc_generate"})
 # Execution prompts that fix dropdown getByText('…下拉框') regressions.
 _EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate"})
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
 _UI_AGENT_NAME = "UI自动化用例生成助手"
+_FUNC_AGENT_NAME = "功能用例生成助手"
 _EXEC_AGENT_NAME = "智能执行引擎"
 
 
@@ -414,6 +416,11 @@ async def ensure_flow_agent_system_prompt(db: AsyncSession) -> bool:
 async def ensure_ui_agent_system_prompt(db: AsyncSession) -> bool:
     """Keep UI-automation Agent system_prompt aligned with seed (idempotent)."""
     return await _ensure_named_agent_system_prompt(db, _UI_AGENT_NAME)
+
+
+async def ensure_func_agent_system_prompt(db: AsyncSession) -> bool:
+    """Keep functional-generation Agent system_prompt aligned with seed."""
+    return await _ensure_named_agent_system_prompt(db, _FUNC_AGENT_NAME)
 
 
 async def ensure_execution_agent_system_prompt(db: AsyncSession) -> bool:
