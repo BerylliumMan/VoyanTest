@@ -784,7 +784,11 @@ async def execute_nl_steps_browser_use(
                     f"--- Step {order} start: {_truncate(desc, 160)} ---",
                 )
                 pages_before = await list_browser_use_page_ids(browser)
-                step_cb = _make_new_step_callback(on_progress, step_order=int(order) or 0)
+                step_cb = _make_new_step_callback(
+                    on_progress,
+                    step_order=int(order) or 0,
+                    browser_session=browser,
+                )
                 agent_kwargs = dict(agent_common)
                 if step_cb is not None:
                     agent_kwargs["register_new_step_callback"] = step_cb
