@@ -533,34 +533,66 @@ class AgentManager:
                         invalidate = True
                         failure_kind = "locator_miss"
 
-                # 2. Two-phase Intent + bind (Midscene-style); fall back to legacy on ambiguity
+                # 2. Two-phase Intent + bind; dropdown steps → open then pick
                 if not used_replay:
-                    tool_call = await _resolve_agent_tool_call(
-                        desc=desc,
-                        snap=snap or "",
-                        expected_result=expected_result,
-                        llm_client=llm_client,
-                        model=model,
-                        base_url_override=base_url_override,
+                    from core.step_executor import (
+                        dropdown_open_description,
+                        dropdown_pick_description,
+                        normalize_step_description,
+                        option_choice_visible_in_snapshot,
+                        parse_dropdown_select,
                     )
 
-                    # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
-                    action_lower = (tool_call.action or "").lower()
-                    if action_lower in ("error", "done"):
-                        result = {
-                            "success": False if action_lower == "error" else True,
-                            "action": f"{tool_call.action}({tool_call.value or ''})",
-                            "error": (
-                                tool_call.value or "LLM 无法确定本步操作"
-                                if action_lower == "error"
-                                else None
-                            ),
-                            "duration_ms": 0,
-                        }
+                    label, option = parse_dropdown_select(desc)
+                    resolve_desc = normalize_step_description(desc)
+
+                    async def _resolve_and_run(step_desc: str, snap_text: str, expect):
+                        tc = await _resolve_agent_tool_call(
+                            desc=step_desc,
+                            snap=snap_text or "",
+                            expected_result=expect,
+                            llm_client=llm_client,
+                            model=model,
+                            base_url_override=base_url_override,
+                        )
+                        act = (tc.action or "").lower()
+                        if act in ("error", "done"):
+                            return tc, {
+                                "success": False if act == "error" else True,
+                                "action": f"{tc.action}({tc.value or ''})",
+                                "error": (
+                                    tc.value or "LLM 无法确定本步操作"
+                                    if act == "error"
+                                    else None
+                                ),
+                                "duration_ms": 0,
+                            }
+                        res = await self._execute_step(
+                            session, agent_id, run_id, step_order, desc, tc.model_dump(),
+                        )
+                        return tc, res
+
+                    if label and option:
+                        need_open = not option_choice_visible_in_snapshot(snap or "", option)
+                        if need_open:
+                            tool_call, result = await _resolve_and_run(
+                                dropdown_open_description(label), snap or "", None,
+                            )
+                            if not result.get("success"):
+                                # fall through to relocate below
+                                pass
+                            else:
+                                snap = await self._get_snapshot(session, agent_id, run_id)
+                                tool_call, result = await _resolve_and_run(
+                                    dropdown_pick_description(option), snap or "", expected_result,
+                                )
+                        else:
+                            tool_call, result = await _resolve_and_run(
+                                dropdown_pick_description(option), snap or "", expected_result,
+                            )
                     else:
-                        # 3. Send tool call to agent for execution
-                        result = await self._execute_step(
-                            session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
+                        tool_call, result = await _resolve_and_run(
+                            resolve_desc, snap or "", expected_result,
                         )
 
                 # Hybrid relocate: on error/MCP fail, refresh snapshot and retry once
@@ -577,33 +609,67 @@ class AgentManager:
                     )
                     await asyncio.sleep(HYBRID_SETTLE_SECONDS)
                     snap = await self._get_snapshot(session, agent_id, run_id)
-                    tool_call = await _resolve_agent_tool_call(
-                        desc=desc,
-                        snap=snap or "",
-                        expected_result=expected_result,
-                        llm_client=llm_client,
-                        model=model,
-                        base_url_override=base_url_override,
+                    from core.step_executor import (
+                        dropdown_open_description,
+                        dropdown_pick_description,
+                        normalize_step_description,
+                        option_choice_visible_in_snapshot,
+                        parse_dropdown_select,
                     )
-                    action_lower = (tool_call.action or "").lower()
-                    if action_lower in ("error", "done"):
-                        result = {
-                            "success": False if action_lower == "error" else True,
-                            "action": f"{tool_call.action}({tool_call.value or ''})",
-                            "error": (
-                                tool_call.value or "LLM 无法确定本步操作"
-                                if action_lower == "error"
-                                else None
-                            ),
-                            "duration_ms": 0,
-                            "relocate_attempted": True,
-                        }
-                    else:
-                        result = await self._execute_step(
-                            session, agent_id, run_id, step_order, desc, tool_call.model_dump(),
-                        )
-                        result["relocate_attempted"] = True
+                    label, option = parse_dropdown_select(desc)
+                    resolve_desc = normalize_step_description(desc)
 
+                    async def _resolve_and_run_retry(step_desc: str, snap_text: str, expect):
+                        tc = await _resolve_agent_tool_call(
+                            desc=step_desc,
+                            snap=snap_text or "",
+                            expected_result=expect,
+                            llm_client=llm_client,
+                            model=model,
+                            base_url_override=base_url_override,
+                        )
+                        act = (tc.action or "").lower()
+                        if act in ("error", "done"):
+                            return tc, {
+                                "success": False if act == "error" else True,
+                                "action": f"{tc.action}({tc.value or ''})",
+                                "error": (
+                                    tc.value or "LLM 无法确定本步操作"
+                                    if act == "error"
+                                    else None
+                                ),
+                                "duration_ms": 0,
+                                "relocate_attempted": True,
+                            }
+                        res = await self._execute_step(
+                            session, agent_id, run_id, step_order, desc, tc.model_dump(),
+                        )
+                        res["relocate_attempted"] = True
+                        return tc, res
+
+                    if label and option:
+                        need_open = not option_choice_visible_in_snapshot(snap or "", option)
+                        if need_open:
+                            tool_call, result = await _resolve_and_run_retry(
+                                dropdown_open_description(label), snap or "", None,
+                            )
+                            if result.get("success"):
+                                snap = await self._get_snapshot(session, agent_id, run_id)
+                                tool_call, result = await _resolve_and_run_retry(
+                                    dropdown_pick_description(option),
+                                    snap or "",
+                                    expected_result,
+                                )
+                        else:
+                            tool_call, result = await _resolve_and_run_retry(
+                                dropdown_pick_description(option),
+                                snap or "",
+                                expected_result,
+                            )
+                    else:
+                        tool_call, result = await _resolve_and_run_retry(
+                            resolve_desc, snap or "", expected_result,
+                        )
                 # Hybrid: locator failure → same-browser browser-use for this NL step only
                 step_backend = "playwright_mcp"
                 if _should_hybrid_browser_use_fallback(
