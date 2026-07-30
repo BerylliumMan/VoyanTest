@@ -524,38 +524,14 @@ class AgentManager:
 
                 # 2. Two-phase Intent + bind (Midscene-style); fall back to legacy on ambiguity
                 if not used_replay:
-                    from core.step_intent import (
-                        generate_step_intent,
-                        intent_to_tool_call,
-                        match_intent_candidates,
+                    tool_call = await _resolve_agent_tool_call(
+                        desc=desc,
+                        snap=snap or "",
+                        expected_result=expected_result,
+                        llm_client=llm_client,
+                        model=model,
+                        base_url_override=base_url_override,
                     )
-                    try:
-                        intent = await generate_step_intent(
-                            desc, snap, expected_result=expected_result,
-                            client=llm_client, model=model,
-                        )
-                        action_i = (intent.action or "").lower()
-                        if action_i in ("wait", "assert_text", "goto", "press_key", "error"):
-                            tool_call = intent_to_tool_call(intent, ref=None)
-                        else:
-                            cands = match_intent_candidates(snap, intent)
-                            if len(cands) == 1:
-                                tool_call = intent_to_tool_call(
-                                    intent, ref=cands[0]["ref"],
-                                )
-                            else:
-                                # Ambiguous / missing: one-shot with refs (Agent path has no vision MCP)
-                                tool_call = await generate_tool_call(
-                                    desc, snap, expected_result=expected_result,
-                                    client=llm_client, model=model,
-                                    base_url=base_url_override or None,
-                                )
-                    except Exception:
-                        tool_call = await generate_tool_call(
-                            desc, snap, expected_result=expected_result,
-                            client=llm_client, model=model,
-                            base_url=base_url_override or None,
-                        )
 
                     # error / done 是 LLM 控制信号，不能当 Playwright 工具下发
                     action_lower = (tool_call.action or "").lower()
@@ -577,6 +553,7 @@ class AgentManager:
                         )
 
                 # Hybrid relocate: on error/MCP fail, refresh snapshot and retry once
+                # Re-run Intent+bind on fresh snap (same as server) to avoid stale refs
                 action_lower = (getattr(tool_call, "action", None) or "").lower() if tool_call else ""
                 if (
                     not used_replay
@@ -589,12 +566,13 @@ class AgentManager:
                     )
                     await asyncio.sleep(HYBRID_SETTLE_SECONDS)
                     snap = await self._get_snapshot(session, agent_id, run_id)
-                    tool_call = await generate_tool_call(
-                        desc, snap,
+                    tool_call = await _resolve_agent_tool_call(
+                        desc=desc,
+                        snap=snap or "",
                         expected_result=expected_result,
-                        client=llm_client,
+                        llm_client=llm_client,
                         model=model,
-                        base_url=base_url_override or None,
+                        base_url_override=base_url_override,
                     )
                     action_lower = (tool_call.action or "").lower()
                     if action_lower in ("error", "done"):
