@@ -198,9 +198,28 @@ class PlaywrightMCPManager:
         action = tool_call.get('action', '')
         selector = tool_call.get('selector')
         value = tool_call.get('value')
+        step_description = tool_call.get('step_description') or tool_call.get('description')
 
         if action == 'error':
             return {'success': False, 'error': f"LLM error: {value}"}
+
+        from core.blank_click import execute_blank_click, should_use_blank_click
+
+        if should_use_blank_click(
+            action=action,
+            selector=selector,
+            step_description=step_description,
+        ):
+            try:
+                result = await execute_blank_click(self.call_tool)
+                if not result.get('success'):
+                    return {
+                        'success': False,
+                        'error': result.get('text') or result.get('error', 'blank click failed'),
+                    }
+                return {'success': True, 'error': None}
+            except (RuntimeError, ConnectionError, OSError, ValueError, TypeError, KeyError) as exc:
+                return {'success': False, 'error': str(exc)}
 
         mcp_tool = ACTION_TOOL_MAP.get(action)
         if not mcp_tool:
