@@ -629,10 +629,14 @@ class AgentManager:
                 # Hybrid relocate: on error/MCP fail, refresh snapshot and retry once
                 # Re-run Intent+bind on fresh snap (same as server) to avoid stale refs
                 action_lower = (getattr(tool_call, "action", None) or "").lower() if tool_call else ""
+                browser_closed = self._error_indicates_browser_closed(
+                    str(result.get("error") or "")
+                )
                 if (
                     not used_replay
                     and not result.get("success")
                     and action_lower != "done"
+                    and not browser_closed
                 ):
                     logger.info(
                         "Hybrid relocate (agent): step %s failed; refreshing snapshot",
