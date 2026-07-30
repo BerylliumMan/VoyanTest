@@ -134,6 +134,8 @@ class AgentClient:
     # Mid-run: closing the browser must abort the case (do not auto-relaunch).
     BROWSER_CLOSED_USER_MSG = "浏览器已关闭，用例执行已中断"
     BROWSER_CLOSED_SNAPSHOT_MARK = "(browser closed by user)"
+    # Playwright MCP snapshots after login can exceed asyncio's default 64KiB line limit.
+    MCP_STDOUT_LIMIT = 16 * 1024 * 1024
 
     # ---- callback helpers ----
 
