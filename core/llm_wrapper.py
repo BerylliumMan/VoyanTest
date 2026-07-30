@@ -169,8 +169,10 @@ DROPDOWN / SELECT (critical):
 - Options often appear inside role=tooltip / listbox / menu after the trigger is clicked — match the OPTION name, not the tooltip container.
 - Native <select>: action="select", selector=ref of the select, value=option label/value.
 - Custom dropdown (Ant Design etc.): click the combobox/selector to expand; if the option is already visible in the snapshot, click the option ref instead.
-- Opening the dropdown alone is NOT enough when the step also names an option — you must click the option.
-- For wait/assert_text: wait for the OPTION text (汉东省院) or field label (单位), never wait for "单位下拉框".
+- Icon-only / glyph buttons with no adjacent text: steps may look like
+  `点击右上角书本形状图标（用途：打开操作手册）`. Prefer aria-label if present in the
+  snapshot; otherwise use vision to pick the matching icon button/img by region and shape.
+  Never treat the literal word 图标 as a selector.
 
 EDGE CASE HANDLING:
 - Timeout: If element not found within 30s, retry once with a refreshed snapshot, then abort with action="error".
