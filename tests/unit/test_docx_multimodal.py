@@ -99,10 +99,10 @@ class TestPromptTestItems:
         assert "测试项" in FP_EXTRACT_PROMPT
         assert "functional_points" in FP_EXTRACT_PROMPT
 
-    def test_tc_prompts_require_three_cases(self):
-        assert "N×3" in TC_GENERATE_PROMPT or "三类" in TC_GENERATE_PROMPT
-        assert "N×3" in TC_GENERATE_UI_PROMPT or "三类" in TC_GENERATE_UI_PROMPT
+    def test_tc_prompts_type_driven_not_forced_triad(self):
+        assert "机械" in TC_GENERATE_PROMPT or "主路径" in TC_GENERATE_PROMPT
+        assert "主路径" in TC_GENERATE_UI_PROMPT or "机械" in TC_GENERATE_UI_PROMPT
         assert "fp_name" in TC_GENERATE_PROMPT
-        assert MIN_TCS_PER_ITEM == 3
+        assert MIN_TCS_PER_ITEM == 2
         assert FP_BATCH_SIZE == 2
         assert "密度要求" in FP_EXTRACT_PROMPT
