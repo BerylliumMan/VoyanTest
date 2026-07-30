@@ -548,9 +548,7 @@ async def preview_step_resolution(
     candidates = match_intent_candidates(snapshot, intent)
     if icon_step and len(candidates) != 1:
         candidates = icon_click_candidates(snapshot) or candidates
-    ref = candidates[0]["ref"] if len(candidates) == 1 and not icon_step else (
-        candidates[0]["ref"] if len(candidates) == 1 else None
-    )
+    ref = candidates[0]["ref"] if len(candidates) == 1 else None
     return StepPreview(
         action=intent.action,
         target_role=intent.target_role,
@@ -560,10 +558,7 @@ async def preview_step_resolution(
         match_count=len(candidates),
         candidates=[{"ref": c["ref"], "role": c["role"], "name": c["name"]} for c in candidates[:12]],
         thinking=intent.thinking,
-        needs_vision=(
-            (icon_step or len(candidates) != 1)
-            and (intent.action or "") not in (
-                "wait", "goto", "error", "assert_text", "press_key", "click_blank",
-            )
+        needs_vision=len(candidates) != 1 and (intent.action or "") not in (
+            "wait", "goto", "error", "assert_text", "press_key", "click_blank",
         ),
     )
