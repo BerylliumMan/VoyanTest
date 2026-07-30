@@ -295,8 +295,8 @@ TC_GENERATE_FLOW_PROMPT = """你是资深的 UI 自动化测试工程师。请�
 # Number of test items to bundle into a single Phase-2 batch.
 # Smaller batches reduce truncation and improve per-item coverage.
 FP_BATCH_SIZE = 2
-# Minimum test cases expected per test item (normal + exception + boundary).
-MIN_TCS_PER_ITEM = 3
+# Minimum test cases expected per test item (soft floor for supplemental).
+MIN_TCS_PER_ITEM = 2
 # Flow-manual mode: one main-path case per extracted flow.
 MIN_TCS_PER_FLOW = 1
 
