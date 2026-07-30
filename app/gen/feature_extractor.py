@@ -566,6 +566,10 @@ async def generate_test_cases_for_fps(
                 f"（正常/异常/边界各至少 1 条），"
                 f"JSON 数组合计至少 {min_needed} 条；"
                 f"每条必须带 fp_name 与 scenario_type。"
+                f"若本批含单条件查询或「组合查询」相关测试项："
+                f"单条件须覆盖文档中的有效/空/无结果等场景；"
+                f"组合查询须输出两两组合用例，scenario_type 填「组合查询」"
+                f"（不做全量笛卡尔积）。"
             )
         tcs = await _generate_batch_once(
             batch=batch,
