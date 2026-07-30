@@ -1,4 +1,4 @@
-"""Unit tests for flow-manual generation prompt key helpers."""
+"""Unit tests for generation prompt key helpers and coverage contracts."""
 from app.gen.prompts import (
     min_tcs_per_item,
     pick_fp_prompt_key,
@@ -57,6 +57,55 @@ def test_flow_tc_expected_must_come_from_document():
         "空编号" in TC_GENERATE_FLOW_PROMPT or "只有序号" in TC_GENERATE_FLOW_PROMPT
     )
     assert "文档未写明" in TC_GENERATE_FLOW_PROMPT
+
+
+def test_fp_extract_requires_per_field_query_and_combo():
+    from app.gen.prompts import FP_EXTRACT_PROMPT
+
+    assert "每个查询字段" in FP_EXTRACT_PROMPT or "每个查询条件" in FP_EXTRACT_PROMPT
+    assert "组合查询" in FP_EXTRACT_PROMPT
+    assert "禁止" in FP_EXTRACT_PROMPT and "揉成一个粗项" in FP_EXTRACT_PROMPT
+
+
+def test_tc_generate_requires_pairwise_combo_scenario():
+    from app.gen.prompts import TC_GENERATE_PROMPT
+
+    assert "组合查询" in TC_GENERATE_PROMPT
+    assert "两两组合" in TC_GENERATE_PROMPT
+    assert "恰好覆盖三类" not in TC_GENERATE_PROMPT
+    assert "至少覆盖三类" in TC_GENERATE_PROMPT or "至少" in TC_GENERATE_PROMPT
+    assert "笛卡尔" in TC_GENERATE_PROMPT
+
+
+def test_ui_prompts_forbid_bare_page_load_wait():
+    from app.gen.prompts import (
+        TC_GENERATE_FLOW_PROMPT,
+        TC_GENERATE_UI_PROMPT,
+        _UI_STEP_CONTRACT,
+    )
+
+    for text in (_UI_STEP_CONTRACT, TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
+        assert "禁止" in text and "等待页面加载完成" in text
+        # Examples must prefer visible-text waits, not bare load waits as good path
+        assert "等待【" in text
+
+
+def test_ui_prompts_require_disambiguation_and_empty_mid_expected():
+    from app.gen.prompts import TC_GENERATE_UI_PROMPT, _UI_STEP_CONTRACT
+
+    assert "同名" in _UI_STEP_CONTRACT or "消歧" in _UI_STEP_CONTRACT
+    assert "Add to cart" in _UI_STEP_CONTRACT or "相同文案" in _UI_STEP_CONTRACT
+    assert '""' in TC_GENERATE_UI_PROMPT
+    assert "中间" in TC_GENERATE_UI_PROMPT or "默认" in TC_GENERATE_UI_PROMPT
+
+
+def test_sanitize_rewrites_bare_page_load_wait():
+    from app.gen.response_parser import _sanitize_ui_step
+
+    assert _sanitize_ui_step("等待页面加载完成") == "等待页面稳定"
+    assert _sanitize_ui_step("等待加载完成") == "等待页面稳定"
+    assert _sanitize_ui_step("等待【Login】出现") == "等待【Login】出现"
+    assert _sanitize_ui_step("密码输入【Abc123】") == "在【密码】输入 Abc123"
 
 
 def test_compact_parts_keep_images_prefers_images():
