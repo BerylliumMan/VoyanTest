@@ -108,11 +108,22 @@ async def _resolve_agent_tool_call(
     base_url_override: Optional[str],
 ):
     """Intent → unique AX bind; ambiguous/missing falls back to one-shot generate_tool_call."""
+    from core.blank_click import BLANK_CLICK_ACTION, is_blank_area_click_step
+    from core.llm_wrapper import PlaywrightMCPToolCall
     from core.step_intent import (
         generate_step_intent,
         intent_to_tool_call,
         match_intent_candidates,
     )
+
+    if is_blank_area_click_step(desc):
+        return PlaywrightMCPToolCall(
+            action=BLANK_CLICK_ACTION,
+            selector=None,
+            value=None,
+            thinking="Step asks to click blank/outside area; use viewport mouse click",
+            next_goal="verify this step only",
+        )
 
     try:
         intent = await generate_step_intent(
@@ -120,7 +131,7 @@ async def _resolve_agent_tool_call(
             client=llm_client, model=model,
         )
         action_i = (intent.action or "").lower()
-        if action_i in ("wait", "assert_text", "goto", "press_key", "error"):
+        if action_i in ("wait", "assert_text", "goto", "press_key", "error", BLANK_CLICK_ACTION):
             return intent_to_tool_call(intent, ref=None)
         cands = match_intent_candidates(snap, intent)
         if len(cands) == 1:
