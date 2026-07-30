@@ -328,7 +328,19 @@ async def resolve_tool_call_from_step(
     timeout_ms: int = 30000,
 ):
     """Resolve NL step → PlaywrightMCPToolCall via Intent + deterministic bind (+ vision)."""
+    from core.blank_click import BLANK_CLICK_ACTION, is_blank_area_click_step
     from core.llm_wrapper import PlaywrightMCPToolCall, generate_tool_call
+
+    # Blank / outside click: no a11y ref — skip LLM bind and use viewport mouse click.
+    if is_blank_area_click_step(step_description):
+        return PlaywrightMCPToolCall(
+            action=BLANK_CLICK_ACTION,
+            selector=None,
+            value=None,
+            timeout_ms=timeout_ms,
+            thinking="Step asks to click blank/outside area; use viewport mouse click",
+            next_goal="verify this step only",
+        )
 
     # Fast path without mcp: keep legacy one-shot for unit tests / callers without manager
     if mcp_manager is None:
