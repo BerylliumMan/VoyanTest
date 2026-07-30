@@ -1182,6 +1182,8 @@ class AgentClient:
                 )
                 if not ready_ok:
                     self._emit_status('error')
+                    self._active_run_id = None
+                    self._active_backend = None
                     self._log_warning(
                         f"Browser not ready for run {msg.run_id}: {ready_err or 'unknown'}"
                     )
@@ -1193,6 +1195,9 @@ class AgentClient:
                     await self._mcp_call_tool("snapshot", "", "")
             except Exception as e:
                 self._log_warning(f"Error during run end: {e}")
+            self._active_run_id = None
+            self._active_step_order = None
+            self._active_backend = None
             self._emit_status('idle')
 
         elif msg.type == WSMessageType.GET_SNAPSHOT:
