@@ -957,6 +957,11 @@ class AgentClient:
 
     async def _mcp_tools_call(self, tool_name: str, arguments: dict) -> dict:
         """Call an MCP tool by exact name (e.g. browser_tabs)."""
+        return await self._mcp_tools_call_once(tool_name, arguments, _retried=False)
+
+    async def _mcp_tools_call_once(
+        self, tool_name: str, arguments: dict, *, _retried: bool,
+    ) -> dict:
         if not self._mcp_process_alive():
             return {
                 "success": False,
@@ -1004,8 +1009,21 @@ class AgentClient:
             await self._invalidate_mcp_session("MCP tool call timed out")
             return {"success": False, "error": "MCP tool call timed out"}
         except Exception as exc:
+            err = str(exc)
             await self._invalidate_mcp_session(f"MCP recv failed: {exc}")
+            # Oversized snapshot line: recover MCP on live CDP and retry once
+            if (
+                not _retried
+                and self._looks_like_mcp_protocol_glitch(err)
+                and await self._recover_mcp_keeping_chrome(
+                    f"MCP protocol glitch on {tool_name}: {err[:120]}"
+                )
+            ):
+                return await self._mcp_tools_call_once(
+                    tool_name, arguments, _retried=True,
+                )
             return {"success": False, "error": f"MCP recv failed: {exc}"}
+
     async def _mcp_screenshot_base64(self) -> Optional[str]:
         """Take a screenshot via MCP and return base64-encoded PNG.
 
