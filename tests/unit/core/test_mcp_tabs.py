@@ -89,31 +89,30 @@ async def test_switch_after_settle_list():
 
 
 @pytest.mark.asyncio
-async def test_switch_retries_until_tab_appears():
+async def test_ensure_on_newest_tab_selects_when_stale():
     calls = []
-    lists = 0
 
     async def call_tool(name, args):
-        nonlocal lists
         calls.append((name, args))
         if args.get("action") == "list":
-            lists += 1
-            if lists < 3:
-                return {
-                    "success": True,
-                    "text": "- 0: (current) [Home](https://example.com/)\n",
-                }
             return {"success": True, "text": SAMPLE}
         return {"success": True, "text": ""}
 
-    ok = await switch_to_new_tab_if_opened(
-        call_tool,
-        count_before=1,
-        result_text="",
-        settle_seconds=0,
-        retries=4,
-        retry_interval=0,
-    )
+    ok = await ensure_on_newest_tab(call_tool)
     assert ok is True
-    assert lists >= 3
-    assert any(c[1].get("action") == "select" for c in calls)
+    assert ("browser_tabs", {"action": "select", "index": 1}) in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_on_newest_tab_noop_when_already_current():
+    text = "- 0: [Home](https://example.com/)\n- 1: (current) [Report](https://example.com/report)\n"
+    calls = []
+
+    async def call_tool(name, args):
+        calls.append((name, args))
+        return {"success": True, "text": text}
+
+    ok = await ensure_on_newest_tab(call_tool)
+    assert ok is False
+    assert all(c[1].get("action") != "select" for c in calls)
+
