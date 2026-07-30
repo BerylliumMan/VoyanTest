@@ -506,8 +506,15 @@ def _to_numbered_expected(parts: list[str]) -> str:
 
 _CTRL_TYPE_SUFFIX = (
     r"(?:下拉框|下拉菜单|下拉列表|选择器|输入框|文本框|文本域|编辑框|"
-    r"组合框|按钮|控件|弹窗|对话框|提示框)"
+    r"组合框|按钮|控件|弹窗|对话框|提示框|"
+    r"图标|图片|图像|箭头|符号|徽标|logo|icon|image|img)"
 )
+
+# 【】内若整词只是这些，执行端无法定位（如「点击【图标】」）
+_GENERIC_BRACKET_ONLY = frozenset({
+    "图标", "图片", "图像", "箭头", "符号", "徽标", "logo", "icon", "image", "img",
+    "按钮", "控件", "链接", "菜单",
+})
 
 
 def _sanitize_ui_step(step: str) -> str:
@@ -533,15 +540,38 @@ def _sanitize_ui_step(step: str) -> str:
         if field:
             return f"在【{field}】中选择【{opt}】"
 
-    # 「点击【单位下拉框】」→「点击【单位】」；「点击登录按钮」→「点击【登录】」
+    # 「点击【单位下拉框】」/「点击【书本图标】」→「点击【单位】」/「点击【书本】」
     m = re.match(rf"^点击【(.+?){_CTRL_TYPE_SUFFIX}】\s*$", s)
     if m:
-        return f"点击【{m.group(1).strip()}】"
+        label = m.group(1).strip()
+        if label and label.lower() not in _GENERIC_BRACKET_ONLY:
+            return f"点击【{label}】"
+
+    # 「点击登录按钮」/「点击书本图标」→「点击【登录】」/「点击【书本】」
     m = re.match(rf"^点击\s*(.+?){_CTRL_TYPE_SUFFIX}\s*$", s)
     if m and "【" not in s:
         label = m.group(1).strip(" ：:的")
-        if label:
+        if label and label.lower() not in _GENERIC_BRACKET_ONLY:
             return f"点击【{label}】"
+
+    # 「点击【图标】」alone — try salvage from trailing/leading hint:
+    # 「点击【图标】（操作手册）」/「点击操作手册【图标】」
+    m = re.match(
+        r"^点击【(?P<br>[^】]+)】\s*[（(](?P<hint>[^）)]+)[）)]\s*$",
+        s,
+    )
+    if m and m.group("br").strip().lower() in _GENERIC_BRACKET_ONLY:
+        hint = m.group("hint").strip()
+        if hint:
+            return f"点击【{hint}】"
+    m = re.match(
+        r"^点击\s*(?P<head>.+?)【(?P<br>[^】]+)】\s*$",
+        s,
+    )
+    if m and m.group("br").strip().lower() in _GENERIC_BRACKET_ONLY:
+        head = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", m.group("head")).strip(" ：:的")
+        if head and head.lower() not in _GENERIC_BRACKET_ONLY:
+            return f"点击【{head}】"
 
     # 「在用户名输入框输入 admin」/「用户名输入框输入 admin」→「在【用户名】输入 admin」
     m = re.match(
@@ -573,11 +603,13 @@ def _sanitize_ui_step(step: str) -> str:
     if m:
         return f"在【{m.group(1).strip()}】输入 {m.group(2).strip()}"
 
-    # Strip control-type suffixes stuck inside existing【】
+    # Strip control-type suffixes stuck inside existing【】（保留纯「图标」不剥成空）
     def _strip_ctrl_in_brackets(match: re.Match) -> str:
         inner = match.group(1)
         cleaned = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", inner).strip()
-        return f"【{cleaned or inner}】"
+        if not cleaned or cleaned.lower() in _GENERIC_BRACKET_ONLY:
+            return f"【{inner}】"
+        return f"【{cleaned}】"
 
     s2 = re.sub(r"【([^】]+)】", _strip_ctrl_in_brackets, s)
     return s2
