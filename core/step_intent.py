@@ -542,8 +542,15 @@ async def preview_step_resolution(
             thinking=f"intent failed: {exc}",
             match_count=0,
         )
+    icon_step = is_icon_only_click_step(step_description)
+    if icon_step and (intent.target_name or "").strip().lower() in _GENERIC_ICON_NAMES:
+        intent = intent.model_copy(update={"target_name": None, "target_role": intent.target_role or "button"})
     candidates = match_intent_candidates(snapshot, intent)
-    ref = candidates[0]["ref"] if len(candidates) == 1 else None
+    if icon_step and len(candidates) != 1:
+        candidates = icon_click_candidates(snapshot) or candidates
+    ref = candidates[0]["ref"] if len(candidates) == 1 and not icon_step else (
+        candidates[0]["ref"] if len(candidates) == 1 else None
+    )
     return StepPreview(
         action=intent.action,
         target_role=intent.target_role,
@@ -553,7 +560,10 @@ async def preview_step_resolution(
         match_count=len(candidates),
         candidates=[{"ref": c["ref"], "role": c["role"], "name": c["name"]} for c in candidates[:12]],
         thinking=intent.thinking,
-        needs_vision=len(candidates) != 1 and (intent.action or "") not in (
-            "wait", "goto", "error", "assert_text", "press_key",
+        needs_vision=(
+            (icon_step or len(candidates) != 1)
+            and (intent.action or "") not in (
+                "wait", "goto", "error", "assert_text", "press_key", "click_blank",
+            )
         ),
     )
