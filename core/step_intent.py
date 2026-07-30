@@ -28,7 +28,7 @@ INTENT_SYSTEM_PROMPT = """You extract a single browser Intent from a test step. 
 
 Output ONLY JSON (no markdown) matching:
 {
-  "action": "click|fill|select|wait|goto|hover|press_key|scroll|assert_text|error",
+  "action": "click|fill|select|wait|goto|hover|press_key|scroll|assert_text|click_blank|error",
   "target_role": "button|link|textbox|combobox|option|menuitem|checkbox|radio|null",
   "target_name": "exact UI label from 【】/「」 or step text",
   "value": "fill/select/wait/goto value or null",
