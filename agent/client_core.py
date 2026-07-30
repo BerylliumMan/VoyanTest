@@ -1547,7 +1547,9 @@ class AgentClient:
                 result.screenshot_base64 = await self._mcp_screenshot_base64()
 
             else:
-                mcp_result = await self._mcp_call_tool(action, selector, value)
+                mcp_result = await self._mcp_call_tool(
+                    action, selector, value, step_description=desc,
+                )
                 if (
                     not mcp_result.get("success")
                     and self._looks_like_dead_browser(
@@ -1559,7 +1561,9 @@ class AgentClient:
                         shared_cdp=shared,
                         why=f"step {step_order} hit dead browser",
                     )
-                    mcp_result = await self._mcp_call_tool(action, selector, value)
+                    mcp_result = await self._mcp_call_tool(
+                        action, selector, value, step_description=desc,
+                    )
                 result.success = mcp_result.get("success", False)
                 if not result.success:
                     result.error = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
