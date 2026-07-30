@@ -42,8 +42,8 @@ Rules:
 - Prefer 【】/「」 text as target_name. Control-type words (下拉框/输入框/按钮) are NOT target_name.
 - 提交≠确定≠保存; 查询≠搜索; 取消≠关闭.
 - One primary action only. If the step is wait/assert, action=wait or assert_text and value=text.
-- Click blank/outside area (点击空白处/页面空白/外侧/遮罩) → action=press_key, value=Escape
-  (runtime also rewrites these steps to a real viewport mouse click; Escape is a safe Intent).
+- Click blank/outside area (点击空白处/页面空白/外侧/遮罩) → action=click_blank
+  (runtime performs a real viewport mouse click; do not invent a body/html target).
 - If you cannot decide safely, action=error and explain in thinking; set ambiguous=true.
 """
 
