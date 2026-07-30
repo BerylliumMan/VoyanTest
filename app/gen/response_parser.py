@@ -472,6 +472,9 @@ def _listify_field(value) -> list[str]:
         for v in value:
             p = str(v).strip() if v is not None else ""
             p = re.sub(r"^\d+[\.、]\s*", "", p)
+            # Bare leftover markers / pure numbering junk → empty
+            if re.fullmatch(r"(?:\d+[\.、]\s*)*", p or ""):
+                p = ""
             out.append(p)
         return out
     from app.gen.adapter import split_numbered_items
@@ -489,7 +492,15 @@ def _to_numbered_expected(parts: list[str]) -> str:
     Non-empty items keep their 1-based step index so import can right-align /
     index-map correctly. All-empty → ``\"\"``.
     """
-    lines = [f"{i + 1}. {p.strip()}" for i, p in enumerate(parts) if (p or "").strip()]
+    lines = []
+    for i, p in enumerate(parts):
+        body = (p or "").strip()
+        if not body:
+            continue
+        # Drop items that are still only numbering after cleanup
+        if re.fullmatch(r"(?:\d+[\.、]\s*)+", body):
+            continue
+        lines.append(f"{i + 1}. {body}")
     return "\n".join(lines)
 
 
