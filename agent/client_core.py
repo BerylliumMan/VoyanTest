@@ -616,6 +616,18 @@ class AgentClient:
         await self._invalidate_mcp_session(why)
         await self._start_mcp(shared_cdp=shared_cdp)
 
+    def _run_in_progress(self) -> bool:
+        return bool(self._active_run_id)
+
+    async def _abort_run_for_closed_browser(self, why: str) -> str:
+        """Stop MCP without relaunching; return the user-facing abort error."""
+        self._log_warning(f"{why} — aborting run (browser closed by user)")
+        try:
+            await self._invalidate_mcp_session(why)
+        except Exception as exc:
+            self._log_warning(f"MCP cleanup after browser close failed: {exc}")
+        return self.BROWSER_CLOSED_USER_MSG
+
     async def _start_mcp(self, *, shared_cdp: bool = False):
         # 清理可能残留的旧 MCP；hybrid 共用 Chromium 时不要 pkill chrome
         try:
