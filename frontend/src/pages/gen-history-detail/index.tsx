@@ -18,6 +18,12 @@ import {
 import { IconLeft, IconMenu, IconPlus, IconCopy, IconDelete, IconCode, IconDownload } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import styles from './style/index.module.less';
+import {
+  splitNumberedItems,
+  splitNumberedItemsNonEmpty,
+  formatNumberedExpected,
+  formatNumberedSteps,
+} from '../../utils/numberedText';
 
 const { Title, Text } = Typography;
 const FormItem = Form.Item;
