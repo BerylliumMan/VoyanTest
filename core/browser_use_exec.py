@@ -386,8 +386,8 @@ def _soften_click_opener_refocus() -> None:
     browser-use's DefaultActionWatchdog resets ``agent_focus`` to the opener with
     ``focus=True`` (Target.activateTarget) after each click, then maybe switches
     to a new tab. That activateTarget is what users see as "标签又切回去了".
-    Soften the reset to ``focus=False``; new-tab SwitchTab still activates the
-    popup when detected, and our sticky preferred-tab logic covers slow popups.
+    Soften **only** the opener reset to ``focus=False``; SwitchTab to a new
+    target still uses ``focus=True``.
     """
     try:
         from browser_use.browser.watchdogs import default_action_watchdog as daw
@@ -400,22 +400,20 @@ def _soften_click_opener_refocus() -> None:
     if orig is None:
         return
 
-    import asyncio
-
     async def _on_click(self, event):  # type: ignore[no-untyped-def]
         session = self.browser_session
+        opener_id = getattr(getattr(session, "agent_focus", None), "target_id", None)
         _orig_get = session.get_or_create_cdp_session
 
         async def _get_or_create(*args, **kwargs):
-            # Only soften the post-click reset to opener (focus=True → False).
-            # Explicit SwitchTab / new-tab focus still uses focus=True.
-            if kwargs.get("focus") is True and len(args) == 0:
-                # Called as get_or_create_cdp_session(target_id=..., focus=True)
-                pass
-            if "focus" in kwargs and kwargs.get("focus") is True:
-                # Detect opener reset: target_id equals pre-click focus and we're
-                # inside click handler — always soften activateTarget here; the
-                # subsequent SwitchTabEvent to the new tab will activate properly.
+            tid = kwargs.get("target_id")
+            if tid is None and args:
+                tid = args[0]
+            if (
+                kwargs.get("focus") is True
+                and opener_id
+                and tid == opener_id
+            ):
                 kwargs = {**kwargs, "focus": False}
             return await _orig_get(*args, **kwargs)
 
