@@ -820,7 +820,9 @@ async def execute_nl_steps_browser_use(
                     await switch_browser_use_to_newest_tab_if_opened(
                         browser,
                         page_ids_before=pages_before,
-                        settle_seconds=0.5,
+                        settle_seconds=0.6,
+                        retries=4,
+                        retry_interval=0.5,
                     )
                 except Exception as exc:
                     logger.warning("post-step new-tab switch failed: %s", exc)
