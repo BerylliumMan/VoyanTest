@@ -790,6 +790,7 @@ async def execute_nl_steps_browser_use(
         enable_default_extensions=False,
         cdp_url=cdp_url,
     )
+    _soften_click_opener_refocus()
     enable_browser_use_auto_switch_new_tabs(browser)
 
     agent_common: dict[str, Any] = {
