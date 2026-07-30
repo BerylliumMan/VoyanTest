@@ -1690,6 +1690,7 @@ class AgentClient:
             f'--user-data-dir={user_data_dir}',
             '--no-first-run', '--no-default-browser-check',
             '--no-sandbox', '--disable-gpu',
+            '--disable-popup-blocking',
             '--disable-features=ChromeWhatsNewUI,ChromeWhatsNew',
             '--disable-sync', '--disable-background-networking',
             '--disable-default-apps', '--disable-extensions',
