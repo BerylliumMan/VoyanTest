@@ -316,19 +316,17 @@ const GenHistoryDetailPage: React.FC = () => {
 
   const alignExpectedToSteps = (stepTexts: string[], resultTexts: string[]): string[] => {
     if (!stepTexts.length) return [];
+    if (resultTexts.length === stepTexts.length) return resultTexts;
     if (resultTexts.length > stepTexts.length) {
       const base = stepTexts.length > 1 ? resultTexts.slice(0, stepTexts.length - 1) : [];
       const extras = resultTexts.slice(stepTexts.length - 1);
       return [...base, extras.join('；')];
     }
-    if (resultTexts.length < stepTexts.length) {
-      // 预期更少时右对齐，避免断言错挂到前面的输入步骤
-      return [
-        ...Array(stepTexts.length - resultTexts.length).fill(''),
-        ...resultTexts,
-      ];
-    }
-    return resultTexts;
+    // 预期更少时右对齐，避免断言错挂到前面的输入步骤
+    return [
+      ...Array(stepTexts.length - resultTexts.length).fill(''),
+      ...resultTexts,
+    ];
   };
 
   const handleEdit = (record: TestCase) => {
@@ -362,8 +360,9 @@ const GenHistoryDetailPage: React.FC = () => {
     try {
       const values = await editForm.validate();
       setEditSubmitting(true);
-      const testSteps = editSteps.map((s, i) => `${i + 1}. ${s.description}`).join('\n');
-      const expectedResult = editSteps.map((s, i) => `${i + 1}. ${s.parsed_result}`).join('\n');
+      const testSteps = formatNumberedSteps(editSteps);
+      // 空预期不写「1. 2. 3.」空行，只保留有内容的步骤序号
+      const expectedResult = formatNumberedExpected(editSteps);
       await axios.put(`/api/gen/history/${id}/test-cases/${editingTestCase.test_case_id}`, {
         ...values,
         test_steps: testSteps,
