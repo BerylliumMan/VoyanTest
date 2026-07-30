@@ -1091,6 +1091,27 @@ class AgentManager:
         )
 
     @staticmethod
+    def _snapshot_looks_blank(text: str | None) -> bool:
+        """True when snapshot is empty or still on about:blank (post-nav race)."""
+        t = (text or "").strip()
+        if not t:
+            return True
+        low = t.lower()
+        if low in (
+            "(empty page)",
+            "(snapshot unavailable)",
+            "(snapshot timeout)",
+            "(page not available)",
+            "(browser ready)",
+        ):
+            return True
+        if "about:blank" in low and (
+            "page url" in low or "pageurl" in low.replace(" ", "") or len(t) < 200
+        ):
+            return True
+        return False
+
+    @staticmethod
     def _error_indicates_browser_closed(err: str | None) -> bool:
         t = err or ""
         low = t.lower()
