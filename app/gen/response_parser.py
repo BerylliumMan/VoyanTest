@@ -626,9 +626,18 @@ def _normalize_tc_item(item: dict) -> dict:
         "暂无",
         "按页面实际",
         "界面状态符合当前操作预期",
+        "成功",
+        "完成",
+        "同上",
+        "见上",
+        "略",
     }
     expected = [
-        "" if (not e) or (e.strip() in _EMPTY_EXPECTED_MARKERS) else e
+        ""
+        if (not e)
+        or (e.strip() in _EMPTY_EXPECTED_MARKERS)
+        or re.fullmatch(r"(?:\d+[\.、]\s*)+", e.strip())
+        else e
         for e in expected
     ]
     if steps:
