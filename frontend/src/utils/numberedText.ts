@@ -30,7 +30,8 @@ export function splitNumberedItems(text: string): string[] {
     const values = [...indexed.values()];
     if (!values.some((v) => v)) return [];
     const maxI = Math.max(...indexed.keys());
-    if (maxI <= indexed.size + 5 && maxI <= 200) {
+    // Expand by explicit index so ``9. only last`` aligns to step 9 (cap at 100).
+    if (maxI <= 100) {
       return Array.from({ length: maxI }, (_, i) => indexed.get(i + 1) || '');
     }
     return sequential;
