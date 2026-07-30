@@ -67,12 +67,20 @@ async def test_switch_from_result_text():
 
 
 @pytest.mark.asyncio
-async def test_switch_after_settle_list():
+async def test_switch_retries_until_tab_appears():
     calls = []
+    lists = 0
 
     async def call_tool(name, args):
+        nonlocal lists
         calls.append((name, args))
         if args.get("action") == "list":
+            lists += 1
+            if lists < 3:
+                return {
+                    "success": True,
+                    "text": "- 0: (current) [Home](https://example.com/)\n",
+                }
             return {"success": True, "text": SAMPLE}
         return {"success": True, "text": ""}
 
@@ -81,7 +89,9 @@ async def test_switch_after_settle_list():
         count_before=1,
         result_text="",
         settle_seconds=0,
+        retries=4,
+        retry_interval=0,
     )
     assert ok is True
-    assert calls[0] == ("browser_tabs", {"action": "list"})
-    assert calls[1] == ("browser_tabs", {"action": "select", "index": 1})
+    assert lists >= 3
+    assert any(c[1].get("action") == "select" for c in calls)

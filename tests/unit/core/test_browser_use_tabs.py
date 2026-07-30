@@ -121,3 +121,33 @@ def test_enable_and_arm_tab_auto_switch():
     assert handlers  # registered
     arm_browser_use_auto_switch_new_tabs(session)
     assert session._voyantest_tab_auto["armed"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_on_newest_tab_switches():
+    from core.browser_use_exec import ensure_browser_use_on_newest_tab
+
+    dispatched = []
+
+    class Bus:
+        def dispatch(self, event):
+            dispatched.append(event)
+
+            class _E:
+                def __await__(self):
+                    async def _done():
+                        return "ok"
+                    return _done().__await__()
+
+            return _E()
+
+    session = SimpleNamespace(
+        agent_focus=SimpleNamespace(target_id="aaa"),
+        event_bus=Bus(),
+        _cdp_get_all_pages=AsyncMock(
+            return_value=[{"targetId": "aaa"}, {"targetId": "bbb"}]
+        ),
+    )
+    ok = await ensure_browser_use_on_newest_tab(session, settle_seconds=0)
+    assert ok is True
+    assert dispatched[0].target_id == "bbb"
