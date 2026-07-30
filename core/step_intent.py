@@ -67,7 +67,12 @@ def icon_click_candidates(snapshot: str, *, limit: int = 16) -> list[dict[str, s
         if role not in _ICON_CANDIDATE_ROLES:
             continue
         name = (el.get("name") or "").strip()
-        if not name or len(name) <= 2 or name.lower() in _GENERIC_ICON_NAMES:
+        # Empty / single-glyph / generic control words → icon-like; keep normal labels
+        if (
+            not name
+            or len(name) <= 1
+            or name.lower() in _GENERIC_ICON_NAMES
+        ):
             unnamed.append(el)
         else:
             named.append(el)
