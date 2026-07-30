@@ -626,6 +626,18 @@ class AgentClient:
         await self._invalidate_mcp_session(why)
         await self._start_mcp(shared_cdp=shared_cdp)
 
+    def _run_in_progress(self) -> bool:
+        return bool(self._active_run_id)
+
+    async def _abort_run_for_closed_browser(self, why: str) -> str:
+        """Stop MCP without relaunching; return the user-facing abort error."""
+        self._log_warning(f"{why} — aborting run (browser closed by user)")
+        try:
+            await self._invalidate_mcp_session(why)
+        except Exception as exc:
+            self._log_warning(f"MCP cleanup after browser close failed: {exc}")
+        return self.BROWSER_CLOSED_USER_MSG
+
     @staticmethod
     def _looks_like_mcp_protocol_glitch(err_text: str) -> bool:
         """True for oversized MCP JSON lines / pipe parse errors (browser still OK)."""
@@ -647,11 +659,14 @@ class AgentClient:
         if not cdp_ok and shared:
             self._log_warning(f"{why} — hybrid CDP also dead; cannot recover MCP alone")
             return False
-        self._log_warning(f"{why} — restarting MCP (shared Chromium kept={cdp_ok})")
+        if not shared and not cdp_ok:
+            # Plain MCP owns the browser — a dead process usually means browser gone
+            return False
+        self._log_warning(f"{why} — restarting MCP (shared Chromium kept={cdp_ok or shared})")
         try:
             if self._mcp_process_alive() or self._mcp_process is not None:
                 await self._invalidate_mcp_session(why)
-            await self._start_mcp(shared_cdp=shared or cdp_ok)
+            await self._start_mcp(shared_cdp=bool(shared or cdp_ok))
             return self._mcp_process_alive()
         except Exception as exc:
             self._log_warning(f"MCP recover failed: {exc}")
