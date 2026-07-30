@@ -171,6 +171,8 @@ DROPDOWN / SELECT (critical):
 
 EDGE CASE HANDLING:
 - Timeout: If element not found within 30s, retry once with a refreshed snapshot, then abort with action="error".
+- Click blank / outside (点击空白处、页面空白、外侧、遮罩关闭下拉): use action="click_blank"
+  with selector=null. Do NOT invent a body/html ref or pick a random nearby control.
 - Popup/Dialog: Only dismiss blocking popups when they prevent THIS step; prefer the dismiss control named in the step (关闭/取消/确定). Do not click 确定 on a confirm dialog unless the step says so.
 - New browser tab: Clicks that open target=_blank / window.open are auto-switched by the runtime after click. On the next step, assume you are already on the newest tab; do not stay on the old page. If the snapshot still looks like the previous page, wait for key text on the new page.
 - Stale Element: If an element reference becomes detached from the DOM, re-query the snapshot to find a fresh ref for the same element, then retry.
