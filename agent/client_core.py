@@ -1561,10 +1561,14 @@ class AgentClient:
             text = "(page not available)"
             if not self._mcp_process_alive():
                 if self._run_in_progress():
-                    text = self.BROWSER_CLOSED_SNAPSHOT_MARK
-                    await self._abort_run_for_closed_browser(
-                        "Snapshot: MCP/browser dead mid-run"
+                    recovered = await self._recover_mcp_keeping_chrome(
+                        "Snapshot: MCP dead mid-run"
                     )
+                    if not recovered:
+                        text = self.BROWSER_CLOSED_SNAPSHOT_MARK
+                        await self._abort_run_for_closed_browser(
+                            "Snapshot: MCP/browser dead mid-run"
+                        )
                 else:
                     # Idle between runs — recover so the next case can start
                     try:
@@ -1580,13 +1584,37 @@ class AgentClient:
                     text = result.get("text") or result.get("error") or "(empty page)"
                     if (
                         not result.get("success")
+                        and self._looks_like_mcp_protocol_glitch(str(text))
+                    ):
+                        if await self._recover_mcp_keeping_chrome(
+                            "Snapshot MCP protocol glitch"
+                        ):
+                            result = await asyncio.wait_for(
+                                self._mcp_call_tool("snapshot", "", ""), timeout=15
+                            )
+                            text = result.get("text") or result.get("error") or "(empty page)"
+                    if (
+                        not result.get("success")
                         and self._looks_like_dead_browser(str(text))
                     ):
                         if self._run_in_progress():
-                            await self._abort_run_for_closed_browser(
-                                "Snapshot hit dead browser mid-run"
+                            recovered = await self._recover_mcp_keeping_chrome(
+                                "Snapshot hit dead MCP mid-run"
                             )
-                            text = self.BROWSER_CLOSED_SNAPSHOT_MARK
+                            if recovered:
+                                result = await asyncio.wait_for(
+                                    self._mcp_call_tool("snapshot", "", ""), timeout=15
+                                )
+                                text = (
+                                    result.get("text")
+                                    or result.get("error")
+                                    or "(empty page)"
+                                )
+                            else:
+                                await self._abort_run_for_closed_browser(
+                                    "Snapshot hit dead browser mid-run"
+                                )
+                                text = self.BROWSER_CLOSED_SNAPSHOT_MARK
                         else:
                             shared = self._exec_cdp_http is not None
                             await self._restart_mcp_for_dead_browser(
@@ -1605,8 +1633,26 @@ class AgentClient:
                 except asyncio.TimeoutError:
                     text = "(snapshot timeout)"
                     await self._invalidate_mcp_session("snapshot timeout")
-                except Exception:
-                    text = "(snapshot unavailable)"
+                except Exception as exc:
+                    if self._looks_like_mcp_protocol_glitch(str(exc)):
+                        if await self._recover_mcp_keeping_chrome(
+                            f"Snapshot recv glitch: {exc}"
+                        ):
+                            try:
+                                result = await asyncio.wait_for(
+                                    self._mcp_call_tool("snapshot", "", ""), timeout=15
+                                )
+                                text = (
+                                    result.get("text")
+                                    or result.get("error")
+                                    or "(empty page)"
+                                )
+                            except Exception:
+                                text = "(snapshot unavailable)"
+                        else:
+                            text = "(snapshot unavailable)"
+                    else:
+                        text = "(snapshot unavailable)"
             await self._send(
                 WSMessageType.SNAPSHOT_RESULT, run_id,
                 SnapshotPayload(text=text).model_dump(),
