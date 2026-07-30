@@ -776,6 +776,7 @@ class AgentClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=self.MCP_STDOUT_LIMIT,
         )
         if sys.platform == "win32":
             proc_kwargs["creationflags"] = _sp.CREATE_NO_WINDOW
