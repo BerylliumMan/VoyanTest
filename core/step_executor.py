@@ -39,15 +39,28 @@ def _sanitize_step(desc: str) -> str:
 
 
 # 「单位下拉框选择【汉东省院】」/「在【单位】下拉中选择【汉东省院】」
+# 「点击单位下拉框，点击【汉东省院】单位」/「点击【单位】下拉框后选择【汉东省院】」
 _DROPDOWN_SELECT_RE = re.compile(
     r"(?:"
     r"(?:在)?【(?P<label1>[^】]{1,40})】(?:的)?(?:下拉框|下拉菜单|下拉|选择器)\s*(?:中)?\s*(?:选择|选)\s*【(?P<option1>[^】]+)】"
     r"|"
     r"(?P<label2>[^【\n]{1,40}?)(?:下拉框|下拉菜单|下拉)\s*(?:中)?\s*(?:选择|选)\s*【(?P<option2>[^】]+)】"
     r"|"
+    r"(?:点击|单击)\s*(?:【(?P<label4>[^】]+)】|(?P<label5>[^【\n，,；;]{1,40}?))"
+    r"\s*(?:下拉框|下拉菜单|下拉|选择器)"
+    r"\s*[，,、]?\s*(?:然后|之后|后|再)?\s*"
+    r"(?:点击|单击|选择|选中)\s*【(?P<option4>[^】]+)】"
+    r"|"
+    r"(?:在)?【(?P<label6>[^】]{1,40})】\s*(?:中)?\s*(?:选择|选)\s*【(?P<option6>[^】]+)】"
+    r"|"
     r"(?:选择|选中)\s*【(?P<option3>[^】]+)】"
     r")"
 )
+
+# Roles that mean the option list is already open / option is clickable
+_OPTION_ROLES = frozenset({
+    "option", "menuitem", "treeitem", "listitem", "row", "checkbox",
+})
 
 
 def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
@@ -55,18 +68,62 @@ def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
     m = _DROPDOWN_SELECT_RE.search((desc or "").strip())
     if not m:
         return None, None
-    label = (m.groupdict().get("label1") or m.groupdict().get("label2") or "").strip()
+    gd = m.groupdict()
+    label = (
+        gd.get("label1")
+        or gd.get("label2")
+        or gd.get("label4")
+        or gd.get("label5")
+        or gd.get("label6")
+        or ""
+    ).strip()
     option = (
-        m.groupdict().get("option1")
-        or m.groupdict().get("option2")
-        or m.groupdict().get("option3")
+        gd.get("option1")
+        or gd.get("option2")
+        or gd.get("option4")
+        or gd.get("option6")
+        or gd.get("option3")
         or ""
     ).strip()
     if not option:
         return None, None
     # Strip trailing control-type words from label
     label = re.sub(r"(?:下拉框|下拉菜单|下拉|选择器)$", "", label).strip(" ：:，,")
+    # 「点击单位」→ label may include leading verb leftovers
+    label = re.sub(r"^(?:点击|单击)\s*", "", label).strip()
     return (label or None), option
+
+
+def option_choice_visible_in_snapshot(snapshot: str, option: str) -> bool:
+    """True when option text is already exposed as a selectable AX node (list open)."""
+    if not option or not snapshot:
+        return False
+    from core.locator_memory import parse_snapshot_elements
+
+    opt = option.strip()
+    for el in parse_snapshot_elements(snapshot):
+        role = (el.get("role") or "").lower()
+        name = (el.get("name") or "").strip()
+        if role not in _OPTION_ROLES:
+            continue
+        if name == opt or opt in name or name in opt:
+            return True
+    return False
+
+
+def dropdown_open_description(label: str) -> str:
+    return (
+        f"点击字段或标签为「{label}」的下拉框/组合框以展开选项列表。"
+        f"不要查找文案「下拉框」或「{label}下拉框」。"
+    )
+
+
+def dropdown_pick_description(option: str) -> str:
+    return (
+        f"在已展开的下拉/树/列表（可能是 tooltip、listbox、menu）中点击选项「{option}」。"
+        f"优先匹配 role 为 option/menuitem/treeitem/listitem 且名称为「{option}」的节点；"
+        f"不要查找文案「下拉框」，也不要点字段标签本身。"
+    )
 
 
 def normalize_step_description(desc: str) -> str:
@@ -78,6 +135,7 @@ def normalize_step_description(desc: str) -> str:
             f"在标签或字段名为「{label}」的下拉框/组合框中选择选项「{option}」。"
             f"不要查找页面文案「下拉框」或「{label}下拉框」；"
             f"应匹配字段「{label}」或选项「{option}」。"
+            f"若选项尚未展开，先点开「{label}」再点「{option}」。"
         )
     if option and not label:
         return (
