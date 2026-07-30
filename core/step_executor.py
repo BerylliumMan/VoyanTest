@@ -70,14 +70,8 @@ def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
 
 
 def normalize_step_description(desc: str) -> str:
-    """Rewrite ambiguous / non-Instant phrasing before Intent / LLM.
-
-    1) Instant-style optimize (点击【x】 / 在【y】输入 z)
-    2) Dropdown-select rewrite so LLM does not getByText('…下拉框')
-    """
-    from core.step_normalize import optimize_step_for_execution
-
-    desc = optimize_step_for_execution(desc or "")
+    """Rewrite ambiguous control phrasing so LLM does not getByText('…下拉框')."""
+    desc = _sanitize_step(desc or "")
     label, option = parse_dropdown_select(desc)
     if option and label:
         return (
