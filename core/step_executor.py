@@ -529,11 +529,11 @@ async def execute_step_mcp(
                 logger.debug("step preview failed: %s", exc)
 
         if not used_replay:
-            if label and option and option not in (snapshot or ""):
-                open_desc = (
-                    f"点击字段或标签为「{label}」的下拉框/组合框以展开选项列表。"
-                    f"不要查找文案「下拉框」或「{label}下拉框」。"
-                )
+            need_open = bool(
+                label and option and not option_choice_visible_in_snapshot(snapshot, option)
+            )
+            if label and option and need_open:
+                open_desc = dropdown_open_description(label)
                 tool_call, exec_result, open_relocated = await _llm_tool_and_run_with_relocate(
                     desc=open_desc,
                     snapshot=snapshot,
@@ -571,10 +571,7 @@ async def execute_step_mcp(
                     result['duration_ms'] = (time.monotonic() - t_start) * 1000
                     return result
                 snapshot = await mcp_manager.get_dom_snapshot()
-                pick_desc = (
-                    f"在已展开的下拉列表中点击选项「{option}」。"
-                    f"不要查找文案「下拉框」。"
-                )
+                pick_desc = dropdown_pick_description(option)
                 tool_call, exec_result, pick_relocated = await _llm_tool_and_run_with_relocate(
                     desc=pick_desc,
                     snapshot=snapshot,
@@ -587,6 +584,19 @@ async def execute_step_mcp(
                 )
                 relocate_attempted = relocate_attempted or pick_relocated
                 result["_open_fp"] = open_fp
+            elif label and option:
+                # List already open — pick option only (do not re-click trigger)
+                pick_desc = dropdown_pick_description(option)
+                tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
+                    desc=pick_desc,
+                    snapshot=snapshot,
+                    expected_result=expected_result,
+                    mcp_manager=mcp_manager,
+                    llm_client=llm_client,
+                    model=model,
+                    system_prompt_override=system_prompt_override,
+                    step_timeout_ms=step_timeout_ms,
+                )
             else:
                 tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
                     desc=desc,
