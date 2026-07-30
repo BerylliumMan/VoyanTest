@@ -604,6 +604,7 @@ async def generate_test_cases_for_fps(
                     + "、".join(fp.name for fp in batch)
                     + f"。每个测试项至少 {per_item} 条（正常/异常/边界），"
                     f"不要重复已有标题；每条必须带 fp_name 与 scenario_type。"
+                    f"查询/组合查询相关项须补齐单条件与两两组合（scenario_type=组合查询）。"
                 )
             extra = await _generate_batch_once(
                 batch=batch,
