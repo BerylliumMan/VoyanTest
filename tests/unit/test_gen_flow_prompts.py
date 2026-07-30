@@ -122,9 +122,7 @@ def test_tc_prompts_forbid_title_scenario_suffix():
     from app.gen.prompts import TC_GENERATE_PROMPT, TC_GENERATE_UI_PROMPT
 
     for text in (TC_GENERATE_PROMPT, TC_GENERATE_UI_PROMPT):
-        assert "禁止" in text and ("-正常" in text or "正常」" in text)
-    assert "-正常" not in TC_GENERATE_PROMPT.split("单测试项示例")[-1] or True
-    # Examples must not end with -正常/-异常/-边界
+        assert "禁止" in text and "-正常" in text
     assert '"title":"正确手机号验证码登录-正常"' not in TC_GENERATE_PROMPT
     assert '"title":"正确手机号验证码登录"' in TC_GENERATE_PROMPT
 
