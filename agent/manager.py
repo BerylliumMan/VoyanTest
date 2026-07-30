@@ -727,7 +727,7 @@ class AgentManager:
                 step_result = {
                     "step_number": step_order,
                     "step_id": step.get("id"),
-                    "original_description": raw_desc,
+                    "original_description": desc,
                     "success": result.get("success", False),
                     "thinking": (tool_call.thinking if tool_call else "") or "",
                     "action": result.get("action", ""),
@@ -743,8 +743,6 @@ class AgentManager:
                     "learned_locator": None,
                     "invalidate_learned_locator": False,
                 }
-                if desc != (raw_desc or "").strip():
-                    step_result["optimized_description"] = desc
 
                 if invalidate or (used_replay and not step_result["success"]):
                     step_result["invalidate_learned_locator"] = True
