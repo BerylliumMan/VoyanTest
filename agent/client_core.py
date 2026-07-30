@@ -1162,6 +1162,8 @@ class AgentClient:
                 ready_err = str(e)
                 self._log_error(f"Failed to start MCP for run {msg.run_id}: {e}")
                 self._emit_status('error')
+                self._active_run_id = None
+                self._active_backend = None
                 await self._send(
                     WSMessageType.ERROR, msg.run_id,
                     {"message": f"MCP start failed: {e}", "ready": False},
