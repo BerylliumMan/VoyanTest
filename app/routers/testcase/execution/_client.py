@@ -632,10 +632,13 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                 )
                 try:
                     from core.locator_memory import persist_learned_locators_from_results
-                    by_order = {s.step_order: s for s in steps_raw}
-                    await persist_learned_locators_from_results(
-                        db, step_results, steps_by_order=by_order,
-                    )
+                    # Batch path: steps_raw is local to _load_case_info — reload ORM rows here
+                    async with db_mod.AsyncSessionLocal() as _persist_db:
+                        orm_steps = await crud.get_steps_for_case(_persist_db, case_id)
+                        by_order = {s.step_order: s for s in orm_steps}
+                        await persist_learned_locators_from_results(
+                            _persist_db, step_results, steps_by_order=by_order,
+                        )
                 except Exception:
                     logger.warning(
                         "persist learned_locator after batch client exec failed",
