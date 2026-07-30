@@ -672,15 +672,6 @@ async def execute_nl_steps_browser_use(
 
     step_results: list[dict] = []
     prompt_override = resolve_system_prompt_override()
-    agent_common: dict[str, Any] = {
-        "llm": llm,
-        "use_vision": "auto",
-        "max_failures": 2,
-        # Between multi_act actions / turns: jump to newest tab if click opened one.
-        "register_should_stop_callback": _compose_should_stop_callback(browser),
-    }
-    if prompt_override is not None:
-        agent_common["override_system_message"] = prompt_override
 
     if cdp_url:
         stop_browser = False
@@ -696,6 +687,17 @@ async def execute_nl_steps_browser_use(
         cdp_url=cdp_url,
     )
     enable_browser_use_auto_switch_new_tabs(browser)
+
+    agent_common: dict[str, Any] = {
+        "llm": llm,
+        "use_vision": "auto",
+        "max_failures": 2,
+        # Between multi_act actions / turns: jump to newest tab if click opened one.
+        "register_should_stop_callback": _compose_should_stop_callback(browser),
+    }
+    if prompt_override is not None:
+        agent_common["override_system_message"] = prompt_override
+
     try:
         if base_url:
             # Keep URL alone on a line: browser-use URL extraction may swallow
@@ -709,7 +711,7 @@ async def execute_nl_steps_browser_use(
                 browser_session=browser,
                 max_actions_per_step=5,
                 register_new_step_callback=_make_new_step_callback(
-                    on_progress, step_order=0,
+                    on_progress, step_order=0, browser_session=browser,
                 ),
                 **agent_common,
             )
