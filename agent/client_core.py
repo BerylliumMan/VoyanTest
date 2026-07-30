@@ -1558,14 +1558,13 @@ class AgentClient:
 
         try:
             if not self._mcp_process_alive():
-                shared = self._exec_cdp_http is not None
-                self._log_warning("Step execute: MCP dead — restarting browser")
-                await self._ensure_mcp_session(shared_cdp=shared)
+                result.error = await self._abort_run_for_closed_browser(
+                    f"Step {step_order}: MCP/browser dead"
+                )
+                result.thinking = result.error
+                result.success = False
 
-            if not self._mcp_process_alive():
-                raise RuntimeError("MCP subprocess not started (browser closed?)")
-
-            if action == "error":
+            elif action == "error":
                 result.thinking = value or "LLM reported error for this step"
                 result.action = f"error({value})"
                 result.success = False
@@ -1588,21 +1587,26 @@ class AgentClient:
                         str(mcp_result.get("error") or mcp_result.get("text") or "")
                     )
                 ):
-                    shared = self._exec_cdp_http is not None
-                    await self._restart_mcp_for_dead_browser(
-                        shared_cdp=shared,
-                        why=f"step {step_order} hit dead browser",
+                    # Mid-run browser close → abort (no relaunch / retry)
+                    result.error = await self._abort_run_for_closed_browser(
+                        f"step {step_order} hit dead browser"
                     )
-                    mcp_result = await self._mcp_call_tool(
-                        action, selector, value, step_description=desc,
-                    )
-                result.success = mcp_result.get("success", False)
-                if not result.success:
-                    result.error = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
-                    result.screenshot_base64 = await self._mcp_screenshot_base64()
+                    result.thinking = result.error
+                    result.success = False
+                else:
+                    result.success = mcp_result.get("success", False)
+                    if not result.success:
+                        result.error = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
+                        result.screenshot_base64 = await self._mcp_screenshot_base64()
 
         except Exception as e:
-            result.error = str(e)
+            err = str(e)
+            if self._looks_like_dead_browser(err) or "browser closed" in err.lower():
+                result.error = await self._abort_run_for_closed_browser(
+                    f"Step {step_order} exception: {err[:120]}"
+                )
+            else:
+                result.error = err
             result.success = False
             self._emit_status('error')
             try:
