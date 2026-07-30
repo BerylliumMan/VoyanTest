@@ -546,6 +546,26 @@ def _sanitize_ui_step(step: str) -> str:
         if field and value:
             return f"在【{field}】输入 {value}"
 
+    # 「密码输入【Abc12345】」—— 值误放进【】 →「在【密码】输入 Abc12345」
+    m = re.match(
+        rf"^(?:在\s*)?(.+?)(?:{_CTRL_TYPE_SUFFIX})?\s*(?:输入|填写|填入)\s*【([^】]+)】\s*$",
+        s,
+    )
+    if m:
+        field, value = m.group(1).strip(" ：:的"), m.group(2).strip()
+        if field and value and "【" not in field:
+            field = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", field).strip(" ：:的")
+            if field:
+                return f"在【{field}】输入 {value}"
+
+    # 「在【密码】输入【Abc12345】」→「在【密码】输入 Abc12345」
+    m = re.match(
+        r"^(?:在\s*)?【([^】]+)】\s*(?:中)?\s*(?:输入|填写|填入)\s*【([^】]+)】\s*$",
+        s,
+    )
+    if m:
+        return f"在【{m.group(1).strip()}】输入 {m.group(2).strip()}"
+
     # Strip control-type suffixes stuck inside existing【】
     def _strip_ctrl_in_brackets(match: re.Match) -> str:
         inner = match.group(1)
