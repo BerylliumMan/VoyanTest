@@ -84,9 +84,8 @@ def test_tc_generate_requires_pairwise_combo_scenario():
 
     assert "组合查询" in TC_GENERATE_PROMPT
     assert "两两组合" in TC_GENERATE_PROMPT
-    assert "恰好覆盖三类" not in TC_GENERATE_PROMPT
-    assert "至少覆盖三类" in TC_GENERATE_PROMPT or "至少" in TC_GENERATE_PROMPT
     assert "笛卡尔" in TC_GENERATE_PROMPT
+    assert "机械" in TC_GENERATE_PROMPT
 
 
 def test_ui_prompts_forbid_bare_page_load_wait():
