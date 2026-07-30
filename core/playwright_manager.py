@@ -42,6 +42,7 @@ class PlaywrightMCPManager:
         self._read = None
         self._write = None
         self._context = None
+        self._mcp_config_path: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
