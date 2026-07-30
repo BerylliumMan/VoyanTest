@@ -650,11 +650,20 @@ class AgentClient:
             pass
         if self._mcp_process:
             self._log_info("Stopping previous MCP before starting new one")
-            await self._stop_mcp()
+            # Keep hybrid Chromium across MCP restarts
+            await self._stop_mcp(close_exec_chrome=False)
+
+        if not shared_cdp:
+            # Plain MCP launches its own browser; drop leftover hybrid Chrome
+            await self._stop_exec_chrome()
 
         cdp_endpoint = None
         if shared_cdp:
-            cdp_endpoint = await self._start_exec_chrome_cdp()
+            if self._exec_cdp_http and await self._is_exec_cdp_alive():
+                cdp_endpoint = self._exec_cdp_http
+                self._log_info(f"Reusing hybrid CDP Chromium: {cdp_endpoint}")
+            else:
+                cdp_endpoint = await self._start_exec_chrome_cdp()
             self._log_info(
                 f"Starting MCP attached to shared CDP headless={self._headless}"
             )
