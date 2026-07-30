@@ -269,16 +269,38 @@ async def _dispatch_switch_tab(session, target_id: str | None) -> bool:
         return False
 
 
+def _tab_auto_state(session) -> dict[str, Any] | None:
+    state = getattr(session, "_voyantest_tab_auto", None)
+    return state if isinstance(state, dict) else None
+
+
+def _set_preferred_tab(session, target_id: str | None) -> None:
+    state = _tab_auto_state(session)
+    if state is None or not target_id:
+        return
+    state["preferred_target_id"] = target_id
+
+
+def _preferred_tab_id(session) -> str | None:
+    state = _tab_auto_state(session)
+    if state is None:
+        return None
+    tid = state.get("preferred_target_id")
+    return tid if isinstance(tid, str) and tid else None
+
+
 async def ensure_browser_use_on_newest_tab(
     session,
     *,
     settle_seconds: float = 0.0,
 ) -> bool:
-    """Focus the most recently opened page if agent_focus is stale.
+    """Re-focus the sticky preferred tab opened during this session.
 
-    browser-use's click handler only waits ~0.1s for popups then may stay on the
-    opener tab. Call this between agent turns / actions so the next observe hits
-    the new page.
+    Important: CDP ``Target.getTargets`` order is **not** creation order. Never
+    treat ``pages[-1]`` as newest — that flips focus back to an older tab.
+
+    Preferred id is set by TabCreated (new pages only) or by
+    ``switch_browser_use_to_newest_tab_if_opened`` via before/after diff.
     """
     import asyncio
 
@@ -286,18 +308,23 @@ async def ensure_browser_use_on_newest_tab(
         return False
     if settle_seconds > 0:
         await asyncio.sleep(settle_seconds)
+    preferred = _preferred_tab_id(session)
+    if not preferred:
+        return False
     pages = await list_browser_use_page_ids(session)
-    if len(pages) < 2:
+    if preferred not in pages:
+        state = _tab_auto_state(session)
+        if state is not None:
+            state["preferred_target_id"] = None
         return False
-    newest_id = pages[-1]
     focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
-    if focus == newest_id:
+    if focus == preferred:
         return False
-    ok = await _dispatch_switch_tab(session, newest_id)
+    ok = await _dispatch_switch_tab(session, preferred)
     if ok:
         logger.info(
-            "browser-use ensured focus on newest tab %s (was %s)",
-            newest_id[-8:],
+            "browser-use ensured focus on preferred tab %s (was %s)",
+            preferred[-8:],
             (focus or "?")[-8:],
         )
     return ok
@@ -311,16 +338,21 @@ async def switch_browser_use_to_newest_tab_if_opened(
     retries: int = 3,
     retry_interval: float = 0.4,
 ) -> bool:
-    """If page count grew, focus the newest page (align with MCP auto-tab switch).
+    """If page set grew, focus a newly appeared page (align with MCP auto-tab).
 
     browser-use's click watchdog tries this with a short 0.1s wait and then may
     stay on the old tab if the popup is slow. We re-check after settle + retries.
+    Uses before/after targetId diff — never ``pages[-1]``.
     """
     import asyncio
 
     if session is None:
         return False
     before = list(page_ids_before or [])
+    if not before:
+        # Without a baseline we cannot tell which id is new (CDP order unstable).
+        return False
+    before_set = set(before)
     attempts = max(1, int(retries))
     for attempt in range(attempts):
         wait = settle_seconds if attempt == 0 else retry_interval
@@ -329,16 +361,13 @@ async def switch_browser_use_to_newest_tab_if_opened(
         after = await list_browser_use_page_ids(session)
         if not after:
             continue
-        before_set = set(before)
-        if before:
-            new_ids = [tid for tid in after if tid not in before_set]
-            if not new_ids:
-                continue
-            newest_id = new_ids[-1]
-        else:
-            if len(after) < 2:
-                continue
-            newest_id = after[-1]
+        new_ids = [tid for tid in after if tid not in before_set]
+        if not new_ids:
+            continue
+        # Prefer the preferred sticky tab if it is among the new ids.
+        preferred = _preferred_tab_id(session)
+        newest_id = preferred if preferred in new_ids else new_ids[-1]
+        _set_preferred_tab(session, newest_id)
 
         focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
         if focus == newest_id:
@@ -357,6 +386,9 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
     Ignored until ``arm_browser_use_auto_switch_new_tabs`` is called, so initial
     connect TabCreated events do not steal focus.
 
+    Only tabs whose targetId was **not** in the baseline at arm-time are treated
+    as new (reconnect emits TabCreated for existing tabs).
+
     Switch is scheduled via ``asyncio.create_task`` (not awaited in the event
     handler) to avoid bubus deadlocks with nested SwitchTabEvent waits, and
     delayed so it runs after browser-use's click handler resets focus to the
@@ -368,7 +400,11 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
     if state is not None:
         return
 
-    state = {"armed": False}
+    state: dict[str, Any] = {
+        "armed": False,
+        "preferred_target_id": None,
+        "baseline_ids": set(),
+    }
     session._voyantest_tab_auto = state
     bus = getattr(session, "event_bus", None)
     if bus is None:
@@ -380,14 +416,24 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
         tid = getattr(event, "target_id", None)
         if not tid:
             return
+        baseline = state.get("baseline_ids") or set()
+        if tid in baseline:
+            # Existing tab discovered on CDP attach — do not steal focus.
+            return
+        # Sticky preferred: survive later CDP list reordering / opener refocus.
+        state["preferred_target_id"] = tid
+        baseline.add(tid)
+        state["baseline_ids"] = baseline
 
         async def _switch_later() -> None:
             import asyncio
 
-            # Click watchdog: sleep 0.1s → reset focus to opener → maybe switch.
-            # Wait longer so we win the race if that 0.1s detection missed the tab.
+            # Click watchdog: sleep 0.1s → reset focus to opener (focus=True) →
+            # maybe switch. Wait longer and switch to *this* targetId.
             await asyncio.sleep(0.6)
             if not state.get("armed"):
+                return
+            if state.get("preferred_target_id") != tid:
                 return
             try:
                 switched = await ensure_browser_use_on_newest_tab(
@@ -418,24 +464,34 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
         logger.warning("failed to register TabCreated auto-switch: %s", exc)
 
 
-def arm_browser_use_auto_switch_new_tabs(session) -> None:
-    """Start auto-switching after session warmup / BASE URL open."""
-    state = getattr(session, "_voyantest_tab_auto", None)
-    if isinstance(state, dict):
-        state["armed"] = True
+async def arm_browser_use_auto_switch_new_tabs(session) -> None:
+    """Start auto-switching after session warmup / BASE URL open.
+
+    Snapshots current page ids as baseline so reconnect TabCreated events for
+    pre-existing tabs are ignored.
+    """
+    state = _tab_auto_state(session)
+    if state is None:
+        return
+    try:
+        ids = await list_browser_use_page_ids(session)
+        state["baseline_ids"] = set(ids)
+    except Exception:
+        state["baseline_ids"] = set(state.get("baseline_ids") or set())
+    state["armed"] = True
 
 
 def _compose_should_stop_callback(
     session,
     existing: Callable[..., Any] | None = None,
 ):
-    """Between agent actions/turns, force focus onto the newest tab."""
+    """Between agent actions/turns, restore sticky preferred-tab focus."""
 
     async def _cb() -> bool:
         try:
             await ensure_browser_use_on_newest_tab(session, settle_seconds=0.0)
         except Exception:
-            logger.debug("ensure newest tab in should_stop failed", exc_info=True)
+            logger.debug("ensure preferred tab in should_stop failed", exc_info=True)
         if existing is None:
             return False
         try:
