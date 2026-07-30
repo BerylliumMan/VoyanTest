@@ -10,31 +10,30 @@ export function splitNumberedItems(text: string): string[] {
   // Collapsed junk: "1.2.3.4." or "1. 2. 3."
   if (/^(?:\d+[\.、]\s*)+$/.test(src)) return [];
 
-  if (src.includes('\n')) {
-    const indexed = new Map<number, string>();
-    const sequential: string[] = [];
-    let sawMarker = false;
-    for (const ln of src.split('\n')) {
-      const m = ln.match(/^\s*(\d+)[\.、]\s*(.*)$/);
-      if (m) {
-        sawMarker = true;
-        const idx = Number.parseInt(m[1], 10);
-        const body = (m[2] || '').trim();
-        indexed.set(idx, body);
-        sequential.push(body);
-      } else if (ln.trim()) {
-        sequential.push(ln.trim());
-      }
+  // Line-oriented parse (also handles single-line ``9. only this``)
+  const indexed = new Map<number, string>();
+  const sequential: string[] = [];
+  let sawMarker = false;
+  for (const ln of src.split('\n')) {
+    const m = ln.match(/^\s*(\d+)[\.、]\s*(.*)$/);
+    if (m) {
+      sawMarker = true;
+      const idx = Number.parseInt(m[1], 10);
+      const body = (m[2] || '').trim();
+      indexed.set(idx, body);
+      sequential.push(body);
+    } else if (ln.trim()) {
+      sequential.push(ln.trim());
     }
-    if (sawMarker && indexed.size > 0) {
-      const values = [...indexed.values()];
-      if (!values.some((v) => v)) return [];
-      const maxI = Math.max(...indexed.keys());
-      if (maxI <= indexed.size + 5 && maxI <= 200) {
-        return Array.from({ length: maxI }, (_, i) => indexed.get(i + 1) || '');
-      }
-      return sequential;
+  }
+  if (sawMarker && indexed.size > 0) {
+    const values = [...indexed.values()];
+    if (!values.some((v) => v)) return [];
+    const maxI = Math.max(...indexed.keys());
+    if (maxI <= indexed.size + 5 && maxI <= 200) {
+      return Array.from({ length: maxI }, (_, i) => indexed.get(i + 1) || '');
     }
+    return sequential;
   }
 
   const inlineRe = /(?:^|\s)(\d+)[\.、]\s+([\s\S]+?)(?=\s+\d+[\.、]\s+|$)/g;
