@@ -450,17 +450,33 @@ async def resolve_tool_call_from_step(
     if action == "error" or intent.ambiguous:
         return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
 
+    # Icon-only: ignore bogus target_name=图标 so we don't false-match nothing useful
+    icon_step = is_icon_only_click_step(step_description)
+    if icon_step and (intent.target_name or "").strip().lower() in _GENERIC_ICON_NAMES:
+        intent = intent.model_copy(update={"target_name": None, "target_role": intent.target_role or "button"})
+
     candidates = match_intent_candidates(snapshot, intent)
     ref: str | None = None
-    if len(candidates) == 1:
+    if len(candidates) == 1 and not icon_step:
         ref = candidates[0]["ref"]
-    elif len(candidates) != 1 and use_vision_fallback:
+    elif len(candidates) == 1 and icon_step:
+        # Unique AX name match for an icon button (aria-label) — accept
+        ref = candidates[0]["ref"]
+    elif use_vision_fallback and (len(candidates) != 1 or icon_step):
         logger.info(
-            "intent match count=%s for name=%r — vision fallback",
-            len(candidates), intent.target_name,
+            "intent match count=%s for name=%r icon_step=%s — vision fallback",
+            len(candidates), intent.target_name, icon_step,
         )
-        # If zero matches, broaden to name-only across roles for vision list
         pool = candidates
+        if icon_step:
+            # Always include glyph-like controls for visual pick
+            icon_pool = icon_click_candidates(snapshot)
+            seen = {c["ref"] for c in pool}
+            for c in icon_pool:
+                if c["ref"] not in seen:
+                    pool.append(c)
+                    seen.add(c["ref"])
+            pool = pool[:16]
         if not pool and intent.target_name:
             broadened = StepIntent(
                 action=intent.action,
@@ -471,12 +487,14 @@ async def resolve_tool_call_from_step(
             )
             pool = match_intent_candidates(snapshot, broadened)[:12]
         if not pool:
-            # Last resort: include same-role elements (capped)
             role = (intent.target_role or "").lower()
-            pool = [
-                el for el in parse_snapshot_elements(snapshot)
-                if not role or el["role"] == role
-            ][:12]
+            if icon_step:
+                pool = icon_click_candidates(snapshot)
+            else:
+                pool = [
+                    el for el in parse_snapshot_elements(snapshot)
+                    if not role or el["role"] == role
+                ][:12]
         ref = await disambiguate_with_vision(
             step_description,
             intent,
@@ -492,6 +510,7 @@ async def resolve_tool_call_from_step(
             value=(
                 f"ambiguous or missing target name={intent.target_name!r} "
                 f"role={intent.target_role!r} matches={len(candidates)}"
+                + (" (icon-only; vision found no ref)" if icon_step else "")
             ),
             thinking=intent.thinking,
             timeout_ms=timeout_ms,
