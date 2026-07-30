@@ -120,7 +120,8 @@ def test_ui_prompts_forbid_bare_icon_click():
 
     for text in (_UI_STEP_CONTRACT, TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
         assert "点击【图标】" in text
-    assert "tooltip" in _UI_STEP_CONTRACT.lower() or "aria-label" in _UI_STEP_CONTRACT
+    assert "用途" in _UI_STEP_CONTRACT  # pure-icon visual template
+    assert "形状" in _UI_STEP_CONTRACT or "外观" in _UI_STEP_CONTRACT
     assert "点击【图标】" in FP_EXTRACT_FLOW_PROMPT
 
 
