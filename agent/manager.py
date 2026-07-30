@@ -98,6 +98,46 @@ def _should_hybrid_browser_use_fallback(
     return _is_locator_failure(result)
 
 
+async def _resolve_agent_tool_call(
+    *,
+    desc: str,
+    snap: str,
+    expected_result: Optional[str],
+    llm_client,
+    model: Optional[str],
+    base_url_override: Optional[str],
+):
+    """Intent → unique AX bind; ambiguous/missing falls back to one-shot generate_tool_call."""
+    from core.step_intent import (
+        generate_step_intent,
+        intent_to_tool_call,
+        match_intent_candidates,
+    )
+
+    try:
+        intent = await generate_step_intent(
+            desc, snap, expected_result=expected_result,
+            client=llm_client, model=model,
+        )
+        action_i = (intent.action or "").lower()
+        if action_i in ("wait", "assert_text", "goto", "press_key", "error"):
+            return intent_to_tool_call(intent, ref=None)
+        cands = match_intent_candidates(snap, intent)
+        if len(cands) == 1:
+            return intent_to_tool_call(intent, ref=cands[0]["ref"])
+        return await generate_tool_call(
+            desc, snap, expected_result=expected_result,
+            client=llm_client, model=model,
+            base_url=base_url_override or None,
+        )
+    except Exception:
+        return await generate_tool_call(
+            desc, snap, expected_result=expected_result,
+            client=llm_client, model=model,
+            base_url=base_url_override or None,
+        )
+
+
 class AgentSession:
     """Holds WebSocket send callback and agent metadata for a connected agent."""
 
