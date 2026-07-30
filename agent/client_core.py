@@ -1388,6 +1388,19 @@ class AgentClient:
                 on_progress=_progress,
             )
             r = results[0] if results else {"success": False, "error": "empty result"}
+            # browser-use may have focused a new tab; MCP still points at the
+            # opener — next snapshot would activate the old tab in Chrome.
+            try:
+                from core.mcp_tabs import ensure_on_newest_tab
+
+                if await ensure_on_newest_tab(self._mcp_tools_call):
+                    self._log_info(
+                        "Synced MCP to newest browser tab after hybrid fallback"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "MCP tab sync after hybrid fallback failed: %s", exc,
+                )
             await self._send(
                 WSMessageType.STEP_RESULT,
                 msg.run_id,
