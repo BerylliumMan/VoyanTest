@@ -152,6 +152,14 @@ def intent_to_tool_call(
             timeout_ms=timeout_ms,
             thinking=thinking,
         )
+    if action in ("click_blank", "click_outside", "click_page"):
+        return PlaywrightMCPToolCall(
+            action="click_blank",
+            selector=None,
+            value=None,
+            timeout_ms=timeout_ms,
+            thinking=thinking or "blank/outside area click",
+        )
     if action == "error" or not ref:
         return PlaywrightMCPToolCall(
             action="error",
