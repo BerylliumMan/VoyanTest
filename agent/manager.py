@@ -768,6 +768,20 @@ class AgentManager:
                             action_type, result.get("error"), has_expected=True,
                         ):
                             post_snap = await self._get_snapshot(session, agent_id, run_id)
+                            # Login/navigation often lands briefly on about:blank — wait & refresh
+                            if self._snapshot_looks_blank(post_snap):
+                                logger.info(
+                                    "Post-step snapshot blank/about:blank; waiting for navigation "
+                                    "(step %s)",
+                                    step_order,
+                                )
+                                for _wait_i in range(4):
+                                    await asyncio.sleep(1.0)
+                                    post_snap = await self._get_snapshot(
+                                        session, agent_id, run_id,
+                                    )
+                                    if not self._snapshot_looks_blank(post_snap):
+                                        break
                             verification = await asyncio.wait_for(
                                 verify_expected_result(
                                     expected_result, post_snap, client=llm_client, model=model,
@@ -779,8 +793,13 @@ class AgentManager:
                                     "Hybrid assert retry (agent): step %s L2 failed; refreshing",
                                     step_order,
                                 )
-                                await asyncio.sleep(HYBRID_SETTLE_SECONDS)
+                                await asyncio.sleep(max(HYBRID_SETTLE_SECONDS, 1.5))
                                 post_snap = await self._get_snapshot(session, agent_id, run_id)
+                                if self._snapshot_looks_blank(post_snap):
+                                    await asyncio.sleep(2.0)
+                                    post_snap = await self._get_snapshot(
+                                        session, agent_id, run_id,
+                                    )
                                 verification = await asyncio.wait_for(
                                     verify_expected_result(
                                         expected_result, post_snap, client=llm_client, model=model,
