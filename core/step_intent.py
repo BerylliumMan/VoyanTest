@@ -453,13 +453,19 @@ async def resolve_tool_call_from_step(
     action = (intent.action or "").lower()
     if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside"):
         return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
-    if action == "error" or intent.ambiguous:
-        return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
 
-    # Icon-only: ignore bogus target_name=图标 so we don't false-match nothing useful
+    # Icon-only: ignore bogus target_name=图标; LLM often marks these ambiguous —
+    # still force vision rather than short-circuiting on action=error.
     icon_step = is_icon_only_click_step(step_description)
     if icon_step and (intent.target_name or "").strip().lower() in _GENERIC_ICON_NAMES:
         intent = intent.model_copy(update={"target_name": None, "target_role": intent.target_role or "button"})
+    if (action == "error" or intent.ambiguous) and not (icon_step and use_vision_fallback):
+        return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
+    if icon_step and (action == "error" or intent.ambiguous):
+        intent = intent.model_copy(
+            update={"action": "click", "ambiguous": False, "target_role": intent.target_role or "button"}
+        )
+        action = "click"
 
     candidates = match_intent_candidates(snapshot, intent)
     ref: str | None = None
