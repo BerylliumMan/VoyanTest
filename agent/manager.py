@@ -46,6 +46,8 @@ _LOCATOR_FAIL_HINTS = (
     "strict mode violation",
     "waiting for",
     "does not exist",
+    "does not match",
+    "doesn't match",
     "isn't visible",
     "is not visible",
     "not visible",
