@@ -110,6 +110,20 @@ def test_ui_prompts_require_disambiguation_and_empty_mid_expected():
     assert "中间" in TC_GENERATE_UI_PROMPT or "默认" in TC_GENERATE_UI_PROMPT
 
 
+def test_ui_prompts_forbid_bare_icon_click():
+    from app.gen.prompts import (
+        FP_EXTRACT_FLOW_PROMPT,
+        TC_GENERATE_FLOW_PROMPT,
+        TC_GENERATE_UI_PROMPT,
+        _UI_STEP_CONTRACT,
+    )
+
+    for text in (_UI_STEP_CONTRACT, TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
+        assert "点击【图标】" in text
+    assert "tooltip" in _UI_STEP_CONTRACT.lower() or "aria-label" in _UI_STEP_CONTRACT
+    assert "点击【图标】" in FP_EXTRACT_FLOW_PROMPT
+
+
 def test_sanitize_rewrites_bare_page_load_wait():
     from app.gen.response_parser import _sanitize_ui_step
 
