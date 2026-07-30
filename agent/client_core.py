@@ -1485,13 +1485,19 @@ class AgentClient:
         try:
             text = "(page not available)"
             if not self._mcp_process_alive():
-                # Browser was closed — try one silent restart for the next command
-                try:
-                    shared = self._exec_cdp_http is not None
-                    await self._ensure_mcp_session(shared_cdp=shared)
-                except Exception as exc:
-                    self._log_warning(f"Snapshot: failed to recover browser: {exc}")
-            if self._mcp_process_alive():
+                if self._run_in_progress():
+                    text = self.BROWSER_CLOSED_SNAPSHOT_MARK
+                    await self._abort_run_for_closed_browser(
+                        "Snapshot: MCP/browser dead mid-run"
+                    )
+                else:
+                    # Idle between runs — recover so the next case can start
+                    try:
+                        shared = self._exec_cdp_http is not None
+                        await self._ensure_mcp_session(shared_cdp=shared)
+                    except Exception as exc:
+                        self._log_warning(f"Snapshot: failed to recover browser: {exc}")
+            if self._mcp_process_alive() and text != self.BROWSER_CLOSED_SNAPSHOT_MARK:
                 try:
                     result = await asyncio.wait_for(
                         self._mcp_call_tool("snapshot", "", ""), timeout=15
@@ -1501,16 +1507,25 @@ class AgentClient:
                         not result.get("success")
                         and self._looks_like_dead_browser(str(text))
                     ):
-                        shared = self._exec_cdp_http is not None
-                        await self._restart_mcp_for_dead_browser(
-                            shared_cdp=shared,
-                            why="snapshot hit dead browser",
-                        )
-                        result = await asyncio.wait_for(
-                            self._mcp_call_tool("snapshot", "", ""), timeout=15
-                        )
-                        text = result.get("text") or result.get("error") or "(empty page)"
-                    if len(text) > 8000:
+                        if self._run_in_progress():
+                            await self._abort_run_for_closed_browser(
+                                "Snapshot hit dead browser mid-run"
+                            )
+                            text = self.BROWSER_CLOSED_SNAPSHOT_MARK
+                        else:
+                            shared = self._exec_cdp_http is not None
+                            await self._restart_mcp_for_dead_browser(
+                                shared_cdp=shared,
+                                why="snapshot hit dead browser",
+                            )
+                            result = await asyncio.wait_for(
+                                self._mcp_call_tool("snapshot", "", ""), timeout=15
+                            )
+                            text = result.get("text") or result.get("error") or "(empty page)"
+                    if (
+                        text != self.BROWSER_CLOSED_SNAPSHOT_MARK
+                        and len(text) > 8000
+                    ):
                         text = text[:8000] + "\n\n[... TRUNCATED]"
                 except asyncio.TimeoutError:
                     text = "(snapshot timeout)"
