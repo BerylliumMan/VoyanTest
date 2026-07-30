@@ -24,6 +24,56 @@ logger = logging.getLogger(__name__)
 _BRACKET_RE = re.compile(r"【([^】]+)】")
 _GUILLEMET_RE = re.compile(r"「([^」]+)」")
 
+# 纯图标 / 视觉描述步骤（旁无文字时靠截图消歧）
+_ICON_ONLY_STEP_RE = re.compile(
+    r"(?:"
+    r"图标|icon\b|无文字按钮|图形按钮"
+    r"|形状图标|书本|齿轮|铃铛|放大镜|垃圾桶|铅笔|头像|汉堡|三点|省略号"
+    r")",
+    re.IGNORECASE,
+)
+_GENERIC_ICON_NAMES = frozenset({
+    "图标", "图片", "图像", "icon", "image", "img", "按钮", "控件",
+})
+_ICON_CANDIDATE_ROLES = frozenset({
+    "button", "link", "img", "image", "menuitem", "tab", "checkbox",
+})
+
+
+def is_icon_only_click_step(text: str | None) -> bool:
+    """True when the step targets an icon / glyph rather than plain labeled text."""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if not _ICON_ONLY_STEP_RE.search(s):
+        return False
+    # 「点击【帮助】」with word 图标 elsewhere is still label-first; still allow vision
+    labels = extract_label_hints(s)
+    if labels and all(lb.lower() not in _GENERIC_ICON_NAMES for lb in labels):
+        # Has a real bracket label — may still be icon button with aria-name
+        return "图标" in s or "icon" in s.lower() or "形状" in s
+    return True
+
+
+def icon_click_candidates(snapshot: str, *, limit: int = 16) -> list[dict[str, str]]:
+    """AX nodes likely to be icon controls (prefer empty/short names)."""
+    from core.locator_memory import parse_snapshot_elements
+
+    unnamed: list[dict[str, str]] = []
+    named: list[dict[str, str]] = []
+    for el in parse_snapshot_elements(snapshot):
+        role = (el.get("role") or "").lower()
+        if role not in _ICON_CANDIDATE_ROLES:
+            continue
+        name = (el.get("name") or "").strip()
+        if not name or len(name) <= 2 or name.lower() in _GENERIC_ICON_NAMES:
+            unnamed.append(el)
+        else:
+            named.append(el)
+    # Prefer unnamed icon-like controls; keep a few named buttons as fallback
+    out = unnamed + named
+    return out[:limit]
+
 INTENT_SYSTEM_PROMPT = """You extract a single browser Intent from a test step. The step text is authoritative.
 
 Output ONLY JSON (no markdown) matching:
