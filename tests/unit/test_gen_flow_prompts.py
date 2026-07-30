@@ -23,8 +23,20 @@ def test_min_tcs_per_item_flow_vs_default():
     assert min_tcs_per_item(["tc_generate_flow"]) == 1
     assert min_tcs_per_item(["fp_extract_flow"]) == 1
     assert min_tcs_per_item(tc_prompt_key="tc_generate_flow") == 1
-    assert min_tcs_per_item(["tc_generate_ui"]) == 3
-    assert min_tcs_per_item(None) == 3
+    assert min_tcs_per_item(["tc_generate_ui"]) == 2
+    assert min_tcs_per_item(None) == 2
+
+
+def test_tc_generate_uses_type_driven_scenarios_not_forced_triad():
+    from app.gen.prompts import TC_GENERATE_PROMPT, TC_GENERATE_UI_PROMPT
+
+    for text in (TC_GENERATE_PROMPT, TC_GENERATE_UI_PROMPT):
+        assert "禁止" in text and "机械" in text
+        assert "主路径" in text
+    assert "至少覆盖三类" not in TC_GENERATE_PROMPT
+    assert "正常流程 + 1 条异常流程 + 1 条边界" not in TC_GENERATE_PROMPT
+    assert "组合查询" in TC_GENERATE_PROMPT
+    assert "scenario_type\":" in TC_GENERATE_PROMPT or "scenario_type" in TC_GENERATE_PROMPT
 
 
 def test_flow_prompts_require_boxed_ui_and_vision():
