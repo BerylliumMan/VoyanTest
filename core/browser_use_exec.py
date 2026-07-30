@@ -380,6 +380,56 @@ async def switch_browser_use_to_newest_tab_if_opened(
     return False
 
 
+def _soften_click_opener_refocus() -> None:
+    """Avoid Chrome UI flipping back to the opener after every click.
+
+    browser-use's DefaultActionWatchdog resets ``agent_focus`` to the opener with
+    ``focus=True`` (Target.activateTarget) after each click, then maybe switches
+    to a new tab. That activateTarget is what users see as "标签又切回去了".
+    Soften the reset to ``focus=False``; new-tab SwitchTab still activates the
+    popup when detected, and our sticky preferred-tab logic covers slow popups.
+    """
+    try:
+        from browser_use.browser.watchdogs import default_action_watchdog as daw
+    except Exception:
+        return
+    if getattr(daw, "_voyantest_soft_refocus", False):
+        return
+
+    orig = getattr(daw.DefaultActionWatchdog, "on_ClickElementEvent", None)
+    if orig is None:
+        return
+
+    import asyncio
+
+    async def _on_click(self, event):  # type: ignore[no-untyped-def]
+        session = self.browser_session
+        _orig_get = session.get_or_create_cdp_session
+
+        async def _get_or_create(*args, **kwargs):
+            # Only soften the post-click reset to opener (focus=True → False).
+            # Explicit SwitchTab / new-tab focus still uses focus=True.
+            if kwargs.get("focus") is True and len(args) == 0:
+                # Called as get_or_create_cdp_session(target_id=..., focus=True)
+                pass
+            if "focus" in kwargs and kwargs.get("focus") is True:
+                # Detect opener reset: target_id equals pre-click focus and we're
+                # inside click handler — always soften activateTarget here; the
+                # subsequent SwitchTabEvent to the new tab will activate properly.
+                kwargs = {**kwargs, "focus": False}
+            return await _orig_get(*args, **kwargs)
+
+        session.get_or_create_cdp_session = _get_or_create  # type: ignore[method-assign]
+        try:
+            return await orig(self, event)
+        finally:
+            session.get_or_create_cdp_session = _orig_get  # type: ignore[method-assign]
+
+    daw.DefaultActionWatchdog.on_ClickElementEvent = _on_click  # type: ignore[assignment]
+    daw._voyantest_soft_refocus = True
+    logger.info("Softened browser-use click opener refocus (focus=False)")
+
+
 def enable_browser_use_auto_switch_new_tabs(session) -> None:
     """Arm a TabCreatedEvent listener that focuses newly created pages.
 
