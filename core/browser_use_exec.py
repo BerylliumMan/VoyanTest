@@ -728,7 +728,7 @@ async def execute_nl_steps_browser_use(
 
             result = {
                 "step_number": order,
-                "original_description": raw_desc,
+                "original_description": desc,
                 "success": fields["success"],
                 "thinking": fields.get("thinking") or "",
                 "action": fields.get("action") or "browser_use",
@@ -739,8 +739,6 @@ async def execute_nl_steps_browser_use(
                 "duration_ms": (time.monotonic() - t0) * 1000,
                 "backend": "browser_use",
             }
-            if desc != (raw_desc or "").strip():
-                result["optimized_description"] = desc
             step_results.append(result)
             status = "passed" if result["success"] else "failed"
             err_bit = f" — {_truncate(str(result.get('error') or ''), 160)}" if not result["success"] else ""
