@@ -409,6 +409,16 @@ def create_browser_session(
         enable_default_extensions=enable_default_extensions,
         **kwargs,
     )
+    # Ensure popup blocker is off even in headless (target=_blank / window.open).
+    try:
+        profile = getattr(session, "browser_profile", None)
+        if profile is not None:
+            args = list(getattr(profile, "args", None) or [])
+            if "--disable-popup-blocking" not in args:
+                args.append("--disable-popup-blocking")
+                profile.args = args
+    except Exception:
+        logger.debug("set --disable-popup-blocking failed", exc_info=True)
     if not headless:
         maximize_browser_session(session)
     return session
