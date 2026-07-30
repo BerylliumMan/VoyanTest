@@ -968,6 +968,16 @@ class AgentManager:
             return payload
         except asyncio.TimeoutError:
             return {"success": False, "error": "Step timeout", "action": "", "duration_ms": 0}
+        except ConnectionError as exc:
+            # Propagate so the run aborts cleanly instead of cascading ASGI send errors
+            raise
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"Step execute failed: {exc}",
+                "action": "",
+                "duration_ms": 0,
+            }
 
     async def _execute_step_browser_use_fallback(
         self,
