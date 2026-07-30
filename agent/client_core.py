@@ -1112,6 +1112,8 @@ class AgentClient:
             self._log_info(
                 f"Run {msg.run_id} started — launching browser backend={backend} shared_cdp={shared_cdp}"
             )
+            self._active_run_id = msg.run_id
+            self._active_backend = backend
             self._emit_status('busy')
             ready_ok = False
             ready_err = ""
