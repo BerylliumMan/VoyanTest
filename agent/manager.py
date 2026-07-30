@@ -447,14 +447,7 @@ class AgentManager:
                     continue
 
                 step_order = step["step_order"]
-                raw_desc = step["description"]
-                from core.step_executor import normalize_step_description
-                desc = normalize_step_description(raw_desc)
-                if desc != (raw_desc or "").strip():
-                    logger.info(
-                        "Step %s description optimized: %r → %r",
-                        step_order, (raw_desc or "")[:80], desc[:80],
-                    )
+                desc = step["description"]
                 expected_result = step.get("expected_result")
                 cached_fp = step.get("learned_locator") if isinstance(step.get("learned_locator"), dict) else None
                 cacheable = bool(step.get("cacheable", True))
