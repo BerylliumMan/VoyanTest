@@ -147,28 +147,8 @@ const TruncateText: React.FC<{ text: string; maxWidth?: number }> = ({
   </span>
 );
 
-const splitNumberedItems = (text: string): string[] => {
-  if (!text) return [];
-  const src = text.trim();
-  const clean = (items: string[]) =>
-    items.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
-  if (src.includes('\n')) {
-    const lineRe = /(?:^|\n)\s*\d+[\.、]\s+([\s\S]+?)(?=\n\s*\d+[\.、]\s+|$)/g;
-    const lineItems: string[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = lineRe.exec(src)) !== null) lineItems.push(m[1]);
-    if (lineItems.length >= 2) return clean(lineItems);
-  }
-  const inlineRe = /(?:^|\s)\d+[\.、]\s+([\s\S]+?)(?=\s+\d+[\.、]\s+|$)/g;
-  const inlineItems: string[] = [];
-  let m2: RegExpExecArray | null;
-  while ((m2 = inlineRe.exec(src)) !== null) inlineItems.push(m2[1]);
-  if (inlineItems.length) return clean(inlineItems);
-  return src.split('\n').map((p) => p.trim()).filter(Boolean);
-};
-
 const NumberedList: React.FC<{ text: string }> = ({ text }) => {
-  const items = splitNumberedItems(text);
+  const items = splitNumberedItemsNonEmpty(text);
   if (items.length === 0) return <span>-</span>;
   return (
     <ol className={styles.numberedList}>
