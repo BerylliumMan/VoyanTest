@@ -118,10 +118,11 @@ or {"ref": null, "thinking": "why none"}
 Rules:
 - Prefer exact 【】/「」 text match when present.
 - Never pick a similar wrong label.
-- Icon-only / visual steps: use the screenshot. Match by region (右上角/工具栏…), glyph shape
-  (书本/齿轮/铃铛/放大镜…), and stated purpose. Prefer candidates with empty or very short names
-  that look like icon buttons in that region.
-- If unsure, ref=null.
+- Icon-only / visual steps: MUST use the screenshot. Match by region (右上角/工具栏…), glyph shape
+  (书本=翻开书页/双页；齿轮=齿牙圆盘；铃铛；放大镜…), color, and stated purpose.
+  Among several empty-name buttons in the same toolbar, pick the one whose glyph matches the
+  described shape — do NOT return null solely because names are empty.
+- If the screenshot is missing and names are empty, ref=null.
 """
 
 
