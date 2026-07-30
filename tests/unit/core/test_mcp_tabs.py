@@ -67,6 +67,27 @@ async def test_switch_from_result_text():
 
 
 @pytest.mark.asyncio
+async def test_switch_after_settle_list():
+    calls = []
+
+    async def call_tool(name, args):
+        calls.append((name, args))
+        if args.get("action") == "list":
+            return {"success": True, "text": SAMPLE}
+        return {"success": True, "text": ""}
+
+    ok = await switch_to_new_tab_if_opened(
+        call_tool,
+        count_before=1,
+        result_text="",
+        settle_seconds=0,
+    )
+    assert ok is True
+    assert calls[0] == ("browser_tabs", {"action": "list"})
+    assert calls[1] == ("browser_tabs", {"action": "select", "index": 1})
+
+
+@pytest.mark.asyncio
 async def test_switch_retries_until_tab_appears():
     calls = []
     lists = 0

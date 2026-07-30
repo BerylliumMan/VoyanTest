@@ -870,6 +870,9 @@ class AgentClient:
                     self._mcp_tools_call,
                     count_before=count_before,
                     result_text=result.get("text") or "",
+                    settle_seconds=0.6,
+                    retries=4,
+                    retry_interval=0.5,
                 )
                 if switched:
                     self._log_info("Focused newly opened browser tab after click")
