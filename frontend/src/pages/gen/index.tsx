@@ -14,6 +14,7 @@ import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import logger from '@/utils/logger';
 import styles from './style/index.module.less';
+import { splitNumberedItemsNonEmpty } from '@/utils/numberedText';
 
 const { Title, Text } = Typography;
 
