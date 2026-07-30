@@ -50,7 +50,6 @@ def _resolve_mcp_tool(action: str) -> str:
         'assert_text': 'browser_wait_for',
         'press_key': 'browser_press_key',
         'hover': 'browser_hover',
-        'scroll': 'browser_mouse_wheel',
     }
     return TOOL_MAP.get(action, action)
 
