@@ -467,6 +467,37 @@ class AgentManager:
 
                 # 1. Get DOM snapshot from agent's browser
                 snap = await self._get_snapshot(session, agent_id, run_id)
+                if self._snapshot_indicates_browser_closed(snap):
+                    logger.warning(
+                        "Step %s aborted — browser closed by user", step_order,
+                    )
+                    step_results.append({
+                        "step_number": step_order,
+                        "original_description": desc,
+                        "success": False,
+                        "thinking": "",
+                        "action": "",
+                        "next_goal": "",
+                        "error": "浏览器已关闭，用例执行已中断",
+                        "screenshot_path": None,
+                        "duration_ms": 0,
+                        "failure_kind": "browser_closed",
+                    })
+                    failed_step_number = step_order
+                    for remaining in steps[idx + 1:]:
+                        step_results.append({
+                            "step_number": remaining["step_order"],
+                            "original_description": remaining["description"],
+                            "success": False,
+                            "status": "skipped",
+                            "thinking": "",
+                            "action": "",
+                            "next_goal": "",
+                            "error": f"Skipped due to step {failed_step_number} failure",
+                            "screenshot_path": None,
+                            "duration_ms": 0,
+                        })
+                    break
 
                 memory_mode = "read_write"
                 try:
