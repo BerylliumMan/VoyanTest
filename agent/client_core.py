@@ -772,7 +772,7 @@ class AgentClient:
         await self._mcp_notify("notifications/initialized")
         self._log_info("MCP subprocess ready (browser started)")
 
-    async def _stop_mcp(self):
+    async def _stop_mcp(self, *, close_exec_chrome: bool = True):
         if self._mcp_process:
             pid = self._mcp_process.pid
             # 1. Close stdin → MCP 检测到 EOF 后优雅退出，Playwright 自动关闭浏览器
@@ -811,8 +811,12 @@ class AgentClient:
             self._mcp_process = None
             self._mcp_stdin = None
             self._mcp_stdout = None
-            self._log_info("MCP subprocess stopped (browser closed)")
-        await self._stop_exec_chrome()
+            self._log_info(
+                "MCP subprocess stopped"
+                + (" (shared Chromium kept)" if not close_exec_chrome else " (browser closed)")
+            )
+        if close_exec_chrome:
+            await self._stop_exec_chrome()
 
     async def _pipe_stderr(self):
         try:
