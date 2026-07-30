@@ -140,6 +140,13 @@ class PlaywrightMCPManager:
             self._context = None
         self._read = None
         self._write = None
+        cfg = getattr(self, "_mcp_config_path", None)
+        self._mcp_config_path = None
+        if cfg:
+            try:
+                os.remove(cfg)
+            except OSError:
+                pass
         logger.info("@playwright/mcp session closed.")
 
     async def __aenter__(self) -> "PlaywrightMCPManager":
