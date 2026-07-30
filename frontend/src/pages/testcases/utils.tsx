@@ -51,9 +51,7 @@ export function renderTree(
                   if (mod) onEditModule(mod);
                 }}>{t['edit']}</Button>
                 <Button size="mini" status="danger" onClick={() => {
-                  if (window.confirm(t['confirm.delete.module'].replace('{name}', m.name))) {
-                    onDeleteModule(m.id, m.name);
-                  }
+                  onDeleteModule(m.id, m.name);
                 }}>{t['delete']}</Button>
                 <Button size="mini" type="primary" onClick={() => onRunModule(m.id)}>{t['run.all']}</Button>
               </Space>
