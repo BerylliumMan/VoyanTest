@@ -89,6 +89,25 @@ class PlaywrightMCPManager:
         else:
             args.extend(['--viewport-size', '1920x1080'])
 
+        # Disable Chromium popup blocker so target=_blank / window.open work
+        # under automated clicks (otherwise new tabs never appear).
+        import json as _json
+        import tempfile as _tempfile
+
+        _launch_args = ['--disable-popup-blocking']
+        if not self.headless:
+            _launch_args.append('--start-maximized')
+        _cfg = {'browser': {'launchOptions': {'args': _launch_args}}}
+        if not self.headless:
+            _cfg['browser']['contextOptions'] = {'viewport': None}
+        _cfg_path = os.path.join(
+            _tempfile.gettempdir(), f'voyantest-server-mcp-{os.getpid()}.json'
+        )
+        with open(_cfg_path, 'w', encoding='utf-8') as _f:
+            _json.dump(_cfg, _f)
+        self._mcp_config_path = _cfg_path
+        args.extend(['--config', _cfg_path])
+
         server_params = StdioServerParameters(
             command='npx',
             args=args,

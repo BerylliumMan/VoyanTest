@@ -672,26 +672,31 @@ class AgentClient:
             if _chrome_exe and os.path.isfile(_chrome_exe):
                 args.extend(["--executable-path", _chrome_exe])
                 self._log_info(f"Using Chromium: {_chrome_exe}")
+
+            import json as _json
+            import tempfile as _tempfile
+
+            # Always pass launchOptions so target=_blank / window.open are not
+            # blocked by Chromium's popup blocker under automation clicks.
+            _launch_args = ["--disable-popup-blocking"]
+            _cfg: dict = {
+                "browser": {
+                    "launchOptions": {"args": _launch_args},
+                }
+            }
             if self._headless:
                 args.append("--headless")
                 args.extend(["--viewport-size", "1920x1080"])
             else:
-                import json as _json
-                import tempfile as _tempfile
-
-                _cfg = {
-                    "browser": {
-                        "launchOptions": {"args": ["--start-maximized"]},
-                        "contextOptions": {"viewport": None},
-                    }
-                }
-                _cfg_path = os.path.join(
-                    _tempfile.gettempdir(), f"voyantest-mcp-{os.getpid()}.json"
-                )
-                with open(_cfg_path, "w", encoding="utf-8") as _f:
-                    _json.dump(_cfg, _f)
-                args.extend(["--config", _cfg_path])
-                self._mcp_config_path = _cfg_path
+                _launch_args.append("--start-maximized")
+                _cfg["browser"]["contextOptions"] = {"viewport": None}
+            _cfg_path = os.path.join(
+                _tempfile.gettempdir(), f"voyantest-mcp-{os.getpid()}.json"
+            )
+            with open(_cfg_path, "w", encoding="utf-8") as _f:
+                _json.dump(_cfg, _f)
+            args.extend(["--config", _cfg_path])
+            self._mcp_config_path = _cfg_path
             args.append("--isolated")
 
         import subprocess as _sp
