@@ -50,23 +50,12 @@ def pick_new_tab_index(
     count_before: int,
 ) -> Optional[int]:
     """Return index to select when a new tab appeared and is not current."""
-    if not tabs_after:
+    if len(tabs_after) <= count_before:
         return None
-    # Prefer growth detection; also recover if count_before was wrong/stale
-    # but a non-current newer tab exists after a click.
-    if len(tabs_after) > count_before:
-        newest = max(tabs_after, key=lambda t: t["index"])
-        if newest.get("current"):
-            return None
-        return int(newest["index"])
-    # Fallback: newest tab exists and is not current (async popup after list)
     newest = max(tabs_after, key=lambda t: t["index"])
     if newest.get("current"):
         return None
-    # Only auto-jump when there is more than one tab
-    if len(tabs_after) < 2:
-        return None
-    return int(newest["index"]) if len(tabs_after) > count_before else None
+    return int(newest["index"])
 
 
 def should_watch_for_new_tab(action: str) -> bool:
