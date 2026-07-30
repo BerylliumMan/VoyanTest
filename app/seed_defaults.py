@@ -497,13 +497,18 @@ async def seed_defaults(db: AsyncSession) -> None:
     for an explicit upgrade. Also upserts missing Agents by name.
     """
     n_prompts = await seed_prompt_templates(db)
-    owned_keys = _FLOW_PROMPT_KEYS | _UI_GEN_PROMPT_KEYS | _EXEC_PROMPT_KEYS
+    owned_keys = (
+        _FLOW_PROMPT_KEYS
+        | _UI_GEN_PROMPT_KEYS
+        | _FUNC_GEN_PROMPT_KEYS
+        | _EXEC_PROMPT_KEYS
+    )
     non_owned_keys = set(get_seed_prompts()) - owned_keys
     n_drafts = await sync_prompt_templates_from_seed(
         db, activate=False, keys=non_owned_keys,
     )
-    # Flow / UI-gen / execution schema prompts are product-owned; activate seed
-    # upgrades so executable-step & dropdown fixes take effect without admin UI.
+    # Flow / UI-gen / functional / execution schema prompts are product-owned;
+    # activate seed upgrades so coverage & executable-step fixes take effect.
     n_owned = await sync_prompt_templates_from_seed(
         db, activate=True, keys=owned_keys,
     )
@@ -511,15 +516,19 @@ async def seed_defaults(db: AsyncSession) -> None:
     n_named = await ensure_named_seed_agents(db)
     flow_sp = await ensure_flow_agent_system_prompt(db)
     ui_sp = await ensure_ui_agent_system_prompt(db)
+    func_sp = await ensure_func_agent_system_prompt(db)
     exec_sp = await ensure_execution_agent_system_prompt(db)
-    if n_prompts or n_drafts or n_owned or n_agents or n_named or flow_sp or ui_sp or exec_sp:
+    if (
+        n_prompts or n_drafts or n_owned or n_agents or n_named
+        or flow_sp or ui_sp or func_sp or exec_sp
+    ):
         await db.commit()
         if n_prompts:
             logger.info("已创建 %d 个默认提示词模板", n_prompts)
         if n_drafts:
             logger.info("已写入 %d 个种子提示词草稿（未覆盖活跃版）", n_drafts)
         if n_owned:
-            logger.info("已激活 %d 个产品提示词种子版（流程/UI生成/执行）", n_owned)
+            logger.info("已激活 %d 个产品提示词种子版（流程/UI/功能生成/执行）", n_owned)
         if n_agents:
             logger.info("已创建 %d 个默认 AI Agent", n_agents)
         if n_named:

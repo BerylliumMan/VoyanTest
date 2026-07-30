@@ -519,6 +519,13 @@ def _sanitize_ui_step(step: str) -> str:
     if not s:
         return s
 
+    # Bare load waits are matched as getByText by the executor — neutralize.
+    if re.fullmatch(
+        r"等待(?:页面)?(?:加载)?完成|等待加载完成|等待页面稳定",
+        s,
+    ):
+        return "等待页面稳定"
+
     # 「单位下拉框选择【汉东省院】」→「在【单位】中选择【汉东省院】」
     m = re.match(rf"^(.+?){_CTRL_TYPE_SUFFIX}\s*选择\s*【([^】]+)】\s*$", s)
     if m:
