@@ -25,6 +25,7 @@ _TAB_LINE_RE = re.compile(
 _TAB_WATCH_ACTIONS = frozenset({
     "click",
     "browser_click",
+    "click_blank",
 })
 
 CallToolFn = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -49,12 +50,23 @@ def pick_new_tab_index(
     count_before: int,
 ) -> Optional[int]:
     """Return index to select when a new tab appeared and is not current."""
-    if len(tabs_after) <= count_before:
+    if not tabs_after:
         return None
+    # Prefer growth detection; also recover if count_before was wrong/stale
+    # but a non-current newer tab exists after a click.
+    if len(tabs_after) > count_before:
+        newest = max(tabs_after, key=lambda t: t["index"])
+        if newest.get("current"):
+            return None
+        return int(newest["index"])
+    # Fallback: newest tab exists and is not current (async popup after list)
     newest = max(tabs_after, key=lambda t: t["index"])
     if newest.get("current"):
         return None
-    return int(newest["index"])
+    # Only auto-jump when there is more than one tab
+    if len(tabs_after) < 2:
+        return None
+    return int(newest["index"]) if len(tabs_after) > count_before else None
 
 
 def should_watch_for_new_tab(action: str) -> bool:
@@ -73,24 +85,33 @@ async def switch_to_new_tab_if_opened(
     count_before: int,
     result_text: str = "",
     settle_seconds: float = 0.5,
+    retries: int = 4,
+    retry_interval: float = 0.4,
 ) -> bool:
     """If tab count grew after an action, select the newest non-current tab.
 
     Tries to parse Open tabs from the action result first; otherwise re-lists
-    after a short settle (popups are often async).
+    with settle + retries (popups are often async and slower than 0.5s).
     """
     import asyncio
 
     tabs = parse_mcp_tabs(result_text)
     index = pick_new_tab_index(tabs, count_before=count_before) if tabs else None
 
-    if index is None:
-        if settle_seconds > 0:
-            await asyncio.sleep(settle_seconds)
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
+        if index is not None:
+            break
+        wait = settle_seconds if attempt == 0 else retry_interval
+        if wait > 0:
+            await asyncio.sleep(wait)
         listed = await call_tool("browser_tabs", {"action": "list"})
         if not listed.get("success", True) and listed.get("error"):
-            logger.warning("browser_tabs list failed: %s", listed.get("error") or listed.get("text"))
-            return False
+            logger.warning(
+                "browser_tabs list failed: %s",
+                listed.get("error") or listed.get("text"),
+            )
+            continue
         tabs = parse_mcp_tabs(listed.get("text") or "")
         index = pick_new_tab_index(tabs, count_before=count_before)
 
