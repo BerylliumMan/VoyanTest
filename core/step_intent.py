@@ -29,7 +29,7 @@ INTENT_SYSTEM_PROMPT = """You extract a single browser Intent from a test step. 
 Output ONLY JSON (no markdown) matching:
 {
   "action": "click|fill|select|wait|goto|hover|press_key|scroll|assert_text|click_blank|error",
-  "target_role": "button|link|textbox|combobox|option|menuitem|checkbox|radio|null",
+  "target_role": "button|link|textbox|combobox|option|menuitem|treeitem|listitem|checkbox|radio|null",
   "target_name": "exact UI label from 【】/「」 or step text",
   "value": "fill/select/wait/goto value or null",
   "confidence": 0.0-1.0,
@@ -42,6 +42,9 @@ Rules:
 - Prefer 【】/「」 text as target_name. Control-type words (下拉框/输入框/按钮) are NOT target_name.
 - 提交≠确定≠保存; 查询≠搜索; 取消≠关闭.
 - One primary action only. If the step is wait/assert, action=wait or assert_text and value=text.
+- Dropdown open-only steps (展开/打开某某下拉): target_role=combobox (or button), target_name=字段名如「单位」.
+- Dropdown option steps (选择/点击【汉东省院】): target_role=option|menuitem|treeitem|listitem,
+  target_name=选项文案「汉东省院」。Options may appear under role=tooltip / listbox / menu — still match by option name.
 - Click blank/outside area (点击空白处/页面空白/外侧/遮罩) → action=click_blank
   (runtime performs a real viewport mouse click; do not invent a body/html target).
 - If you cannot decide safely, action=error and explain in thinking; set ambiguous=true.
