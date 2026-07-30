@@ -29,7 +29,7 @@ INTENT_SYSTEM_PROMPT = """You extract a single browser Intent from a test step. 
 Output ONLY JSON (no markdown) matching:
 {
   "action": "click|fill|select|wait|goto|hover|press_key|scroll|assert_text|click_blank|error",
-  "target_role": "button|link|textbox|combobox|option|menuitem|treeitem|listitem|checkbox|radio|null",
+  "target_role": "button|link|textbox|combobox|option|menuitem|treeitem|listitem|img|checkbox|radio|null",
   "target_name": "exact UI label from 【】/「」 or step text",
   "value": "fill/select/wait/goto value or null",
   "confidence": 0.0-1.0,
@@ -39,12 +39,15 @@ Output ONLY JSON (no markdown) matching:
 
 Rules:
 - NEVER invent refs (e15) or CSS selectors.
-- Prefer 【】/「」 text as target_name. Control-type words (下拉框/输入框/按钮) are NOT target_name.
+- Prefer 【】/「」 text as target_name. Control-type words (下拉框/输入框/按钮/图标) are NOT target_name.
 - 提交≠确定≠保存; 查询≠搜索; 取消≠关闭.
 - One primary action only. If the step is wait/assert, action=wait or assert_text and value=text.
 - Dropdown open-only steps (展开/打开某某下拉): target_role=combobox (or button), target_name=字段名如「单位」.
 - Dropdown option steps (选择/点击【汉东省院】): target_role=option|menuitem|treeitem|listitem,
   target_name=选项文案「汉东省院」。Options may appear under role=tooltip / listbox / menu — still match by option name.
+- Icon-only steps (…图标 / 书本形状 / 齿轮形状 / 无文字按钮, often with 位置+用途):
+  target_role=button (or img/link), target_name=null unless 【】 contains a real accessible name
+  (not 图标/图片). Put shape+position+purpose into thinking. Do NOT set target_name to 图标.
 - Click blank/outside area (点击空白处/页面空白/外侧/遮罩) → action=click_blank
   (runtime performs a real viewport mouse click; do not invent a body/html target).
 - If you cannot decide safely, action=error and explain in thinking; set ambiguous=true.
@@ -56,7 +59,13 @@ Output ONLY JSON:
 {"ref": "e12", "thinking": "why this candidate"}
 or {"ref": null, "thinking": "why none"}
 
-Rules: Prefer exact 【】/「」 match. Never pick a similar wrong label. If unsure, ref=null.
+Rules:
+- Prefer exact 【】/「」 text match when present.
+- Never pick a similar wrong label.
+- Icon-only / visual steps: use the screenshot. Match by region (右上角/工具栏…), glyph shape
+  (书本/齿轮/铃铛/放大镜…), and stated purpose. Prefer candidates with empty or very short names
+  that look like icon buttons in that region.
+- If unsure, ref=null.
 """
 
 
