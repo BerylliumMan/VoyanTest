@@ -1640,6 +1640,12 @@ class AgentClient:
         # send_act 可能把 URL 放在 url 字段
         if not value:
             value = tc.get("url") or p.get("url")
+        step_description = (
+            p.get("description")
+            or tc.get("step_description")
+            or tc.get("description")
+            or ""
+        )
 
         result: dict = {"success": False, "screenshot_b64": "", "error": ""}
 
@@ -1659,7 +1665,9 @@ class AgentClient:
                 await self.send_result(run_id, result)
                 return
 
-            mcp_result = await self._mcp_call_tool(action, selector, value)
+            mcp_result = await self._mcp_call_tool(
+                action, selector, value, step_description=step_description,
+            )
             result["success"] = mcp_result.get("success", False)
             if not result["success"]:
                 result["error"] = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
