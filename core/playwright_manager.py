@@ -29,6 +29,9 @@ ACTION_TOOL_MAP = {
     'screenshot': 'browser_take_screenshot',
     'snapshot': 'browser_snapshot',
     'assert_text': 'browser_wait_for',
+    'press_key': 'browser_press_key',
+    'hover': 'browser_hover',
+    'scroll': 'browser_mouse_wheel',
 }
 
 
