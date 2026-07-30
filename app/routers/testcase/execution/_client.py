@@ -303,10 +303,13 @@ async def run_test_case_on_client(
             )
             try:
                 from core.locator_memory import persist_learned_locators_from_results
-                by_order = {s.step_order: s for s in steps_raw}
-                await persist_learned_locators_from_results(
-                    db, step_results, steps_by_order=by_order,
-                )
+                # Use a fresh session — request-scoped db may be stale after long agent runs
+                async with db_mod.AsyncSessionLocal() as _persist_db:
+                    orm_steps = await crud.get_steps_for_case(_persist_db, case_id)
+                    by_order = {s.step_order: s for s in orm_steps}
+                    await persist_learned_locators_from_results(
+                        _persist_db, step_results, steps_by_order=by_order,
+                    )
             except Exception:
                 logger.warning("persist learned_locator after client exec failed", exc_info=True)
             # empty list: all([]) is True in Python — treat as failed
