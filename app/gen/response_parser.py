@@ -583,6 +583,26 @@ def _sanitize_ui_step(step: str) -> str:
     return s2
 
 
+def _sanitize_tc_title(title: str) -> str:
+    """Strip trailing scenario-type tags from titles (e.g. 「…-正常」)."""
+    t = (title or "").strip()
+    if not t:
+        return t
+    # Repeatedly strip common suffixes: -正常 / —异常流程 / _边界场景
+    pattern = (
+        r"(?:[-—–_／/]\s*)"
+        r"(?:正常|异常|边界|组合)"
+        r"(?:流程|场景|用例|测试)?"
+        r"(?:流程|场景)?"
+        r"\s*$"
+    )
+    prev = None
+    while prev != t:
+        prev = t
+        t = re.sub(pattern, "", t).strip()
+    return t or (title or "").strip()
+
+
 def _normalize_tc_item(item: dict) -> dict:
     """Normalize TC field names (handle Chinese, camelCase, snake_case)."""
     from app.gen.adapter import align_expected_to_steps
@@ -603,6 +623,9 @@ def _normalize_tc_item(item: dict) -> dict:
                     _coerce_text_field(val) if target == "preconditions" else val
                 )
                 break
+
+    if normalized.get("title"):
+        normalized["title"] = _sanitize_tc_title(str(normalized["title"]))
 
     # Pair steps/expected with right-align so shorter expected maps to trailing steps
     steps_raw = None
