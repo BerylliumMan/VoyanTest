@@ -778,7 +778,8 @@ async def execute_nl_steps_browser_use(
                 _emit_progress(on_progress, f"BASE URL open failed: {exc}")
 
         # After warmup: auto-focus newly created tabs (target=_blank / window.open).
-        arm_browser_use_auto_switch_new_tabs(browser)
+        # Baseline current ids so reconnect TabCreated for existing tabs is ignored.
+        await arm_browser_use_auto_switch_new_tabs(browser)
 
         failed_step: int | None = None
         for step in steps:
