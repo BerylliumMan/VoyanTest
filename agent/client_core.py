@@ -829,12 +829,26 @@ class AgentClient:
                 logger.warning(f"MCP non-JSON stdout: {text[:200]}")
                 continue
 
-    async def _mcp_call_tool(self, action: str, selector: str, value: str) -> dict:
+    async def _mcp_call_tool(
+        self,
+        action: str,
+        selector: str,
+        value: str,
+        step_description: str = "",
+    ) -> dict:
+        from core.blank_click import execute_blank_click, should_use_blank_click
         from core.mcp_tabs import (
             list_tab_count,
             should_watch_for_new_tab,
             switch_to_new_tab_if_opened,
         )
+
+        if should_use_blank_click(
+            action=action,
+            selector=selector,
+            step_description=step_description,
+        ):
+            return await execute_blank_click(self._mcp_tools_call)
 
         mcp_tool = _resolve_mcp_tool(action)
         if not mcp_tool:
