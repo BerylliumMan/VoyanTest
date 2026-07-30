@@ -919,6 +919,13 @@ class TestResponseParserFpHelpers:
         # Already good steps stay unchanged
         assert _sanitize_ui_step("在【用户名】输入 admin") == "在【用户名】输入 admin"
         assert _sanitize_ui_step("点击【登录】") == "点击【登录】"
+        # Icon / image generics
+        assert _sanitize_ui_step("点击【书本图标】") == "点击【书本】"
+        assert _sanitize_ui_step("点击书本图标") == "点击【书本】"
+        assert _sanitize_ui_step("点击【图标】（操作手册）") == "点击【操作手册】"
+        assert _sanitize_ui_step("点击操作手册【图标】") == "点击【操作手册】"
+        # Bare 点击【图标】 cannot invent a label — leave for human edit
+        assert _sanitize_ui_step("点击【图标】") == "点击【图标】"
 
     def test_normalize_tc_sanitizes_steps(self):
         from app.gen.response_parser import _normalize_tc_item
