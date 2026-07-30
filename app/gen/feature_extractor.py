@@ -562,14 +562,13 @@ async def generate_test_cases_for_fps(
             user_hint = (
                 f"本批测试项共 {len(batch)} 个，名称："
                 + "、".join(fp.name for fp in batch)
-                + f"。\n请为以上每个测试项各生成至少 {per_item} 条用例"
-                f"（正常/异常/边界各至少 1 条），"
-                f"JSON 数组合计至少 {min_needed} 条；"
-                f"每条必须带 fp_name 与 scenario_type。"
-                f"若本批含单条件查询或「组合查询」相关测试项："
-                f"单条件须覆盖文档中的有效/空/无结果等场景；"
-                f"组合查询须输出两两组合用例，scenario_type 填「组合查询」"
-                f"（不做全量笛卡尔积）。"
+                + f"。\n请为以上每个测试项生成高价值用例（合计至少 {min_needed} 条，"
+                f"每项通常 {per_item}～4 条）：按测试项类型选型"
+                f"（主路径/校验失败/空结果/组合查询等），"
+                f"**禁止**机械凑「正常/异常/边界」三类；"
+                f"文档未写明的场景不要编造。"
+                f"每条必须带 fp_name 与具体 scenario_type。"
+                f"组合查询项须输出两两组合（非笛卡尔积），scenario_type=组合查询。"
             )
         tcs = await _generate_batch_once(
             batch=batch,
