@@ -274,7 +274,10 @@ class AgentClient:
                 await self._send_registration()
                 logger.info(f"Connected as {self.agent_name}")
                 self._log_info(f"Connected as {self.agent_name}")
-                self._log_info("Agent features: cdp-recover-v2 (dead browser auto-restart)")
+                self._log_info(
+                    "Agent features: cdp-recover-v2 "
+                    "(startup recover; mid-run browser close aborts case)"
+                )
                 self._emit_status('connected')
 
                 # 定期心跳任务（独立于消息接收，确保执行中也能保持在线）
