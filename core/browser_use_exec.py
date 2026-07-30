@@ -237,55 +237,104 @@ async def list_browser_use_page_ids(session) -> list[str]:
     return ids
 
 
-async def switch_browser_use_to_newest_tab_if_opened(
-    session,
-    *,
-    page_ids_before: list[str] | None = None,
-    settle_seconds: float = 0.5,
-) -> bool:
-    """If page count grew, focus the newest page (align with MCP auto-tab switch).
-
-    browser-use's click watchdog tries this with a short 0.1s wait and then may
-    stay on the old tab if the popup is slow. We re-check after settle.
-    """
-    import asyncio
-
-    if session is None:
-        return False
-    before = list(page_ids_before or [])
-    if settle_seconds > 0:
-        await asyncio.sleep(settle_seconds)
-    after = await list_browser_use_page_ids(session)
-    if not after:
-        return False
-    before_set = set(before)
-    if before:
-        new_ids = [tid for tid in after if tid not in before_set]
-        if not new_ids:
-            return False
-        newest_id = new_ids[-1]
-    else:
-        if len(after) < 2:
-            return False
-        newest_id = after[-1]
-
-    focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
-    if focus == newest_id:
-        return False
-
+async def _dispatch_switch_tab(session, target_id: str | None) -> bool:
+    """Dispatch SwitchTabEvent without nested-await deadlocks when possible."""
     bus = getattr(session, "event_bus", None)
     if bus is None:
         return False
     try:
         from browser_use.browser.events import SwitchTabEvent
 
-        event = bus.dispatch(SwitchTabEvent(target_id=newest_id))
+        event = bus.dispatch(SwitchTabEvent(target_id=target_id))
+        # Prefer awaiting completion so agent_focus is updated before next observe.
+        # If the bus deadlocks under nested handlers, callers should use create_task.
         await event
-        logger.info("browser-use switched to new tab %s", newest_id[-8:])
         return True
     except Exception as exc:
-        logger.warning("browser-use new-tab switch failed: %s", exc, exc_info=True)
+        logger.warning("browser-use SwitchTabEvent failed: %s", exc, exc_info=True)
         return False
+
+
+async def ensure_browser_use_on_newest_tab(
+    session,
+    *,
+    settle_seconds: float = 0.0,
+) -> bool:
+    """Focus the most recently opened page if agent_focus is stale.
+
+    browser-use's click handler only waits ~0.1s for popups then may stay on the
+    opener tab. Call this between agent turns / actions so the next observe hits
+    the new page.
+    """
+    import asyncio
+
+    if session is None:
+        return False
+    if settle_seconds > 0:
+        await asyncio.sleep(settle_seconds)
+    pages = await list_browser_use_page_ids(session)
+    if len(pages) < 2:
+        return False
+    newest_id = pages[-1]
+    focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
+    if focus == newest_id:
+        return False
+    ok = await _dispatch_switch_tab(session, newest_id)
+    if ok:
+        logger.info(
+            "browser-use ensured focus on newest tab %s (was %s)",
+            newest_id[-8:],
+            (focus or "?")[-8:],
+        )
+    return ok
+
+
+async def switch_browser_use_to_newest_tab_if_opened(
+    session,
+    *,
+    page_ids_before: list[str] | None = None,
+    settle_seconds: float = 0.5,
+    retries: int = 3,
+    retry_interval: float = 0.4,
+) -> bool:
+    """If page count grew, focus the newest page (align with MCP auto-tab switch).
+
+    browser-use's click watchdog tries this with a short 0.1s wait and then may
+    stay on the old tab if the popup is slow. We re-check after settle + retries.
+    """
+    import asyncio
+
+    if session is None:
+        return False
+    before = list(page_ids_before or [])
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
+        wait = settle_seconds if attempt == 0 else retry_interval
+        if wait > 0:
+            await asyncio.sleep(wait)
+        after = await list_browser_use_page_ids(session)
+        if not after:
+            continue
+        before_set = set(before)
+        if before:
+            new_ids = [tid for tid in after if tid not in before_set]
+            if not new_ids:
+                continue
+            newest_id = new_ids[-1]
+        else:
+            if len(after) < 2:
+                continue
+            newest_id = after[-1]
+
+        focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
+        if focus == newest_id:
+            return False
+
+        ok = await _dispatch_switch_tab(session, newest_id)
+        if ok:
+            logger.info("browser-use switched to new tab %s", newest_id[-8:])
+            return True
+    return False
 
 
 def enable_browser_use_auto_switch_new_tabs(session) -> None:
@@ -293,6 +342,11 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
 
     Ignored until ``arm_browser_use_auto_switch_new_tabs`` is called, so initial
     connect TabCreated events do not steal focus.
+
+    Switch is scheduled via ``asyncio.create_task`` (not awaited in the event
+    handler) to avoid bubus deadlocks with nested SwitchTabEvent waits, and
+    delayed so it runs after browser-use's click handler resets focus to the
+    opener tab.
     """
     if session is None:
         return
@@ -312,17 +366,35 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
         tid = getattr(event, "target_id", None)
         if not tid:
             return
-        focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
-        if tid == focus:
-            return
-        try:
-            from browser_use.browser.events import SwitchTabEvent
 
-            ev = bus.dispatch(SwitchTabEvent(target_id=tid))
-            await ev
-            logger.info("browser-use auto-switched on TabCreated %s", str(tid)[-8:])
+        async def _switch_later() -> None:
+            import asyncio
+
+            # Click watchdog: sleep 0.1s → reset focus to opener → maybe switch.
+            # Wait longer so we win the race if that 0.1s detection missed the tab.
+            await asyncio.sleep(0.6)
+            if not state.get("armed"):
+                return
+            try:
+                switched = await ensure_browser_use_on_newest_tab(
+                    session, settle_seconds=0.0,
+                )
+                if switched:
+                    logger.info(
+                        "browser-use auto-switched after TabCreated %s",
+                        str(tid)[-8:],
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "browser-use TabCreated auto-switch failed: %s", exc,
+                )
+
+        try:
+            import asyncio
+
+            asyncio.create_task(_switch_later())
         except Exception as exc:
-            logger.warning("browser-use TabCreated auto-switch failed: %s", exc)
+            logger.warning("failed to schedule TabCreated switch: %s", exc)
 
     try:
         from browser_use.browser.events import TabCreatedEvent
@@ -337,6 +409,31 @@ def arm_browser_use_auto_switch_new_tabs(session) -> None:
     state = getattr(session, "_voyantest_tab_auto", None)
     if isinstance(state, dict):
         state["armed"] = True
+
+
+def _compose_should_stop_callback(
+    session,
+    existing: Callable[..., Any] | None = None,
+):
+    """Between agent actions/turns, force focus onto the newest tab."""
+
+    async def _cb() -> bool:
+        try:
+            await ensure_browser_use_on_newest_tab(session, settle_seconds=0.0)
+        except Exception:
+            logger.debug("ensure newest tab in should_stop failed", exc_info=True)
+        if existing is None:
+            return False
+        try:
+            result = existing()
+            if hasattr(result, "__await__"):
+                result = await result  # type: ignore[misc]
+            return bool(result)
+        except Exception:
+            logger.debug("existing should_stop callback failed", exc_info=True)
+            return False
+
+    return _cb
 
 
 def create_browser_use_llm_from_config(
