@@ -553,11 +553,16 @@ class AgentClient:
         return proc.returncode is None
 
     async def _invalidate_mcp_session(self, why: str = "") -> None:
-        """Drop a dead/desynced MCP session so the next call starts fresh."""
+        """Drop a dead/desynced MCP session so the next call starts fresh.
+
+        Important: do **not** kill the hybrid shared Chromium here. Login and
+        other full-page navigations often briefly desync MCP; closing Chrome
+        would wipe the session and leave about:blank for the next snapshot.
+        """
         if why:
             self._log_warning(f"Invalidating MCP session: {why}")
         try:
-            await self._stop_mcp()
+            await self._stop_mcp(close_exec_chrome=False)
         except Exception as exc:
             self._log_warning(f"MCP invalidate stop failed: {exc}")
 
