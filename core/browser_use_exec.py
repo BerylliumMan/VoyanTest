@@ -600,14 +600,12 @@ async def execute_nl_steps_browser_use(
         failed_step: int | None = None
         for step in steps:
             order = step.get("step_order") or step.get("step_number") or 0
-            raw_desc = step.get("description") or ""
-            from core.step_executor import normalize_step_description
-            desc = normalize_step_description(raw_desc)
+            desc = step.get("description") or ""
             expected = step.get("expected_result")
             if failed_step is not None:
                 step_results.append({
                     "step_number": order,
-                    "original_description": raw_desc,
+                    "original_description": desc,
                     "success": False,
                     "status": "skipped",
                     "thinking": "",
