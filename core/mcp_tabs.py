@@ -68,6 +68,44 @@ async def list_tab_count(call_tool: CallToolFn) -> int:
     return len(tabs) if tabs else 1
 
 
+async def ensure_on_newest_tab(call_tool: CallToolFn) -> bool:
+    """If multiple tabs exist and current is not the highest index, select it.
+
+    Used after hybrid browser-use fallback: Playwright MCP often still points at
+    the opener tab, and the next snapshot activates that tab in Chrome — looking
+    like the browser "switched back" after opening a new tab.
+    """
+    listed = await call_tool("browser_tabs", {"action": "list"})
+    if not listed.get("success", True) and listed.get("error"):
+        logger.warning(
+            "browser_tabs list failed (ensure newest): %s",
+            listed.get("error") or listed.get("text"),
+        )
+        return False
+    tabs = parse_mcp_tabs(listed.get("text") or "")
+    if len(tabs) < 2:
+        return False
+    newest = max(tabs, key=lambda t: t["index"])
+    if newest.get("current"):
+        return False
+    selected = await call_tool(
+        "browser_tabs", {"action": "select", "index": int(newest["index"])},
+    )
+    if not selected.get("success", True):
+        logger.warning(
+            "Failed to select newest tab index=%s: %s",
+            newest["index"],
+            selected.get("error") or selected.get("text"),
+        )
+        return False
+    logger.info(
+        "Ensured MCP focus on newest tab index=%s url=%s",
+        newest["index"],
+        newest.get("url") or "",
+    )
+    return True
+
+
 async def switch_to_new_tab_if_opened(
     call_tool: CallToolFn,
     *,
