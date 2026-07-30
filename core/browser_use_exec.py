@@ -662,6 +662,8 @@ async def execute_nl_steps_browser_use(
         "llm": llm,
         "use_vision": "auto",
         "max_failures": 2,
+        # Between multi_act actions / turns: jump to newest tab if click opened one.
+        "register_should_stop_callback": _compose_should_stop_callback(browser),
     }
     if prompt_override is not None:
         agent_common["override_system_message"] = prompt_override
