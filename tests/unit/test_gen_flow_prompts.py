@@ -123,6 +123,7 @@ def test_ui_prompts_forbid_bare_icon_click():
     assert "用途" in _UI_STEP_CONTRACT  # pure-icon visual template
     assert "形状" in _UI_STEP_CONTRACT or "外观" in _UI_STEP_CONTRACT
     assert "点击【图标】" in FP_EXTRACT_FLOW_PROMPT
+    assert "用途" in FP_EXTRACT_FLOW_PROMPT
 
 
 def test_sanitize_rewrites_bare_page_load_wait():
