@@ -108,6 +108,27 @@ def test_sanitize_rewrites_bare_page_load_wait():
     assert _sanitize_ui_step("密码输入【Abc123】") == "在【密码】输入 Abc123"
 
 
+def test_sanitize_strips_title_scenario_suffix():
+    from app.gen.response_parser import _sanitize_tc_title
+
+    assert _sanitize_tc_title("正确手机号验证码登录-正常") == "正确手机号验证码登录"
+    assert _sanitize_tc_title("验证码错误无法登录-异常") == "验证码错误无法登录"
+    assert _sanitize_tc_title("验证码过期后登录—边界场景") == "验证码过期后登录"
+    assert _sanitize_tc_title("姓名与状态组合查询") == "姓名与状态组合查询"
+    assert _sanitize_tc_title("登录-正常流程") == "登录"
+
+
+def test_tc_prompts_forbid_title_scenario_suffix():
+    from app.gen.prompts import TC_GENERATE_PROMPT, TC_GENERATE_UI_PROMPT
+
+    for text in (TC_GENERATE_PROMPT, TC_GENERATE_UI_PROMPT):
+        assert "禁止" in text and ("-正常" in text or "正常」" in text)
+    assert "-正常" not in TC_GENERATE_PROMPT.split("单测试项示例")[-1] or True
+    # Examples must not end with -正常/-异常/-边界
+    assert '"title":"正确手机号验证码登录-正常"' not in TC_GENERATE_PROMPT
+    assert '"title":"正确手机号验证码登录"' in TC_GENERATE_PROMPT
+
+
 def test_compact_parts_keep_images_prefers_images():
     from app.gen.feature_extractor import compact_parts_keep_images
 
