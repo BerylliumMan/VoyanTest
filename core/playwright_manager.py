@@ -279,6 +279,21 @@ class PlaywrightMCPManager:
             return {}
         elif action == 'assert_text':
             return {'text': value or ''}
+        elif action == 'press_key':
+            return {'key': value or 'Escape'}
+        elif action == 'hover':
+            return {'element': selector or '', 'target': selector or ''}
+        elif action == 'scroll':
+            delta = 400
+            if value:
+                v = str(value).strip().lower()
+                if v.isdigit() or (v.startswith('-') and v[1:].isdigit()):
+                    delta = int(v)
+                elif v in ('up', 'pageup'):
+                    delta = -400
+                elif v in ('down', 'pagedown'):
+                    delta = 400
+            return {'deltaY': delta}
         return {}
 
     # ------------------------------------------------------------------
