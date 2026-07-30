@@ -248,6 +248,9 @@ class PlaywrightMCPManager:
                         self.call_tool,
                         count_before=count_before,
                         result_text=result.get('text') or '',
+                        settle_seconds=0.6,
+                        retries=4,
+                        retry_interval=0.5,
                     )
                 except Exception as exc:
                     logger.warning("New-tab switch after click failed: %s", exc)
