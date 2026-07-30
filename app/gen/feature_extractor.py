@@ -599,11 +599,11 @@ async def generate_test_cases_for_fps(
             else:
                 extra_hint = (
                     f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
-                    f"请继续为以下测试项补齐："
+                    f"请继续为以下测试项补齐高价值用例："
                     + "、".join(fp.name for fp in batch)
-                    + f"。每个测试项至少 {per_item} 条（正常/异常/边界），"
-                    f"不要重复已有标题；每条必须带 fp_name 与 scenario_type。"
-                    f"查询/组合查询相关项须补齐单条件与两两组合（scenario_type=组合查询）。"
+                    + f"。每项至少 {per_item} 条；按类型选型，禁止机械凑正常/异常/边界；"
+                    f"不要重复已有标题；每条必须带 fp_name 与具体 scenario_type。"
+                    f"组合查询相关项补两两组合（scenario_type=组合查询）。"
                 )
             extra = await _generate_batch_once(
                 batch=batch,
