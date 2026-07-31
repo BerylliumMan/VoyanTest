@@ -37,21 +37,142 @@ ACTION_TOOL_MAP = {
 class PlaywrightMCPManager:
     """管理 Playwright MCP 服务器子进程和 MCP 客户端会话。"""
 
-    def __init__(self, browser_type: str = 'chromium', headless: bool = True):
+    def __init__(
+        self,
+        browser_type: str = 'chromium',
+        headless: bool = True,
+        *,
+        shared_cdp: bool = False,
+    ):
         self.browser_type = browser_type
         self.headless = headless
+        self.shared_cdp = bool(shared_cdp) and browser_type == 'chromium'
+        self.cdp_url: Optional[str] = None
         self._session: Optional[ClientSession] = None
         self._read = None
         self._write = None
         self._context = None
         self._mcp_config_path: Optional[str] = None
+        self._chrome_process = None
+        self._chrome_user_data: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _resolve_chrome_exe(self) -> Optional[str]:
+        import glob as _glob
+        import sys as _sys
+
+        if _sys.platform == 'win32':
+            pattern = os.path.expanduser(
+                '~/AppData/Local/ms-playwright/chromium-*/chrome-win64/chrome.exe'
+            )
+        else:
+            pattern = os.path.expanduser(
+                '~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome'
+            )
+        bins = sorted(_glob.glob(pattern))
+        return bins[-1] if bins else None
+
+    async def _start_shared_chrome_cdp(self) -> str:
+        """Launch Chromium with remote debugging; return http://127.0.0.1:PORT."""
+        import asyncio
+        import signal
+        import sys
+        import tempfile
+
+        await self._stop_shared_chrome()
+        chrome_exe = self._resolve_chrome_exe()
+        if not chrome_exe:
+            raise RuntimeError("Chrome binary not found for hybrid CDP")
+
+        user_data_dir = tempfile.mkdtemp(prefix="voyantest_server_cdp_")
+        proc_kwargs: dict = {
+            "stdout": asyncio.subprocess.DEVNULL,
+            "stderr": asyncio.subprocess.DEVNULL,
+        }
+        if sys.platform != "win32":
+            proc_kwargs["preexec_fn"] = os.setsid
+
+        chrome_args = [
+            chrome_exe,
+            "--remote-debugging-port=0",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-popup-blocking",
+            "--disable-extensions",
+        ]
+        if self.headless:
+            chrome_args.append("--headless=new")
+        else:
+            chrome_args.append("--start-maximized")
+
+        self._chrome_user_data = user_data_dir
+        self._chrome_process = await asyncio.create_subprocess_exec(
+            *chrome_args, **proc_kwargs
+        )
+        active_port_file = os.path.join(user_data_dir, "DevToolsActivePort")
+        actual_port = None
+        for _ in range(40):
+            await asyncio.sleep(0.25)
+            try:
+                with open(active_port_file) as f:
+                    actual_port = int(f.readline().strip())
+                break
+            except (OSError, ValueError):
+                continue
+        if actual_port is None:
+            raise RuntimeError("Server hybrid Chrome did not write DevToolsActivePort")
+        if self._chrome_process.returncode is not None:
+            raise RuntimeError(
+                f"Server hybrid Chrome exited early code={self._chrome_process.returncode}"
+            )
+        self.cdp_url = f"http://127.0.0.1:{actual_port}"
+        logger.info("Server hybrid CDP Chromium ready: %s", self.cdp_url)
+        return self.cdp_url
+
+    async def _stop_shared_chrome(self) -> None:
+        import asyncio
+        import signal
+        import shutil
+        import sys
+
+        proc = self._chrome_process
+        self._chrome_process = None
+        self.cdp_url = None
+        if proc is not None:
+            try:
+                if sys.platform != "win32" and proc.pid:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except Exception:
+                        proc.terminate()
+                else:
+                    proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        ud = self._chrome_user_data
+        self._chrome_user_data = None
+        if ud:
+            try:
+                shutil.rmtree(ud, ignore_errors=True)
+            except Exception:
+                pass
+
     async def start(self) -> ClientSession:
-        """启动 npx @playwright/mcp 子进程，建立 MCP 会话。"""
+        """启动 npx @playwright/mcp 子进程，建立 MCP 会话。
+
+        ``shared_cdp=True`` 时先起带 remote-debugging 的 Chromium，再让 MCP
+        通过 ``--cdp-endpoint`` 附着，供 hybrid browser-use 同浏览器救场。
+        """
         headless_flag = '--headless' if self.headless else ''
         browser_arg = {
             'chromium': '--browser=chromium',
@@ -59,15 +180,22 @@ class PlaywrightMCPManager:
             'webkit': '--browser=webkit',
         }.get(self.browser_type, '--browser=chromium')
 
-        logger.info(
-            f"Starting @playwright/mcp: {browser_arg} headless={self.headless}"
-        )
+        cdp_endpoint = None
+        if self.shared_cdp:
+            cdp_endpoint = await self._start_shared_chrome_cdp()
+            logger.info(
+                "Starting @playwright/mcp attached to CDP %s headless=%s",
+                cdp_endpoint, self.headless,
+            )
+        else:
+            logger.info(
+                f"Starting @playwright/mcp: {browser_arg} headless={self.headless}"
+            )
 
-        # 只对 chromium 模式使用预装的 chrome 二进制（避免 firefox/webkit 错用 chrome）
         import glob as _glob
         import sys as _sys
         _executable_args = []
-        if self.browser_type == 'chromium':
+        if self.browser_type == 'chromium' and not cdp_endpoint:
             if _sys.platform == 'win32':
                 _chrome_pattern = os.path.expanduser(
                     '~/AppData/Local/ms-playwright/chromium-*/chrome-win64/chrome.exe'
@@ -87,13 +215,13 @@ class PlaywrightMCPManager:
             '--isolated',
             *_executable_args,
         ]
-        if headless_flag:
+        if cdp_endpoint:
+            args.extend(['--cdp-endpoint', cdp_endpoint])
+        if headless_flag and not cdp_endpoint:
             args.append(headless_flag)
-        else:
+        elif not self.headless and not cdp_endpoint:
             args.extend(['--viewport-size', '1920x1080'])
 
-        # Disable Chromium popup blocker so target=_blank / window.open work
-        # under automated clicks (otherwise new tabs never appear).
         import json as _json
         import tempfile as _tempfile
 
@@ -101,8 +229,10 @@ class PlaywrightMCPManager:
         if not self.headless:
             _launch_args.append('--start-maximized')
         _cfg = {'browser': {'launchOptions': {'args': _launch_args}}}
-        if not self.headless:
+        if not self.headless and not cdp_endpoint:
             _cfg['browser']['contextOptions'] = {'viewport': None}
+        if cdp_endpoint:
+            _cfg['browser']['cdpEndpoint'] = cdp_endpoint
         _cfg_path = os.path.join(
             _tempfile.gettempdir(), f'voyantest-server-mcp-{os.getpid()}.json'
         )
@@ -123,7 +253,7 @@ class PlaywrightMCPManager:
         await self._session.__aenter__()
         await self._session.initialize()
 
-        logger.info("@playwright/mcp session initialized.")
+        logger.info("@playwright/mcp session initialized (shared_cdp=%s).", self.shared_cdp)
         return self._session
 
     async def stop(self) -> None:
