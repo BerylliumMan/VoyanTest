@@ -136,6 +136,43 @@ class StepIntent(BaseModel):
     thinking: str = ""
 
 
+def structured_to_intent(structured: dict | None) -> StepIntent | None:
+    """Build StepIntent from UI StructuredStep, skipping Intent LLM when complete."""
+    from core.step_normalize import coerce_structured_step, structured_step_is_complete
+
+    step = coerce_structured_step(structured)
+    if not step or not structured_step_is_complete(step):
+        return None
+    action = (step.get("action") or "click").strip().lower()
+    # Map UI-only actions onto executor actions
+    if action == "assert_visible":
+        action = "assert_text"
+    elif action == "icon_click":
+        action = "click"
+    elif action in ("check", "uncheck"):
+        action = "click"
+    name = step.get("target_name")
+    value = step.get("value")
+    role = step.get("target_role")
+    thinking_parts = ["from structured_step"]
+    if step.get("disambiguation"):
+        thinking_parts.append(f"disambiguation={step['disambiguation']}")
+    if step.get("icon_hint"):
+        thinking_parts.append(f"icon_hint={step['icon_hint']}")
+        if not name:
+            name = None
+            role = role or "button"
+    return StepIntent(
+        action=action,
+        target_role=role,
+        target_name=name,
+        value=value if value is not None else None,
+        confidence=0.95,
+        ambiguous=False,
+        thinking="; ".join(thinking_parts),
+    )
+
+
 class StepPreview(BaseModel):
     """Debug preview of what would be acted on (Stagehand observe-style)."""
 
