@@ -49,7 +49,7 @@ class ExecutionBackendConfig(BaseModel):
     - hybrid: 客户端 MCP 默认；定位失败时同浏览器 CDP 挂 browser-use 救场一步
     """
 
-    backend: Literal["playwright_mcp", "browser_use", "hybrid"] = "playwright_mcp"
+    backend: Literal["playwright_mcp", "browser_use", "hybrid"] = "hybrid"
     max_steps_per_nl: int = Field(default=30, ge=3, le=50)
     headless: bool = True
 
