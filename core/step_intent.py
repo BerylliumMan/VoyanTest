@@ -205,8 +205,8 @@ def match_intent_candidates(
 ) -> list[dict[str, str]]:
     """Return AX elements matching intent role/name (exact name preferred).
 
-    ``frame_hint``: when set, prefer elements whose nearby snapshot context
-    mentions the iframe title/name (best-effort line-window filter).
+    ``frame_hint``: when set, keep only elements whose nearest preceding
+    ``iframe`` / ``frame`` snapshot line mentions the hint.
     """
     role = (intent.target_role or "").strip().lower() or None
     name = (intent.target_name or "").strip()
@@ -217,16 +217,22 @@ def match_intent_candidates(
     if frame_hint:
         fh = frame_hint.strip()
         if fh:
-            # Prefer refs whose surrounding snapshot text mentions the frame hint
-            preferred: list[dict[str, str]] = []
-            for el in elements:
-                # Search a window around the ref occurrence
-                idx = (snapshot or "").find(f"[ref={el['ref']}]")
-                if idx < 0:
-                    continue
-                window = (snapshot or "")[max(0, idx - 400): idx + 200]
-                if fh in window or fh.lower() in window.lower():
-                    preferred.append(el)
+            lines = (snapshot or "").splitlines()
+            # Map ref → nearest preceding iframe/frame line text
+            ref_frame: dict[str, str] = {}
+            last_frame = ""
+            for line in lines:
+                low = line.lower()
+                if "iframe" in low or re.search(r"^\s*-\s+frame\b", line, re.I):
+                    last_frame = line
+                m = re.search(r"\[ref=(e\d+)\]", line)
+                if m:
+                    ref_frame[m.group(1)] = last_frame
+            preferred = [
+                el for el in elements
+                if fh in (ref_frame.get(el["ref"]) or "")
+                or fh.lower() in (ref_frame.get(el["ref"]) or "").lower()
+            ]
             if preferred:
                 elements = preferred
 
