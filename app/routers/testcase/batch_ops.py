@@ -81,6 +81,9 @@ async def batch_copy_cases(req: BatchCopyRequest, admin=Depends(require_admin), 
             name=original.name + " (副本)",
             description=original.description,
             steps=steps_data,
+            case_kind=getattr(original, "case_kind", None) or "ui",
+            priority=getattr(original, "priority", None) or "medium",
+            tags=getattr(original, "tags", None),
         )
         await crud.create_test_case(db, new_case)
         copied += 1
