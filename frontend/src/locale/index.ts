@@ -5,6 +5,7 @@ const i18n = {
     'menu.testcases': 'Test Cases',
     'menu.testcases.functional': 'Functional Cases',
     'menu.testcases.ui': 'UI Automation Cases',
+    'case.kind': 'Case Type',
     'menu.reports': 'Reports',
     'menu.agents': 'Clients',
     'menu.settings': 'Settings',
