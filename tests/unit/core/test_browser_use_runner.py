@@ -41,6 +41,7 @@ class TestHistoryToStepFields:
         hist.model_thoughts.return_value = ["think"]
         hist.action_names.return_value = ["click", "done"]
         hist.final_result.return_value = "ok"
+        hist.judgement.return_value = None
         fields = _history_to_step_fields(hist)
         assert fields["success"] is True
         assert fields["error"] is None
@@ -52,6 +53,7 @@ class TestHistoryToStepFields:
         hist.model_thoughts.return_value = []
         hist.action_names.return_value = []
         hist.final_result.return_value = "找不到按钮"
+        hist.judgement.return_value = None
         fields = _history_to_step_fields(hist)
         assert fields["success"] is False
         assert "找不到按钮" in fields["error"]
@@ -62,8 +64,43 @@ class TestHistoryToStepFields:
         hist.model_thoughts.return_value = []
         hist.action_names.return_value = []
         hist.final_result.return_value = None
+        hist.judgement.return_value = None
         fields = _history_to_step_fields(hist)
         assert fields["success"] is False
+
+    def test_judge_overrides_agent_false_negative(self):
+        hist = MagicMock()
+        hist.is_successful.return_value = False
+        hist.model_thoughts.return_value = []
+        hist.action_names.return_value = ["input", "click", "done"]
+        hist.final_result.return_value = "无法完成：筛选框不可见"
+        hist.judgement.return_value = {
+            "verdict": False,
+            "failure_reason": (
+                "The agent incorrectly reported task failure despite successfully "
+                "completing all required steps. Screenshots clearly show the unit was selected."
+            ),
+            "reasoning": "UI shows 京州市院 in the unit field.",
+        }
+        fields = _history_to_step_fields(hist)
+        assert fields["success"] is True
+        assert fields["error"] is None
+        assert "judge override" in fields["thinking"]
+
+    def test_judge_verdict_true_overrides_agent_fail(self):
+        hist = MagicMock()
+        hist.is_successful.return_value = False
+        hist.model_thoughts.return_value = []
+        hist.action_names.return_value = ["done"]
+        hist.final_result.return_value = "agent said fail"
+        hist.judgement.return_value = {
+            "verdict": True,
+            "failure_reason": "",
+            "reasoning": "Task completed.",
+        }
+        fields = _history_to_step_fields(hist)
+        assert fields["success"] is True
+        assert fields["error"] is None
 
 
 @pytest.mark.asyncio
