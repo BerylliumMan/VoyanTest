@@ -128,6 +128,7 @@ class TestCaseUpdate(BaseModel):
     is_init: Optional[bool] = None
     tags: Optional[str] = None
     priority: Optional[str] = None
+    case_kind: Optional[str] = Field(None, pattern="^(functional|ui)$")
 
 class TestStepCreatePayload(BaseModel):
     step_order: int = Field(..., gt=0)
