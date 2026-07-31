@@ -209,12 +209,16 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     {
       title: t['actions'], render: (_: unknown, record: TestCase) => (
         <div className={styles.actionsCell}>
-          <Button type="primary" size="mini" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
-          <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} className={styles.agentSelectMini} size="mini">
-            {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
-          </Select>
-          <Button type="outline" size="mini" icon={<IconPlayArrow />} onClick={() => handleRunClient(record.id)}>{t['client']}</Button>
-          <Button type="outline" size="mini" icon={<IconBug />} onClick={() => handleRunDebug(record.id)}>调试</Button>
+          {allowRun && (
+            <>
+              <Button type="primary" size="mini" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
+              <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} className={styles.agentSelectMini} size="mini">
+                {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
+              </Select>
+              <Button type="outline" size="mini" icon={<IconPlayArrow />} onClick={() => handleRunClient(record.id)}>{t['client']}</Button>
+              <Button type="outline" size="mini" icon={<IconBug />} onClick={() => handleRunDebug(record.id)}>调试</Button>
+            </>
+          )}
           <Button type="text" size="mini" icon={record.is_init ? <IconStarFill className={styles.initIcon} /> : <IconStar />}
             onClick={() => handleToggleInit(record.id, !record.is_init)}
             aria-label={record.is_init ? '取消初始化' : '标记为初始化'}
