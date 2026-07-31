@@ -67,7 +67,10 @@ class Pipeline:
         # Step 4: Validate
         self._check_cancelled()
         self._progress(4, 4, "正在校验用例")
-        v_result = validate_test_cases(tcs, fps)
+        from app.gen.prompts import case_kind_from_tc_prompt_key
+        tc_key = self.config.get("tc_prompt_key") or getattr(self.tc_generator, "prompt_key", None)
+        require_structured = case_kind_from_tc_prompt_key(tc_key) == "ui"
+        v_result = validate_test_cases(tcs, fps, require_structured=require_structured)
         warnings.extend(v_result["warnings"])
         if not v_result["passed"]:
             warnings.append(f"质量校验: {v_result['valid_count']}/{len(tcs)} 个用例通过")
