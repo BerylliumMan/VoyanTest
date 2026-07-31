@@ -64,7 +64,7 @@ async def get_next_project_case_number(db: AsyncSession, project_id: int) -> int
 
 async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_models.TestCase:
     """创建测试用例及其步骤（单事务）"""
-    kind = getattr(case, "case_kind", None) or "ui"
+    kind = getattr(case, "case_kind", None) or "functional"
     if kind not in ("functional", "ui"):
         kind = "ui"
     db_case = db_models.TestCase(
