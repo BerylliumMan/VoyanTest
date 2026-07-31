@@ -121,6 +121,8 @@ async def export_test_cases(
 
         module_name = tc.module.name if tc.module else ""
 
+        from app.gen.adapter import format_priority_for_export
+
         values = [
             tc.project_case_number,
             module_name,
@@ -128,7 +130,7 @@ async def export_test_cases(
             tc.description or "",
             steps_str,
             expected_str,
-            tc.priority or "medium",
+            format_priority_for_export(tc.priority),
         ]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
