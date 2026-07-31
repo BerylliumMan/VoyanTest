@@ -6,7 +6,7 @@ import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
 import logger from '@/utils/logger';
-import { TestCase, Module, Project, Environment, Step } from './types';
+import { TestCase, Module, Project, Environment, Step, CaseKind } from './types';
 import useTestCaseData from './hooks/useTestCaseData';
 import ModuleTree from './components/ModuleTree';
 import TestCaseTable from './components/TestCaseTable';
@@ -16,9 +16,14 @@ import BatchMoveCopyModal from './components/BatchMoveCopyModal';
 import EnvironmentManager from './components/EnvironmentManager';
 import styles from './index.module.less';
 
-const TestCases: React.FC = () => {
+interface TestCasesProps {
+  caseKind?: CaseKind;
+}
+
+const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const t = useLocale();
   const history = useHistory();
+  const allowRun = caseKind === 'ui';
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState<number | null>(null);
@@ -54,7 +59,7 @@ const TestCases: React.FC = () => {
   const [batchRunLoading, setBatchRunLoading] = useState(false);
   const batchRunModeRef = useRef<'server' | 'client'>('server');
 
-  const { data, total, loading, modules, moduleTree, environments, selectedEnvironment, setSelectedEnvironment, fetchData, fetchModules, fetchEnvironments } = useTestCaseData(selectedProject, selectedModuleId, page, pageSize, submittedQuery);
+  const { data, total, loading, modules, moduleTree, environments, selectedEnvironment, setSelectedEnvironment, fetchData, fetchModules, fetchEnvironments } = useTestCaseData(selectedProject, selectedModuleId, page, pageSize, submittedQuery, caseKind);
 
   useEffect(() => {
     apiGet<Project[]>('/api/projects/')
