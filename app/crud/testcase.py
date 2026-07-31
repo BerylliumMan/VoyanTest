@@ -243,6 +243,11 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
         s.step_order: getattr(s, "cacheable", True)
         for s in (db_case.steps or [])
     }
+    old_structured = {
+        s.step_order: getattr(s, "structured_step", None)
+        for s in (db_case.steps or [])
+        if getattr(s, "structured_step", None)
+    }
 
     # 删除旧步骤并创建新步骤（单事务）
     await delete_steps_for_case(db, case_id)
@@ -261,6 +266,13 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
             cacheable = bool(getattr(step_data, "cacheable", True))
         else:
             cacheable = bool(old_cacheable.get(step_data.step_order, True))
+        if "structured_step" in fields_set:
+            structured = step_data.structured_step
+        else:
+            structured = getattr(step_data, "structured_step", None) or old_structured.get(step_data.step_order)
+        if not structured and step_data.description:
+            from core.step_normalize import parse_instant_to_structured
+            structured = parse_instant_to_structured(step_data.description)
         db_step = db_models.TestStep(
             case_id=case_id,
             step_order=step_data.step_order,
@@ -268,6 +280,7 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
             parsed_result=step_data.parsed_result,
             healed_selector=healed,
             learned_locator=learned,
+            structured_step=structured if isinstance(structured, dict) else None,
             cacheable=cacheable,
         )
         db.add(db_step)
