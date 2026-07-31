@@ -243,13 +243,17 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     <Popconfirm title={t['confirm.delete.item']} onOk={handleBatchDelete}><Button type="primary" status="danger" icon={<IconDelete />}>{t['delete.batch'].replace('{count}', String(selectedRowKeys.length))}</Button></Popconfirm>
     <Button type="outline" onClick={() => openBatchModal('move')}>{t['batch.move']}</Button>
     <Button type="outline" onClick={() => openBatchModal('copy')}>{t['batch.copy']}</Button>
-    <Button type="primary" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('server')}>{t['batch.run.server']}</Button>
-    <div className={styles.inlineFlex}>
-      <Select value={selectedAgent} onChange={setSelectedAgent} className={styles.agentSelectWide} placeholder={t['select.agent']}>
-        {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
-      </Select>
-      <Button type="outline" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('client')}>{t['batch.run.client']}</Button>
-    </div>
+    {allowRun && (
+      <>
+        <Button type="primary" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('server')}>{t['batch.run.server']}</Button>
+        <div className={styles.inlineFlex}>
+          <Select value={selectedAgent} onChange={setSelectedAgent} className={styles.agentSelectWide} placeholder={t['select.agent']}>
+            {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
+          </Select>
+          <Button type="outline" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('client')}>{t['batch.run.client']}</Button>
+        </div>
+      </>
+    )}
   </> : null;
 
   const filterExtra = selectedProject ? (
