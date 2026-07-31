@@ -1058,6 +1058,8 @@ async def execute_nl_steps_browser_use(
                     f"--- Step {order} start: {_truncate(desc, 160)} ---",
                 )
                 pages_before = await list_browser_use_page_ids(browser)
+                step_stop = create_step_stop_state()
+                stop_watch_ref["state"] = step_stop
                 step_cb = _make_new_step_callback(
                     on_progress,
                     step_order=int(order) or 0,
@@ -1075,7 +1077,24 @@ async def execute_nl_steps_browser_use(
                 try:
                     history = await agent.run(max_steps=max_steps_per_nl)
                     fields = history_to_step_fields(history)
-                    if (not fields["success"]) and _is_max_steps_incomplete(fields.get("error")):
+                    if step_stop.get("stop"):
+                        reason = step_stop.get("reason") or "early stop"
+                        logger.warning(
+                            "browser-use step %s early-stop: %s", order, reason,
+                        )
+                        _emit_progress(
+                            on_progress,
+                            f"Step {order} early-stop: {reason}",
+                        )
+                        fields = {
+                            "success": False,
+                            "thinking": fields.get("thinking") or "",
+                            "action": fields.get("action") or "browser_use",
+                            "error": (
+                                f"早停: {reason}（避免空白标签恢复空转 / 无意义重试）"
+                            ),
+                        }
+                    elif (not fields["success"]) and _is_max_steps_incomplete(fields.get("error")):
                         cont_budget = max(10, min(20, int(max_steps_per_nl)))
                         logger.info(
                             "browser-use step %s hit max_steps, continue +%s",
@@ -1100,6 +1119,16 @@ async def execute_nl_steps_browser_use(
                         )
                         history = await cont_agent.run(max_steps=cont_budget)
                         fields = history_to_step_fields(history)
+                        if step_stop.get("stop"):
+                            reason = step_stop.get("reason") or "early stop"
+                            fields = {
+                                "success": False,
+                                "thinking": fields.get("thinking") or "",
+                                "action": fields.get("action") or "browser_use",
+                                "error": (
+                                    f"早停: {reason}（避免空白标签恢复空转 / 无意义重试）"
+                                ),
+                            }
                 except Exception as exc:
                     logger.exception("browser-use step %s failed", order)
                     _emit_progress(on_progress, f"Step {order} exception: {exc}")
@@ -1109,6 +1138,8 @@ async def execute_nl_steps_browser_use(
                         "action": "browser_use",
                         "error": str(exc),
                     }
+                finally:
+                    stop_watch_ref["state"] = None
 
                 try:
                     await switch_browser_use_to_newest_tab_if_opened(
