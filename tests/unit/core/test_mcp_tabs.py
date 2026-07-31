@@ -6,6 +6,7 @@ from core.mcp_tabs import (
     ensure_on_newest_tab,
     parse_mcp_tabs,
     pick_new_tab_index,
+    pick_newest_tab_index,
     should_watch_for_new_tab,
     switch_to_new_tab_if_opened,
 )
