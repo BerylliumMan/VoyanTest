@@ -24,6 +24,7 @@ class AnalysisSession:
     completed_at: Optional[datetime] = None
     functional_points: list["FunctionalPoint"] = field(default_factory=list)
     test_cases: list["TestCase"] = field(default_factory=list)
+    case_kind: str = "ui"
 
 
 @dataclass
