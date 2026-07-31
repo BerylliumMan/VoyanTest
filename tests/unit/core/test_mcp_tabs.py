@@ -120,6 +120,15 @@ async def test_switch_retries_until_tab_appears():
     assert any(c[1].get("action") == "select" for c in calls)
 
 
+def test_pick_newest_tab_index_skips_blank():
+    tabs = [
+        {"index": 0, "url": "https://example.com/", "current": True},
+        {"index": 1, "url": "https://example.com/detail", "current": False},
+        {"index": 2, "url": "about:blank", "current": False},
+    ]
+    assert pick_newest_tab_index(tabs) == 1
+
+
 @pytest.mark.asyncio
 async def test_ensure_on_newest_tab_selects_when_stale():
     calls = []
