@@ -171,6 +171,38 @@ async def delete_run_batch(db: AsyncSession, batch_id: int) -> bool:
     return True
 
 
+async def cancel_remaining_batch_runs(
+    db: AsyncSession,
+    batch_id: int,
+    message: str = "用户停止执行",
+) -> int:
+    """将批次内仍为 pending/running 的 TestRun 标为 cancelled。返回更新条数。"""
+    result = await db.execute(
+        select(db_models.TestRun).where(
+            db_models.TestRun.batch_id == batch_id,
+            db_models.TestRun.status.in_(("pending", "running")),
+        )
+    )
+    runs = result.scalars().all()
+    now = tz_now()
+    for r in runs:
+        r.status = "cancelled"
+        if r.start_time is None:
+            r.start_time = now
+        r.end_time = now
+        r.duration = 0.0
+        db.add(
+            db_models.RunLog(
+                run_id=r.id,
+                level="warning",
+                message=message,
+            )
+        )
+    if runs:
+        await db.flush()
+    return len(runs)
+
+
 async def update_batch_counters(db: AsyncSession, batch_id: int, case_status: str) -> db_models.RunBatch | None:
     """用例完成后更新批次计数和状态"""
     batch = await get_run_batch(db, batch_id)
