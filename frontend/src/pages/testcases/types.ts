@@ -8,7 +8,7 @@ export interface TestCase {
   module_id: number | null;
   is_init: boolean;
   case_kind?: CaseKind;
-  steps: { step_order: number; description: string; parsed_result?: string; retry_max?: number; retry_delay?: number; healed_selector?: string; learned_locator?: Record<string, unknown> | null; cacheable?: boolean }[];
+  steps: { step_order: number; description: string; parsed_result?: string; retry_max?: number; retry_delay?: number; healed_selector?: string; learned_locator?: Record<string, unknown> | null; structured_step?: Record<string, unknown> | null; cacheable?: boolean }[];
 }
 
 export interface Module {
@@ -43,6 +43,7 @@ export interface Step {
   retry_delay?: number;
   healed_selector?: string;
   learned_locator?: Record<string, unknown> | null;
+  structured_step?: Record<string, unknown> | null;
   /** When false, skip locator/plan cache replay & learning for this step */
   cacheable?: boolean;
 }
