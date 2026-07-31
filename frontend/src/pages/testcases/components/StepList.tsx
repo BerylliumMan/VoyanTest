@@ -126,6 +126,12 @@ const StepList: React.FC<StepListProps> = ({
                   value={step.structured_step?.value == null ? '' : String(step.structured_step.value)}
                   onChange={(v) => patchStructured(idx, step, { value: v })}
                 />
+                <Input
+                  style={{ flex: 1, minWidth: 100 }}
+                  placeholder="消歧 disambiguation（同名时）"
+                  value={(step.structured_step?.disambiguation as string) || ''}
+                  onChange={(v) => patchStructured(idx, step, { disambiguation: v })}
+                />
                 {(step.structured_step?.action === 'icon_click') && (
                   <Input
                     style={{ flex: 2, minWidth: 200 }}
