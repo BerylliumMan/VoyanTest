@@ -826,25 +826,19 @@ class AgentManager:
                 if invalidate or (used_replay and not step_result["success"]):
                     step_result["invalidate_learned_locator"] = True
                 elif step_result["success"] and can_write_memory and tool_call is not None:
-                    from core.locator_memory import (
-                        bump_hit_count,
-                        extract_from_snapshot,
-                        is_learnable_action,
+                    from core.locator_memory import learn_fingerprint_after_success
+
+                    fp = learn_fingerprint_after_success(
+                        action=tool_call.action,
+                        selector=tool_call.selector,
+                        value=tool_call.value,
+                        snapshot=snap or "",
+                        structured_step=structured_step,
+                        cached_fp=cached_fp,
+                        used_replay=used_replay,
                     )
-                    action = tool_call.action
-                    selector = tool_call.selector
-                    if is_learnable_action(action) and selector:
-                        fp = extract_from_snapshot(
-                            snap or "",
-                            str(selector),
-                            action=str(action),
-                            value=tool_call.value,
-                        )
-                        if fp:
-                            if used_replay and cached_fp:
-                                step_result["learned_locator"] = bump_hit_count(cached_fp)
-                            else:
-                                step_result["learned_locator"] = fp
+                    if fp:
+                        step_result["learned_locator"] = fp
 
                 step_results.append(step_result)
 
