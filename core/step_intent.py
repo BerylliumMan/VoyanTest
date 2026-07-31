@@ -442,8 +442,12 @@ async def resolve_tool_call_from_step(
     system_prompt: str | None = None,  # kept for API compat; unused in two-phase
     use_vision_fallback: bool = True,
     timeout_ms: int = 30000,
+    structured_step: dict | None = None,
 ):
-    """Resolve NL step → PlaywrightMCPToolCall via Intent + deterministic bind (+ vision)."""
+    """Resolve NL step → PlaywrightMCPToolCall via Intent + deterministic bind (+ vision).
+
+    When ``structured_step`` is complete, skip Intent LLM and bind from the structure.
+    """
     from core.blank_click import BLANK_CLICK_ACTION, is_blank_area_click_step
     from core.llm_wrapper import PlaywrightMCPToolCall, generate_tool_call
 
@@ -457,6 +461,64 @@ async def resolve_tool_call_from_step(
             thinking="Step asks to click blank/outside area; use viewport mouse click",
             next_goal="verify this step only",
         )
+
+    # StructuredStep fast path (skip Intent LLM)
+    prebuilt = structured_to_intent(structured_step)
+    if prebuilt is not None:
+        intent = prebuilt
+        action = (intent.action or "").lower()
+        if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside"):
+            return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
+        if action == "click_blank" or action == BLANK_CLICK_ACTION:
+            return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
+
+        icon_step = is_icon_only_click_step(step_description) or (
+            isinstance(structured_step, dict)
+            and (structured_step.get("action") or "").lower() == "icon_click"
+        )
+        candidates = match_intent_candidates(snapshot, intent)
+        ref: str | None = None
+        if len(candidates) == 1 and not icon_step:
+            ref = candidates[0]["ref"]
+        elif len(candidates) == 1 and icon_step:
+            ref = candidates[0]["ref"]
+        elif use_vision_fallback and mcp_manager is not None and (len(candidates) != 1 or icon_step):
+            pool = list(candidates)
+            if icon_step:
+                icon_pool = icon_click_candidates(snapshot)
+                seen = {c["ref"] for c in pool}
+                for c in icon_pool:
+                    if c["ref"] not in seen:
+                        pool.append(c)
+                        seen.add(c["ref"])
+                pool = pool[:16]
+            if not pool and intent.target_name:
+                pool = match_intent_candidates(
+                    snapshot,
+                    StepIntent(
+                        action=intent.action,
+                        target_role=None,
+                        target_name=intent.target_name,
+                        value=intent.value,
+                    ),
+                )[:12]
+            if not pool:
+                pool = icon_click_candidates(snapshot) if icon_step else parse_snapshot_elements(snapshot)[:12]
+            ref = await disambiguate_with_vision(
+                step_description,
+                intent,
+                pool,
+                mcp_manager=mcp_manager,
+                client=client,
+                model=model,
+            )
+        elif len(candidates) == 0 and not use_vision_fallback:
+            return intent_to_tool_call(
+                intent.model_copy(update={"action": "error", "thinking": "structured bind: no AX match"}),
+                ref=None,
+                timeout_ms=timeout_ms,
+            )
+        return intent_to_tool_call(intent, ref=ref, timeout_ms=timeout_ms)
 
     # Fast path without mcp: keep legacy one-shot for unit tests / callers without manager
     if mcp_manager is None:
@@ -506,7 +568,7 @@ async def resolve_tool_call_from_step(
         action = "click"
 
     candidates = match_intent_candidates(snapshot, intent)
-    ref: str | None = None
+    ref = None
     if len(candidates) == 1 and not icon_step:
         ref = candidates[0]["ref"]
     elif len(candidates) == 1 and icon_step:
