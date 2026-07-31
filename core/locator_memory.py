@@ -19,13 +19,14 @@ logger = logging.getLogger(__name__)
 # Playwright MCP accessibility snapshot lines, e.g.:
 #   - button "登录" [ref=e15]
 #   - textbox "用户名" [ref=e12] [cursor=pointer]:
+#   - textbox "Username" [ref=f4e11]   (frame-prefixed refs)
 _SNAP_LINE_RE = re.compile(
     r"^\s*-\s+"
     r"(?P<role>[a-zA-Z0-9_-]+)"
     r"(?:\s+"
     r"(?:\"(?P<name>[^\"]*)\"|'(?P<name2>[^']*)')"
     r")?"
-    r".*?\[ref=(?P<ref>e\d+)\]",
+    r".*?\[ref=(?P<ref>[a-zA-Z]*\d*e\d+)\]",
     re.MULTILINE,
 )
 
