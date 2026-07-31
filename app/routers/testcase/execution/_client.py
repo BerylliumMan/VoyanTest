@@ -573,13 +573,31 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
 
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
 
+    # 预创建 pending TestRun，避免按序落库期间轮询把批次误判为 partial
+    from core.runner._persistence import precreate_pending_runs
+    _init_ids = [c["id"] for c in case_infos if c.get("is_init")]
+    _main_ids = [c["id"] for c in case_infos if not c.get("is_init")]
+    async with db_mod.AsyncSessionLocal() as _pr_db:
+        precreated_run_ids = await precreate_pending_runs(
+            _pr_db, _main_ids, batch.id, init_case_ids=_init_ids,
+        )
+
     async def _run_batch() -> None:
         _all_success = True
         for idx, info in enumerate(case_infos):
             case_id = info["id"]
+            db_run_id = precreated_run_ids.get(case_id)
             steps = info["steps"]
             if not steps:
                 logger.warning("Skip case %s — no steps", case_id)
+                await save_run_results(
+                    case_id, "failed", tz_now(), tz_now(), 0.0,
+                    None, None,
+                    [{"level": "error", "message": "用例无步骤，已跳过"}],
+                    batch_id=batch.id, run_id=db_run_id,
+                    is_init=info.get("is_init", False),
+                )
+                _all_success = False
                 continue
 
             # 仅第一个用例导航 BASE URL；后续复用同一浏览器会话（保留登录态）
