@@ -148,9 +148,11 @@ async def export_test_cases(
             cell.border = thin_border
 
     # 列宽（对齐 gen/history.py 格式 + 结构化列）
+    from openpyxl.utils import get_column_letter
+
     widths = [10, 16, 30, 24, 40, 40, 10, 36]
     for i, w in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + i) if i <= 26 else "A"].width = w
+        ws.column_dimensions[get_column_letter(i)].width = w
 
     buf = io.BytesIO()
     wb.save(buf)
