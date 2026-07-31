@@ -201,6 +201,8 @@ def validate_test_cases(
     if invalid_cases:
         warnings.append(f"{len(invalid_cases)}/{len(test_cases)} 个用例未通过校验")
 
+    for _, vr in valid_cases:
+        warnings.extend(vr.warnings)
     for _, vr in invalid_cases:
         warnings.extend(vr.warnings)
 
