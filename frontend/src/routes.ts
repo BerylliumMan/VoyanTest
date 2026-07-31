@@ -62,6 +62,22 @@ export const routes: IRoute[] = [
   {
     name: 'menu.testcases',
     key: 'testcases',
+    children: [
+      {
+        name: 'menu.testcases.functional',
+        key: 'testcases/functional',
+      },
+      {
+        name: 'menu.testcases.ui',
+        key: 'testcases/ui',
+      },
+    ],
+  },
+  {
+    name: '测试用例重定向',
+    key: 'testcases-redirect',
+    path: '/testcases',
+    ignore: true,
   },
   {
     name: 'menu.reports',
