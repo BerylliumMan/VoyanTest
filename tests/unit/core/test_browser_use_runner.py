@@ -16,7 +16,10 @@ class TestBuildStepTask:
         )
         assert "点击登录" in task
         assert "进入首页" in task
-        assert "https://example.com" in task
+        # 不得把真实 URL 写入 task，否则 browser-use 会自动 navigate 刷掉前序 UI 状态
+        assert "https://example.com" not in task
+        assert "BASE URL" not in task
+        assert "禁止重新打开" in task or "禁止 navigate" in task
         assert "步骤编号: 1" in task
 
     def test_empty_expected(self):
@@ -28,6 +31,7 @@ class TestBuildStepTask:
         )
         assert "未写明" in task
         assert "BASE URL" not in task
+        assert "http://" not in task
 
 
 class TestHistoryToStepFields:
