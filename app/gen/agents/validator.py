@@ -50,8 +50,8 @@ class ValidationResult:
 
 
 def _is_ui_structured_case(tc: dict[str, Any]) -> bool:
-    """True when case looks like UI structured gen (object steps or flag)."""
-    if tc.get("require_structured_steps") or tc.get("case_kind") == "ui":
+    """True when case already has StructuredStep objects or explicit flag."""
+    if tc.get("require_structured_steps"):
         return True
     steps = tc.get("steps") or tc.get("structured_steps")
     if isinstance(steps, list) and steps and all(
