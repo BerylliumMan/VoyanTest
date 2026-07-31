@@ -680,6 +680,45 @@ def _is_max_steps_incomplete(error: str | None) -> bool:
     return "max_steps" in low or "reached max" in low or "maximum step" in low
 
 
+def _history_judgement(history) -> dict[str, Any] | None:
+    """browser-use 0.11+ attaches Judge result; older versions have no API."""
+    try:
+        if hasattr(history, "judgement"):
+            data = history.judgement()
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+    return None
+
+
+def _judge_says_task_actually_done(judgement: dict[str, Any] | None) -> bool:
+    """Judge may verdict=FAIL while explaining the agent falsely reported failure.
+
+    Example failure_reason: "The agent incorrectly reported task failure despite
+    successfully completing all required steps..."
+    """
+    if not judgement:
+        return False
+    if judgement.get("verdict") is True:
+        return True
+    blob = " ".join(
+        str(judgement.get(k) or "")
+        for k in ("failure_reason", "reasoning")
+    ).lower()
+    markers = (
+        "incorrectly reported",
+        "despite successfully completing",
+        "actually completed",
+        "successfully completing all required",
+        "screenshots clearly show",
+        "误报",
+        "实际已完成",
+        "已经完成",
+        "任务实际成功",
+    )
+    return any(m in blob for m in markers)
+
+
 def history_to_step_fields(history) -> dict[str, Any]:
     """Map AgentHistoryList to VoyanTest step result fields."""
     success: bool | None = None
@@ -703,6 +742,17 @@ def history_to_step_fields(history) -> dict[str, Any]:
             action = " → ".join(str(n) for n in names if n)[:500]
     except Exception:
         pass
+
+    judgement = _history_judgement(history)
+    # Agent self-report can false-fail after dropdown closes; prefer Judge when it
+    # indicates the work was actually done (verdict true OR false-negative wording).
+    if success is False and _judge_says_task_actually_done(judgement):
+        success = True
+        error = None
+        note = (judgement or {}).get("failure_reason") or (judgement or {}).get("reasoning") or ""
+        if note:
+            thinking = (thinking + "\n" if thinking else "") + f"[judge override] {str(note)[:800]}"
+
     try:
         final = history.final_result() if hasattr(history, "final_result") else None
         if success is False and final:
