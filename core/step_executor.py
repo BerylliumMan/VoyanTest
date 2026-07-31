@@ -626,6 +626,7 @@ async def execute_step_mcp(
                     model=model,
                     system_prompt_override=system_prompt_override,
                     step_timeout_ms=step_timeout_ms,
+                    structured_step=structured_step,
                 )
 
         if relocate_attempted:
