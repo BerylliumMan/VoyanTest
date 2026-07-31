@@ -499,7 +499,22 @@ async def resolve_tool_call_from_step(
             isinstance(structured_step, dict)
             and (structured_step.get("action") or "").lower() == "icon_click"
         )
-        candidates = match_intent_candidates(snapshot, intent)
+        frame_hint = None
+        if isinstance(structured_step, dict):
+            frame_hint = structured_step.get("frame_hint")
+
+        # Scroll + re-snapshot when target label missing from truncated AX tree
+        if mcp_manager is not None and hasattr(mcp_manager, "refresh_snapshot_for_hints"):
+            hints = [intent.target_name] if intent.target_name else []
+            if not hints:
+                from core.step_intent import extract_label_hints as _elh
+                hints = _elh(step_description)
+            try:
+                snapshot = await mcp_manager.refresh_snapshot_for_hints(hints, current=snapshot)
+            except Exception as exc:
+                logger.debug("snapshot hint refresh failed: %s", exc)
+
+        candidates = match_intent_candidates(snapshot, intent, frame_hint=frame_hint)
         ref: str | None = None
         if len(candidates) == 1 and not icon_step:
             ref = candidates[0]["ref"]
