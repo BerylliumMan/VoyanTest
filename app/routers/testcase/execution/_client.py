@@ -731,6 +731,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     None, None,
                     [{"level": "error", "message": "客户端 Agent 执行过程中发生内部错误，请查看服务端日志获取详情"}],
                     batch_id=batch.id,
+                    run_id=db_run_id,
                     is_init=info.get("is_init", False),
                 )
 
@@ -749,6 +750,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                             "message": f"因初始化用例 {case_id} 失败而跳过",
                         }],
                         batch_id=batch.id,
+                        run_id=precreated_run_ids.get(remaining["id"]),
                         is_init=remaining.get("is_init", False),
                     )
                 break
