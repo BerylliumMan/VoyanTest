@@ -223,7 +223,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是 UI 自动化用例生成专家。流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出浏览器可执行步骤。按类型选型（主路径/校验提示/空态/组合查询），禁止机械凑正常/异常/边界；优先可自动化路径。硬规则：一步一动作；【】标可见文案/aria-label/tooltip；禁止控件类型词与裸「图标/图片」进【】；禁止点击【图标】；纯图形无文字时写「点击{位置}的{外观}图标（用途：{功能}）」；等待用「等待【可见文案】出现」；同名须消歧；中间 expected 默认空。",
+        "system_prompt": "你是 UI 自动化用例生成专家。流程：(1) fp_extract 提取细粒度测试项；(2) tc_generate_ui 输出浏览器可执行 StructuredStep。按类型选型（主路径/校验提示/空态/组合查询），禁止机械凑正常/异常/边界。硬规则：steps 必须是对象数组，每步含 action/target_name/value；一步一动作；target_name 只写可见文案/aria-label，禁止控件类型词与省略号；纯图形用 action=icon_click + icon_hint；等待用 wait+可见文案；同名须 disambiguation；中间 expected 默认空。",
         "prompt_overrides": {}
     },
     {
