@@ -19,6 +19,14 @@ def test_pick_tc_prompt_key_priority():
     assert pick_tc_prompt_key([]) == "tc_generate"
 
 
+def test_case_kind_from_tc_prompt_key():
+    from app.gen.prompts import case_kind_from_tc_prompt_key
+    assert case_kind_from_tc_prompt_key("tc_generate") == "functional"
+    assert case_kind_from_tc_prompt_key("tc_generate_ui") == "ui"
+    assert case_kind_from_tc_prompt_key("tc_generate_flow") == "ui"
+    assert case_kind_from_tc_prompt_key(None) == "functional"
+
+
 def test_min_tcs_per_item_flow_vs_default():
     assert min_tcs_per_item(["tc_generate_flow"]) == 1
     assert min_tcs_per_item(["fp_extract_flow"]) == 1

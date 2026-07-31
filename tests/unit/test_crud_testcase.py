@@ -17,9 +17,9 @@ async def _module(db, project_id, name="M"):
     ))
 
 
-async def _case(db, project_id, name="C", module_id=None, steps=None):
+async def _case(db, project_id, name="C", module_id=None, steps=None, case_kind="ui"):
     return await crud.create_test_case(db, models.TestCaseCreate(
-        project_id=project_id, module_id=module_id, name=name,
+        project_id=project_id, module_id=module_id, name=name, case_kind=case_kind,
         steps=steps or [TestStepCreatePayload(step_order=1, description="s")],
     ))
 
