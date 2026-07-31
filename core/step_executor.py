@@ -757,10 +757,9 @@ async def execute_step_mcp(
             action = getattr(tool_call, "action", None)
             selector = getattr(tool_call, "selector", None)
             value = getattr(tool_call, "value", None)
+            structured = step.get("structured_step") if isinstance(step.get("structured_step"), dict) else None
             try:
-                if used_replay and cached_fp:
-                    result["learned_locator"] = bump_hit_count(cached_fp)
-                elif result.get("_open_fp") and is_learnable_action(action) and selector:
+                if result.get("_open_fp") and is_learnable_action(action) and selector:
                     pick_fp = extract_from_snapshot(
                         snapshot, str(selector), action=str(action), value=value,
                     )
@@ -811,18 +810,32 @@ async def execute_step_mcp(
                             plan_steps,
                             page_url_hint=page_url_hint(extract_page_url(snapshot)),
                         )
-                    elif is_learnable_action(action) and selector:
-                        fp = extract_from_snapshot(
-                            snapshot, str(selector), action=str(action), value=value,
+                    else:
+                        from core.locator_memory import learn_fingerprint_after_success
+                        learned = learn_fingerprint_after_success(
+                            action=action,
+                            selector=selector,
+                            value=value,
+                            snapshot=snapshot,
+                            structured_step=structured,
+                            cached_fp=cached_fp,
+                            used_replay=used_replay,
                         )
-                        if fp:
-                            result["learned_locator"] = fp
-                elif is_learnable_action(action) and selector:
-                    fp = extract_from_snapshot(
-                        snapshot, str(selector), action=str(action), value=value,
+                        if learned:
+                            result["learned_locator"] = learned
+                else:
+                    from core.locator_memory import learn_fingerprint_after_success
+                    learned = learn_fingerprint_after_success(
+                        action=action,
+                        selector=selector,
+                        value=value,
+                        snapshot=snapshot,
+                        structured_step=structured,
+                        cached_fp=cached_fp,
+                        used_replay=used_replay,
                     )
-                    if fp:
-                        result["learned_locator"] = fp
+                    if learned:
+                        result["learned_locator"] = learned
             except Exception as exc:
                 logger.debug("learn locator/plan failed: %s", exc)
 
