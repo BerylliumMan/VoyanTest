@@ -12,6 +12,14 @@ VALID_ACTIONS = {
 }
 MAX_STEP_DESCRIPTION_LENGTH = 500
 TC_NAME_PATTERN = re.compile(r"^[\w\u4e00-\u9fff\s\-（）(),.。!！?？、：；]{2,100}$")
+# Truncated labels inside 【】 cannot be located reliably
+_BRACKET_ELLIPSIS_RE = re.compile(r"【[^】]*(?:[…\.]{2,}|。。。)[^】]*】")
+# Multi-action / close-all compounds that should have been split
+_COMPOUND_STEP_RE = re.compile(
+    r"(?:把|将)?所有(?:的)?(?:对话框|弹窗)|(?:关闭|关掉)所有(?:的)?(?:对话框|弹窗)|"
+    r"(?:分别|依次|然后|并且).{0,8}(?:点击|输入|选择)|"
+    r"(?:点击|输入).{0,20}(?:然后|并且|再).{0,8}(?:点击|输入|选择)"
+)
 
 
 class ValidationResult:
