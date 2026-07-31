@@ -423,6 +423,8 @@ const i18n = {
     'menu.dashboard': '仪表盘',
     'menu.projects': '项目管理',
     'menu.testcases': '测试用例',
+    'menu.testcases.functional': '功能测试用例',
+    'menu.testcases.ui': 'UI自动化用例',
     'menu.reports': '执行报告',
     'menu.agents': '客户端管理',
     'menu.settings': '系统设置',
