@@ -130,7 +130,11 @@ def resolve_ref(
     *,
     step_description: str = "",
 ) -> Optional[str]:
-    """Return current ref only when exactly one element matches the fingerprint."""
+    """Return current ref when a unique fingerprint match exists.
+
+    Matching order: exact name → longest prefix (ellipsis salvage) → controlled
+    containment when only one candidate remains.
+    """
     if not fingerprint:
         return None
     if not url_hint_ok(fingerprint, snapshot):
@@ -142,21 +146,52 @@ def resolve_ref(
 
     role = (fingerprint.get("role") or "").strip().lower()
     name = (fingerprint.get("name") or "").strip()
-    matches: list[str] = []
+    if not role and not name:
+        return None
+
+    exact: list[str] = []
+    prefix: list[tuple[int, str]] = []  # (prefix_len, ref)
+    partial: list[str] = []
     for el in parse_snapshot_elements(snapshot):
         if role and el["role"] != role:
             continue
-        if name and el["name"] != name:
+        el_name = el.get("name") or ""
+        if not name:
+            exact.append(el["ref"])
             continue
-        if not role and not name:
-            continue
-        matches.append(el["ref"])
+        if el_name == name:
+            exact.append(el["ref"])
+        elif el_name.startswith(name) or name.startswith(el_name):
+            # Require meaningful prefix (≥2 chars) to avoid single-char noise
+            plen = min(len(el_name), len(name))
+            if plen >= 2:
+                prefix.append((plen, el["ref"]))
+        elif name in el_name or el_name in name:
+            if len(name) >= 2 and len(el_name) >= 2:
+                partial.append(el["ref"])
 
-    if len(matches) != 1:
-        if matches:
-            logger.info("locator_memory: ambiguous match count=%s, skip replay", len(matches))
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        logger.info("locator_memory: ambiguous exact match count=%s, skip replay", len(exact))
         return None
-    return matches[0]
+
+    if prefix:
+        prefix.sort(key=lambda x: -x[0])
+        best_len = prefix[0][0]
+        tops = [r for L, r in prefix if L == best_len]
+        if len(tops) == 1:
+            logger.info("locator_memory: unique longest-prefix match len=%s", best_len)
+            return tops[0]
+        logger.info("locator_memory: ambiguous prefix match count=%s, skip replay", len(tops))
+        return None
+
+    if len(partial) == 1:
+        logger.info("locator_memory: unique containment match")
+        return partial[0]
+    if partial:
+        logger.info("locator_memory: ambiguous partial match count=%s, skip replay", len(partial))
+    return None
 
 
 def bump_hit_count(fp: dict[str, Any]) -> dict[str, Any]:
