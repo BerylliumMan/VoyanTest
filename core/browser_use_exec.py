@@ -928,7 +928,9 @@ async def execute_nl_steps_browser_use(
     if cdp_url:
         stop_browser = False
 
-    log_handlers = attach_browser_use_log_handler(on_progress=on_progress)
+    log_handlers = attach_browser_use_log_handler(
+        on_progress=on_progress, stop_watch_ref=stop_watch_ref,
+    )
 
     # Disable default extensions: sync download can block the asyncio loop
     # (WS heartbeat dies → server unregisters the agent mid-run).
@@ -948,7 +950,9 @@ async def execute_nl_steps_browser_use(
         "use_vision": "auto",
         "max_failures": 2,
         # Between multi_act actions / turns: jump to newest tab if click opened one.
-        "register_should_stop_callback": _compose_should_stop_callback(browser),
+        "register_should_stop_callback": _compose_should_stop_callback(
+            browser, stop_watch_ref=stop_watch_ref,
+        ),
     }
     if prompt_override is not None:
         agent_common["override_system_message"] = prompt_override
