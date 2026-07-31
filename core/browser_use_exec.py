@@ -742,7 +742,9 @@ async def execute_nl_steps_browser_use(
         enable_default_extensions=False,
         cdp_url=cdp_url,
     )
-    _soften_click_opener_refocus()
+    # Register TabCreated listener early (armed=False). Do NOT monkeypatch
+    # browser-use click handlers — bubus requires handler.__name__ == on_<Event>
+    # and class patches have already caused BrowserStart failures in production.
     enable_browser_use_auto_switch_new_tabs(browser)
 
     agent_common: dict[str, Any] = {
@@ -777,9 +779,18 @@ async def execute_nl_steps_browser_use(
             except Exception as exc:
                 logger.warning("browser-use 打开 BASE URL 失败: %s", exc, exc_info=True)
                 _emit_progress(on_progress, f"BASE URL open failed: {exc}")
+        else:
+            # Hybrid / attach mode: connect CDP before arming so baseline includes
+            # existing tabs. Arming with an empty baseline treats reconnect
+            # TabCreated events as "new" and flips focus away from the real page.
+            try:
+                await browser.start()
+            except Exception as exc:
+                logger.warning(
+                    "browser-use start before tab-arm failed: %s", exc, exc_info=True,
+                )
 
-        # After warmup: auto-focus newly created tabs (target=_blank / window.open).
-        # Baseline current ids so reconnect TabCreated for existing tabs is ignored.
+        # After CDP is up: snapshot existing tabs, then auto-focus only truly new ones.
         await arm_browser_use_auto_switch_new_tabs(browser)
 
         failed_step: int | None = None
