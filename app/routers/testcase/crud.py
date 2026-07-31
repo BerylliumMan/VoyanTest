@@ -37,14 +37,18 @@ async def create_test_case(case: models.TestCaseCreate, user=Depends(get_current
 
 
 @router.get("/search", response_model=models.TestCasePage)
-async def search_test_cases(project_id: int, q: str = "", page: int = 1, size: int = 20, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+async def search_test_cases(
+    project_id: int, q: str = "", page: int = 1, size: int = 20,
+    case_kind: str | None = None,
+    user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
+) -> dict:
     """
     搜索测试用例（按名称和描述）。
     """
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
-    result = await crud.search_test_cases(db, project_id, q, page, size)
+    result = await crud.search_test_cases(db, project_id, q, page, size, case_kind=case_kind)
     return {
         "items": result["items"],
         "total_items": result["total_items"],
@@ -54,12 +58,17 @@ async def search_test_cases(project_id: int, q: str = "", page: int = 1, size: i
 
 
 @router.get("/init-cases", response_model=List[models.TestCase])
-async def list_init_test_cases(project_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> list[models.TestCase]:
+async def list_init_test_cases(
+    project_id: int,
+    case_kind: str | None = None,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> list[models.TestCase]:
     """获取项目下所有标记为初始化的测试用例"""
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
-    return await crud.get_init_test_cases(db, project_id)
+    return await crud.get_init_test_cases(db, project_id, case_kind=case_kind)
 
 
 @router.get("/export")
