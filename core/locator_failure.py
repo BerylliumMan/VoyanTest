@@ -4,10 +4,17 @@
 from __future__ import annotations
 
 _LOCATOR_FAIL_HINTS = (
-    "timeout",
-    "timed out",
     "not found",
     "no element",
+    "no popup",
+    "no modal",
+    "no dialog",
+    "no alert",
+    "no matching",
+    "locator",
+    "timeout",
+    "timed out",
+    "unable to find",
     "unable to locate",
     "cannot find",
     "can't find",
