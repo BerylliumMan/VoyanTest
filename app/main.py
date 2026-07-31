@@ -253,6 +253,42 @@ async def _run_startup_init():
                             "历史用例 case_kind 已迁到 functional，rowcount=%s",
                             result.rowcount,
                         )
+                    # 一次性：生成页 P0/P1/P2 导入时未映射，全落成 medium；按 gen_test_cases 标题回填
+                    done_pri = (
+                        await db.execute(
+                            _t("SELECT 1 FROM schema_patches WHERE id = 'priority_backfill_from_gen'")
+                        )
+                    ).scalar()
+                    if not done_pri:
+                        from app.gen.adapter import normalize_priority_to_storage
+                        rows = (
+                            await db.execute(
+                                _t(
+                                    "SELECT tc.id, g.priority FROM test_cases tc "
+                                    "JOIN gen_test_cases g ON g.title = tc.name "
+                                    "WHERE g.priority IS NOT NULL AND TRIM(g.priority) <> ''"
+                                )
+                            )
+                        ).all()
+                        updated = 0
+                        for tc_id, gen_pri in rows:
+                            stored = normalize_priority_to_storage(gen_pri)
+                            await db.execute(
+                                _t("UPDATE test_cases SET priority = :p WHERE id = :id"),
+                                {"p": stored, "id": tc_id},
+                            )
+                            updated += 1
+                        await db.execute(
+                            _t(
+                                "INSERT INTO schema_patches (id) VALUES ('priority_backfill_from_gen') "
+                                "ON CONFLICT (id) DO NOTHING"
+                            )
+                        )
+                        await db.commit()
+                        logger.info(
+                            "用例优先级已按生成结果回填，matched=%s",
+                            updated,
+                        )
         except Exception:
             logger.warning("case_kind 历史数据回填失败（非关键，继续）", exc_info=True)
         try:
