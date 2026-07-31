@@ -144,7 +144,7 @@ LLM 配置存储在数据库中，**不从环境变量或配置文件读取**。
 | `DATABASE_URL` | 数据库连接字符串 | `sqlite:///./uitest.db` |
 | `APP_HOST` | 监听地址 | `0.0.0.0` |
 | `APP_PORT` | 监听端口 | `8002` |
-| `SESSION_EXPIRE_MINUTES` | 会话过期时间（分钟，滑动续期） | `10080`（7 天） |
+| `SESSION_EXPIRE_MINUTES` | 会话过期时间（分钟，滑动续期） | `720`（12 小时） |
 | `MAX_LOGIN_ATTEMPTS` | 最大登录尝试次数 | `5` |
 | `LOCK_DURATION_MINUTES` | 账号锁定时间 | `15` |
 | `DEFAULT_ADMIN_USERNAME` | 默认管理员用户名 | `admin` |
