@@ -64,12 +64,19 @@ async def get_next_project_case_number(db: AsyncSession, project_id: int) -> int
 
 async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_models.TestCase:
     """创建测试用例及其步骤（单事务）"""
+    kind = getattr(case, "case_kind", None) or "ui"
+    if kind not in ("functional", "ui"):
+        kind = "ui"
     db_case = db_models.TestCase(
         project_id=case.project_id,
         module_id=case.module_id,
         project_case_number=await get_next_project_case_number(db, case.project_id),
         name=case.name,
-        description=case.description
+        description=case.description,
+        case_kind=kind,
+        is_init=bool(getattr(case, "is_init", False)),
+        tags=getattr(case, "tags", None),
+        priority=getattr(case, "priority", None) or "medium",
     )
     db.add(db_case)
     await db.flush()
@@ -91,6 +98,13 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
     db_case.steps = created_steps
     return db_case
 
+
+def _case_kind_filter(case_kind: str | None):
+    if case_kind in ("functional", "ui"):
+        return [db_models.TestCase.case_kind == case_kind]
+    return []
+
+
 async def get_test_case(db: AsyncSession, case_id: int) -> db_models.TestCase | None:
     """通过ID获取测试用例"""
     result = await db.execute(
@@ -100,28 +114,35 @@ async def get_test_case(db: AsyncSession, case_id: int) -> db_models.TestCase | 
     )
     return result.scalar_one_or_none()
 
-async def get_all_test_cases_for_project(db: AsyncSession, project_id: int) -> list[db_models.TestCase]:
+async def get_all_test_cases_for_project(
+    db: AsyncSession, project_id: int, case_kind: str | None = None,
+) -> list[db_models.TestCase]:
     """获取项目的所有测试用例"""
+    conditions = [db_models.TestCase.project_id == project_id, *_case_kind_filter(case_kind)]
     result = await db.execute(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps), selectinload(db_models.TestCase.module))
-        .where(db_models.TestCase.project_id == project_id)
+        .where(*conditions)
         .order_by(db_models.TestCase.project_case_number.asc())
     )
     return result.scalars().all()
 
-async def get_all_test_cases_for_project_paginated(db: AsyncSession, project_id: int, page: int = 1, size: int = 20) -> dict[str, any]:
+async def get_all_test_cases_for_project_paginated(
+    db: AsyncSession, project_id: int, page: int = 1, size: int = 20,
+    case_kind: str | None = None,
+) -> dict[str, any]:
     """分页获取项目的测试用例"""
+    conditions = [db_models.TestCase.project_id == project_id, *_case_kind_filter(case_kind)]
     count_result = await db.execute(
         select(func.count(db_models.TestCase.id))
-        .where(db_models.TestCase.project_id == project_id)
+        .where(*conditions)
     )
     total_items = count_result.scalar()
     offset = (page - 1) * size
     items_result = await db.execute(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
-        .where(db_models.TestCase.project_id == project_id)
+        .where(*conditions)
         .order_by(db_models.TestCase.id.asc())
         .offset(offset)
         .limit(size)
@@ -129,28 +150,35 @@ async def get_all_test_cases_for_project_paginated(db: AsyncSession, project_id:
     items = items_result.scalars().all()
     return {"total_items": total_items, "items": items}
 
-async def get_all_test_cases_for_module(db: AsyncSession, module_id: int) -> list[db_models.TestCase]:
+async def get_all_test_cases_for_module(
+    db: AsyncSession, module_id: int, case_kind: str | None = None,
+) -> list[db_models.TestCase]:
     """获取模块的所有测试用例"""
+    conditions = [db_models.TestCase.module_id == module_id, *_case_kind_filter(case_kind)]
     result = await db.execute(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
-        .where(db_models.TestCase.module_id == module_id)
+        .where(*conditions)
         .order_by(db_models.TestCase.id.asc())
     )
     return result.scalars().all()
 
-async def get_all_test_cases_for_module_paginated(db: AsyncSession, module_id: int, page: int = 1, size: int = 20) -> dict[str, any]:
+async def get_all_test_cases_for_module_paginated(
+    db: AsyncSession, module_id: int, page: int = 1, size: int = 20,
+    case_kind: str | None = None,
+) -> dict[str, any]:
     """获取模块的所有测试用例（分页）"""
+    conditions = [db_models.TestCase.module_id == module_id, *_case_kind_filter(case_kind)]
     count_result = await db.execute(
         select(func.count(db_models.TestCase.id))
-        .where(db_models.TestCase.module_id == module_id)
+        .where(*conditions)
     )
     total_items = count_result.scalar()
     offset = (page - 1) * size
     items_result = await db.execute(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
-        .where(db_models.TestCase.module_id == module_id)
+        .where(*conditions)
         .order_by(db_models.TestCase.id.asc())
         .offset(offset)
         .limit(size)
@@ -158,9 +186,12 @@ async def get_all_test_cases_for_module_paginated(db: AsyncSession, module_id: i
     items = items_result.scalars().all()
     return {"total_items": total_items, "items": items}
 
-async def search_test_cases(db: AsyncSession, project_id: int, query: str, page: int = 1, size: int = 20) -> dict[str, any]:
+async def search_test_cases(
+    db: AsyncSession, project_id: int, query: str, page: int = 1, size: int = 20,
+    case_kind: str | None = None,
+) -> dict[str, any]:
     """根据名称和描述搜索测试用例"""
-    conditions = [db_models.TestCase.project_id == project_id]
+    conditions = [db_models.TestCase.project_id == project_id, *_case_kind_filter(case_kind)]
     if query:
         like = f"%{query}%"
         conditions.append(
