@@ -21,8 +21,9 @@ interface ModuleTreeProps {
   onCreateModule: () => void;
   onEditModule: (mod: Module) => void;
   onDeleteModule: (id: number, name: string) => void;
-  onRunModule: (id: number) => void;
-  onRunAll: () => void;
+  onRunModule?: (id: number) => void;
+  onRunAll?: () => void;
+  allowRun?: boolean;
   t: Record<string, string>;
   openCreateEnv: () => void;
   openEnvManage: () => void;
@@ -44,6 +45,7 @@ const ModuleTree: React.FC<ModuleTreeProps> = ({
   onDeleteModule,
   onRunModule,
   onRunAll,
+  allowRun = true,
   t,
   openCreateEnv,
   openEnvManage,
