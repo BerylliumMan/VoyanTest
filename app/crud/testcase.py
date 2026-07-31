@@ -284,15 +284,19 @@ async def update_test_case_is_init(db: AsyncSession, case_id: int, is_init: bool
     return db_case
 
 
-async def get_init_test_cases(db: AsyncSession, project_id: int) -> list[db_models.TestCase]:
+async def get_init_test_cases(
+    db: AsyncSession, project_id: int, case_kind: str | None = None,
+) -> list[db_models.TestCase]:
     """获取项目下所有标记为初始化的测试用例"""
+    conditions = [
+        db_models.TestCase.project_id == project_id,
+        db_models.TestCase.is_init == True,
+        *_case_kind_filter(case_kind),
+    ]
     result = await db.execute(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
-        .where(
-            db_models.TestCase.project_id == project_id,
-            db_models.TestCase.is_init == True,
-        )
+        .where(*conditions)
         .order_by(db_models.TestCase.created_at.desc())
     )
     return result.scalars().all()
