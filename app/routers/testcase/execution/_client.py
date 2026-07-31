@@ -521,6 +521,9 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                 "learned_locator": getattr(s, "learned_locator", None)
                 if isinstance(getattr(s, "learned_locator", None), dict)
                 else None,
+                "structured_step": getattr(s, "structured_step", None)
+                if isinstance(getattr(s, "structured_step", None), dict)
+                else None,
                 "cacheable": bool(getattr(s, "cacheable", True)),
             }
             for s in sorted(steps_raw, key=lambda x: x.step_order)
