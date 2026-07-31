@@ -27,6 +27,8 @@ class TestCase(Base):
     priority = Column(String, default="medium")  # low, medium, high, critical
     status = Column(String, default="active")  # active, deprecated, draft
     is_init = Column(Boolean, default=False, nullable=False)  # 是否作为初始化用例
+    # functional = 功能测试用例；ui = UI 自动化用例（默认可执行）
+    case_kind = Column(String(32), default="ui", nullable=False, index=True)
 
     steps = relationship("TestStep", backref="test_case", lazy="selectin", cascade="all, delete-orphan", order_by="TestStep.step_order")
 
