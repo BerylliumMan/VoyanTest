@@ -928,6 +928,7 @@ async def execute_nl_steps_browser_use(
     if cdp_url:
         stop_browser = False
 
+    stop_watch_ref: dict[str, Any] = {"state": None}
     log_handlers = attach_browser_use_log_handler(
         on_progress=on_progress, stop_watch_ref=stop_watch_ref,
     )
