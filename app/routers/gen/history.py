@@ -316,7 +316,7 @@ async def retry_analysis(
 
     from app.crud.agent_definition import get_active_by_type, get_agent_definition
     from app.gen.models import AnalysisSession
-    from app.gen.prompts import min_tcs_per_item, pick_fp_prompt_key, pick_tc_prompt_key
+    from app.gen.prompts import min_tcs_per_item, pick_fp_prompt_key, pick_tc_prompt_key, case_kind_from_tc_prompt_key
     from .upload import launch_gen_analysis
 
     record = await crud.gen.get_gen_session(db, session_id)
@@ -347,6 +347,7 @@ async def retry_analysis(
     fp_prompt_key = pick_fp_prompt_key(resolved_skills)
     tc_prompt_key = pick_tc_prompt_key(resolved_skills)
     min_tcs = min_tcs_per_item(resolved_skills, tc_prompt_key=tc_prompt_key)
+    case_kind = case_kind_from_tc_prompt_key(tc_prompt_key)
 
     await clear_gen_runtime(session_id)
     async with _lock:
@@ -362,9 +363,14 @@ async def retry_analysis(
         status="analyzing",
         progress=0,
         progress_message="准备重新分析",
+        case_kind=case_kind,
     )
     async with _lock:
         _sessions[session_id] = session
+
+    record.case_kind = case_kind
+    record.status = "analyzing"
+    await db.commit()
 
     file_contents = [BytesIO(b) for b in raw_bytes]
     await launch_gen_analysis(
