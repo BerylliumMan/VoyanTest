@@ -380,55 +380,6 @@ async def switch_browser_use_to_newest_tab_if_opened(
     return False
 
 
-def _soften_click_opener_refocus() -> None:
-    """Avoid Chrome UI flipping back to the opener after every click.
-
-    browser-use's DefaultActionWatchdog resets ``agent_focus`` to the opener with
-    ``focus=True`` (Target.activateTarget) after each click, then maybe switches
-    to a new tab. That activateTarget is what users see as "标签又切回去了".
-    Soften **only** the opener reset to ``focus=False``; SwitchTab to a new
-    target still uses ``focus=True``.
-    """
-    try:
-        from browser_use.browser.watchdogs import default_action_watchdog as daw
-    except Exception:
-        return
-    if getattr(daw, "_voyantest_soft_refocus", False):
-        return
-
-    orig = getattr(daw.DefaultActionWatchdog, "on_ClickElementEvent", None)
-    if orig is None:
-        return
-
-    # bubus/watchdog_base requires handler.__name__ to start with "on_".
-    async def on_ClickElementEvent(self, event):  # type: ignore[no-untyped-def]
-        session = self.browser_session
-        opener_id = getattr(getattr(session, "agent_focus", None), "target_id", None)
-        _orig_get = session.get_or_create_cdp_session
-
-        async def _get_or_create(*args, **kwargs):
-            tid = kwargs.get("target_id")
-            if tid is None and args:
-                tid = args[0]
-            if (
-                kwargs.get("focus") is True
-                and opener_id
-                and tid == opener_id
-            ):
-                kwargs = {**kwargs, "focus": False}
-            return await _orig_get(*args, **kwargs)
-
-        session.get_or_create_cdp_session = _get_or_create  # type: ignore[method-assign]
-        try:
-            return await orig(self, event)
-        finally:
-            session.get_or_create_cdp_session = _orig_get  # type: ignore[method-assign]
-
-    daw.DefaultActionWatchdog.on_ClickElementEvent = on_ClickElementEvent  # type: ignore[assignment]
-    daw._voyantest_soft_refocus = True
-    logger.info("Softened browser-use click opener refocus (focus=False)")
-
-
 def enable_browser_use_auto_switch_new_tabs(session) -> None:
     """Arm a TabCreatedEvent listener that focuses newly created pages.
 
