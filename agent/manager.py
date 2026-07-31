@@ -455,6 +455,13 @@ class AgentManager:
                 expected_result = step.get("expected_result")
                 cached_fp = step.get("learned_locator") if isinstance(step.get("learned_locator"), dict) else None
                 cacheable = bool(step.get("cacheable", True))
+                structured_step = step.get("structured_step") if isinstance(step.get("structured_step"), dict) else None
+                if structured_step is None and desc:
+                    try:
+                        from core.step_normalize import parse_instant_to_structured, sanitize_ui_step
+                        structured_step = parse_instant_to_structured(sanitize_ui_step(desc))
+                    except Exception:
+                        structured_step = None
 
                 logger.info(f"--- Step {step_order}: {desc} ---")
 
