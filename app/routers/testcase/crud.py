@@ -278,6 +278,7 @@ async def get_project_test_cases(
 async def import_test_cases(
     project_id: int,
     file: UploadFile = File(...),
+    case_kind: str = "ui",
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
@@ -285,6 +286,8 @@ async def import_test_cases(
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=403, detail="无权访问该项目")
+    if case_kind not in ("functional", "ui"):
+        case_kind = "ui"
     from openpyxl import load_workbook
 
     if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
@@ -342,6 +345,7 @@ async def import_test_cases(
                     project_id=project_id, name=title,
                     description=preconditions or "",
                     steps=steps_payload, priority=priority or "medium",
+                    case_kind=case_kind,
                 ))
                 created += 1
             except Exception as e:
@@ -361,6 +365,7 @@ async def import_test_cases(
                 await crud.create_test_case(db, models.TestCaseCreate(
                     project_id=project_id, name=name,
                     steps=steps_payload, priority=priority or "medium", tags=tags or "",
+                    case_kind=case_kind,
                 ))
                 created += 1
             except Exception as e:
