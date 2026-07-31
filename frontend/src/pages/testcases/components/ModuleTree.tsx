@@ -90,7 +90,7 @@ const ModuleTree: React.FC<ModuleTreeProps> = ({
               onKeyDown={(e) => e.key === 'Enter' && onSelectModule(null, false)}
             >
               <span>{t['all.modules']}</span>
-              {selectedModuleId === null && (
+              {selectedModuleId === null && allowRun && onRunAll && (
                 <Popover
                   trigger="click"
                   position="right"
@@ -105,7 +105,7 @@ const ModuleTree: React.FC<ModuleTreeProps> = ({
               )}
             </div>
             <Tree
-              treeData={renderTree(moduleTree, selectedModuleId, moduleTree, t, onEditModule, onDeleteModule, onRunModule)}
+              treeData={renderTree(moduleTree, selectedModuleId, moduleTree, t, onEditModule, onDeleteModule, allowRun ? onRunModule : undefined)}
               selectedKeys={selectedModuleId ? [String(selectedModuleId)] : []}
               onSelect={(keys) => { onSelectModule(keys[0] ? Number(keys[0]) : null, true); }}
               actionOnClick="select"
