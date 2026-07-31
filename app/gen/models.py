@@ -48,3 +48,5 @@ class TestCase:
     expected_result: str = ""
     priority: str = "中"
     validation_errors: str = ""
+    # Parallel to numbered test_steps (may contain None for unparseable Instant rows)
+    structured_steps: list = field(default_factory=list)
