@@ -200,16 +200,39 @@ def extract_label_hints(step_description: str) -> list[str]:
 def match_intent_candidates(
     snapshot: str,
     intent: StepIntent,
+    *,
+    frame_hint: str | None = None,
 ) -> list[dict[str, str]]:
-    """Return AX elements matching intent role/name (exact name preferred)."""
+    """Return AX elements matching intent role/name (exact name preferred).
+
+    ``frame_hint``: when set, prefer elements whose nearby snapshot context
+    mentions the iframe title/name (best-effort line-window filter).
+    """
     role = (intent.target_role or "").strip().lower() or None
     name = (intent.target_name or "").strip()
     if not name and not role:
         return []
 
+    elements = parse_snapshot_elements(snapshot)
+    if frame_hint:
+        fh = frame_hint.strip()
+        if fh:
+            # Prefer refs whose surrounding snapshot text mentions the frame hint
+            preferred: list[dict[str, str]] = []
+            for el in elements:
+                # Search a window around the ref occurrence
+                idx = (snapshot or "").find(f"[ref={el['ref']}]")
+                if idx < 0:
+                    continue
+                window = (snapshot or "")[max(0, idx - 400): idx + 200]
+                if fh in window or fh.lower() in window.lower():
+                    preferred.append(el)
+            if preferred:
+                elements = preferred
+
     exact: list[dict[str, str]] = []
     partial: list[dict[str, str]] = []
-    for el in parse_snapshot_elements(snapshot):
+    for el in elements:
         if role and el["role"] != role:
             continue
         el_name = el.get("name") or ""
