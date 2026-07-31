@@ -88,8 +88,7 @@ const StepList: React.FC<StepListProps> = ({
     const next = { ...(step.structured_step || {}), ...patch };
     if (!next.action) next.action = 'click';
     const desc = renderStructuredDescription(next);
-    onUpdate(idx, 'structured_step', next);
-    if (desc) onUpdate(idx, 'description', desc);
+    onUpdate(idx, '_patch', { structured_step: next, description: desc || step.description || '' });
   };
 
   return (

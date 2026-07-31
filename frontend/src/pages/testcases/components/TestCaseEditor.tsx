@@ -46,7 +46,11 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   const removeStep = (idx: number) => setSteps(steps.filter((_, i) => i !== idx).map((s, i) => ({ ...s, step_order: i + 1 })));
   const updateStep = (idx: number, field: string, value: string | number | boolean | null | Record<string, unknown>) => {
     const newSteps = [...steps];
-    newSteps[idx] = { ...newSteps[idx], [field]: value };
+    if (field === '_patch' && value && typeof value === 'object' && !Array.isArray(value)) {
+      newSteps[idx] = { ...newSteps[idx], ...(value as Record<string, unknown>) } as typeof newSteps[number];
+    } else {
+      newSteps[idx] = { ...newSteps[idx], [field]: value };
+    }
     setSteps(newSteps);
   };
 
