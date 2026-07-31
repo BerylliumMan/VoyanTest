@@ -576,10 +576,6 @@ def _normalize_tc_item(item: dict) -> dict:
             expected_raw = item.get(c)
             break
 
-    raw_steps = [_sanitize_ui_step(s) for s in _listify_field(steps_raw)]
-    # Drop trailing empty steps only; keep middle empties rare
-    while raw_steps and not raw_steps[-1]:
-        raw_steps.pop()
     expected = _listify_field(expected_raw)
     # Treat placeholder phrases as empty (must not invent expected for flow manuals)
     _EMPTY_EXPECTED_MARKERS = {
@@ -606,31 +602,76 @@ def _normalize_tc_item(item: dict) -> dict:
         else e
         for e in expected
     ]
-    if raw_steps:
-        expected = align_expected_to_steps(raw_steps, expected)
-        # align may join leftover empties with '；' — treat as empty
+
+    # Structured object steps (UI gen) vs Instant string steps
+    structured_in: list[dict] = []
+    string_in: list[str] = []
+    if isinstance(steps_raw, list) and steps_raw and all(
+        isinstance(x, dict) for x in steps_raw
+    ):
+        for item_step in steps_raw:
+            st = coerce_structured_step(item_step)
+            if st:
+                structured_in.extend(expand_structured_compounds(st))
+            else:
+                desc = (item_step.get("description") or item_step.get("desc") or "").strip()
+                if desc:
+                    string_in.append(_sanitize_ui_step(desc))
+    else:
+        string_in = [_sanitize_ui_step(s) for s in _listify_field(steps_raw)]
+
+    # Prefer structured path when we have objects; else Instant strings
+    if structured_in:
+        while structured_in and not (
+            structured_in[-1].get("action")
+            or structured_in[-1].get("target_name")
+            or structured_in[-1].get("value")
+        ):
+            structured_in.pop()
+        expected = align_expected_to_steps(
+            [render_structured_step(s) for s in structured_in], expected
+        )
         expected = [
             "" if re.fullmatch(r"[；;\s]*", (e or "").strip() or "") else e
             for e in expected
         ]
-        # Expand compound steps; intermediate parts get empty expected
+        steps_desc = [render_structured_step(s) for s in structured_in]
+        normalized["test_steps"] = _to_numbered_text(steps_desc)
+        normalized["expected_result"] = _to_numbered_expected(expected)
+        normalized["structured_steps"] = structured_in
+        normalized["steps"] = [
+            {**s, "description": d, "expected": e}
+            for s, d, e in zip(structured_in, steps_desc, expected)
+        ]
+    elif string_in:
+        while string_in and not string_in[-1]:
+            string_in.pop()
+        expected = align_expected_to_steps(string_in, expected)
+        expected = [
+            "" if re.fullmatch(r"[；;\s]*", (e or "").strip() or "") else e
+            for e in expected
+        ]
         steps: list[str] = []
+        structured_out: list[dict | None] = []
         aligned_expected: list[str] = []
-        for step, exp in zip(raw_steps, expected):
+        for step, exp in zip(string_in, expected):
             parts = _expand_compound_ui_step(step)
             if not parts:
                 continue
             if len(parts) == 1:
                 steps.append(parts[0])
+                structured_out.append(parse_instant_to_structured(parts[0]))
                 aligned_expected.append(exp)
             else:
                 for i, part in enumerate(parts):
                     steps.append(part)
+                    structured_out.append(parse_instant_to_structured(part))
                     aligned_expected.append(exp if i == len(parts) - 1 else "")
-        # Keep empty expected as-is — do not invent neutral placeholders
         normalized["test_steps"] = _to_numbered_text(steps)
-        # Never persist bare "1.\n2.\n3." — UI collapses them to "1.2.3.4…"
         normalized["expected_result"] = _to_numbered_expected(aligned_expected)
+        normalized["structured_steps"] = [s for s in structured_out if s]
+        # Keep parallel list (may include None) for import by index
+        normalized["structured_steps_aligned"] = structured_out
     elif expected:
         normalized["expected_result"] = _to_numbered_expected(expected)
 
