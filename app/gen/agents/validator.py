@@ -91,9 +91,11 @@ def _normalize_steps_for_validation(tc: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for i, step in enumerate(steps):
         if isinstance(step, str):
+            parsed = parse_instant_to_structured(step) or {}
             out.append({
+                **parsed,
                 "description": step,
-                "action": "",
+                "action": parsed.get("action") or "",
                 "expected": _er_padded[i] if i < len(_er_padded) else "",
             })
             continue
@@ -101,6 +103,10 @@ def _normalize_steps_for_validation(tc: dict[str, Any]) -> list[dict[str, Any]]:
             out.append({"description": str(step), "action": "", "expected": ""})
             continue
         coerced = coerce_structured_step(step) or {}
+        if not coerced.get("action"):
+            desc0 = (step.get("description") or step.get("desc") or "").strip()
+            if desc0:
+                coerced = parse_instant_to_structured(desc0) or coerced
         desc = (
             step.get("description")
             or step.get("desc")
