@@ -199,6 +199,17 @@ class TestGetAllTestCasesForProject:
         assert len(await crud.get_all_test_cases_for_project(db, p1.id)) == 1
         assert len(await crud.get_all_test_cases_for_project(db, p2.id)) == 1
 
+    @pytest.mark.asyncio
+    async def test_filters_by_case_kind(self, db):
+        project = await _project(db)
+        await _case(db, project.id, name="ui-case", case_kind="ui")
+        await _case(db, project.id, name="func-case", case_kind="functional")
+        ui = await crud.get_all_test_cases_for_project(db, project.id, case_kind="ui")
+        func = await crud.get_all_test_cases_for_project(db, project.id, case_kind="functional")
+        assert len(ui) == 1 and ui[0].name == "ui-case"
+        assert len(func) == 1 and func[0].name == "func-case"
+        assert len(await crud.get_all_test_cases_for_project(db, project.id)) == 2
+
 
 class TestGetAllTestCasesForProjectPaginated:
     """覆盖 line 91-96。"""
