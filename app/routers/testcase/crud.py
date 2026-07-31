@@ -344,10 +344,13 @@ async def import_test_cases(
                             parsed_result=exp.strip() or None,
                         ))
 
+                from app.gen.adapter import normalize_priority_to_storage
+
                 await crud.create_test_case(db, models.TestCaseCreate(
                     project_id=project_id, name=title,
                     description=preconditions or "",
-                    steps=steps_payload, priority=priority or "medium",
+                    steps=steps_payload,
+                    priority=normalize_priority_to_storage(priority),
                     case_kind=case_kind,
                 ))
                 created += 1
@@ -365,9 +368,13 @@ async def import_test_cases(
                     steps_payload.append(models.TestStepCreatePayload(
                         step_order=1, description=desc, parsed_result=expected or None,
                     ))
+                from app.gen.adapter import normalize_priority_to_storage
+
                 await crud.create_test_case(db, models.TestCaseCreate(
                     project_id=project_id, name=name,
-                    steps=steps_payload, priority=priority or "medium", tags=tags or "",
+                    steps=steps_payload,
+                    priority=normalize_priority_to_storage(priority),
+                    tags=tags or "",
                     case_kind=case_kind,
                 ))
                 created += 1
