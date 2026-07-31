@@ -176,13 +176,19 @@ TC_GENERATE_UI_PROMPT = """你是资深的 UI 自动化测试工程师。请为�
 输出格式：
 [
   {
-    "fp_name": "对应测试项名称",
-    "title": "用例标题（简洁，含页面/操作意图）",
-    "module": "所属业务模块",
-    "priority": "P0 | P1 | P2",
-    "precondition": "前置条件（页面/登录态）",
-    "steps": ["打开【登录】页面", "等待【Login】出现", "在【用户名】输入 admin", "在【密码】输入 Admin@123", "点击【登录】", "等待【首页】出现"],
-    "expected": ["", "", "", "", "", "进入系统首页或出现登录后界面"],
+    "fp_name": "手机号验证码登录成功",
+    "title": "正确手机号验证码登录",
+    "module": "登录注册——验证码登录",
+    "priority": "P0",
+    "precondition": "已打开登录页且可收验证码",
+    "steps": [
+      {"action": "fill", "target_name": "手机号", "target_role": "textbox", "value": "13800138000"},
+      {"action": "click", "target_name": "获取验证码", "target_role": "button"},
+      {"action": "fill", "target_name": "验证码", "target_role": "textbox", "value": "123456"},
+      {"action": "click", "target_name": "登录", "target_role": "button"},
+      {"action": "wait", "target_name": "首页", "value": "首页"}
+    ],
+    "expected": ["", "", "", "", "进入系统首页或出现登录后界面"],
     "scenario_type": "主路径 | 校验提示 | 空结果 | …"
   }
 ]
