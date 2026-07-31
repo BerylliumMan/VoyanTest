@@ -267,11 +267,19 @@ async def _run_test_case_unlocked(
     debug_mode: bool = False,
     run_id: int | None = None,
     backend: str | None = None,
+    case_kind: str | None = None,
 ):
     from app.runtime_config import execution_backend_config
     from core.playwright_manager import PlaywrightMCPManager
 
-    selected = (backend or execution_backend_config.backend or "playwright_mcp").strip()
+    selected = (backend or execution_backend_config.backend or "hybrid").strip()
+    # UI cases default to hybrid when caller did not override and config is plain MCP
+    if (
+        backend is None
+        and (case_kind or "") == "ui"
+        and selected == "playwright_mcp"
+    ):
+        selected = "hybrid"
 
     # Scheme B: optional browser-use backend (server-side only)
     if selected == "browser_use":
@@ -290,7 +298,21 @@ async def _run_test_case_unlocked(
             max_steps_per_nl=execution_backend_config.max_steps_per_nl,
         )
 
-    mcp_manager = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
+    hybrid = selected == "hybrid"
+    # hybrid needs chromium CDP; firefox/webkit fall back to plain MCP
+    use_shared_cdp = hybrid and browser_type == "chromium"
+    if hybrid and not use_shared_cdp:
+        logger.warning(
+            "hybrid requested but browser=%s; server fallback requires chromium — MCP only",
+            browser_type,
+        )
+        hybrid = False
+
+    mcp_manager = PlaywrightMCPManager(
+        browser_type=browser_type,
+        headless=headless,
+        shared_cdp=use_shared_cdp,
+    )
     start_time = tz_now()
     try:
         await mcp_manager.start()
@@ -342,12 +364,14 @@ async def _run_test_case_unlocked(
                     case_id, mcp_manager,
                     batch_id=batch_id, run_id=run_id,
                     base_url_override=base_url_override, debug_mode=debug_mode,
+                    hybrid=hybrid,
                 )
         else:
             await run_test_case_in_browser(
                 case_id, mcp_manager,
                 batch_id=batch_id, run_id=run_id,
                 base_url_override=base_url_override, debug_mode=debug_mode,
+                hybrid=hybrid,
             )
     except Exception:  # noqa: BLE001
         logger.exception("Unhandled error in run_test_case_in_browser for case %s", case_id)
