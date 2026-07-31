@@ -172,6 +172,7 @@ async def upload_and_analyze(
         filenames=filenames,
         project_description=project_description,
         status="analyzing",
+        case_kind=case_kind,
     )
 
     async with _lock:
@@ -185,6 +186,7 @@ async def upload_and_analyze(
         project_id=project_id,
         project_description=project_description,
         user_id=user.id,
+        case_kind=case_kind,
     )
 
     await launch_gen_analysis(
