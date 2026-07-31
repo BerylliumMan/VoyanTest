@@ -672,7 +672,8 @@ def _sanitize_ui_step(step: str) -> str:
         return f"【{cleaned}】"
 
     s2 = re.sub(r"【([^】]+)】", _strip_ctrl_in_brackets, s)
-    return s2
+    # Ellipsis strip again after other rewrites that may reintroduce truncated labels
+    return _sanitize_brackets_ellipsis(s2)
 
 
 def _sanitize_tc_title(title: str) -> str:
