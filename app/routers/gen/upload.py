@@ -126,7 +126,9 @@ async def upload_and_analyze(
 
     # Resolve generation agent early (validate before starting background work)
     from app.crud.agent_definition import get_active_by_type, get_agent_definition
-    from app.gen.prompts import pick_fp_prompt_key, pick_tc_prompt_key, min_tcs_per_item
+    from app.gen.prompts import (
+        pick_fp_prompt_key, pick_tc_prompt_key, min_tcs_per_item, case_kind_from_tc_prompt_key,
+    )
 
     selected_agent = None
     if agent_id is not None:
@@ -141,6 +143,7 @@ async def upload_and_analyze(
     fp_prompt_key = pick_fp_prompt_key(resolved_skills)
     tc_prompt_key = pick_tc_prompt_key(resolved_skills)
     min_tcs = min_tcs_per_item(resolved_skills, tc_prompt_key=tc_prompt_key)
+    case_kind = case_kind_from_tc_prompt_key(tc_prompt_key)
 
     filenames = [f.filename or f"file_{i}" for i, f in enumerate(files)]
 
