@@ -151,9 +151,19 @@ function Dashboard() {
                   { title: t['status'], dataIndex: 'status', width: 100,
  render: (_: unknown, r: BatchRun) => {
                        const s = r.status;
-                       if (s === 'running') return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
-                       if (r.passed === r.total_cases && r.total_cases > 0) return <Tag color="green">{t['all.passed']}</Tag>;
-                       if (r.passed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
+                       const failed = r.failed || 0;
+                       if (s === 'running' || s === 'pending') {
+                         return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
+                       }
+                       if (s === 'partial') return <Tag color="orange">{t['partial.passed']}</Tag>;
+                       if (s === 'passed' || (r.passed === r.total_cases && r.total_cases > 0)) {
+                         return <Tag color="green">{t['all.passed']}</Tag>;
+                       }
+                       if (s === 'failed') return <Tag color="red">{t['all.failed']}</Tag>;
+                       if (r.total_cases > 0 && (r.passed || 0) + failed < r.total_cases) {
+                         return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
+                       }
+                       if ((r.passed || 0) > 0 && failed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
                        if (r.total_cases > 0) return <Tag color="red">{t['all.failed']}</Tag>;
                        return <Tag color="gray">--</Tag>;
                      } },
