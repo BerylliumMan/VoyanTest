@@ -240,7 +240,7 @@ DEFAULT_AGENTS: list[dict] = [
         "goal": "忠实还原操作手册中的主路径为可执行 UI 步骤",
         "constraints": [],
         "thinking_config": {},
-        "system_prompt": "你是流程手册用例生成专家。流程：(1) fp_extract_flow 从图文手册抽取操作流程，desc 须逐步可执行并含【控件文案】；(2) tc_generate_flow 为每个流程生成 1 条主路径 UI 用例，按手册编号逐步展开、禁止并步/跳步，须对照截图红框。步骤用 Instant 句式：点击【…】/在【字段】输入 值/在【字段】中选择【选项】；值不要放进【】；禁止「密码输入【x】」「点击登录按钮」「填写表单」「等待页面加载完成」「点击【图标】」。【】内禁止省略号（.../…）；截图看不清写完整 title/可见全文，禁止「（高检...）」类截断。禁止「关闭所有对话框」并步，须拆成「等待弹窗出现」+「点击【关闭】」。纯图标有 label 写【帮助】等；旁无文字也无 accessible name 时写「点击{位置}的{外观}图标（用途：{功能}）」供视觉定位。打开/提交后写「等待【可见文案】出现」；同名控件须消歧；弹窗先等待再关闭。禁止臆造异常/边界。expected 与 steps 等长：有文档结果写完整可观察句，未写明填 \"\"；严禁只输出 1、2、3、 这种空编号。",
+        "system_prompt": "你是流程手册用例生成专家。流程：(1) fp_extract_flow 从图文手册抽取操作流程，desc 须逐步可执行并含【控件文案】；(2) tc_generate_flow 为每个流程生成 1 条主路径 UI 用例，steps 必须是 StructuredStep 对象数组（action/target_name/value），按手册编号逐步展开、禁止并步/跳步，须对照截图红框。禁止 target_name 含省略号或控件类型词；禁止关闭所有对话框并步（拆成 wait+click 关闭）。纯图标用 icon_click+icon_hint。expected 与 steps 等长；严禁空编号。",
         "prompt_overrides": {}
     }
 ]
