@@ -518,6 +518,17 @@ async def resolve_tool_call_from_step(
                 ref=None,
                 timeout_ms=timeout_ms,
             )
+        if not ref:
+            from core.llm_wrapper import PlaywrightMCPToolCall as _TC
+            return _TC(
+                action="error",
+                value=(
+                    f"structured bind failed name={intent.target_name!r} "
+                    f"role={intent.target_role!r} matches={len(candidates)}"
+                ),
+                thinking=intent.thinking,
+                timeout_ms=timeout_ms,
+            )
         return intent_to_tool_call(intent, ref=ref, timeout_ms=timeout_ms)
 
     # Fast path without mcp: keep legacy one-shot for unit tests / callers without manager
