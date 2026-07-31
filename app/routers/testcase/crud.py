@@ -248,7 +248,11 @@ async def toggle_test_case_init(case_id: int, body: Dict[str, Any], user=Depends
 
 
 @router.get("/project/{project_id}/testcases", response_model=models.TestCasePage)
-async def get_project_test_cases(project_id: int, page: int = 1, size: int = 20, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+async def get_project_test_cases(
+    project_id: int, page: int = 1, size: int = 20,
+    case_kind: str | None = None,
+    user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
+) -> dict:
     """
     检索特定项目的所有测试用例，并分页。
     """
@@ -259,7 +263,9 @@ async def get_project_test_cases(project_id: int, page: int = 1, size: int = 20,
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    paginated_data = await crud.get_all_test_cases_for_project_paginated(db, project_id, page, size)
+    paginated_data = await crud.get_all_test_cases_for_project_paginated(
+        db, project_id, page, size, case_kind=case_kind,
+    )
     return {
         "items": paginated_data["items"],
         "total_items": paginated_data["total_items"],
