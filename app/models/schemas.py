@@ -141,6 +141,9 @@ class TestStepCreatePayload(BaseModel):
     retry_max: int = Field(default=0, ge=0)
     retry_delay: float = Field(default=1.0, ge=0.0)
     assertions: list[dict] = Field(default_factory=list)
+    structured_step: Optional[dict] = None
+    learned_locator: Optional[dict] = None
+    cacheable: bool = True
 
 
 class TestCaseCreate(TestCaseBase):
