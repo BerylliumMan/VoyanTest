@@ -279,7 +279,40 @@ class PlaywrightMCPManager:
                 os.remove(cfg)
             except OSError:
                 pass
+        try:
+            await self._stop_shared_chrome()
+        except Exception as exc:
+            logger.warning("Error stopping shared CDP Chrome: %s", exc, exc_info=True)
         logger.info("@playwright/mcp session closed.")
+
+    async def refresh_snapshot_for_hints(
+        self,
+        hints: list[str],
+        *,
+        current: str | None = None,
+    ) -> str:
+        """If label hints missing from snapshot, PageDown a few times and re-snapshot."""
+        snap = current if current is not None else await self.get_dom_snapshot()
+        if not hints:
+            return snap
+        joined = snap or ""
+        if any(h and h in joined for h in hints):
+            return snap
+        logger.info(
+            "Snapshot missing hints %s — scrolling and re-snapshot",
+            [h[:40] for h in hints[:3]],
+        )
+        for _ in range(3):
+            try:
+                await self.call_tool('browser_press_key', {'key': 'PageDown'})
+            except Exception as exc:
+                logger.debug("PageDown for snapshot refresh failed: %s", exc)
+                break
+            await __import__('asyncio').sleep(0.35)
+            snap = await self.get_dom_snapshot()
+            if any(h and h in (snap or "") for h in hints):
+                return snap
+        return snap
 
     async def __aenter__(self) -> "PlaywrightMCPManager":
         await self.start()
