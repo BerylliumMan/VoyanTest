@@ -121,6 +121,7 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             t={t}
+            caseKind={caseKind}
           />
         </Form.Item>
       </Form>
