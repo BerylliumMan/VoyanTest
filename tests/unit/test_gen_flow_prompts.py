@@ -143,6 +143,105 @@ def test_sanitize_rewrites_bare_page_load_wait():
     assert _sanitize_ui_step("密码输入【Abc123】") == "在【密码】输入 Abc123"
 
 
+def test_sanitize_strips_bracket_ellipsis():
+    from app.gen.response_parser import _sanitize_ui_step
+
+    assert (
+        _sanitize_ui_step("点击【4888智能辅助（高检...）】")
+        == "点击【4888智能辅助】"
+    )
+    assert _sanitize_ui_step("点击【某某功能…】") == "点击【某某功能】"
+
+
+def test_expand_close_all_dialogs_compound():
+    from app.gen.response_parser import _expand_compound_ui_step, _normalize_tc_item
+
+    parts = _expand_compound_ui_step(
+        "等待页面中间出现对话框，把所有对话框都点击【关闭】按钮或【X】形状的关闭标志"
+    )
+    assert parts == ["等待弹窗或对话框出现", "点击【关闭】"]
+
+    tc = _normalize_tc_item({
+        "title": "test1804登录",
+        "module": "登录",
+        "steps": [
+            "点击单位下拉框",
+            "等待页面中间出现对话框，把所有对话框都点击【关闭】按钮或【X】形状的关闭标志",
+        ],
+        "expected": [
+            "1.",
+            "2.",
+            "3.",
+        ],
+    })
+    assert "等待弹窗或对话框出现" in tc["test_steps"]
+    assert "点击【关闭】" in tc["test_steps"]
+    # Bare numbered expected must not persist as fake asserts
+    assert tc.get("expected_result", "") == ""
+
+
+def test_normalize_flow_case_real_phrases():
+    from app.gen.response_parser import _normalize_tc_item
+
+    tc = _normalize_tc_item({
+        "title": "用户端进入提交问题反馈页面操作流程",
+        "module": "问题反馈",
+        "precondition": "前置条件：登录用户端系统后，在在办案件页面",
+        "steps": [
+            "点击【问题反馈测试LJ072301】",
+            "点击左侧【功能】",
+            "在【搜索框】输入 4888智能辅助",
+            "点击【4888智能辅助（高检...）】",
+            "点击右上角书本形状图标（用途：打开帮助中心）",
+        ],
+        "expected": ["1. ", "2. ", "3. ", "4. ", "5. "],
+    })
+    assert "点击【4888智能辅助】" in tc["test_steps"]
+    assert "（高检" not in tc["test_steps"]
+    assert "..." not in tc["test_steps"]
+    assert tc.get("expected_result", "") == ""
+
+
+def test_validator_flags_ellipsis_and_compound():
+    from app.gen.agents.validator import _validate_test_case, validate_test_cases
+
+    bad = {
+        "title": "问题反馈流程",
+        "module": "问题反馈",
+        "priority": "P0",
+        "steps": [
+            "点击【4888智能辅助（高检...）】",
+            "把所有对话框都点击【关闭】",
+            "a",
+            "b",
+            "c",
+        ],
+        "expected": ["", "", "", "", ""],
+    }
+    vr = _validate_test_case(bad)
+    assert vr.passed is False
+    assert any("省略号" in w for w in vr.warnings)
+    assert any("并步" in w for w in vr.warnings)
+
+    soft = {
+        "title": "长流程无断言",
+        "module": "M",
+        "priority": "P1",
+        "steps": ["点击【A】", "点击【B】", "点击【C】", "点击【D】", "点击【E】"],
+        "expected": ["", "", "", "", ""],
+    }
+    out = validate_test_cases([soft])
+    assert any("无可观察预期" in w for w in out["warnings"])
+
+
+def test_flow_prompt_forbids_ellipsis_and_close_all():
+    from app.gen.prompts import TC_GENERATE_FLOW_PROMPT
+
+    assert "省略号" in TC_GENERATE_FLOW_PROMPT
+    assert "关闭所有对话框" in TC_GENERATE_FLOW_PROMPT
+    assert "高检..." in TC_GENERATE_FLOW_PROMPT
+
+
 def test_sanitize_strips_title_scenario_suffix():
     from app.gen.response_parser import _sanitize_tc_title
 
