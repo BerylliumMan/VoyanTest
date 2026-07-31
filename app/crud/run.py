@@ -244,13 +244,21 @@ async def _compute_batch_status(db: AsyncSession, batch, preloaded_runs: list = 
         stuck_failed = sum(1 for r in runs if getattr(r, "status", "") == "failed" and getattr(r, "_stuck_marked", False))
         counts["failed"] = counts.get("failed", 0) + stuck_failed
 
-    # 实际已完成（passed + failed）的用例数
-    completed = counts.get("passed", 0) + counts.get("failed", 0)
+    # 实际已完成（passed + failed + cancelled）的用例数
+    completed = (
+        counts.get("passed", 0)
+        + counts.get("failed", 0)
+        + counts.get("cancelled", 0)
+    )
     running = counts.get("running", 0) + counts.get("pending", 0)
 
-    # 同步批次计数器（仅用 confirmed 状态）
+    # 同步批次计数器（仅用 confirmed 状态；cancelled 不计入 failed）
     batch.passed = counts.get("passed", 0)
     batch.failed = counts.get("failed", 0)
+
+    # 用户暂停/停止：保留状态，避免轮询把 paused/cancelled 改回 running
+    if batch.status in ("paused", "cancelled"):
+        return
 
     if running > 0:
         batch.status = "running"
