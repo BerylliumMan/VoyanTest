@@ -924,6 +924,8 @@ async def execute_nl_steps_browser_use(
             except Exception as exc:
                 logger.warning("browser-use 打开 BASE URL 失败: %s", exc, exc_info=True)
                 _emit_progress(on_progress, f"BASE URL open failed: {exc}")
+            if not headless and not cdp_url:
+                await ensure_browser_window_maximized(browser)
         else:
             # Hybrid / attach mode: connect CDP before arming so baseline includes
             # existing tabs. Arming with an empty baseline treats reconnect
@@ -934,6 +936,8 @@ async def execute_nl_steps_browser_use(
                 logger.warning(
                     "browser-use start before tab-arm failed: %s", exc, exc_info=True,
                 )
+            if not headless and not cdp_url:
+                await ensure_browser_window_maximized(browser)
 
         # After CDP is up: snapshot existing tabs, then auto-focus only truly new ones.
         await arm_browser_use_auto_switch_new_tabs(browser)
