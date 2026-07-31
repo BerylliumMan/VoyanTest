@@ -939,11 +939,12 @@ async def execute_nl_steps_browser_use(
 
             assert fields is not None
 
+            # Align with Playwright MCP: screenshot only on failure (not success/skipped).
             ss_path, ss_b64 = None, None
-            # Always capture on failure; also on success for report consistency
-            ss_path, ss_b64 = await capture_browser_screenshot(
-                browser, step_order=order, screenshots_dir=screenshots_dir,
-            )
+            if not fields.get("success"):
+                ss_path, ss_b64 = await capture_browser_screenshot(
+                    browser, step_order=order, screenshots_dir=screenshots_dir,
+                )
 
             result = {
                 "step_number": order,
