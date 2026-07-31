@@ -3,6 +3,8 @@ const i18n = {
     'menu.dashboard': 'Dashboard',
     'menu.projects': 'Projects',
     'menu.testcases': 'Test Cases',
+    'menu.testcases.functional': 'Functional Cases',
+    'menu.testcases.ui': 'UI Automation Cases',
     'menu.reports': 'Reports',
     'menu.agents': 'Clients',
     'menu.settings': 'Settings',
