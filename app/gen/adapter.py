@@ -259,7 +259,7 @@ async def import_test_cases(
         if gen_tc.preconditions:
             description = f"前置条件：{gen_tc.preconditions}"
 
-        priority = PRIORITY_MAP.get((gen_tc.priority or "").strip(), "medium")
+        priority = normalize_priority_to_storage(gen_tc.priority)
 
         project_case_number = await get_next_project_case_number(db, project_id)
         tc = db_models.TestCase(
