@@ -204,7 +204,11 @@ async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depen
 
 
 @router.get("/module/{module_id}/testcases", response_model=models.TestCasePage)
-async def get_module_test_cases(module_id: int, page: int = 1, size: int = 20, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+async def get_module_test_cases(
+    module_id: int, page: int = 1, size: int = 20,
+    case_kind: str | None = None,
+    user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
+) -> dict:
     """
     检索特定模块的所有测试用例，并分页。
     """
@@ -216,7 +220,9 @@ async def get_module_test_cases(module_id: int, page: int = 1, size: int = 20, u
     if allowed_ids is not None and db_module.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Module not found")
 
-    paginated_data = await crud.get_all_test_cases_for_module_paginated(db, module_id, page, size)
+    paginated_data = await crud.get_all_test_cases_for_module_paginated(
+        db, module_id, page, size, case_kind=case_kind,
+    )
     return {
         "items": paginated_data["items"],
         "total_items": paginated_data["total_items"],
