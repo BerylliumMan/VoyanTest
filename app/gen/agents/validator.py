@@ -109,11 +109,35 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
         if not expected:
             pass
 
+        # Hard gates: truncated 【】 labels / compound multi-actions
+        if _BRACKET_ELLIPSIS_RE.search(desc):
+            result.fail(
+                f"step_{i}_ellipsis",
+                f"步骤 {i + 1} 的【】控件名含省略号，无法可靠定位: {desc[:60]}",
+            )
+        if _COMPOUND_STEP_RE.search(desc):
+            result.fail(
+                f"step_{i}_compound",
+                f"步骤 {i + 1} 疑似并步（多动作/关闭所有弹窗），须拆成单步: {desc[:60]}",
+            )
+
     # Check 4: Steps have basic sanity (description length)
     for i, step in enumerate(steps):
         desc = (step.get("description") or step.get("desc") or "").strip()
         if len(desc) > MAX_STEP_DESCRIPTION_LENGTH:
             result.fail(f"step_{i}_length", f"步骤 {i + 1} 描述过长（{len(desc)} > {MAX_STEP_DESCRIPTION_LENGTH}）")
+
+    # Soft warning: long flow with zero non-empty expected
+    nonempty_expected = 0
+    for step in steps:
+        if isinstance(step, dict):
+            exp = (step.get("parsed_result") or step.get("expected") or "").strip()
+            if exp and not re.fullmatch(r"(?:\d+[\.、]\s*)+", exp):
+                nonempty_expected += 1
+    if len(steps) >= 5 and nonempty_expected == 0:
+        result.warnings.append(
+            f"用例「{(tc.get('title') or tc.get('name') or '')[:40]}」有 {len(steps)} 步但无任何可观察预期，手册可能缺断言"
+        )
 
     # Check 5: Module name exists
     module = tc.get("module") or ""
