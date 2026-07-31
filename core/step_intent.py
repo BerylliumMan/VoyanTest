@@ -218,13 +218,20 @@ def match_intent_candidates(
         fh = frame_hint.strip()
         if fh:
             lines = (snapshot or "").splitlines()
-            # Map ref → nearest preceding iframe/frame line text
             ref_frame: dict[str, str] = {}
             last_frame = ""
+            last_frame_indent = -1
             for line in lines:
-                low = line.lower()
-                if "iframe" in low or re.search(r"^\s*-\s+frame\b", line, re.I):
+                stripped = line.lstrip(" ")
+                indent = len(line) - len(stripped)
+                low = stripped.lower()
+                if low.startswith("- iframe") or re.match(r"- frame\b", low):
                     last_frame = line
+                    last_frame_indent = indent
+                elif last_frame_indent >= 0 and indent <= last_frame_indent and stripped.startswith("-"):
+                    # Left the iframe subtree (sibling or ancestor level)
+                    last_frame = ""
+                    last_frame_indent = -1
                 m = re.search(r"\[ref=(e\d+)\]", line)
                 if m:
                     ref_frame[m.group(1)] = last_frame
