@@ -204,6 +204,10 @@ async def _run_startup_init():
             "test_steps.learned_locator 迁移",
         )
         await _ddl(
+            "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS structured_step JSONB",
+            "test_steps.structured_step 迁移",
+        )
+        await _ddl(
             "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS cacheable BOOLEAN DEFAULT TRUE",
             "test_steps.cacheable 迁移",
         )
