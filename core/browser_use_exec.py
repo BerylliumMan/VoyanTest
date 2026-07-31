@@ -7,6 +7,7 @@ Safe for Agent client offline packaging — only depends on browser-use + stdlib
 import base64
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,46 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], Any]  # sync or returns awaitable
+
+# Early-stop when browser-use loop detection reports prolonged stagnation
+STAGNATION_STOP_THRESHOLD = 8
+_STAGNATION_RE = re.compile(r"stagnation\s*=\s*(\d+)", re.I)
+_BROWSER_DEAD_MARKERS = (
+    "No tabs remain",
+    "Cannot navigate - browser not connected",
+    "Failed to open new tab - no browser is open",
+    "browser not connected",
+    "no browser is open",
+)
+
+
+def create_step_stop_state() -> dict[str, Any]:
+    return {"stop": False, "reason": None, "max_stagnation": 0}
+
+
+def note_browser_use_log_for_stop(
+    state: dict[str, Any] | None,
+    msg: str,
+    *,
+    stagnation_threshold: int = STAGNATION_STOP_THRESHOLD,
+) -> None:
+    """Update stop state from a browser-use / SessionManager log line."""
+    if not state or state.get("stop"):
+        return
+    text = msg or ""
+    m = _STAGNATION_RE.search(text)
+    if m:
+        val = int(m.group(1))
+        state["max_stagnation"] = max(int(state.get("max_stagnation") or 0), val)
+        if val >= stagnation_threshold:
+            state["stop"] = True
+            state["reason"] = f"loop stagnation={val} (threshold={stagnation_threshold})"
+            return
+    for marker in _BROWSER_DEAD_MARKERS:
+        if marker in text:
+            state["stop"] = True
+            state["reason"] = f"browser session dead: {marker}"
+            return
 
 
 def _emit_progress(on_progress: ProgressCallback | None, message: str) -> None:
