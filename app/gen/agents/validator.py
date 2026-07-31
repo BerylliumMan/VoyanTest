@@ -196,15 +196,6 @@ def _validate_test_case(
                     f"step_{i}_ellipsis",
                     f"步骤 {i + 1} 的【】内含省略号，无法可靠定位: {desc[:60]}",
                 )
-            if label_has_control_type_word(
-                (re.search(r"【([^】]+)】", desc) or type("", (), {"group": lambda *_: ""})()).group(1)
-                if "【" in desc else None
-            ):
-                pass  # NL path: soft via sanitize; keep existing compound checks below
-                result.fail(
-                    f"step_{i}_ellipsis",
-                    f"步骤 {i + 1} 的【】控件名含省略号，无法可靠定位: {desc[:60]}",
-                )
             if _COMPOUND_STEP_RE.search(desc):
                 result.fail(
                     f"step_{i}_compound",
