@@ -760,12 +760,18 @@ def _normalize_tc_item(item: dict) -> dict:
         if (not e)
         or (e.strip() in _EMPTY_EXPECTED_MARKERS)
         or re.fullmatch(r"(?:\d+[\.、]\s*)+", e.strip())
-        or not re.sub(r"[\d\.、\s]+", "", e.strip())  # "1. \n" style empties
+        or re.fullmatch(r"[；;\s]+", e.strip())  # align merge-of-empties artifact
+        or not re.sub(r"[\d\.、\s；;]+", "", e.strip())
         else e
         for e in expected
     ]
     if raw_steps:
         expected = align_expected_to_steps(raw_steps, expected)
+        # align may join leftover empties with '；' — treat as empty
+        expected = [
+            "" if re.fullmatch(r"[；;\s]*", (e or "").strip() or "") else e
+            for e in expected
+        ]
         # Expand compound steps; intermediate parts get empty expected
         steps: list[str] = []
         aligned_expected: list[str] = []
