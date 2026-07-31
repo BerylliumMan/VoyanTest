@@ -223,3 +223,45 @@ async def test_ensure_on_preferred_tab_switches():
     ok = await ensure_browser_use_on_newest_tab(session, settle_seconds=0)
     assert ok is True
     assert dispatched[0].target_id == "bbb"
+
+
+def test_maximize_browser_session_clears_size_and_sets_flag():
+    from core.browser_use_exec import maximize_browser_session
+
+    profile = SimpleNamespace(
+        window_size={"width": 1280, "height": 720},
+        window_position={"width": 0, "height": 0},
+        args=["--window-size=1280,720", "--keep"],
+    )
+    maximize_browser_session(SimpleNamespace(browser_profile=profile))
+    assert profile.window_size is None
+    assert profile.window_position is None
+    assert "--start-maximized" in profile.args
+    assert "--keep" in profile.args
+    assert not any(str(a).startswith("--window-size=") for a in profile.args)
+
+
+@pytest.mark.asyncio
+async def test_ensure_browser_window_maximized_via_cdp():
+    from core.browser_use_exec import ensure_browser_window_maximized
+
+    set_bounds = AsyncMock()
+    get_window = AsyncMock(return_value={"windowId": 7})
+    cdp = SimpleNamespace(
+        send=SimpleNamespace(
+            Browser=SimpleNamespace(
+                getWindowForTarget=get_window,
+                setWindowBounds=set_bounds,
+            )
+        )
+    )
+    session = SimpleNamespace(
+        _cdp_client_root=cdp,
+        _cdp_get_all_pages=AsyncMock(return_value=[{"targetId": "tid1"}]),
+    )
+    await ensure_browser_window_maximized(session)
+    get_window.assert_awaited_once()
+    set_bounds.assert_awaited_once()
+    kwargs = set_bounds.await_args.kwargs["params"]
+    assert kwargs["windowId"] == 7
+    assert kwargs["bounds"]["windowState"] == "maximized"
