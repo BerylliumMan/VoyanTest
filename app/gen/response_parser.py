@@ -735,10 +735,10 @@ def _normalize_tc_item(item: dict) -> dict:
             expected_raw = item.get(c)
             break
 
-    steps = [_sanitize_ui_step(s) for s in _listify_field(steps_raw)]
+    raw_steps = [_sanitize_ui_step(s) for s in _listify_field(steps_raw)]
     # Drop trailing empty steps only; keep middle empties rare
-    while steps and not steps[-1]:
-        steps.pop()
+    while raw_steps and not raw_steps[-1]:
+        raw_steps.pop()
     expected = _listify_field(expected_raw)
     # Treat placeholder phrases as empty (must not invent expected for flow manuals)
     _EMPTY_EXPECTED_MARKERS = {
@@ -760,15 +760,30 @@ def _normalize_tc_item(item: dict) -> dict:
         if (not e)
         or (e.strip() in _EMPTY_EXPECTED_MARKERS)
         or re.fullmatch(r"(?:\d+[\.、]\s*)+", e.strip())
+        or not re.sub(r"[\d\.、\s]+", "", e.strip())  # "1. \n" style empties
         else e
         for e in expected
     ]
-    if steps:
-        expected = align_expected_to_steps(steps, expected)
+    if raw_steps:
+        expected = align_expected_to_steps(raw_steps, expected)
+        # Expand compound steps; intermediate parts get empty expected
+        steps: list[str] = []
+        aligned_expected: list[str] = []
+        for step, exp in zip(raw_steps, expected):
+            parts = _expand_compound_ui_step(step)
+            if not parts:
+                continue
+            if len(parts) == 1:
+                steps.append(parts[0])
+                aligned_expected.append(exp)
+            else:
+                for i, part in enumerate(parts):
+                    steps.append(part)
+                    aligned_expected.append(exp if i == len(parts) - 1 else "")
         # Keep empty expected as-is — do not invent neutral placeholders
         normalized["test_steps"] = _to_numbered_text(steps)
         # Never persist bare "1.\n2.\n3." — UI collapses them to "1.2.3.4…"
-        normalized["expected_result"] = _to_numbered_expected(expected)
+        normalized["expected_result"] = _to_numbered_expected(aligned_expected)
     elif expected:
         normalized["expected_result"] = _to_numbered_expected(expected)
 
