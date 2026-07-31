@@ -363,6 +363,36 @@ async def _run_test_case_in_browser_impl(
                         'duration_ms': 0,
                     }
 
+                # Server hybrid: locator failure → same CDP browser-use one step
+                if hybrid and not result.get("success"):
+                    from core.locator_failure import should_hybrid_browser_use_fallback
+                    from app.runtime_config import execution_backend_config as _eb
+
+                    action_lower = (result.get("action") or "").lower()
+                    if should_hybrid_browser_use_fallback(
+                        hybrid=True, result=result, action_lower=action_lower,
+                    ):
+                        logger.info(
+                            "Server hybrid browser-use fallback: step %s after MCP locator failure: %s",
+                            step_dict["step_order"],
+                            (result.get("error") or "")[:200],
+                        )
+                        fb = await _server_hybrid_browser_use_fallback(
+                            mcp_manager,
+                            description=step_dict.get("description") or "",
+                            expected_result=step_dict.get("expected_result"),
+                            max_steps_per_nl=min(20, int(_eb.max_steps_per_nl or 20)),
+                        )
+                        if fb.get("success"):
+                            result = {**result, **fb, "success": True, "backend": "browser_use_fallback"}
+                        else:
+                            result = {
+                                **result,
+                                "fallback_attempted": True,
+                                "fallback_error": fb.get("error"),
+                                "backend": "browser_use_fallback",
+                            }
+
                 step_duration = (tz_now() - step_start_time).total_seconds()
 
                 if result['success']:
