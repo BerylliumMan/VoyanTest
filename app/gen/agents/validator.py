@@ -11,6 +11,7 @@ from core.step_normalize import (
     coerce_structured_step,
     label_has_control_type_word,
     label_has_ellipsis,
+    parse_instant_to_structured,
     render_structured_step,
     validate_structured_step_fields,
 )
