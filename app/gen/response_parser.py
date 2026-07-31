@@ -516,6 +516,64 @@ _GENERIC_BRACKET_ONLY = frozenset({
     "按钮", "控件", "链接", "菜单",
 })
 
+# Ellipsis / truncated labels inside 【】 break locator matching
+_ELLIPSIS_CHARS = r"…\.\.。\u2026"
+_BRACKET_ELLIPSIS_RE = re.compile(r"[…\.]{2,}|。。。")
+
+
+def _strip_ellipsis_in_bracket_label(inner: str) -> str:
+    """Remove truncated tails from a【】label so execution can longest-match.
+
+    ``4888智能辅助（高检...）`` → ``4888智能辅助``
+    ``某某功能…`` → ``某某功能``
+    """
+    s = (inner or "").strip()
+    if not s:
+        return s
+    # Drop trailing parenthetical that itself contains ellipsis
+    s2 = re.sub(
+        r"[（(][^）)]*(?:[…\.]{2,}|。。。)[^）)]*[）)]\s*$",
+        "",
+        s,
+    ).strip()
+    # Drop trailing bare ellipsis
+    s2 = re.sub(r"(?:[…\.]{2,}|。。。)\s*$", "", s2).strip()
+    # Drop leftover open paren after truncation salvage: ``名称（``
+    s2 = re.sub(r"[（(]\s*$", "", s2).strip()
+    return s2 or s
+
+
+def _sanitize_brackets_ellipsis(text: str) -> str:
+    """Rewrite every 【…】 so inner labels do not contain ellipsis truncation."""
+    def _repl(m: re.Match) -> str:
+        return f"【{_strip_ellipsis_in_bracket_label(m.group(1))}】"
+    return re.sub(r"【([^】]*)】", _repl, text or "")
+
+
+def _expand_compound_ui_step(step: str) -> list[str]:
+    """Split known multi-action phrases into single-action steps.
+
+    Conservative: only well-known 「关闭所有对话框」 patterns from flow manuals.
+    """
+    s = (step or "").strip()
+    if not s:
+        return []
+    # e.g. 等待页面中间出现对话框，把所有对话框都点击【关闭】按钮或【X】形状的关闭标志
+    close_all = (
+        re.search(r"(?:把|将)?所有(?:的)?(?:对话框|弹窗|提示框)", s)
+        or re.search(r"(?:关闭|关掉)所有(?:的)?(?:对话框|弹窗|提示框)", s)
+    )
+    mentions_close = re.search(
+        r"点击【(?:关闭|X|×)】|点击.*(?:关闭|【X】)|关闭标志|关闭按钮",
+        s,
+    )
+    if close_all and (mentions_close or "关闭" in s or "【X】" in s):
+        return [
+            "等待弹窗或对话框出现",
+            "点击【关闭】",
+        ]
+    return [s]
+
 
 def _sanitize_ui_step(step: str) -> str:
     """Rewrite common non-executable step phrasings into【visible-label】form.
@@ -525,6 +583,8 @@ def _sanitize_ui_step(step: str) -> str:
     s = (step or "").strip()
     if not s:
         return s
+
+    s = _sanitize_brackets_ellipsis(s)
 
     # Bare load waits are matched as getByText by the executor — neutralize.
     if re.fullmatch(
