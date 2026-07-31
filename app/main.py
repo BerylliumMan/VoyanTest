@@ -208,13 +208,52 @@ async def _run_startup_init():
             "test_steps.cacheable 迁移",
         )
         await _ddl(
-            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'ui'",
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'functional'",
             "test_cases.case_kind 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ALTER COLUMN case_kind SET DEFAULT 'functional'",
+            "test_cases.case_kind 默认值改为 functional",
         )
         await _ddl(
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'ui'",
             "gen_sessions.case_kind 迁移",
         )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS schema_patches (
+                id VARCHAR(64) PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "schema_patches 表",
+        )
+        # 一次性：拆菜单前加列默认 ui，导致历史用例全进「UI自动化」；改归「功能」
+        try:
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import text as _t
+                done = (
+                    await db.execute(
+                        _t("SELECT 1 FROM schema_patches WHERE id = 'case_kind_history_to_functional'")
+                    )
+                ).scalar()
+                if not done:
+                    result = await db.execute(
+                        _t("UPDATE test_cases SET case_kind = 'functional' WHERE case_kind = 'ui'")
+                    )
+                    await db.execute(
+                        _t(
+                            "INSERT INTO schema_patches (id) VALUES ('case_kind_history_to_functional') "
+                            "ON CONFLICT (id) DO NOTHING"
+                        )
+                    )
+                    await db.commit()
+                    logger.info(
+                        "历史用例 case_kind 已迁到 functional，rowcount=%s",
+                        result.rowcount,
+                    )
+        except Exception:
+            logger.warning("case_kind 历史数据回填失败（非关键，继续）", exc_info=True)
         try:
             async with engine.connect() as conn:
                 await conn.execution_options(isolation_level="AUTOCOMMIT")
