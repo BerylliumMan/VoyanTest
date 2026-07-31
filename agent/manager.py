@@ -651,7 +651,7 @@ class AgentManager:
                             )
                     else:
                         tool_call, result = await _resolve_and_run_retry(
-                            resolve_desc, snap or "", expected_result,
+                            resolve_desc, snap or "", expected_result, structured_step,
                         )
                 # Hybrid: locator failure → same-browser browser-use for this NL step only
                 step_backend = "playwright_mcp"
