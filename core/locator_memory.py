@@ -35,11 +35,113 @@ _BRACKET_TEXT_RE = re.compile(r"【([^】]+)】")
 
 _LEARNABLE_ACTIONS = frozenset({
     "click", "fill", "select", "hover", "browser_click", "browser_type", "browser_select_option",
+    # wait / assert：有 target_name（或 assert 文案 value）时也写入记忆，供编辑器展示与后续重放提示
+    "wait", "assert_text", "assert_visible",
 })
 
 
 def is_learnable_action(action: str | None) -> bool:
     return (action or "").strip().lower() in _LEARNABLE_ACTIONS
+
+
+def fingerprint_from_target_name(
+    *,
+    action: str,
+    target_name: str | None = None,
+    target_role: str | None = None,
+    value: str | None = None,
+    snapshot: str = "",
+) -> Optional[dict[str, Any]]:
+    """Build a locator fingerprint from StructuredStep target_name / assert value.
+
+    Used when the MCP tool call has no ref (wait / assert_text), or to backfill
+    name/role from structured fields after a successful interactive step.
+    """
+    name = (target_name or "").strip()
+    val = None if value is None else str(value).strip() or None
+    if not name and val:
+        name = val
+    if not name:
+        return None
+
+    role = (target_role or "").strip().lower() or None
+    if snapshot:
+        matches: list[dict[str, str]] = []
+        for el in parse_snapshot_elements(snapshot):
+            el_name = el.get("name") or ""
+            if not el_name:
+                continue
+            if el_name == name or name in el_name or el_name in name:
+                if role and el.get("role") != role:
+                    continue
+                matches.append(el)
+        if len(matches) == 1:
+            role = matches[0].get("role") or role
+            name = matches[0].get("name") or name
+
+    url = extract_page_url(snapshot) if snapshot else ""
+    return {
+        "action": (action or "wait").strip().lower(),
+        "role": role,
+        "name": name,
+        "value": val,
+        "page_url_hint": page_url_hint(url),
+        "hit_count": 1,
+        "source": "structured_target",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def learn_fingerprint_after_success(
+    *,
+    action: str | None,
+    selector: str | None = None,
+    value: str | None = None,
+    snapshot: str = "",
+    structured_step: dict | None = None,
+    cached_fp: dict | None = None,
+    used_replay: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Prefer AX-ref fingerprint; fall back to structured target_name / value."""
+    act = (action or "").strip().lower()
+    if not is_learnable_action(act):
+        return None
+
+    if used_replay and isinstance(cached_fp, dict):
+        return bump_hit_count(cached_fp)
+
+    if selector:
+        fp = extract_from_snapshot(
+            snapshot or "",
+            str(selector),
+            action=act,
+            value=value,
+        )
+        if fp:
+            # Merge structured target_name when snapshot name empty
+            struct = structured_step if isinstance(structured_step, dict) else None
+            if struct and not (fp.get("name") or "").strip():
+                tn = (struct.get("target_name") or "").strip()
+                if tn:
+                    fp = {**fp, "name": tn}
+            return fp
+
+    struct = structured_step if isinstance(structured_step, dict) else None
+    if not struct:
+        # wait/assert_text often only have value on the tool call
+        if act in ("wait", "assert_text", "assert_visible") and value:
+            return fingerprint_from_target_name(
+                action=act, value=value, snapshot=snapshot or "",
+            )
+        return None
+
+    return fingerprint_from_target_name(
+        action=act or (struct.get("action") or "wait"),
+        target_name=struct.get("target_name"),
+        target_role=struct.get("target_role"),
+        value=struct.get("value") if struct.get("value") is not None else value,
+        snapshot=snapshot or "",
+    )
 
 
 def extract_page_url(snapshot: str) -> str:
