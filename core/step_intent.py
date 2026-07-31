@@ -507,8 +507,7 @@ async def resolve_tool_call_from_step(
         if mcp_manager is not None and hasattr(mcp_manager, "refresh_snapshot_for_hints"):
             hints = [intent.target_name] if intent.target_name else []
             if not hints:
-                from core.step_intent import extract_label_hints as _elh
-                hints = _elh(step_description)
+                hints = extract_label_hints(step_description)
             try:
                 snapshot = await mcp_manager.refresh_snapshot_for_hints(hints, current=snapshot)
             except Exception as exc:
