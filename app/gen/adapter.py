@@ -167,6 +167,7 @@ async def import_test_cases(
     test_cases: list,  # list of gen.models.TestCase (gentestcases format)
     selected_ids: list[str] | None = None,  # list of test_case_id strings to import, None = all
     parent_module_id: int | None = None,
+    case_kind: str = "ui",
 ) -> tuple[list[db_models.TestCase], int]:
     """Import gentestcases test cases into uitest-work DB.
 
@@ -176,6 +177,8 @@ async def import_test_cases(
     created = []
     skipped = 0
     selected_set = set(selected_ids) if selected_ids else None
+    if case_kind not in ("functional", "ui"):
+        case_kind = "ui"
 
     for gen_tc in test_cases:
         if selected_set is not None and gen_tc.test_case_id not in selected_set:
@@ -215,6 +218,7 @@ async def import_test_cases(
             name=title,
             description=description,
             priority=priority,
+            case_kind=case_kind,
         )
         db.add(tc)
         await db.flush()
