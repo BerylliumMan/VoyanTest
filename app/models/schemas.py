@@ -84,6 +84,8 @@ class TestStepBase(BaseModel):
     assertions: list[dict] = Field(default_factory=list)
     healed_selector: Optional[str] = None
     learned_locator: Optional[dict] = None
+    # UI StructuredStep dict; optional for functional / legacy NL steps
+    structured_step: Optional[dict] = None
     # Midscene-style: when False, never read/write locator memory for this step
     cacheable: bool = True
 
@@ -117,6 +119,8 @@ class TestStepUpdate(BaseModel):
     assertions: Optional[list[dict]] = None
     healed_selector: Optional[str] = None
     learned_locator: Optional[dict] = None
+    # UI StructuredStep dict; optional for functional / legacy NL steps
+    structured_step: Optional[dict] = None
     # Midscene-style: when False, never read/write locator memory for this step
     cacheable: bool = True
 
