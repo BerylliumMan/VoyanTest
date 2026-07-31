@@ -65,6 +65,25 @@ async def save_run_results(
                 else:
                     run_id = None
 
+            # 复用同批次下预创建的 pending/running 行，避免 OTA/批量路径重复建 run
+            if not run_id and batch_id:
+                result = await db.execute(
+                    select(db_models.TestRun).where(
+                        db_models.TestRun.batch_id == batch_id,
+                        db_models.TestRun.case_id == case_id,
+                        db_models.TestRun.status.in_(("pending", "running")),
+                    ).limit(1)
+                )
+                db_run = result.scalar_one_or_none()
+                if db_run:
+                    run_id = db_run.id
+                    db_run.status = status
+                    db_run.start_time = start_time
+                    db_run.end_time = end_time
+                    db_run.duration = duration
+                    db_run.report_path = report_path
+                    db_run.log_path = log_path
+
             if not run_id:
                 db_run = db_models.TestRun(
                     case_id=case_id,
