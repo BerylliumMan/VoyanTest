@@ -48,7 +48,23 @@ def normalize_priority_to_storage(raw: str | None, *, default: str = "medium") -
     key = (raw or "").strip()
     if not key:
         return default
-    mapped = _PRIORITY_TO_STORAGE.get(key) or _PRIORITY_TO_STORAGE.get(key.upper()) or _PRIORITY_TO_STORAGE.get(key.lower())
+    # Combined labels like ``P0/P1/P2`` or ``高/中`` → first recognizable part
+    for part in re.split(r"[/,|，、\s]+", key):
+        part = part.strip()
+        if not part:
+            continue
+        mapped = (
+            _PRIORITY_TO_STORAGE.get(part)
+            or _PRIORITY_TO_STORAGE.get(part.upper())
+            or _PRIORITY_TO_STORAGE.get(part.lower())
+        )
+        if mapped:
+            return mapped
+    mapped = (
+        _PRIORITY_TO_STORAGE.get(key)
+        or _PRIORITY_TO_STORAGE.get(key.upper())
+        or _PRIORITY_TO_STORAGE.get(key.lower())
+    )
     return mapped or default
 
 
