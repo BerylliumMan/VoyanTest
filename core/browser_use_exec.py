@@ -143,19 +143,29 @@ def _make_new_step_callback(
 def attach_browser_use_log_handler(
     *,
     on_progress: ProgressCallback | None,
+    stop_watch_ref: dict[str, Any] | None = None,
     logger_names: tuple[str, ...] = ("browser_use", "bubus"),
 ) -> list[tuple[logging.Logger, logging.Handler]]:
     """Attach temporary handlers that forward library logs to on_progress.
 
+    When ``stop_watch_ref`` is provided (``{\"state\": step_stop_dict}``), also
+    watch for stagnation / browser-dead markers to request early stop.
+
     Returns list of (logger, handler) to remove later via ``detach_browser_use_log_handlers``.
     """
-    if not on_progress:
+    if not on_progress and not stop_watch_ref:
         return []
 
     class _ProgressHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             try:
                 msg = self.format(record)
+                if stop_watch_ref is not None:
+                    state = stop_watch_ref.get("state")
+                    if isinstance(state, dict):
+                        note_browser_use_log_for_stop(state, msg)
+                if not on_progress:
+                    return
                 # Skip extremely noisy debug noise if somehow attached at DEBUG
                 if record.levelno < logging.INFO:
                     return
