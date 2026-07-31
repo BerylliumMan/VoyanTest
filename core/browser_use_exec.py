@@ -594,34 +594,23 @@ async def ensure_browser_window_maximized(session) -> None:
     try:
         cdp = getattr(session, "_cdp_client_root", None)
         if cdp is None:
-            cdp_prop = getattr(type(session), "cdp_client", None)
-            if cdp_prop is not None:
-                try:
-                    cdp = session.cdp_client
-                except Exception:
-                    cdp = None
+            try:
+                cdp = session.cdp_client
+            except Exception:
+                cdp = None
         if cdp is None:
             return
 
-        target_id = None
         pages = await list_browser_use_page_ids(session)
-        if pages:
-            target_id = pages[0]
-        if not target_id:
-            # Fallback: any page target from CDP
-            try:
-                targets = await cdp.send.Target.getTargets()
-                for t in (targets or {}).get("targetInfos") or []:
-                    if t.get("type") == "page" and t.get("targetId"):
-                        target_id = t["targetId"]
-                        break
-            except Exception:
-                pass
+        target_id = pages[0] if pages else None
         if not target_id:
             return
 
         win = await cdp.send.Browser.getWindowForTarget(params={"targetId": target_id})
-        window_id = (win or {}).get("windowId")
+        if isinstance(win, dict):
+            window_id = win.get("windowId")
+        else:
+            window_id = getattr(win, "windowId", None)
         if window_id is None:
             return
         await cdp.send.Browser.setWindowBounds(
