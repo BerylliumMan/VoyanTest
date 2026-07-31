@@ -15,7 +15,7 @@ import styles from './style/index.module.less';
 interface ProjectSummary { id: number; name: string; last_run_status?: string; }
 interface DashboardStats { total_runs: number; passed: number; failed: number; pass_rate: number | null; }
 interface TrendItem { date: string; label?: string; total: number; passed: number; failed: number; }
-interface BatchRun { id: number; name: string; project_name: string; status: string; passed: number; total_cases: number; }
+interface BatchRun { id: number; name: string; project_name: string; status: string; passed: number; failed?: number; total_cases: number; }
 
 const { Row, Col } = Grid;
 
