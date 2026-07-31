@@ -616,9 +616,21 @@ def _normalize_tc_item(item: dict) -> dict:
             else:
                 desc = (item_step.get("description") or item_step.get("desc") or "").strip()
                 if desc:
-                    string_in.append(_sanitize_ui_step(desc))
+                    parsed = parse_instant_to_structured(_sanitize_ui_step(desc))
+                    if parsed:
+                        structured_in.extend(expand_structured_compounds(parsed))
+                    else:
+                        string_in.append(_sanitize_ui_step(desc))
     else:
         string_in = [_sanitize_ui_step(s) for s in _listify_field(steps_raw)]
+
+    # If we mixed leftovers into string_in while having structured, upgrade leftovers
+    if structured_in and string_in:
+        for s in string_in:
+            parsed = parse_instant_to_structured(s)
+            if parsed:
+                structured_in.extend(expand_structured_compounds(parsed))
+        string_in = []
 
     # Prefer structured path when we have objects; else Instant strings
     if structured_in:
