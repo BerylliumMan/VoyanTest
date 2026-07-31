@@ -157,18 +157,32 @@ def _validate_test_case(
         action = (step.get("action") or "").strip().lower()
 
         if require_structured:
+            # Hard-check raw fields BEFORE coerce strips ellipsis / type suffixes
+            raw_steps = tc.get("steps") or tc.get("structured_steps") or []
+            raw = raw_steps[i] if isinstance(raw_steps, list) and i < len(raw_steps) else None
+            if isinstance(raw, dict):
+                raw_name = raw.get("target_name") or raw.get("target") or raw.get("name")
+                raw_value = raw.get("value")
+                if label_has_ellipsis(raw_name if isinstance(raw_name, str) else None):
+                    result.fail(
+                        f"step_{i}_ellipsis",
+                        f"步骤 {i + 1} 的 target_name 含省略号: {raw_name}",
+                    )
+                if label_has_ellipsis(str(raw_value) if raw_value is not None else None):
+                    result.fail(
+                        f"step_{i}_ellipsis_val",
+                        f"步骤 {i + 1} 的 value 含省略号: {raw_value}",
+                    )
+                if label_has_control_type_word(raw_name if isinstance(raw_name, str) else None):
+                    result.fail(
+                        f"step_{i}_ctrl_type",
+                        f"步骤 {i + 1} 的 target_name 含控件类型词: {raw_name}",
+                    )
             for reason in validate_structured_step_fields(step, index=i, require_action=True):
+                # skip duplicates already covered by raw checks
+                if "省略号" in reason or "控件类型词" in reason:
+                    continue
                 result.fail(f"step_{i}_struct", reason)
-            if label_has_ellipsis(step.get("target_name")):
-                result.fail(
-                    f"step_{i}_ellipsis",
-                    f"步骤 {i + 1} 的 target_name 含省略号: {step.get('target_name')}",
-                )
-            if label_has_control_type_word(step.get("target_name")):
-                result.fail(
-                    f"step_{i}_ctrl_type",
-                    f"步骤 {i + 1} 的 target_name 含控件类型词: {step.get('target_name')}",
-                )
         else:
             if not desc:
                 result.fail(f"step_{i}_desc", f"步骤 {i + 1} 描述不能为空")
@@ -178,6 +192,15 @@ def _validate_test_case(
                     f"步骤 {i + 1} 操作 '{action}' 不在合法操作列表中",
                 )
             if _BRACKET_ELLIPSIS_RE.search(desc):
+                result.fail(
+                    f"step_{i}_ellipsis",
+                    f"步骤 {i + 1} 的【】内含省略号，无法可靠定位: {desc[:60]}",
+                )
+            if label_has_control_type_word(
+                (re.search(r"【([^】]+)】", desc) or type("", (), {"group": lambda *_: ""})()).group(1)
+                if "【" in desc else None
+            ):
+                pass  # NL path: soft via sanitize; keep existing compound checks below
                 result.fail(
                     f"step_{i}_ellipsis",
                     f"步骤 {i + 1} 的【】控件名含省略号，无法可靠定位: {desc[:60]}",
