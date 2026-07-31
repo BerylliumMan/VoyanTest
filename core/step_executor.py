@@ -436,6 +436,15 @@ async def execute_step_mcp(
     desc = normalize_step_description(raw_desc)
     expected_result = step.get('expected_result')
     label, option = parse_dropdown_select(raw_desc)
+    structured_step = step.get("structured_step")
+    if not isinstance(structured_step, dict):
+        structured_step = None
+        if raw_desc:
+            try:
+                from core.step_normalize import parse_instant_to_structured
+                structured_step = parse_instant_to_structured(raw_desc)
+            except Exception:
+                structured_step = None
     t_start = time.monotonic()
     cacheable = step.get("cacheable", True)
     if cacheable is None:
