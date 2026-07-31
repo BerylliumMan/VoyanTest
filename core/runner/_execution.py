@@ -60,30 +60,12 @@ async def run_test_case_in_browser(
     run_id: int | None = None,
     base_url_override: str | None = None,
     debug_mode: bool = False,
+    hybrid: bool = False,
 ) -> dict:
     """Execute a single test case using an existing PlaywrightMCPManager.
 
-    Parameters
-    ----------
-    case_id : int
-        The test case to execute.
-    mcp_manager : PlaywrightMCPManager
-        An already-started manager (shared across batch runs).
-    db : AsyncSession, optional
-        Database session.  Created internally when *None* via
-        ``AsyncSessionLocal`` async context manager.
-    batch_id : int, optional
-        RunBatch ID to associate this run with.
-    clear_cookies : bool
-        If True, clear browser cookies before execution (used once at
-        batch-start, not per-case).
-    debug_mode : bool
-        If True, pauses execution on step failure for interactive
-        debugging via WebSocket (retry / skip / abort / edit).
-
-    Returns
-    -------
-    dict with keys: case_id, status, report_path, step_results, batch_id
+    ``hybrid``: on locator failure, attach browser-use to the same CDP browser
+    for one NL step (requires ``mcp_manager.cdp_url`` from shared_cdp start).
     """
     if db is None:
         async with AsyncSessionLocal() as db:
@@ -96,6 +78,7 @@ async def run_test_case_in_browser(
                 run_id=run_id,
                 base_url_override=base_url_override,
                 debug_mode=debug_mode,
+                hybrid=hybrid,
             )
     return await _run_test_case_in_browser_impl(
         case_id,
@@ -106,7 +89,47 @@ async def run_test_case_in_browser(
         run_id=run_id,
         base_url_override=base_url_override,
         debug_mode=debug_mode,
+        hybrid=hybrid,
     )
+
+
+async def _server_hybrid_browser_use_fallback(
+    mcp_manager,
+    *,
+    description: str,
+    expected_result: str | None,
+    max_steps_per_nl: int = 20,
+) -> dict:
+    """Run one NL step via browser-use on the shared server CDP browser."""
+    cdp_url = getattr(mcp_manager, "cdp_url", None)
+    if not cdp_url:
+        return {"success": False, "error": "no shared CDP for server hybrid", "action": "browser_use_fallback"}
+    try:
+        from core.browser_use_exec import (
+            create_browser_use_llm_from_config,
+            execute_nl_steps_browser_use,
+        )
+        from core.llm_wrapper import _resolve_config as _llm_resolve_config
+
+        key, base, model = await _llm_resolve_config()
+        llm = create_browser_use_llm_from_config(
+            api_key=key, api_base=base, model=model,
+        )
+        results = await execute_nl_steps_browser_use(
+            [{"description": description, "expected_result": expected_result}],
+            llm=llm,
+            max_steps_per_nl=max_steps_per_nl,
+            cdp_url=cdp_url,
+            headless=True,
+        )
+        if not results:
+            return {"success": False, "error": "empty browser-use result", "action": "browser_use_fallback"}
+        r = results[0] if isinstance(results[0], dict) else {"success": False, "error": str(results[0])}
+        r.setdefault("action", "browser_use_fallback")
+        return r
+    except Exception as exc:
+        logger.exception("server hybrid browser-use fallback failed")
+        return {"success": False, "error": str(exc), "action": "browser_use_fallback"}
 
 
 async def _run_test_case_in_browser_impl(
