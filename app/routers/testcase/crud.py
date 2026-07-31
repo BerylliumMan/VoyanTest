@@ -74,6 +74,7 @@ async def list_init_test_cases(
 @router.get("/export")
 async def export_test_cases(
     project_id: int,
+    case_kind: str | None = None,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -81,7 +82,7 @@ async def export_test_cases(
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-    cases = await crud.get_all_test_cases_for_project(db, project_id)
+    cases = await crud.get_all_test_cases_for_project(db, project_id, case_kind=case_kind)
 
     wb = Workbook()
     ws = wb.active
