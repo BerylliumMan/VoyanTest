@@ -740,6 +740,9 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             )
             _b = _result.scalar_one_or_none()
             if _b:
+                # 标记结束，避免未跑完的用例数把状态卡在 running
+                if _b.finished_at is None:
+                    _b.finished_at = tz_now()
                 await crud._compute_batch_status(_db, _b)
                 await _db.commit()
 
