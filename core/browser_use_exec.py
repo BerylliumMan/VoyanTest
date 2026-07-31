@@ -552,9 +552,9 @@ def create_browser_use_llm_from_config(
 def maximize_browser_session(session) -> None:
     """Force headed Chrome to start maximized.
 
-    browser-use's profile validator copies display size into ``window_size``,
-    which makes launch use ``--window-size=WxH`` instead of ``--start-maximized``.
-    Clear that and ensure the maximize flag is present.
+    browser-use's ``detect_display_configuration`` copies display size into
+    ``window_size``, which makes launch use ``--window-size=WxH`` instead of
+    ``--start-maximized``. Clear size/position and ensure the maximize flag.
     """
     profile = getattr(session, "browser_profile", None)
     if profile is None:
@@ -564,13 +564,72 @@ def maximize_browser_session(session) -> None:
     except Exception:
         logger.debug("clear window_size failed", exc_info=True)
     try:
-        args = [a for a in (list(getattr(profile, "args", None) or [])) if a != "--start-maximized"]
+        profile.window_position = None
+    except Exception:
+        logger.debug("clear window_position failed", exc_info=True)
+    try:
+        args = [
+            a
+            for a in (list(getattr(profile, "args", None) or []))
+            if a != "--start-maximized" and not str(a).startswith("--window-size=")
+            and not str(a).startswith("--window-position=")
+        ]
         if "--disable-popup-blocking" not in args:
             args.append("--disable-popup-blocking")
         args.append("--start-maximized")
         profile.args = args
     except Exception:
         logger.debug("set --start-maximized failed", exc_info=True)
+
+
+async def ensure_browser_window_maximized(session) -> None:
+    """Maximize the OS window via CDP after connect.
+
+    ``--start-maximized`` is often ignored when Chromium is launched with
+    ``--remote-debugging-port`` (common on Windows). CDP ``windowState=maximized``
+    is reliable once the browser is up.
+    """
+    if session is None:
+        return
+    try:
+        cdp = getattr(session, "_cdp_client_root", None)
+        if cdp is None:
+            cdp_prop = getattr(type(session), "cdp_client", None)
+            if cdp_prop is not None:
+                try:
+                    cdp = session.cdp_client
+                except Exception:
+                    cdp = None
+        if cdp is None:
+            return
+
+        target_id = None
+        pages = await list_browser_use_page_ids(session)
+        if pages:
+            target_id = pages[0]
+        if not target_id:
+            # Fallback: any page target from CDP
+            try:
+                targets = await cdp.send.Target.getTargets()
+                for t in (targets or {}).get("targetInfos") or []:
+                    if t.get("type") == "page" and t.get("targetId"):
+                        target_id = t["targetId"]
+                        break
+            except Exception:
+                pass
+        if not target_id:
+            return
+
+        win = await cdp.send.Browser.getWindowForTarget(params={"targetId": target_id})
+        window_id = (win or {}).get("windowId")
+        if window_id is None:
+            return
+        await cdp.send.Browser.setWindowBounds(
+            params={"windowId": window_id, "bounds": {"windowState": "maximized"}},
+        )
+        logger.info("browser-use window maximized via CDP (windowId=%s)", window_id)
+    except Exception as exc:
+        logger.warning("browser-use CDP maximize failed: %s", exc, exc_info=True)
 
 
 def create_browser_session(
@@ -596,11 +655,21 @@ def create_browser_session(
             **kwargs,
         )
 
+    # Prefer maximize flag at construction; detect_display still fills window_size
+    # until maximize_browser_session clears it below.
+    launch_kwargs = dict(kwargs)
+    if not headless:
+        extra_args = list(launch_kwargs.pop("args", None) or [])
+        if "--start-maximized" not in extra_args:
+            extra_args.append("--start-maximized")
+        launch_kwargs["args"] = extra_args
+        launch_kwargs.setdefault("no_viewport", True)
+
     session = BrowserSession(
         headless=headless,
         keep_alive=keep_alive,
         enable_default_extensions=enable_default_extensions,
-        **kwargs,
+        **launch_kwargs,
     )
     # Ensure popup blocker is off even in headless (target=_blank / window.open).
     try:
