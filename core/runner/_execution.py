@@ -188,6 +188,7 @@ async def _run_test_case_in_browser_impl(
             if healed:
                 desc = f"{desc}（优先使用选择器: {healed}）"
             learned = getattr(s, "learned_locator", None)
+            structured = getattr(s, "structured_step", None)
             step_list.append({
                 'id': s.id,
                 'step_order': s.step_order,
@@ -195,6 +196,7 @@ async def _run_test_case_in_browser_impl(
                 'expected_result': s.parsed_result,
                 'healed_selector': healed or None,
                 'learned_locator': learned if isinstance(learned, dict) else None,
+                'structured_step': structured if isinstance(structured, dict) else None,
                 'cacheable': bool(getattr(s, "cacheable", True)),
             })
         step_list.sort(key=lambda x: x['step_order'])
