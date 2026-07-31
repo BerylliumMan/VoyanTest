@@ -89,6 +89,9 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
       onOk={onSubmit} className={styles['editor-modal']}
     >
       <Form form={form} layout="vertical">
+        <Form.Item label={t['case.kind'] || '用例类型'}>
+          <Tag color={caseKind === 'functional' ? 'arcoblue' : 'green'}>{kindLabel}</Tag>
+        </Form.Item>
         <Form.Item field="name" label={t['name']} rules={[{ required: true, message: t['case.name.placeholder'] }]}>
           <Input placeholder={t['case.name.placeholder']} />
         </Form.Item>
