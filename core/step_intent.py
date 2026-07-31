@@ -232,7 +232,7 @@ def match_intent_candidates(
                     # Left the iframe subtree (sibling or ancestor level)
                     last_frame = ""
                     last_frame_indent = -1
-                m = re.search(r"\[ref=(e\d+)\]", line)
+                m = re.search(r"\[ref=([a-zA-Z]*\d*e\d+)\]", line)
                 if m:
                     ref_frame[m.group(1)] = last_frame
             preferred = [
