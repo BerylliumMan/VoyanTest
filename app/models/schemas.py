@@ -72,6 +72,7 @@ class TestCaseBase(BaseModel):
     is_init: bool = False
     tags: Optional[str] = None
     priority: str = "medium"
+    case_kind: str = Field("ui", pattern="^(functional|ui)$")
 
 class TestStepBase(BaseModel):
     case_id: int
