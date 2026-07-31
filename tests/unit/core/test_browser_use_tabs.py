@@ -147,6 +147,40 @@ async def test_enable_and_arm_tab_auto_switch():
 
 
 @pytest.mark.asyncio
+async def test_pre_arm_tab_created_folded_into_baseline():
+    """TabCreated before arm must not become preferred / steal focus."""
+    handlers = []
+
+    class Bus:
+        def on(self, event_cls, handler):
+            handlers.append(handler)
+
+    session = SimpleNamespace(
+        event_bus=Bus(),
+        agent_focus=SimpleNamespace(target_id="aaa"),
+        _cdp_get_all_pages=AsyncMock(return_value=[{"targetId": "aaa"}]),
+    )
+    enable_browser_use_auto_switch_new_tabs(session)
+    on_created = handlers[0]
+    await on_created(SimpleNamespace(target_id="aaa"))
+    await on_created(SimpleNamespace(target_id="bbb"))
+    assert session._voyantest_tab_auto["preferred_target_id"] is None
+    await arm_browser_use_auto_switch_new_tabs(session)
+    assert session._voyantest_tab_auto["baseline_ids"] == {"aaa", "bbb"}
+    assert session._voyantest_tab_auto["preferred_target_id"] is None
+
+
+def test_no_click_handler_monkeypatch():
+    """Regression: soft-refocus patch broke BrowserStart (handler name rules)."""
+    import core.browser_use_exec as mod
+
+    assert not hasattr(mod, "_soften_click_opener_refocus")
+    from browser_use.browser.watchdogs import default_action_watchdog as daw
+
+    assert not getattr(daw, "_voyantest_soft_refocus", False)
+
+
+@pytest.mark.asyncio
 async def test_ensure_without_preferred_does_not_guess_pages_last():
     """CDP may list opener last — must not flip back without preferred id."""
     dispatched = []
