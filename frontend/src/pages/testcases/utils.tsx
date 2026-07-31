@@ -33,7 +33,7 @@ export function renderTree(
   t: Record<string, string>,
   onEditModule: (mod: Module) => void,
   onDeleteModule: (id: number, name: string) => void,
-  onRunModule: (id: number) => void,
+  onRunModule?: (id: number) => void,
 ): TreeNodeData[] {
   return mods.map((m) => ({
     key: String(m.id),
@@ -53,7 +53,9 @@ export function renderTree(
                 <Button size="mini" status="danger" onClick={() => {
                   onDeleteModule(m.id, m.name);
                 }}>{t['delete']}</Button>
-                <Button size="mini" type="primary" onClick={() => onRunModule(m.id)}>{t['run.all']}</Button>
+                {onRunModule && (
+                  <Button size="mini" type="primary" onClick={() => onRunModule(m.id)}>{t['run.all']}</Button>
+                )}
               </Space>
             }
           >
