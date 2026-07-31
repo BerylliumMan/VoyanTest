@@ -75,11 +75,14 @@ async def create_gen_session(
     project_description: str,
     status: str = "analyzing",
     user_id: int | None = None,
+    case_kind: str = "ui",
 ) -> db_models.GenSession:
     """创建一条 GenSession 行（路由层 upload 用）。
 
     ``filenames`` 应为 JSON 字符串（与原路由一致）；router 负责序列化。
     """
+    if case_kind not in ("functional", "ui"):
+        case_kind = "ui"
     record = db_models.GenSession(
         id=session_id,
         filename=filename,
@@ -88,6 +91,7 @@ async def create_gen_session(
         user_id=user_id,
         project_description=project_description,
         status=status,
+        case_kind=case_kind,
     )
     db.add(record)
     await db.commit()
