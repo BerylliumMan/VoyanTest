@@ -6,9 +6,18 @@ from typing import Any
 import re
 from dataclasses import asdict as _asdict
 
-VALID_ACTIONS = {
-    "click", "fill", "goto", "select", "hover",
-    "scroll", "wait", "assert", "screenshot", "press",
+from core.step_normalize import (
+    UI_ACTIONS,
+    coerce_structured_step,
+    label_has_control_type_word,
+    label_has_ellipsis,
+    render_structured_step,
+    validate_structured_step_fields,
+)
+
+VALID_ACTIONS = set(UI_ACTIONS) | {
+    # legacy aliases accepted if present before coerce
+    "assert", "screenshot", "press", "scroll", "input", "type", "navigate", "open",
 }
 MAX_STEP_DESCRIPTION_LENGTH = 500
 TC_NAME_PATTERN = re.compile(r"^[\w\u4e00-\u9fff\s\-（）(),.。!！?？、：；]{2,100}$")
@@ -40,13 +49,88 @@ class ValidationResult:
             self.checks[check] = True
 
 
-def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
+def _is_ui_structured_case(tc: dict[str, Any]) -> bool:
+    """True when case looks like UI structured gen (object steps or flag)."""
+    if tc.get("require_structured_steps") or tc.get("case_kind") == "ui":
+        return True
+    steps = tc.get("steps") or tc.get("structured_steps")
+    if isinstance(steps, list) and steps and all(
+        isinstance(s, dict) and s.get("action") for s in steps
+    ):
+        return True
+    return False
+
+
+def _normalize_steps_for_validation(tc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize steps to list of dicts with description/action/expected."""
+    _er_raw = tc.get("expected_result") or ""
+    if isinstance(_er_raw, list):
+        _er_raw = " ".join(str(v) for v in _er_raw if v)
+    if isinstance(_er_raw, str) and _er_raw.strip():
+        _er_parts = [p.strip() for p in re.split(r"\d+\.\s*", _er_raw.strip()) if p.strip()]
+    else:
+        exp = tc.get("expected")
+        if isinstance(exp, list):
+            _er_parts = [str(x).strip() if x is not None else "" for x in exp]
+        else:
+            _er_parts = []
+
+    steps = tc.get("steps") or tc.get("structured_steps") or tc.get("test_steps") or []
+    if isinstance(steps, str):
+        parts = re.split(r"\d+\.\s*", steps.strip())
+        steps = [p.strip() for p in parts if p.strip()] or [steps.strip()]
+
+    if not isinstance(steps, list):
+        return []
+
+    _er_padded = _er_parts[: len(steps)]
+    if len(_er_padded) < len(steps):
+        _er_padded = [""] * (len(steps) - len(_er_padded)) + _er_padded
+
+    out: list[dict[str, Any]] = []
+    for i, step in enumerate(steps):
+        if isinstance(step, str):
+            out.append({
+                "description": step,
+                "action": "",
+                "expected": _er_padded[i] if i < len(_er_padded) else "",
+            })
+            continue
+        if not isinstance(step, dict):
+            out.append({"description": str(step), "action": "", "expected": ""})
+            continue
+        coerced = coerce_structured_step(step) or {}
+        desc = (
+            step.get("description")
+            or step.get("desc")
+            or render_structured_step(coerced)
+            or ""
+        ).strip()
+        expected = (
+            step.get("parsed_result")
+            or step.get("expected")
+            or (_er_padded[i] if i < len(_er_padded) else "")
+            or ""
+        )
+        merged = {**coerced, "description": desc, "expected": str(expected).strip()}
+        if not merged.get("action") and step.get("action"):
+            merged["action"] = str(step.get("action") or "").strip().lower()
+        out.append(merged)
+    return out
+
+
+def _validate_test_case(
+    tc: dict[str, Any],
+    *,
+    require_structured: bool | None = None,
+) -> ValidationResult:
     """Validate a single generated test case."""
     if not isinstance(tc, dict):
         tc = _asdict(tc)
     result = ValidationResult()
+    if require_structured is None:
+        require_structured = _is_ui_structured_case(tc)
 
-    # Check 1: Title exists and is valid
     title = (tc.get("title") or tc.get("name") or "").strip()
     if not title:
         result.fail("title_required", "用例标题不能为空")
@@ -55,101 +139,72 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
     else:
         result.pass_check("title_required")
 
-    # 预解析 expected_result（支持编号格式："1.结果1 2.结果2"，或无编号的纯文本）
-    # 注意：编号可能跳过中间步骤（如仅 "3.保存成功"），解析后需要右对齐
-    _er_raw = tc.get("expected_result") or tc.get("test_steps") or ""
-    if isinstance(_er_raw, list):
-        _er_raw = " ".join(str(v) for v in _er_raw if v)
-    if isinstance(_er_raw, str):
-        _er_parts = [p.strip() for p in re.split(r'\d+\.\s*', _er_raw.strip()) if p.strip()]
-    else:
-        _er_parts = []
-
-    # Check 2: At least one step（支持 test_steps 字符串字段）
-    steps = tc.get("steps") or tc.get("test_steps") or []
-    if isinstance(steps, str):
-        # 用编号拆分 steps（"1. step1 2. step2" → ["step1", "step2"]），兼容无编号的纯描述
-        parts = re.split(r'\d+\.\s*', steps.strip())
-        steps = [p.strip() for p in parts if p.strip()] or [steps.strip()]
-
-    # 右对齐 _er_parts：如果预期结果少于步骤，优先匹配末尾步骤
-    _er_padded = _er_parts[:len(steps)]  # 截断多余的
-    if len(_er_padded) < len(steps):
-        _er_padded = [''] * (len(steps) - len(_er_padded)) + _er_padded  # 右对齐
-
-    if isinstance(steps, list) and all(isinstance(s, str) for s in steps):
-        # 如果 steps 是字符串列表（从没进入 string 拆分的路径），转为 dict
-        steps = [
-            {"description": s, "action": "", "expected": _er_padded[i] if i < len(_er_padded) else ""}
-            for i, s in enumerate(steps)
-        ]
-    if not isinstance(steps, list):
-        result.fail("steps_required", "steps 必须是数组")
-    elif len(steps) < 1:
+    steps = _normalize_steps_for_validation(tc)
+    if len(steps) < 1:
         result.fail("steps_required", "用例至少需要 1 个步骤")
     else:
         result.pass_check("steps_required")
 
-    # Check 3: Each step has description and valid action
     for i, step in enumerate(steps):
-        if isinstance(step, str):
-            step = {"description": step, "action": "", "expected": _er_padded[i] if i < len(_er_padded) else ""}
-            steps[i] = step
-        desc = (step.get("description") or step.get("desc") or "").strip()
-        if not desc:
-            result.fail(f"step_{i}_desc", f"步骤 {i + 1} 描述不能为空")
-
+        desc = (step.get("description") or "").strip()
         action = (step.get("action") or "").strip().lower()
-        if action and action not in VALID_ACTIONS:
-            result.fail(f"step_{i}_action", f"步骤 {i + 1} 操作 '{action}' 不在合法操作列表中")
 
-        expected = (step.get("parsed_result") or step.get("expected") or "").strip()
-        # Allow empty expected on any step (flow manuals often omit undocumented asserts).
-        # Empty is preferred over invented placeholders.
-        if not expected:
-            pass
+        if require_structured:
+            for reason in validate_structured_step_fields(step, index=i, require_action=True):
+                result.fail(f"step_{i}_struct", reason)
+            if label_has_ellipsis(step.get("target_name")):
+                result.fail(
+                    f"step_{i}_ellipsis",
+                    f"步骤 {i + 1} 的 target_name 含省略号: {step.get('target_name')}",
+                )
+            if label_has_control_type_word(step.get("target_name")):
+                result.fail(
+                    f"step_{i}_ctrl_type",
+                    f"步骤 {i + 1} 的 target_name 含控件类型词: {step.get('target_name')}",
+                )
+        else:
+            if not desc:
+                result.fail(f"step_{i}_desc", f"步骤 {i + 1} 描述不能为空")
+            if action and action not in VALID_ACTIONS:
+                result.fail(
+                    f"step_{i}_action",
+                    f"步骤 {i + 1} 操作 '{action}' 不在合法操作列表中",
+                )
+            if _BRACKET_ELLIPSIS_RE.search(desc):
+                result.fail(
+                    f"step_{i}_ellipsis",
+                    f"步骤 {i + 1} 的【】控件名含省略号，无法可靠定位: {desc[:60]}",
+                )
+            if _COMPOUND_STEP_RE.search(desc):
+                result.fail(
+                    f"step_{i}_compound",
+                    f"步骤 {i + 1} 疑似并步（多动作/关闭所有弹窗），须拆成单步: {desc[:60]}",
+                )
 
-        # Hard gates: truncated 【】 labels / compound multi-actions
-        if _BRACKET_ELLIPSIS_RE.search(desc):
-            result.fail(
-                f"step_{i}_ellipsis",
-                f"步骤 {i + 1} 的【】控件名含省略号，无法可靠定位: {desc[:60]}",
-            )
-        if _COMPOUND_STEP_RE.search(desc):
-            result.fail(
-                f"step_{i}_compound",
-                f"步骤 {i + 1} 疑似并步（多动作/关闭所有弹窗），须拆成单步: {desc[:60]}",
-            )
-
-    # Check 4: Steps have basic sanity (description length)
-    for i, step in enumerate(steps):
-        desc = (step.get("description") or step.get("desc") or "").strip()
         if len(desc) > MAX_STEP_DESCRIPTION_LENGTH:
-            result.fail(f"step_{i}_length", f"步骤 {i + 1} 描述过长（{len(desc)} > {MAX_STEP_DESCRIPTION_LENGTH}）")
+            result.fail(
+                f"step_{i}_length",
+                f"步骤 {i + 1} 描述过长（{len(desc)} > {MAX_STEP_DESCRIPTION_LENGTH}）",
+            )
 
-    # Soft warning: long flow with zero non-empty expected
     nonempty_expected = 0
     for step in steps:
-        if isinstance(step, dict):
-            exp = (step.get("parsed_result") or step.get("expected") or "").strip()
-            if exp and not re.fullmatch(r"(?:\d+[\.、]\s*)+", exp):
-                nonempty_expected += 1
+        exp = (step.get("parsed_result") or step.get("expected") or "").strip()
+        if exp and not re.fullmatch(r"(?:\d+[\.、]\s*)+", exp):
+            nonempty_expected += 1
     if len(steps) >= 5 and nonempty_expected == 0:
         result.warnings.append(
             f"用例「{(tc.get('title') or tc.get('name') or '')[:40]}」有 {len(steps)} 步但无任何可观察预期，手册可能缺断言"
         )
 
-    # Check 5: Module name exists
     module = tc.get("module") or ""
     if not module:
         result.fail("module_required", "用例模块不能为空")
     else:
         result.pass_check("module_required")
 
-    # Check 6: Priority is valid — 支持中文（高/中/低）和英文（P0-P3）格式，允许拼接值（如 P0/P1/P2）
     priority = tc.get("priority") or "P2"
-    # Split combined priorities like "P0/P1/P2" and check the first valid part
-    pri_parts = [p.strip() for p in priority.replace(",", "/").split("/")]
+    pri_parts = [p.strip() for p in str(priority).replace(",", "/").split("/")]
     valid = False
     valid_priorities = ("P0", "P1", "P2", "P3", "高", "中", "低", "HIGH", "MEDIUM", "LOW")
     valid_upper = {p.upper() for p in valid_priorities}
@@ -168,28 +223,19 @@ def _validate_test_case(tc: dict[str, Any]) -> ValidationResult:
 def validate_test_cases(
     test_cases: list[dict[str, Any]],
     functional_points: list[dict[str, Any]] | None = None,
+    *,
+    require_structured: bool | None = None,
 ) -> dict[str, Any]:
     """Validate a list of generated test cases.
 
-    Args:
-        test_cases: List of generated test case dicts
-        functional_points: Optional list of functional points (for FP coverage check)
-
-    Returns:
-        Result dict with structure:
-        {
-            "passed": bool,
-            "warnings": list[str],
-            "cases": list[dict]  # Original cases with validation_result attached
-        }
+    ``require_structured=True`` forces UI StructuredStep hard gates.
+    ``None`` auto-detects from object steps / case_kind.
     """
-    results: list[ValidationResult] = []
     valid_cases: list[tuple[dict[str, Any], ValidationResult]] = []
     invalid_cases: list[tuple[dict[str, Any], ValidationResult]] = []
 
     for tc in test_cases:
-        vr = _validate_test_case(tc)
-        results.append(vr)
+        vr = _validate_test_case(tc, require_structured=require_structured)
         if vr.passed:
             valid_cases.append((tc, vr))
         else:
@@ -197,7 +243,6 @@ def validate_test_cases(
 
     warnings: list[str] = []
 
-    # Summary warnings
     if invalid_cases:
         warnings.append(f"{len(invalid_cases)}/{len(test_cases)} 个用例未通过校验")
 
@@ -206,16 +251,15 @@ def validate_test_cases(
     for _, vr in invalid_cases:
         warnings.extend(vr.warnings)
 
-    # FP coverage check (if FPs provided)
     if functional_points:
         def _fp_title(fp):
             if not isinstance(fp, dict):
                 return getattr(fp, "name", getattr(fp, "title", "")) or ""
             return fp.get("name", fp.get("title", "")) or ""
+
         fp_titles = {_fp_title(fp).strip() for fp in functional_points if _fp_title(fp)}
         covered_fps: set[str] = set()
         for tc, _ in valid_cases:
-            # Check if TC references a FP title
             tc_title = getattr(tc, "title", tc.get("title", "") if isinstance(tc, dict) else "")
             for fp_title in fp_titles:
                 if fp_title and (fp_title in tc_title or tc_title in fp_title):
@@ -223,7 +267,9 @@ def validate_test_cases(
 
         uncovered = fp_titles - covered_fps
         if uncovered:
-            warnings.append(f"{len(uncovered)}/{len(fp_titles)} 个功能点未被覆盖: {', '.join(list(uncovered)[:5])}")
+            warnings.append(
+                f"{len(uncovered)}/{len(fp_titles)} 个功能点未被覆盖: {', '.join(list(uncovered)[:5])}"
+            )
 
     annotated_invalid: list = []
     for tc, vr in invalid_cases:
