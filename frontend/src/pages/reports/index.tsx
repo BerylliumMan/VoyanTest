@@ -63,10 +63,18 @@ const Reports: React.FC = () => {
     </Tag>
   );
 
-  const getBatchStatusTag = (s: string, passed: number, total: number) => {
-    if (s === 'running') return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
-    if (passed === total) return <Tag color="green">{t['all.passed']}</Tag>;
-    if (passed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
+  const getBatchStatusTag = (s: string, passed: number, total: number, failed = 0) => {
+    if (s === 'running' || s === 'pending') {
+      return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
+    }
+    if (s === 'partial') return <Tag color="orange">{t['partial.passed']}</Tag>;
+    if (s === 'passed' || (total > 0 && passed === total)) return <Tag color="green">{t['all.passed']}</Tag>;
+    if (s === 'failed') return <Tag color="red">{t['all.failed']}</Tag>;
+    // 兜底：已完成数少于总数时仍视为运行中（避免误显示部分通过）
+    if (total > 0 && passed + failed < total) {
+      return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
+    }
+    if (passed > 0 && failed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
     if (total > 0) return <Tag color="red">{t['all.failed']}</Tag>;
     return <Tag color="gray">--</Tag>;
   };
