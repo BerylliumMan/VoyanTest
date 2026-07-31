@@ -293,6 +293,52 @@ async def _run_startup_init():
                             "用例优先级已按生成结果回填，matched=%s",
                             updated,
                         )
+                    # 一次性：UI 用例缺 structured_step 时用 Instant 描述尽力回填
+                    done_ss = (
+                        await db.execute(
+                            _t("SELECT 1 FROM schema_patches WHERE id = 'structured_step_backfill_ui'")
+                        )
+                    ).scalar()
+                    if not done_ss:
+                        from core.step_normalize import parse_instant_to_structured
+
+                        rows = (
+                            await db.execute(
+                                _t(
+                                    "SELECT s.id, s.description FROM test_steps s "
+                                    "JOIN test_cases tc ON tc.id = s.test_case_id "
+                                    "WHERE tc.case_kind = 'ui' "
+                                    "AND s.structured_step IS NULL "
+                                    "AND s.description IS NOT NULL "
+                                    "AND TRIM(s.description) <> ''"
+                                )
+                            )
+                        ).all()
+                        filled = 0
+                        for step_id, desc in rows:
+                            parsed = parse_instant_to_structured(desc or "")
+                            if not parsed:
+                                continue
+                            await db.execute(
+                                _t(
+                                    "UPDATE test_steps SET structured_step = CAST(:ss AS jsonb) "
+                                    "WHERE id = :id"
+                                ),
+                                {"ss": __import__("json").dumps(parsed, ensure_ascii=False), "id": step_id},
+                            )
+                            filled += 1
+                        await db.execute(
+                            _t(
+                                "INSERT INTO schema_patches (id) VALUES ('structured_step_backfill_ui') "
+                                "ON CONFLICT (id) DO NOTHING"
+                            )
+                        )
+                        await db.commit()
+                        logger.info(
+                            "UI structured_step Instant 回填完成，filled=%s scanned=%s",
+                            filled,
+                            len(rows),
+                        )
         except Exception:
             logger.warning("case_kind 历史数据回填失败（非关键，继续）", exc_info=True)
         try:
