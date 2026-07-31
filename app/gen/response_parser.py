@@ -532,12 +532,12 @@ def _strip_ellipsis_in_bracket_label(inner: str) -> str:
         return s
     # Drop trailing parenthetical that itself contains ellipsis
     s2 = re.sub(
-        r"[（(][^）)]*(?:[…\.]{2,}|。。。)[^）)]*[）)]\s*$",
+        r"[（(][^）)]*(?:…+|\.{2,}|。{2,})[^）)]*[）)]\s*$",
         "",
         s,
     ).strip()
-    # Drop trailing bare ellipsis
-    s2 = re.sub(r"(?:[…\.]{2,}|。。。)\s*$", "", s2).strip()
+    # Drop trailing bare ellipsis (unicode …, ascii ..., or 。。)
+    s2 = re.sub(r"(?:…+|\.{2,}|。{2,})\s*$", "", s2).strip()
     # Drop leftover open paren after truncation salvage: ``名称（``
     s2 = re.sub(r"[（(]\s*$", "", s2).strip()
     return s2 or s
