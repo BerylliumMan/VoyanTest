@@ -615,6 +615,13 @@ async def resolve_tool_call_from_step(
         )
         action = "click"
 
+    if mcp_manager is not None and hasattr(mcp_manager, "refresh_snapshot_for_hints"):
+        hints = [intent.target_name] if intent.target_name else extract_label_hints(step_description)
+        try:
+            snapshot = await mcp_manager.refresh_snapshot_for_hints(hints, current=snapshot)
+        except Exception as exc:
+            logger.debug("snapshot hint refresh failed: %s", exc)
+
     candidates = match_intent_candidates(snapshot, intent)
     ref = None
     if len(candidates) == 1 and not icon_step:
