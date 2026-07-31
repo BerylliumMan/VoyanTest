@@ -37,6 +37,7 @@ def test_priority_normalize_and_export():
     assert normalize_priority_to_storage("中") == "medium"
     assert normalize_priority_to_storage("低") == "low"
     assert normalize_priority_to_storage("unknown") == "medium"
+    assert normalize_priority_to_storage("P0/P1/P2") == "high"
 
     assert format_priority_for_export("high") == "P0"
     assert format_priority_for_export("medium") == "P1"
