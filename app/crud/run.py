@@ -256,6 +256,11 @@ async def _compute_batch_status(db: AsyncSession, batch, preloaded_runs: list = 
         batch.status = "running"
     elif completed >= batch.total_cases:
         batch.status = "passed" if counts.get("failed", 0) == 0 else "failed"
+        if batch.finished_at is None:
+            batch.finished_at = now
+    elif batch.finished_at is None:
+        # 客户端批量按序落库：未完成前只有已完成的 TestRun，不应判 partial
+        batch.status = "running"
     else:
         batch.status = "partial"
 
