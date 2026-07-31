@@ -47,5 +47,7 @@ class TestStep(Base):
     healed_selector = Column(String(500), nullable=True, default=None)
     # Successful-run element fingerprint for faster replay (role/name/…); not ephemeral refs.
     learned_locator = Column(JSON, nullable=True, default=None)
+    # UI StructuredStep: {action, target_name, target_role, value, ...}; None for functional/NL-only.
+    structured_step = Column(JSON, nullable=True, default=None)
     # When False, skip locator/plan memory for this step (dynamic steps).
     cacheable = Column(Boolean, default=True, nullable=False)

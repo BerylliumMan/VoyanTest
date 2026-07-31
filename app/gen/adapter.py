@@ -294,12 +294,22 @@ async def import_test_cases(
         results_text = _align_expected_to_steps(
             steps_text, _split_expected_results(gen_tc.expected_result)
         )
+        structured_list = list(getattr(gen_tc, "structured_steps", None) or [])
         for idx, step_text in enumerate(steps_text, start=1):
+            structured = None
+            if idx - 1 < len(structured_list):
+                structured = structured_list[idx - 1]
+            if isinstance(structured, dict) and not structured.get("action"):
+                structured = None
+            if structured is None and case_kind == "ui" and step_text:
+                from core.step_normalize import parse_instant_to_structured
+                structured = parse_instant_to_structured(step_text)
             step = db_models.TestStep(
                 case_id=tc.id,
                 step_order=idx,
                 description=step_text,
                 parsed_result=results_text[idx - 1],
+                structured_step=structured if isinstance(structured, dict) else None,
             )
             db.add(step)
 
