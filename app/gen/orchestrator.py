@@ -187,12 +187,9 @@ async def _analyze_pdf_two_phase(file, progress_callback, project_description) -
 
     # ── 质量校验 ──────────────────────────────────────────────────────────
     from app.gen.agents.validator import validate_test_cases
-    from app.gen.prompts import case_kind_from_tc_prompt_key
 
-    tc_key = locals().get("tc_prompt_key")  # may be set by caller scope
-    # Prefer session / kwargs if available on warnings context — default soft detect
-    require_structured = None
-    v_result = validate_test_cases(all_tcs, all_fps, require_structured=require_structured)
+    # Image/PDF legacy path still emits Instant strings — auto-detect structured
+    v_result = validate_test_cases(all_tcs, all_fps, require_structured=None)
     warnings.extend(v_result["warnings"])
     if not v_result["passed"]:
         warnings.append(f"质量校验: {v_result['valid_count']}/{len(all_tcs)} 个用例通过")
