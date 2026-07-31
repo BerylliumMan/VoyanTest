@@ -65,12 +65,24 @@ async def import_test_cases(
         raise HTTPException(403, "无权限操作该项目")
 
     from app.gen.adapter import import_test_cases as do_import
+
+    case_kind = "ui"
+    async with _lock:
+        mem = _sessions.get(body.session_id)
+    if mem and getattr(mem, "case_kind", None) in ("functional", "ui"):
+        case_kind = mem.case_kind
+    else:
+        record_for_kind = await crud.get_gen_session(db, body.session_id)
+        if record_for_kind and getattr(record_for_kind, "case_kind", None) in ("functional", "ui"):
+            case_kind = record_for_kind.case_kind
+
     created, skipped = await do_import(
         db,
         body.project_id,
         test_cases_data,
         body.selected_ids,
         parent_module_id=body.parent_module_id,
+        case_kind=case_kind,
     )
 
     await crud.increment_imported_count(db, body.session_id, body.project_id, len(created))
