@@ -10,7 +10,7 @@ class TestSettings:
         assert s.app_port == 8002
         assert s.browser_type == "chromium"
         assert s.headless is True
-        assert s.session_expire_minutes == 30
+        assert s.session_expire_minutes == 10080
         assert s.max_login_attempts == 5
         assert s.cookie_secure is False
         assert s.log_level == "INFO"
