@@ -144,6 +144,7 @@ async def export_gen_test_cases_xlsx(
         cell.border = thin_border
 
     cell_align = Alignment(vertical="top", wrap_text=True)
+    from app.gen.adapter import format_priority_for_export
     for row_idx, tc in enumerate(db_tcs, 2):
         values = [
             tc.test_case_id,
@@ -152,7 +153,7 @@ async def export_gen_test_cases_xlsx(
             tc.preconditions or "",
             tc.test_steps or "",
             tc.expected_result or "",
-            tc.priority,
+            format_priority_for_export(tc.priority),
         ]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
