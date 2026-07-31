@@ -577,7 +577,20 @@ class AgentManager:
                     label, option = parse_dropdown_select(desc)
                     resolve_desc = normalize_step_description(desc)
 
-                    async def _resolve_and_run(step_desc: str, snap_text: str, expect):
+                    async def _resolve_and_run(step_desc: str, snap_text: str, expect, struct=None):
+                        class _SnapAdapter:
+                            def __init__(self, outer):
+                                self._outer = outer
+
+                            async def get_dom_snapshot(self):
+                                return await self._outer._get_snapshot(
+                                    session, agent_id, run_id,
+                                )
+
+                            async def take_screenshot(self, *a, **k):
+                                # vision may call screenshot APIs — best-effort via snapshot only
+                                return None
+
                         tc = await _resolve_agent_tool_call(
                             desc=step_desc,
                             snap=snap_text or "",
@@ -585,6 +598,8 @@ class AgentManager:
                             llm_client=llm_client,
                             model=model,
                             base_url_override=base_url_override,
+                            structured_step=struct,
+                            mcp_manager=_SnapAdapter(self),
                         )
                         act = (tc.action or "").lower()
                         if act in ("error", "done"):
