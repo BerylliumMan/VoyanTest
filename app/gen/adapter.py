@@ -8,8 +8,59 @@ from app.crud.testcase import get_next_project_case_number
 
 logger = logging.getLogger(__name__)
 
-# Priority mapping: Chinese → English
-PRIORITY_MAP = {"高": "high", "中": "medium", "低": "low"}
+# Gen page uses P0/P1/P2 (and sometimes 高/中/低); test_cases store English.
+_PRIORITY_TO_STORAGE = {
+    "p0": "high",
+    "p1": "medium",
+    "p2": "low",
+    "p3": "low",
+    "高": "high",
+    "中": "medium",
+    "低": "low",
+    "high": "high",
+    "medium": "medium",
+    "low": "low",
+    "critical": "high",
+    "HIGH": "high",
+    "MEDIUM": "medium",
+    "LOW": "low",
+}
+# Backward-compatible alias used by older call sites / tests
+PRIORITY_MAP = {"高": "high", "中": "medium", "低": "low", "P0": "high", "P1": "medium", "P2": "low", "P3": "low"}
+
+_PRIORITY_TO_EXPORT = {
+    "high": "P0",
+    "critical": "P0",
+    "medium": "P1",
+    "low": "P2",
+    "p0": "P0",
+    "p1": "P1",
+    "p2": "P2",
+    "p3": "P3",
+    "高": "P0",
+    "中": "P1",
+    "低": "P2",
+}
+
+
+def normalize_priority_to_storage(raw: str | None, *, default: str = "medium") -> str:
+    """Map gen/UI priority labels to test_cases storage (high|medium|low)."""
+    key = (raw or "").strip()
+    if not key:
+        return default
+    mapped = _PRIORITY_TO_STORAGE.get(key) or _PRIORITY_TO_STORAGE.get(key.upper()) or _PRIORITY_TO_STORAGE.get(key.lower())
+    return mapped or default
+
+
+def format_priority_for_export(raw: str | None, *, default: str = "P1") -> str:
+    """Map stored / mixed priority to gen-page style P0/P1/P2 for xlsx export."""
+    key = (raw or "").strip()
+    if not key:
+        return default
+    if re.fullmatch(r"P[0-3]", key, flags=re.I):
+        return key.upper()
+    mapped = _PRIORITY_TO_EXPORT.get(key) or _PRIORITY_TO_EXPORT.get(key.lower())
+    return mapped or default
 
 
 def split_numbered_items(text: str) -> list[str]:
