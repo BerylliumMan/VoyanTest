@@ -73,4 +73,9 @@ def should_hybrid_browser_use_fallback(
 ) -> bool:
     if not hybrid or not result or result.get("success") or action_lower == "done":
         return False
+    # assert / wait 是读页面，不是定位失败救场对象；交给 browser-use 会改页面「凑」断言
+    if (action_lower or "").strip().lower() in (
+        "assert_text", "assert_visible", "wait", "assert", "screenshot",
+    ):
+        return False
     return is_locator_failure(result)
