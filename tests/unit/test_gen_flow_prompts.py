@@ -231,7 +231,7 @@ def test_validator_flags_ellipsis_and_compound():
         "expected": ["", "", "", "", ""],
     }
     out = validate_test_cases([soft])
-    assert any("无可观察预期" in w for w in out["warnings"])
+    assert any("无任何可观察预期" in w or "无可观察预期" in w for w in out["warnings"])
 
 
 def test_flow_prompt_forbids_ellipsis_and_close_all():
