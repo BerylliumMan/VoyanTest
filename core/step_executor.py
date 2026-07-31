@@ -289,6 +289,7 @@ async def _llm_tool_and_run(
     model: str | None,
     system_prompt_override: str | None,
     step_timeout_ms: int,
+    structured_step: dict | None = None,
 ):
     """Generate one tool call via two-phase Intent+bind (Midscene-style) and execute."""
     from core.step_intent import resolve_tool_call_from_step
@@ -305,6 +306,7 @@ async def _llm_tool_and_run(
                 system_prompt=system_prompt_override,
                 use_vision_fallback=True,
                 timeout_ms=step_timeout_ms,
+                structured_step=structured_step,
             ),
             timeout=120,
         )
