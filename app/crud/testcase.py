@@ -88,7 +88,10 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
             case_id=db_case.id,
             step_order=step_data.step_order,
             description=step_data.description,
-            parsed_result=step_data.parsed_result
+            parsed_result=step_data.parsed_result,
+            structured_step=getattr(step_data, "structured_step", None),
+            learned_locator=getattr(step_data, "learned_locator", None),
+            cacheable=bool(getattr(step_data, "cacheable", True)),
         )
         db.add(db_step)
         created_steps.append(db_step)
