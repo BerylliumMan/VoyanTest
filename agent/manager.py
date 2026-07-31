@@ -22,80 +22,12 @@ from agent.models import (
 
 from core.llm_wrapper import create_openai_client, generate_tool_call, _resolve_config as _llm_resolve_config
 from core.step_executor import HYBRID_SETTLE_SECONDS
-
-logger = logging.getLogger("agent.manager")
-
-_LOCATOR_FAIL_HINTS = (
-    "not found",
-    "no element",
-    "no popup",
-    "no modal",
-    "no dialog",
-    "no alert",
-    "no matching",
-    "locator",
-    "timeout",
-    "timed out",
-    "unable to find",
-    "unable to locate",
-    "cannot find",
-    "can't find",
-    "could not find",
-    "cannot proceed",
-    "can't proceed",
-    "strict mode violation",
-    "waiting for",
-    "does not exist",
-    "does not match",
-    "doesn't match",
-    "isn't visible",
-    "is not visible",
-    "not visible",
-    "找不到",
-    "无法定位",
-    "定位失败",
-    "无法确定本步",
-    "无法确定",
-    "看不到",
-    "不存在",
-    "没有找到",
-    "未找到",
-    "element is not",
+from core.locator_failure import (
+    is_locator_failure as _is_locator_failure,
+    should_hybrid_browser_use_fallback as _should_hybrid_browser_use_fallback,
 )
 
-
-def _is_locator_failure(result: dict | None) -> bool:
-    """True when MCP/LLM failure looks like element locating, not assertion."""
-    if not result:
-        return False
-    err = f"{result.get('error') or ''} {result.get('action') or ''}"
-    low = err.lower()
-    if "verification failed" in low or "expected result verification" in low or "断言" in err:
-        return False
-    # LLM soft-fail: action=error(...) means it refused / cannot do the step
-    action = (result.get("action") or "").strip().lower()
-    if action == "error" or action.startswith("error("):
-        return True
-    if any(h in low for h in _LOCATOR_FAIL_HINTS):
-        return True
-    # "No xxx found" / "none ... found" — common LLM phrasing (≠ substring "not found")
-    if "found" in low and (
-        low.startswith("no ")
-        or " no " in low
-        or "none " in low
-        or "没有" in err
-        or "未找到" in err
-    ):
-        return True
-    return False
-
-
-def _should_hybrid_browser_use_fallback(
-    *, hybrid: bool, result: dict | None, action_lower: str
-) -> bool:
-    if not hybrid or not result or result.get("success") or action_lower == "done":
-        return False
-    return _is_locator_failure(result)
+logger = logging.getLogger("agent.manager")
 
 
 async def _resolve_agent_tool_call(
