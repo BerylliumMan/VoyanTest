@@ -142,6 +142,7 @@ async def _run_test_case_in_browser_impl(
     run_id: int | None = None,
     base_url_override: str | None = None,
     debug_mode: bool = False,
+    hybrid: bool = False,
 ) -> dict:
     """Inner implementation of :func:`run_test_case_in_browser`.
 
