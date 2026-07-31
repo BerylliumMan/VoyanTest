@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Button, Tag, Input, Typography, Space, Switch, Select } from '@arco-design/web-react';
 import { IconMenu, IconPlus, IconCopy, IconDelete, IconTool } from '@arco-design/web-react/icon';
 import { CaseKind, Step } from '../types';
