@@ -207,6 +207,14 @@ async def _run_startup_init():
             "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS cacheable BOOLEAN DEFAULT TRUE",
             "test_steps.cacheable 迁移",
         )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'ui'",
+            "test_cases.case_kind 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'ui'",
+            "gen_sessions.case_kind 迁移",
+        )
         try:
             async with engine.connect() as conn:
                 await conn.execution_options(isolation_level="AUTOCOMMIT")
