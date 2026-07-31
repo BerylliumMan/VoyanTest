@@ -562,14 +562,24 @@ async def arm_browser_use_auto_switch_new_tabs(session) -> None:
 def _compose_should_stop_callback(
     session,
     existing: Callable[..., Any] | None = None,
+    stop_watch_ref: dict[str, Any] | None = None,
 ):
-    """Between agent actions/turns, restore sticky preferred-tab focus."""
+    """Between agent actions/turns, restore sticky preferred-tab focus.
+
+    Also returns True when ``stop_watch_ref['state']`` requests early stop
+    (stagnation / browser disconnect) so we do not burn the full max_steps budget
+    or keep creating blank recovery tabs.
+    """
 
     async def _cb() -> bool:
         try:
             await ensure_browser_use_on_newest_tab(session, settle_seconds=0.0)
         except Exception:
             logger.debug("ensure preferred tab in should_stop failed", exc_info=True)
+        if stop_watch_ref is not None:
+            state = stop_watch_ref.get("state")
+            if isinstance(state, dict) and state.get("stop"):
+                return True
         if existing is None:
             return False
         try:
