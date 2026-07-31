@@ -701,6 +701,11 @@ def _parse_tcs_from_text(text: str, session_id: str = "", start_index: int = 0) 
                         title=tc.get("title", ""),
                         preconditions=tc.get("preconditions", ""),
                         test_steps=tc.get("test_steps", ""),
+                        structured_steps=list(
+                            tc.get("structured_steps_aligned")
+                            or tc.get("structured_steps")
+                            or []
+                        ),
                         expected_result=tc.get("expected_result", ""),
                         priority=tc.get("priority", "中"),
                     ))
