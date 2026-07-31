@@ -517,8 +517,6 @@ _GENERIC_BRACKET_ONLY = frozenset({
 })
 
 # Ellipsis / truncated labels inside 【】 break locator matching
-_ELLIPSIS_CHARS = r"…\.\.。\u2026"
-_BRACKET_ELLIPSIS_RE = re.compile(r"[…\.]{2,}|。。。")
 
 
 def _strip_ellipsis_in_bracket_label(inner: str) -> str:
