@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # Auth
     cookie_secure: bool = False
     session_secret_key: str = ""
-    session_expire_minutes: int = 30
+    session_expire_minutes: int = 10080  # 7 days; sliding refresh on each request
     max_login_attempts: int = 5
     lock_duration_minutes: int = 15
     default_admin_username: str = "admin"
