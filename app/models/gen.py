@@ -24,6 +24,8 @@ class GenSession(Base):
     functional_points_count = Column(Integer, default=0)
     test_cases_count = Column(Integer, default=0)
     imported_count = Column(Integer, default=0)
+    # Derived from generation Agent: functional | ui
+    case_kind = Column(String(32), default="ui", nullable=False)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
