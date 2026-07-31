@@ -169,6 +169,7 @@ class TestCase(TestCaseBase):
     created_at: datetime
     steps: List[TestStep] = []
     is_init: bool = False
+    case_kind: str = "ui"
 
     model_config = {"from_attributes": True}
 
