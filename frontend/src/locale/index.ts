@@ -425,6 +425,7 @@ const i18n = {
     'menu.testcases': '测试用例',
     'menu.testcases.functional': '功能测试用例',
     'menu.testcases.ui': 'UI自动化用例',
+    'case.kind': '用例类型',
     'menu.reports': '执行报告',
     'menu.agents': '客户端管理',
     'menu.settings': '系统设置',
