@@ -32,9 +32,14 @@ _URL_CHARS = r'a-zA-Z0-9._~:/?#\[\]@!$&\'()*+,;%=<>-'
 
 
 def _sanitize_step(desc: str) -> str:
-    """Insert space between URL and adjacent Chinese characters."""
+    """Insert space between URL and adjacent Chinese characters; apply UI Instant sanitize."""
     desc = re.sub(r'(https?://[' + _URL_CHARS + r']+)([一-鿿])', r'\1 \2', desc)
     desc = re.sub(r'([一-鿿])(https?://)', r'\1 \2', desc)
+    try:
+        from core.step_normalize import sanitize_ui_step
+        desc = sanitize_ui_step(desc)
+    except Exception:
+        pass
     return desc
 
 
