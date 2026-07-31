@@ -404,6 +404,7 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
         "armed": False,
         "preferred_target_id": None,
         "baseline_ids": set(),
+        "pre_arm_ids": set(),
     }
     session._voyantest_tab_auto = state
     bus = getattr(session, "event_bus", None)
@@ -411,10 +412,15 @@ def enable_browser_use_auto_switch_new_tabs(session) -> None:
         return
 
     async def _on_tab_created(event) -> None:
-        if not state.get("armed"):
-            return
         tid = getattr(event, "target_id", None)
         if not tid:
+            return
+        if not state.get("armed"):
+            # CDP connect emits TabCreated for existing tabs before arm — record
+            # them so arm() can fold them into baseline.
+            pre = state.setdefault("pre_arm_ids", set())
+            if isinstance(pre, set):
+                pre.add(tid)
             return
         baseline = state.get("baseline_ids") or set()
         if tid in baseline:
