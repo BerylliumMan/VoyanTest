@@ -638,7 +638,7 @@ class AgentManager:
                             )
                     else:
                         tool_call, result = await _resolve_and_run(
-                            resolve_desc, snap or "", expected_result,
+                            resolve_desc, snap or "", expected_result, structured_step,
                         )
 
                 # Hybrid relocate: on error/MCP fail, refresh snapshot and retry once
