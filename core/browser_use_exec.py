@@ -400,7 +400,8 @@ def _soften_click_opener_refocus() -> None:
     if orig is None:
         return
 
-    async def _on_click(self, event):  # type: ignore[no-untyped-def]
+    # bubus/watchdog_base requires handler.__name__ to start with "on_".
+    async def on_ClickElementEvent(self, event):  # type: ignore[no-untyped-def]
         session = self.browser_session
         opener_id = getattr(getattr(session, "agent_focus", None), "target_id", None)
         _orig_get = session.get_or_create_cdp_session
@@ -423,7 +424,7 @@ def _soften_click_opener_refocus() -> None:
         finally:
             session.get_or_create_cdp_session = _orig_get  # type: ignore[method-assign]
 
-    daw.DefaultActionWatchdog.on_ClickElementEvent = _on_click  # type: ignore[assignment]
+    daw.DefaultActionWatchdog.on_ClickElementEvent = on_ClickElementEvent  # type: ignore[assignment]
     daw._voyantest_soft_refocus = True
     logger.info("Softened browser-use click opener refocus (focus=False)")
 
