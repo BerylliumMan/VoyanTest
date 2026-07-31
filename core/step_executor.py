@@ -345,6 +345,7 @@ async def _llm_tool_and_run_with_relocate(
     model: str | None,
     system_prompt_override: str | None,
     step_timeout_ms: int,
+    structured_step: dict | None = None,
 ):
     """Run `_llm_tool_and_run`; on failure, settle + refresh snapshot + retry once.
 
@@ -360,6 +361,7 @@ async def _llm_tool_and_run_with_relocate(
         model=model,
         system_prompt_override=system_prompt_override,
         step_timeout_ms=step_timeout_ms,
+        structured_step=structured_step,
     )
     if exec_result.get('success'):
         return tool_call, exec_result, False
@@ -384,6 +386,7 @@ async def _llm_tool_and_run_with_relocate(
         model=model,
         system_prompt_override=system_prompt_override,
         step_timeout_ms=step_timeout_ms,
+        structured_step=structured_step,
     )
     return tool_call2, exec_result2, True
 
