@@ -363,6 +363,13 @@ def pick_tc_prompt_key(skills: list | None) -> str:
     return "tc_generate"
 
 
+def case_kind_from_tc_prompt_key(tc_prompt_key: str | None) -> str:
+    """Map generation prompt key to persisted case_kind (functional | ui)."""
+    if tc_prompt_key in ("tc_generate_ui", "tc_generate_flow"):
+        return "ui"
+    return "functional"
+
+
 def min_tcs_per_item(skills: list | None = None, *, tc_prompt_key: str | None = None) -> int:
     """Minimum TCs expected per FP/flow for supplemental generation."""
     if tc_prompt_key == "tc_generate_flow":
