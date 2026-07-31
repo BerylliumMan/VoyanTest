@@ -274,7 +274,7 @@ const Reports: React.FC = () => {
     { title: t['project'], dataIndex: 'project_name', width: 150, ellipsis: true },
     {
       title: t['status'], width: 120,
-      render: (_: unknown, r: BatchItem) => getBatchStatusTag(r.status, r.passed, r.total_cases),
+      render: (_: unknown, r: BatchItem) => getBatchStatusTag(r.status, r.passed, r.total_cases, r.failed),
     },
     {
       title: t['result'], width: 180,
