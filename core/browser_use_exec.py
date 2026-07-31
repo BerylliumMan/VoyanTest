@@ -474,17 +474,28 @@ async def arm_browser_use_auto_switch_new_tabs(session) -> None:
     """Start auto-switching after session warmup / BASE URL open.
 
     Snapshots current page ids as baseline so reconnect TabCreated events for
-    pre-existing tabs are ignored.
+    pre-existing tabs are ignored. Must run **after** CDP connect (see
+    ``execute_nl_steps_browser_use``), otherwise baseline is empty and every
+    existing tab looks "new".
     """
     state = _tab_auto_state(session)
     if state is None:
         return
     try:
         ids = await list_browser_use_page_ids(session)
-        state["baseline_ids"] = set(ids)
+        baseline = set(ids)
     except Exception:
-        state["baseline_ids"] = set(state.get("baseline_ids") or set())
+        baseline = set(state.get("baseline_ids") or set())
+    pre = state.get("pre_arm_ids") or set()
+    if isinstance(pre, set):
+        baseline |= pre
+    state["baseline_ids"] = baseline
+    state["pre_arm_ids"] = set()
     state["armed"] = True
+    logger.info(
+        "browser-use tab auto-switch armed; baseline=%d tabs",
+        len(baseline),
+    )
 
 
 def _compose_should_stop_callback(
