@@ -156,13 +156,19 @@ async def run_test_case_on_client(
 ) -> dict:
     """Run a test case on a connected client agent via WebSocket.
 
-    Query ``backend``: ``playwright_mcp``（默认）| ``browser_use`` | ``hybrid``（MCP 默认，定位失败同浏览器救场）。
+    Query ``backend``: ``playwright_mcp`` | ``browser_use`` | ``hybrid``（默认 hybrid，定位失败同浏览器救场）。
     """
     from agent.manager import agent_manager
+    from app.runtime_config import execution_backend_config
 
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
+
+    if backend is None:
+        backend = execution_backend_config.backend or "hybrid"
+        if getattr(db_case, "case_kind", None) == "ui" and backend == "playwright_mcp":
+            backend = "hybrid"
 
     if backend is not None and backend not in ("playwright_mcp", "browser_use", "hybrid"):
         raise HTTPException(
