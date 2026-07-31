@@ -330,10 +330,31 @@ class TestComputeBatchStatusAdvanced:
         db.expire_all()
 
     @pytest.mark.asyncio
+    async def test_compute_incomplete_without_finished_is_running(
+        self, db, sample_project, sample_testcase,
+    ):
+        """客户端批量按序落库：未设 finished_at 时应为 running，而非 partial。"""
+        from app.crud.run import _compute_batch_status
+        batch = await create_run_batch(db, sample_project["id"], "In Progress", total_cases=3)
+        now = tz_now()
+        run_passed = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
+                                     start_time=now - timedelta(seconds=5),
+                                     end_time=now, duration=5.0)
+
+        await _compute_batch_status(db, batch, preloaded_runs=[run_passed])
+
+        assert batch.status == "running"
+        assert batch.passed == 1
+        assert batch.failed == 0
+
+        db.expire_all()
+
+    @pytest.mark.asyncio
     async def test_compute_partial_state(self, db, sample_project, sample_testcase):
         from app.crud.run import _compute_batch_status
         batch = await create_run_batch(db, sample_project["id"], "Partial", total_cases=3)
         now = tz_now()
+        batch.finished_at = now
         run_passed = await self._make_run(db, sample_testcase["id"], batch.id, "passed",
                                      start_time=now - timedelta(seconds=5),
                                      end_time=now, duration=5.0)
