@@ -98,7 +98,7 @@ async def export_test_cases(
     )
     cell_align = Alignment(vertical="top", wrap_text=True)
 
-    headers = ["用例ID", "所属模块", "标题", "前置条件", "测试步骤", "预期结果", "优先级"]
+    headers = ["用例ID", "所属模块", "标题", "前置条件", "测试步骤", "预期结果", "优先级", "结构化步骤JSON"]
     for col, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=h)
         cell.font = header_font
@@ -110,14 +110,23 @@ async def export_test_cases(
         # 步骤合并为文本块（每行 "序号. 描述 → 预期结果"）
         steps_str = ""
         expected_str = ""
+        structured_json = ""
         if tc.steps:
+            import json as _json
+
             lines = []
             exp_lines = []
+            struct_list = []
             for s in tc.steps:
                 lines.append(f"{s.step_order}. {s.description}")
                 exp_lines.append(f"{s.step_order}. {s.parsed_result or ''}")
+                ss = getattr(s, "structured_step", None)
+                if isinstance(ss, dict):
+                    struct_list.append(ss)
             steps_str = "\n".join(lines)
             expected_str = "\n".join(exp_lines)
+            if struct_list:
+                structured_json = _json.dumps(struct_list, ensure_ascii=False)
 
         module_name = tc.module.name if tc.module else ""
 
@@ -131,16 +140,17 @@ async def export_test_cases(
             steps_str,
             expected_str,
             format_priority_for_export(tc.priority),
+            structured_json,
         ]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
             cell.alignment = cell_align
             cell.border = thin_border
 
-    # 列宽（对齐 gen/history.py 格式）
-    widths = [10, 16, 30, 24, 40, 40, 10]
+    # 列宽（对齐 gen/history.py 格式 + 结构化列）
+    widths = [10, 16, 30, 24, 40, 40, 10, 36]
     for i, w in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + i)].width = w
+        ws.column_dimensions[chr(64 + i) if i <= 26 else "A"].width = w
 
     buf = io.BytesIO()
     wb.save(buf)
