@@ -68,8 +68,27 @@ async def list_tab_count(call_tool: CallToolFn) -> int:
     return len(tabs) if tabs else 1
 
 
+def _is_blankish_tab_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return (
+        not u
+        or u == "about:blank"
+        or u.startswith("chrome://new-tab")
+        or u.startswith("chrome://newtab")
+    )
+
+
+def pick_newest_tab_index(tabs: list[dict[str, Any]]) -> Optional[int]:
+    """Highest-index tab, preferring a non-blank URL when present."""
+    if not tabs:
+        return None
+    real = [t for t in tabs if not _is_blankish_tab_url(str(t.get("url") or ""))]
+    pool = real or tabs
+    return int(max(pool, key=lambda t: t["index"])["index"])
+
+
 async def ensure_on_newest_tab(call_tool: CallToolFn) -> bool:
-    """If multiple tabs exist and current is not the highest index, select it.
+    """If multiple tabs exist and current is not the newest real tab, select it.
 
     Used after hybrid browser-use fallback: Playwright MCP often still points at
     the opener tab, and the next snapshot activates that tab in Chrome — looking
@@ -85,22 +104,25 @@ async def ensure_on_newest_tab(call_tool: CallToolFn) -> bool:
     tabs = parse_mcp_tabs(listed.get("text") or "")
     if len(tabs) < 2:
         return False
-    newest = max(tabs, key=lambda t: t["index"])
+    index = pick_newest_tab_index(tabs)
+    if index is None:
+        return False
+    newest = next(t for t in tabs if t["index"] == index)
     if newest.get("current"):
         return False
     selected = await call_tool(
-        "browser_tabs", {"action": "select", "index": int(newest["index"])},
+        "browser_tabs", {"action": "select", "index": index},
     )
     if not selected.get("success", True):
         logger.warning(
             "Failed to select newest tab index=%s: %s",
-            newest["index"],
+            index,
             selected.get("error") or selected.get("text"),
         )
         return False
     logger.info(
         "Ensured MCP focus on newest tab index=%s url=%s",
-        newest["index"],
+        index,
         newest.get("url") or "",
     )
     return True
