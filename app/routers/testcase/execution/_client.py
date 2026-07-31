@@ -700,6 +700,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     case_id, status, start_time, tz_now(),
                     (tz_now() - start_time).total_seconds(),
                     report_path, None, [], batch_id=batch.id,
+                    run_id=db_run_id,
                     is_init=info.get("is_init", False),
                 )
 
