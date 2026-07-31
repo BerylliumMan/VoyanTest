@@ -27,6 +27,24 @@ def test_case_kind_from_tc_prompt_key():
     assert case_kind_from_tc_prompt_key(None) == "functional"
 
 
+def test_priority_normalize_and_export():
+    from app.gen.adapter import normalize_priority_to_storage, format_priority_for_export
+
+    assert normalize_priority_to_storage("P0") == "high"
+    assert normalize_priority_to_storage("P1") == "medium"
+    assert normalize_priority_to_storage("P2") == "low"
+    assert normalize_priority_to_storage("高") == "high"
+    assert normalize_priority_to_storage("中") == "medium"
+    assert normalize_priority_to_storage("低") == "low"
+    assert normalize_priority_to_storage("unknown") == "medium"
+
+    assert format_priority_for_export("high") == "P0"
+    assert format_priority_for_export("medium") == "P1"
+    assert format_priority_for_export("low") == "P2"
+    assert format_priority_for_export("P0") == "P0"
+    assert format_priority_for_export("高") == "P0"
+
+
 def test_min_tcs_per_item_flow_vs_default():
     assert min_tcs_per_item(["tc_generate_flow"]) == 1
     assert min_tcs_per_item(["fp_extract_flow"]) == 1
