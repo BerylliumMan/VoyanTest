@@ -413,10 +413,38 @@ async def _run_test_case_in_browser_impl(
                         f"{': ' + result.get('error', '') if result.get('error') else ''}"
                     )
 
-                # ---- 自愈选择器：仅在首次失败且错误为定位类时尝试 ----
+                # ---- 自愈：优先 AX name/role 重绑 ref；CSS 仅作遗留回退 ----
                 error_msg = (result.get('error') or '').strip()
                 if attempt == 0 and not step_success and _is_healable_error(error_msg):
-                    from core.self_healing import try_heal_and_retry
+                    from core.self_healing import try_heal_and_retry, try_heal_ax_rebind
+                    from core.step_normalize import render_structured_step
+
+                    ax_healed = await try_heal_ax_rebind(
+                        mcp_manager,
+                        step_dict=step_dict,
+                        step_description=step_obj.description,
+                        error=result.get('error', ''),
+                    )
+                    if ax_healed and isinstance(ax_healed.get("structured_step"), dict):
+                        new_struct = ax_healed["structured_step"]
+                        logger.info(
+                            "  🔧 自愈 AX 重绑: %s → name=%r role=%r ref=%s",
+                            step_obj.description,
+                            ax_healed.get("target_name"),
+                            ax_healed.get("target_role"),
+                            ax_healed.get("ref"),
+                        )
+                        step_dict["structured_step"] = new_struct
+                        step_dict["description"] = (
+                            render_structured_step(new_struct) or step_obj.description
+                        )
+                        try:
+                            step_obj.structured_step = new_struct
+                            step_obj.description = step_dict["description"]
+                            await db.commit()
+                        except SQLAlchemyError as db_exc:
+                            logger.warning("保存自愈 structured_step 失败: %s", db_exc, exc_info=True)
+                        continue
 
                     healed = await try_heal_and_retry(
                         mcp_manager,
@@ -430,7 +458,6 @@ async def _run_test_case_in_browser_impl(
                         logger.info(
                             f"  🔧 自愈选择器生效: {step_obj.description} → {healed}"
                         )
-                        # 保留自然语言描述，只附加选择器提示供 LLM 优先定位
                         step_dict['healed_selector'] = healed
                         step_dict['description'] = (
                             f"{step_obj.description}（优先使用选择器: {healed}）"
@@ -440,7 +467,7 @@ async def _run_test_case_in_browser_impl(
                             await db.commit()
                         except SQLAlchemyError as db_exc:
                             logger.warning("保存自愈选择器失败: %s", db_exc, exc_info=True)
-                        continue  # 用提示后的描述重试
+                        continue
                     elif attempt == 0 and not step_success and error_msg:
                         logger.debug("  跳过自愈（非定位错误）: %s", error_msg[:80])
                 attempt += 1
