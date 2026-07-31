@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import {
-  Modal, Form, Input, Select, Message, Collapse,
+  Modal, Form, Input, Select, Message, Tag,
 } from '@arco-design/web-react';
-import { Step, Module, TestCase } from '../types';
+import { Step, Module, TestCase, CaseKind } from '../types';
 import StepList from './StepList';
 import styles from '../style/components.module.less';
 
@@ -22,12 +22,17 @@ interface TestCaseEditorProps {
   form: FormInstance;
   steps: Step[];
   setSteps: React.Dispatch<React.SetStateAction<Step[]>>;
+  caseKind?: CaseKind;
 }
 
 const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
-  visible, editingCase, onCancel, onSubmit, modules, projectId, t, form, steps, setSteps,
+  visible, editingCase, onCancel, onSubmit, modules, projectId, t, form, steps, setSteps, caseKind = 'ui',
 }) => {
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
+  const kindLabel = caseKind === 'functional'
+    ? (t['menu.testcases.functional'] || '功能测试用例')
+    : (t['menu.testcases.ui'] || 'UI自动化用例');
+
 
   const addStep = () => setSteps([...steps, { step_order: steps.length + 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0 }]);
   const removeStep = (idx: number) => setSteps(steps.filter((_, i) => i !== idx).map((s, i) => ({ ...s, step_order: i + 1 })));
