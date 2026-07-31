@@ -215,12 +215,13 @@ async def run_test_case(
     Backward-compatible wrapper that creates its own PlaywrightMCPManager.
     ``run_id`` 用于调试模式等已预创建 TestRun 的场景，保证 WS 广播 id 一致。
     ``backend`` 可选覆盖运行时配置：``playwright_mcp`` | ``browser_use`` | ``hybrid``。
-    hybrid 在服务端跑法中按 playwright_mcp 处理（救场仅客户端 Agent）。
+    hybrid：MCP 优先；定位失败时同 CDP 挂 browser-use 救场一步（服务端与客户端一致）。
     """
     from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
 
     project_id: int | None = None
+    case_kind: str | None = None
     browser_type = 'chromium'
     headless = True
     base_url_override = None
@@ -229,6 +230,7 @@ async def run_test_case(
             tc = await crud.get_test_case(_db, case_id)
             if tc:
                 project_id = tc.project_id
+                case_kind = getattr(tc, "case_kind", None) or "functional"
         except SQLAlchemyError:
             logger.warning("Failed to load case %s for project lock", case_id, exc_info=True)
         if environment_id:
@@ -246,10 +248,12 @@ async def run_test_case(
             return await _run_test_case_unlocked(
                 case_id, batch_id, browser_type, headless, base_url_override,
                 debug_mode=debug_mode, run_id=run_id, backend=backend,
+                case_kind=case_kind,
             )
     return await _run_test_case_unlocked(
         case_id, batch_id, browser_type, headless, base_url_override,
         debug_mode=debug_mode, run_id=run_id, backend=backend,
+        case_kind=case_kind,
     )
 
 
