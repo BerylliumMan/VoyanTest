@@ -306,7 +306,7 @@ async def _run_startup_init():
                             await db.execute(
                                 _t(
                                     "SELECT s.id, s.description FROM test_steps s "
-                                    "JOIN test_cases tc ON tc.id = s.test_case_id "
+                                    "JOIN test_cases tc ON tc.id = s.case_id "
                                     "WHERE tc.case_kind = 'ui' "
                                     "AND s.structured_step IS NULL "
                                     "AND s.description IS NOT NULL "
