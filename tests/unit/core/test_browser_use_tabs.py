@@ -35,7 +35,9 @@ def test_build_step_task_mentions_semantic_fidelity():
     assert "忠实执行" in task
     assert "提交≠确定≠保存" in task
     assert "禁止臆造输入值" in task
-    assert "BASE URL" in task
+    assert "https://example.com" not in task
+    assert "BASE URL" not in task
+    assert "会话已打开" in task or "禁止重新打开" in task
 
 
 @pytest.mark.asyncio
