@@ -104,3 +104,32 @@ def test_attach_detach_log_handlers():
     n = len(seen)
     logging.getLogger("browser_use").info("after-detach")
     assert len(seen) == n
+
+
+def test_note_browser_use_log_for_stop_stagnation_and_dead():
+    from core.browser_use_exec import (
+        create_step_stop_state,
+        note_browser_use_log_for_stop,
+        STAGNATION_STOP_THRESHOLD,
+    )
+
+    st = create_step_stop_state()
+    note_browser_use_log_for_stop(
+        st, "Loop detection nudge injected (repetition=7, stagnation=3)",
+    )
+    assert st["stop"] is False
+    assert st["max_stagnation"] == 3
+
+    note_browser_use_log_for_stop(
+        st,
+        f"Loop detection nudge injected (repetition=7, stagnation={STAGNATION_STOP_THRESHOLD})",
+    )
+    assert st["stop"] is True
+    assert "stagnation" in (st["reason"] or "")
+
+    dead = create_step_stop_state()
+    note_browser_use_log_for_stop(
+        dead, "[SessionManager] No tabs remain! Creating new tab for agent...",
+    )
+    assert dead["stop"] is True
+    assert "No tabs remain" in (dead["reason"] or "")
