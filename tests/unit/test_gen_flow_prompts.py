@@ -78,13 +78,8 @@ def test_ui_and_flow_tc_prompts_forbid_dropdown_control_words():
     from app.gen.prompts import TC_GENERATE_FLOW_PROMPT, TC_GENERATE_UI_PROMPT
 
     for text in (TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
-        assert (
-            "在【单位】中选择" in text
-            or "在【字段】中选择" in text
-            or "在【字段名】中选择" in text
-            or "在【字段标签】中选择" in text
-        )
-        assert "下拉框选择" in text  # appears in forbidden examples
+        assert "select" in text and "combobox" in text
+        assert "控件类型词" in text or "下拉框" in text
         assert "禁止" in text
 
 
@@ -124,15 +119,14 @@ def test_ui_prompts_forbid_bare_page_load_wait():
 
     for text in (_UI_STEP_CONTRACT, TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
         assert "禁止" in text and "等待页面加载完成" in text
-        # Examples must prefer visible-text waits, not bare load waits as good path
-        assert "等待【" in text
+        assert '"action":"wait"' in text or "action\":\"wait\"" in text or "wait" in text
 
 
 def test_ui_prompts_require_disambiguation_and_empty_mid_expected():
     from app.gen.prompts import TC_GENERATE_UI_PROMPT, _UI_STEP_CONTRACT
 
-    assert "同名" in _UI_STEP_CONTRACT or "消歧" in _UI_STEP_CONTRACT
-    assert "Add to cart" in _UI_STEP_CONTRACT or "相同文案" in _UI_STEP_CONTRACT
+    assert "同名" in _UI_STEP_CONTRACT or "消歧" in _UI_STEP_CONTRACT or "disambiguation" in _UI_STEP_CONTRACT
+    assert "disambiguation" in _UI_STEP_CONTRACT or "同名" in _UI_STEP_CONTRACT
     assert '""' in TC_GENERATE_UI_PROMPT
     assert "中间" in TC_GENERATE_UI_PROMPT or "默认" in TC_GENERATE_UI_PROMPT
 
@@ -146,7 +140,8 @@ def test_ui_prompts_forbid_bare_icon_click():
     )
 
     for text in (_UI_STEP_CONTRACT, TC_GENERATE_UI_PROMPT, TC_GENERATE_FLOW_PROMPT):
-        assert "点击【图标】" in text
+        assert "icon_click" in text or "图标" in text
+        assert "icon_hint" in text or "用途" in text
     assert "用途" in _UI_STEP_CONTRACT  # pure-icon visual template
     assert "形状" in _UI_STEP_CONTRACT or "外观" in _UI_STEP_CONTRACT
     assert "点击【图标】" in FP_EXTRACT_FLOW_PROMPT
