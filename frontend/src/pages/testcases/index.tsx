@@ -85,11 +85,11 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
 
   const fetchInitCases = useCallback(async (projectId: number) => {
     try {
-      const res = await axios.get('/api/testcases/init-cases', { params: { project_id: projectId } });
+      const res = await axios.get('/api/testcases/init-cases', { params: { project_id: projectId, case_kind: caseKind } });
       setInitCases(res.data || []);
       setBatchRunInitCaseIds((res.data || []).map((c: TestCase) => c.id));
     } catch { setInitCases([]); }
-  }, []);
+  }, [caseKind]);
 
   useEffect(() => {
     if (selectedProject) fetchInitCases(selectedProject);
