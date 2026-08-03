@@ -384,6 +384,86 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
     }
 
 
+async def _get_batch_for_user(batch_id: int, user, db: AsyncSession):
+    batch = await crud.get_run_batch(db, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and batch.project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return batch
+
+
+async def _broadcast_batch_control(batch_id: int, event_type: str, status: str) -> None:
+    try:
+        from app.websocket import log_manager
+        await log_manager.send_message(batch_id, {
+            "type": event_type,
+            "timestamp": tz_now().isoformat(),
+            "batch_id": batch_id,
+            "status": status,
+            "message": f"batch {status}",
+        })
+    except Exception:
+        logger.debug("batch control WS broadcast failed", exc_info=True)
+
+
+@router.post("/batches/{batch_id}/pause")
+async def pause_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """暂停正在运行的批次（当前步骤结束后在检查点停下）。"""
+    from app import execution_control
+
+    batch = await _get_batch_for_user(batch_id, user, db)
+    if batch.status != "running":
+        raise HTTPException(status_code=409, detail=f"仅 running 状态可暂停，当前为 {batch.status}")
+    ok = await execution_control.request_pause(batch_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="批次已停止，无法暂停")
+    batch.status = "paused"
+    await db.commit()
+    await _broadcast_batch_control(batch_id, "batch_paused", "paused")
+    return {"id": batch_id, "status": "paused", "message": "已请求暂停"}
+
+
+@router.post("/batches/{batch_id}/resume")
+async def resume_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """继续已暂停的批次。"""
+    from app import execution_control
+
+    batch = await _get_batch_for_user(batch_id, user, db)
+    if batch.status != "paused":
+        raise HTTPException(status_code=409, detail=f"仅 paused 状态可继续，当前为 {batch.status}")
+    ok = await execution_control.request_resume(batch_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="批次已停止，无法继续")
+    batch.status = "running"
+    await db.commit()
+    await _broadcast_batch_control(batch_id, "batch_resumed", "running")
+    return {"id": batch_id, "status": "running", "message": "已继续执行"}
+
+
+@router.post("/batches/{batch_id}/stop")
+async def stop_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+    """停止批次：后续用例不再执行，剩余 pending 标为 cancelled。"""
+    from app import execution_control
+
+    batch = await _get_batch_for_user(batch_id, user, db)
+    if batch.status not in ("running", "paused"):
+        raise HTTPException(status_code=409, detail=f"仅 running/paused 可停止，当前为 {batch.status}")
+    await execution_control.request_stop(batch_id)
+    n = await crud.cancel_remaining_batch_runs(db, batch_id, message="用户停止执行")
+    batch.status = "cancelled"
+    batch.finished_at = tz_now()
+    await db.commit()
+    await _broadcast_batch_control(batch_id, "batch_cancelled", "cancelled")
+    return {
+        "id": batch_id,
+        "status": "cancelled",
+        "cancelled_runs": n,
+        "message": "已请求停止",
+    }
+
+
 @router.put("/batches/{batch_id}")
 async def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_admin), db: AsyncSession = Depends(get_async_db)) -> dict:
     """更新批次名称"""

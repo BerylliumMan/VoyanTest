@@ -43,6 +43,7 @@ class WSMessageType(str, Enum):
     GET_SCREENSHOT = "get_screenshot"
     RUN_END = "run_end"
     SHUTDOWN = "shutdown"
+    CANCEL_RUN = "cancel_run"  # best-effort: abort in-flight agent run
     RECORDING_START = "recording_start"
     RECORDING_STOP = "recording_stop"
     # Agent → Server

@@ -237,7 +237,8 @@ class AgentManager:
                                 backend: Optional[str] = None,
                                 *,
                                 navigate_base_url: bool = True,
-                                manage_busy: bool = True) -> dict:
+                                manage_busy: bool = True,
+                                batch_id: Optional[int] = None) -> dict:
         """Execute all steps via the agent. Server handles LLM, agent handles browser.
 
         Serialized per agent so batch/init cases never overlap on the same browser.
@@ -246,6 +247,7 @@ class AgentManager:
         ``backend``: ``playwright_mcp`` (default) or ``browser_use`` (client-local NL agent).
         ``navigate_base_url``: when False, skip BASE URL navigation (batch follow-up cases).
         ``manage_busy``: when False, caller owns ``_agent_busy`` for the whole job lifecycle.
+        ``batch_id``: optional RunBatch id for pause/stop checkpoints.
         """
         if manage_busy:
             self._agent_busy.add(agent_id)
@@ -257,6 +259,7 @@ class AgentManager:
                     base_url_override=base_url_override,
                     backend=backend,
                     navigate_base_url=navigate_base_url,
+                    batch_id=batch_id,
                 )
         finally:
             if manage_busy:
@@ -269,6 +272,7 @@ class AgentManager:
         base_url_override: Optional[str] = None,
         backend: Optional[str] = None,
         navigate_base_url: bool = True,
+        batch_id: Optional[int] = None,
     ) -> dict:
         """Inner implementation; caller must hold ``_run_lock_for(agent_id)``."""
         from app.runtime_config import execution_backend_config
@@ -282,6 +286,7 @@ class AgentManager:
                 max_steps_per_nl=execution_backend_config.max_steps_per_nl,
                 headless=execution_backend_config.headless,
                 navigate_base_url=navigate_base_url,
+                batch_id=batch_id,
             )
 
         session = await self.get_session(agent_id)
@@ -367,6 +372,34 @@ class AgentManager:
                 )
 
             for idx, step in enumerate(steps):
+                if batch_id is not None:
+                    from app import execution_control
+                    await execution_control.wait_if_paused(batch_id)
+                    if execution_control.is_stopped(batch_id):
+                        try:
+                            await session.send(WSMessage(
+                                type=WSMessageType.CANCEL_RUN,
+                                agent_id=agent_id,
+                                run_id=run_id,
+                                payload={},
+                            ))
+                        except Exception:
+                            logger.debug("CANCEL_RUN send failed", exc_info=True)
+                        for rest in steps[idx:]:
+                            step_results.append({
+                                "step_number": rest["step_order"],
+                                "original_description": rest["description"],
+                                "success": False,
+                                "status": "cancelled",
+                                "thinking": "",
+                                "action": "",
+                                "next_goal": "",
+                                "error": "用户停止执行",
+                                "screenshot_path": None,
+                                "duration_ms": 0,
+                            })
+                        break
+
                 if failed_step_number is not None:
                     step_results.append({
                         "step_number": step["step_order"],
@@ -934,8 +967,29 @@ class AgentManager:
         max_steps_per_nl: int = 20,
         headless: bool = True,
         navigate_base_url: bool = True,
+        batch_id: Optional[int] = None,
     ) -> list:
         """Client-local browser-use: server sends NL steps + LLM config, waits for RUN_COMPLETE."""
+        if batch_id is not None:
+            from app import execution_control
+            await execution_control.wait_if_paused(batch_id)
+            if execution_control.is_stopped(batch_id):
+                return [
+                    {
+                        "step_number": s.get("step_order"),
+                        "original_description": s.get("description"),
+                        "success": False,
+                        "status": "cancelled",
+                        "thinking": "",
+                        "action": "",
+                        "next_goal": "",
+                        "error": "用户停止执行",
+                        "screenshot_path": None,
+                        "duration_ms": 0,
+                    }
+                    for s in steps
+                ]
+
         session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")

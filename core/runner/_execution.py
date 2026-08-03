@@ -280,18 +280,26 @@ async def _run_test_case_in_browser_impl(
         await asyncio.to_thread(os.makedirs, screenshot_dir, exist_ok=True)
 
         should_abort = False
+        user_stopped = False
         for idx, (step_obj, step_dict) in enumerate(zip(steps_raw, step_list)):
+            if batch_id is not None:
+                from app import execution_control
+                await execution_control.wait_if_paused(batch_id)
+                if execution_control.is_stopped(batch_id):
+                    user_stopped = True
+                    should_abort = True
+
             if should_abort:
-                # 因 abort 决策跳过剩余步骤
+                # 因 abort 决策或用户停止跳过剩余步骤
                 step_results.append({
                     'step_number': step_dict['step_order'],
                     'original_description': step_dict['description'],
                     'success': False,
-                    'status': 'skipped',
+                    'status': 'cancelled' if user_stopped else 'skipped',
                     'thinking': '',
                     'action': '',
                     'next_goal': '',
-                    'error': '用户中止执行',
+                    'error': '用户停止执行' if user_stopped else '用户中止执行',
                     'screenshot_path': None,
                     'duration_ms': 0,
                 })
@@ -765,8 +773,11 @@ async def _run_test_case_in_browser_impl(
         # ------------------------------------------------------------------
         # Report
         # ------------------------------------------------------------------
-        all_passed = all(r['success'] for r in step_results)
-        test_status = "passed" if all_passed else "failed"
+        all_passed = all(r['success'] for r in step_results) if step_results else False
+        if user_stopped:
+            test_status = "cancelled"
+        else:
+            test_status = "passed" if all_passed else "failed"
 
         report = {
             "test_case_id": case_id,
