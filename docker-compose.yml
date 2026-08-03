@@ -1,43 +1,32 @@
 version: "3.9"
 
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: voyantest
-      POSTGRES_PASSWORD: voyantest_prod
-      POSTGRES_DB: voyantest
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U voyantest"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
+# 复用本机已有的 postgres 容器（voyantest-net），避免 compose 再起一套空库丢掉历史数据。
+# 旧库：容器名 postgres / 库名 voyantest / 账号 postgres:postgres
 
+services:
   app:
     build: .
+    image: voyantest:latest
     container_name: voyantest
     ports:
       - "8002:8002"
     environment:
       APP_HOST: "0.0.0.0"
       APP_PORT: "8002"
-      DATABASE_URL: "postgresql+asyncpg://voyantest:voyantest_prod@postgres:5432/voyantest"
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/voyantest"
       SESSION_SECRET_KEY: "${SESSION_SECRET_KEY:-change-me-in-production}"
       TZ: "Asia/Shanghai"
     volumes:
       - reports:/app/reports
       - logs:/app/logs
-    depends_on:
-      postgres:
-        condition: service_healthy
+    networks:
+      - voyantest-net
     restart: unless-stopped
 
 volumes:
-  pgdata:
   reports:
   logs:
+
+networks:
+  voyantest-net:
+    external: true
