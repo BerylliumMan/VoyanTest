@@ -232,29 +232,44 @@ async def _run_startup_init():
             """,
             "schema_patches 表",
         )
-        # 一次性：拆菜单前加列默认 ui，导致历史用例全进「UI自动化」；改归「功能」
+        # 一次性：拆菜单后曾把全部历史用例打成 functional，导致可执行 UI 用例无法运行。
+        # 将带浏览器操作语义步骤的用例恢复为 ui（可执行）。
         try:
             if AsyncSessionLocal is not None:
                 async with AsyncSessionLocal() as db:
                     from sqlalchemy import text as _t
-                    done = (
+                    done_restore = (
                         await db.execute(
-                            _t("SELECT 1 FROM schema_patches WHERE id = 'case_kind_history_to_functional'")
+                            _t("SELECT 1 FROM schema_patches WHERE id = 'case_kind_restore_ui_browser_steps'")
                         )
                     ).scalar()
-                    if not done:
+                    if not done_restore:
                         result = await db.execute(
-                            _t("UPDATE test_cases SET case_kind = 'functional' WHERE case_kind = 'ui'")
+                            _t(
+                                """
+                                UPDATE test_cases tc
+                                SET case_kind = 'ui'
+                                WHERE tc.case_kind = 'functional'
+                                  AND EXISTS (
+                                    SELECT 1 FROM test_steps s
+                                    WHERE s.case_id = tc.id
+                                      AND (
+                                        s.structured_step IS NOT NULL
+                                        OR s.description ~ '(点击|进入|打开|输入|填写|选择|勾选|上传|登录|跳转|等待|查看|断言|hover|navigate|click|fill|type|select|upload)'
+                                      )
+                                  )
+                                """
+                            )
                         )
                         await db.execute(
                             _t(
-                                "INSERT INTO schema_patches (id) VALUES ('case_kind_history_to_functional') "
+                                "INSERT INTO schema_patches (id) VALUES ('case_kind_restore_ui_browser_steps') "
                                 "ON CONFLICT (id) DO NOTHING"
                             )
                         )
                         await db.commit()
                         logger.info(
-                            "历史用例 case_kind 已迁到 functional，rowcount=%s",
+                            "历史浏览器步骤用例已恢复为 ui，rowcount=%s",
                             result.rowcount,
                         )
                     # 一次性：生成页 P0/P1/P2 导入时未映射，全落成 medium；按 gen_test_cases 标题回填
