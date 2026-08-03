@@ -130,6 +130,7 @@ class AgentClient:
         self._active_run_id: Optional[str] = None
         self._active_step_order: Optional[int] = None
         self._active_backend: Optional[str] = None
+        self._cancel_requested: bool = False
 
     # Mid-run: closing the browser must abort the case (do not auto-relaunch).
     BROWSER_CLOSED_USER_MSG = "浏览器已关闭，用例执行已中断"
@@ -1187,6 +1188,7 @@ class AgentClient:
             )
             self._active_run_id = msg.run_id
             self._active_backend = backend
+            self._cancel_requested = False
             self._emit_status('busy')
             ready_ok = False
             ready_err = ""
@@ -1307,6 +1309,28 @@ class AgentClient:
                 await self._stop_bu_browser()
             except Exception as e:
                 self._log_error(f"Error shutting down browser-use: {e}")
+
+        elif msg.type == WSMessageType.CANCEL_RUN:
+            self._log_info(f"Cancel run signal received for {msg.run_id}")
+            self._cancel_requested = True
+            # Best-effort: abort in-flight act; keep browser for subsequent cases
+            try:
+                if self._active_run_id and (
+                    not msg.run_id or msg.run_id == self._active_run_id
+                ):
+                    await self._send(
+                        WSMessageType.RUN_COMPLETE,
+                        msg.run_id or self._active_run_id,
+                        {
+                            "status": "cancelled",
+                            "error": "用户停止执行",
+                            "steps": [],
+                        },
+                    )
+                    self._active_run_id = None
+                    self._emit_status("idle")
+            except Exception as e:
+                self._log_warning(f"Cancel run cleanup: {e}")
 
         elif msg.type == WSMessageType.HEARTBEAT:
             pass

@@ -155,6 +155,8 @@ function Dashboard() {
                        if (s === 'running' || s === 'pending') {
                          return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
                        }
+                       if (s === 'paused') return <Tag color="orangered">{t['paused']}</Tag>;
+                       if (s === 'cancelled') return <Tag color="gray">{t['cancelled']}</Tag>;
                        if (s === 'partial') return <Tag color="orange">{t['partial.passed']}</Tag>;
                        if (s === 'passed' || (r.passed === r.total_cases && r.total_cases > 0)) {
                          return <Tag color="green">{t['all.passed']}</Tag>;

@@ -43,7 +43,8 @@ interface BatchDetail {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  pending: 'blue', running: 'blue', passed: 'green', failed: 'red', skipped: 'orange',
+  pending: 'blue', running: 'blue', paused: 'orangered', passed: 'green',
+  failed: 'red', skipped: 'orange', cancelled: 'gray', partial: 'orange',
 };
 
 const Reports: React.FC = () => {
@@ -52,8 +53,10 @@ const Reports: React.FC = () => {
   const STATUS_LABELS: Record<string, string> = {
     pending: t['step.waiting'],
     running: t['running'],
+    paused: t['paused'],
     passed: t['passed'],
     failed: t['failed'],
+    cancelled: t['cancelled'],
     skipped: 'Skipped',
   };
 
@@ -67,6 +70,10 @@ const Reports: React.FC = () => {
     if (s === 'running' || s === 'pending') {
       return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
     }
+    if (s === 'paused') {
+      return <Tag color="orangered">{t['paused']}</Tag>;
+    }
+    if (s === 'cancelled') return <Tag color="gray">{t['cancelled']}</Tag>;
     if (s === 'partial') return <Tag color="orange">{t['partial.passed']}</Tag>;
     if (s === 'passed' || (total > 0 && passed === total)) return <Tag color="green">{t['all.passed']}</Tag>;
     if (s === 'failed') return <Tag color="red">{t['all.failed']}</Tag>;
@@ -131,11 +138,30 @@ const Reports: React.FC = () => {
         { showSuccess: false, showError: false }
       );
       setDetail(updated);
-      if (updated.status !== 'running') {
+      // 暂停时仍轮询；终态才停
+      if (!['running', 'paused'].includes(updated.status)) {
         setPollingBatchId(null);
       }
     } catch {
       setPollingBatchId(null);
+    }
+  };
+
+  const handleBatchControl = async (batchId: number, action: 'pause' | 'resume' | 'stop') => {
+    try {
+      await apiRequest(
+        { method: 'POST', url: `/api/reports/batches/${batchId}/${action}` },
+        { showSuccess: false, showError: true }
+      );
+      const msgKey = action === 'pause' ? 'batch.pause.ok' : action === 'resume' ? 'batch.resume.ok' : 'batch.stop.ok';
+      Message.success(t[msgKey]);
+      await refreshBatchDetail(batchId);
+      fetchData();
+      if (action === 'resume') {
+        setPollingBatchId(batchId);
+      }
+    } catch {
+      Message.error(t['batch.control.failed']);
     }
   };
 
@@ -161,7 +187,9 @@ const Reports: React.FC = () => {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'run_complete' || msg.type === 'step_complete') {
+          if (msg.type === 'run_complete' || msg.type === 'step_complete'
+            || msg.type === 'batch_paused' || msg.type === 'batch_resumed'
+            || msg.type === 'batch_cancelled') {
             refreshBatchDetail(pollingBatchId);
           }
         } catch { /* ignore parse errors */ }
@@ -337,7 +365,23 @@ const Reports: React.FC = () => {
             ? t['batch.detail'].replace('{name}', String(detail.name || detail.id))
             : t['loading']
         }
-        footer={<Button onClick={handleCloseDetail}>{t['close']}</Button>}
+        footer={
+          <Space>
+            {detail?.status === 'running' && (
+              <>
+                <Button onClick={() => handleBatchControl(detail.id, 'pause')}>{t['batch.pause']}</Button>
+                <Button status="danger" onClick={() => handleBatchControl(detail.id, 'stop')}>{t['batch.stop']}</Button>
+              </>
+            )}
+            {detail?.status === 'paused' && (
+              <>
+                <Button type="primary" onClick={() => handleBatchControl(detail.id, 'resume')}>{t['batch.resume']}</Button>
+                <Button status="danger" onClick={() => handleBatchControl(detail.id, 'stop')}>{t['batch.stop']}</Button>
+              </>
+            )}
+            <Button onClick={handleCloseDetail}>{t['close']}</Button>
+          </Space>
+        }
         className={styles.modalWide}
       >
         <Spin loading={detailLoading}>
@@ -347,7 +391,7 @@ const Reports: React.FC = () => {
                 column={3}
                 data={[
                   { label: t['project'], value: detail.project_name },
-                  { label: t['status'], value: getStatusTag(detail.status, detail.status === 'running') },
+                  { label: t['status'], value: getBatchStatusTag(detail.status, detail.passed, detail.total_cases, detail.failed) },
                   { label: t['case.count'], value: detail.total_cases },
                   { label: t['passed'], value: detail.passed },
                   { label: t['failed'], value: detail.failed },

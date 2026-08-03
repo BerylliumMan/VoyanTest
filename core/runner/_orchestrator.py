@@ -440,207 +440,241 @@ async def run_batch_test_cases(
     mcp_manager = None
     base_url_override = None
 
-    async with BrowserPool.project_lock(project_id), AsyncSessionLocal() as batch_db:
-        # ── AgentRunner 分发检查（T011）────────────────────────────────────
-        # 在打开浏览器之前，先检查是否有激活的 execution AgentDefinition。
-        # 如果有且配置了工具，则使用 AgentRunner OTA 循环替代传统的
-        # run_test_case_in_browser 逐步骤执行。
-        agent_def = None
-        use_agent_runner = False
-        agent_llm_client = None
-        try:
-            from app.crud.agent_definition import get_active_by_type
-            agent_def = await get_active_by_type(batch_db, "execution")
-            if await _should_use_agent_runner(agent_def):
-                agent_llm_client = await create_openai_client(agent_type="execution")
-                use_agent_runner = True
-                logger.info(
-                    "AgentRunner 模式已激活: agent_def_id=%s, name=%s",
-                    agent_def.id, agent_def.name,
-                )
-        except Exception as exc:
-            logger.warning("AgentRunner 初始化失败，回退传统模式: %s", exc, exc_info=True)
+    import asyncio
+    from app import execution_control
+    _cur = asyncio.current_task()
+    if _cur is not None and batch_id is not None:
+        await execution_control.register_batch_task(batch_id, _cur)
 
-        # Get project/environment browser settings
-        try:
-            if environment_id:
-                env = await crud.get_environment(batch_db, environment_id)
-                if env:
-                    browser_type = env.browser
-                    headless = True  # 服务端始终用 headless 模式
-                    base_url_override = env.base_url
+    try:
+        async with BrowserPool.project_lock(project_id), AsyncSessionLocal() as batch_db:
+            # ── AgentRunner 分发检查（T011）────────────────────────────────────
+            # 在打开浏览器之前，先检查是否有激活的 execution AgentDefinition。
+            # 如果有且配置了工具，则使用 AgentRunner OTA 循环替代传统的
+            # run_test_case_in_browser 逐步骤执行。
+            agent_def = None
+            use_agent_runner = False
+            agent_llm_client = None
+            try:
+                from app.crud.agent_definition import get_active_by_type
+                agent_def = await get_active_by_type(batch_db, "execution")
+                if await _should_use_agent_runner(agent_def):
+                    agent_llm_client = await create_openai_client(agent_type="execution")
+                    use_agent_runner = True
+                    logger.info(
+                        "AgentRunner 模式已激活: agent_def_id=%s, name=%s",
+                        agent_def.id, agent_def.name,
+                    )
+            except Exception as exc:
+                logger.warning("AgentRunner 初始化失败，回退传统模式: %s", exc, exc_info=True)
+
+            # Get project/environment browser settings
+            try:
+                if environment_id:
+                    env = await crud.get_environment(batch_db, environment_id)
+                    if env:
+                        browser_type = env.browser
+                        headless = True  # 服务端始终用 headless 模式
+                        base_url_override = env.base_url
+                    else:
+                        project_data = await crud.get_project(batch_db, project_id)
+                        browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
+                        headless = True  # 服务端始终用 headless 模式
                 else:
                     project_data = await crud.get_project(batch_db, project_id)
                     browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
                     headless = True  # 服务端始终用 headless 模式
-            else:
-                project_data = await crud.get_project(batch_db, project_id)
-                browser_type = project_data.browser if project_data and project_data.browser else 'chromium'
-                headless = True  # 服务端始终用 headless 模式
-        except SQLAlchemyError:
-            logger.warning("Failed to load environment/project settings; falling back to defaults", exc_info=True)
-            browser_type = 'chromium'
-            headless = True
+            except SQLAlchemyError:
+                logger.warning("Failed to load environment/project settings; falling back to defaults", exc_info=True)
+                browser_type = 'chromium'
+                headless = True
 
-        # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
-        # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
-        precreated_run_ids = await precreate_pending_runs(
-            batch_db, case_ids, batch_id, init_case_ids=init_case_ids
-        )
+            # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
+            # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
+            precreated_run_ids = await precreate_pending_runs(
+                batch_db, case_ids, batch_id, init_case_ids=init_case_ids
+            )
 
-        # Scheme B: browser-use batch — per-case session, skip Playwright MCP pool
-        from app.runtime_config import execution_backend_config as _exec_backend
-        if _exec_backend.backend == "browser_use":
-            from core.browser_use_runner import run_test_case_via_browser_use
+            # Scheme B: browser-use batch — per-case session, skip Playwright MCP pool
+            from app.runtime_config import execution_backend_config as _exec_backend
+            if _exec_backend.backend == "browser_use":
+                from core.browser_use_runner import run_test_case_via_browser_use
+
+                results = []
+                for case_id in (init_case_ids or []) + case_ids:
+                    from app import execution_control
+                    await execution_control.wait_if_paused(batch_id)
+                    if execution_control.is_stopped(batch_id):
+                        await crud.cancel_remaining_batch_runs(
+                            batch_db, batch_id, message="用户停止执行",
+                        )
+                        await batch_db.commit()
+                        break
+                    _rid = precreated_run_ids.get(case_id)
+                    try:
+                        result = await run_test_case_via_browser_use(
+                            case_id,
+                            batch_id=batch_id,
+                            run_id=_rid,
+                            base_url_override=base_url_override,
+                            headless=_exec_backend.headless,
+                            max_steps_per_nl=_exec_backend.max_steps_per_nl,
+                        )
+                        results.append(result)
+                        logger.info(
+                            "Batch browser-use case %s finished: %s",
+                            case_id, (result or {}).get("status"),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("Batch browser-use case %s failed", case_id)
+                        await _record_batch_case_failure(
+                            batch_db, precreated_run_ids, case_id, batch_id,
+                            message=f"browser-use executor exception: {exc}",
+                        )
+                        results.append({
+                            "case_id": case_id,
+                            "status": "failed",
+                            "error": str(exc),
+                            "batch_id": batch_id,
+                            "backend": "browser_use",
+                        })
+                return results
+
+            # 创建或复用浏览器
+            try:
+                async def _factory():
+                    mgr = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
+                    await mgr.start()
+                    return mgr
+
+                existing = await browser_pool.get_or_create(project_id, _factory)
+                if existing is not None:
+                    mcp_manager = existing
+                else:
+                    mcp_manager = await _factory()
+                    await browser_pool.register(project_id, mcp_manager)
+            except Exception as exc:  # noqa: BLE001 - 见下方注释
+                # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
+                # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
+                # Failures can surface as OSError (subprocess), ConnectionError, or
+                # asyncio.TimeoutError — any of them must be reported as a clean
+                # "browser startup failed" so all pre-created pending TestRun
+                # records get marked as failed consistently.
+                logger.exception("Failed to start browser for batch %s", batch_id)
+                for cid in ((init_case_ids or []) + case_ids):
+                    await _record_batch_case_failure(
+                        batch_db, precreated_run_ids, cid, batch_id,
+                        message=f"Browser startup failed: {exc}",
+                    )
+                return
+
+            # Clear cookies once at batch start
+            await mcp_manager.clear_cookies()
 
             results = []
-            for case_id in (init_case_ids or []) + case_ids:
+            # 先运行初始化用例，再运行主用例
+            for case_id in (init_case_ids or []):
+                from app import execution_control
+                await execution_control.wait_if_paused(batch_id)
+                if execution_control.is_stopped(batch_id):
+                    await crud.cancel_remaining_batch_runs(
+                        batch_db, batch_id, message="用户停止执行",
+                    )
+                    await batch_db.commit()
+                    break
                 _rid = precreated_run_ids.get(case_id)
                 try:
-                    result = await run_test_case_via_browser_use(
-                        case_id,
-                        batch_id=batch_id,
-                        run_id=_rid,
-                        base_url_override=base_url_override,
-                        headless=_exec_backend.headless,
-                        max_steps_per_nl=_exec_backend.max_steps_per_nl,
-                    )
+                    if use_agent_runner and agent_def is not None:
+                        result = await run_test_case_via_agent(
+                            case_id, mcp_manager, batch_db, agent_def,
+                            llm_client=agent_llm_client,
+                            base_url=base_url_override,
+                            batch_id=batch_id,
+                            run_id=_rid,
+                        )
+                        if result is None:
+                            result = await run_test_case_in_browser(
+                                case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                                batch_id=batch_id, run_id=_rid,
+                                base_url_override=base_url_override,
+                                debug_mode=debug_mode,
+                            )
+                    else:
+                        result = await run_test_case_in_browser(
+                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                            batch_id=batch_id, run_id=_rid,
+                            base_url_override=base_url_override,
+                            debug_mode=debug_mode,
+                        )
                     results.append(result)
-                    logger.info(
-                        "Batch browser-use case %s finished: %s",
-                        case_id, (result or {}).get("status"),
-                    )
+                    logger.info("Batch init-case %s finished: %s", case_id, result['status'])
                 except Exception as exc:  # noqa: BLE001
-                    logger.exception("Batch browser-use case %s failed", case_id)
+                    logger.exception("Batch init-case %s failed", case_id)
                     await _record_batch_case_failure(
                         batch_db, precreated_run_ids, case_id, batch_id,
-                        message=f"browser-use executor exception: {exc}",
+                        message=f"Batch init-case executor exception: {exc}",
+                    )
+                    results.append({"case_id": case_id, "status": "failed", "error": str(exc), "batch_id": batch_id})
+
+            # 运行主用例
+            for case_id in case_ids:
+                from app import execution_control
+                await execution_control.wait_if_paused(batch_id)
+                if execution_control.is_stopped(batch_id):
+                    await crud.cancel_remaining_batch_runs(
+                        batch_db, batch_id, message="用户停止执行",
+                    )
+                    await batch_db.commit()
+                    break
+                _rid = precreated_run_ids.get(case_id)
+                try:
+                    if use_agent_runner and agent_def is not None:
+                        result = await run_test_case_via_agent(
+                            case_id, mcp_manager, batch_db, agent_def,
+                            llm_client=agent_llm_client,
+                            base_url=base_url_override,
+                            batch_id=batch_id,
+                            run_id=_rid,
+                        )
+                        if result is None:
+                            result = await run_test_case_in_browser(
+                                case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                                batch_id=batch_id, run_id=_rid,
+                                base_url_override=base_url_override,
+                                debug_mode=debug_mode,
+                            )
+                    else:
+                        result = await run_test_case_in_browser(
+                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
+                            batch_id=batch_id, run_id=_rid,
+                            base_url_override=base_url_override,
+                            debug_mode=debug_mode,
+                        )
+                    results.append(result)
+                    logger.info(
+                        f"Batch: case {case_id} finished: {result['status']}"
+                    )
+                except Exception as exc:  # noqa: BLE001 - 见下方注释
+                    # Broad catch is necessary: run_test_case_in_browser touches DB,
+                    # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
+                    # unhandled error must be recorded on the pre-created TestRun
+                    # row so the report page stays consistent.
+                    logger.exception(
+                        "Batch: case %s failed with exception",
+                        case_id,
+                    )
+                    await _record_batch_case_failure(
+                        batch_db, precreated_run_ids, case_id, batch_id,
+                        message=f"Batch executor exception: {exc}",
                     )
                     results.append({
                         "case_id": case_id,
                         "status": "failed",
                         "error": str(exc),
                         "batch_id": batch_id,
-                        "backend": "browser_use",
                     })
+
             return results
-
-        # 创建或复用浏览器
-        try:
-            async def _factory():
-                mgr = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
-                await mgr.start()
-                return mgr
-
-            existing = await browser_pool.get_or_create(project_id, _factory)
-            if existing is not None:
-                mcp_manager = existing
-            else:
-                mcp_manager = await _factory()
-                await browser_pool.register(project_id, mcp_manager)
-        except Exception as exc:  # noqa: BLE001 - 见下方注释
-            # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
-            # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
-            # Failures can surface as OSError (subprocess), ConnectionError, or
-            # asyncio.TimeoutError — any of them must be reported as a clean
-            # "browser startup failed" so all pre-created pending TestRun
-            # records get marked as failed consistently.
-            logger.exception("Failed to start browser for batch %s", batch_id)
-            for cid in ((init_case_ids or []) + case_ids):
-                await _record_batch_case_failure(
-                    batch_db, precreated_run_ids, cid, batch_id,
-                    message=f"Browser startup failed: {exc}",
-                )
-            return
-
-        # Clear cookies once at batch start
-        await mcp_manager.clear_cookies()
-
-        results = []
-        # 先运行初始化用例，再运行主用例
-        for case_id in (init_case_ids or []):
-            _rid = precreated_run_ids.get(case_id)
-            try:
-                if use_agent_runner and agent_def is not None:
-                    result = await run_test_case_via_agent(
-                        case_id, mcp_manager, batch_db, agent_def,
-                        llm_client=agent_llm_client,
-                        base_url=base_url_override,
-                        batch_id=batch_id,
-                        run_id=_rid,
-                    )
-                    if result is None:
-                        result = await run_test_case_in_browser(
-                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                            batch_id=batch_id, run_id=_rid,
-                            base_url_override=base_url_override,
-                            debug_mode=debug_mode,
-                        )
-                else:
-                    result = await run_test_case_in_browser(
-                        case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                        batch_id=batch_id, run_id=_rid,
-                        base_url_override=base_url_override,
-                        debug_mode=debug_mode,
-                    )
-                results.append(result)
-                logger.info("Batch init-case %s finished: %s", case_id, result['status'])
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Batch init-case %s failed", case_id)
-                await _record_batch_case_failure(
-                    batch_db, precreated_run_ids, case_id, batch_id,
-                    message=f"Batch init-case executor exception: {exc}",
-                )
-                results.append({"case_id": case_id, "status": "failed", "error": str(exc), "batch_id": batch_id})
-
-        # 运行主用例
-        for case_id in case_ids:
-            _rid = precreated_run_ids.get(case_id)
-            try:
-                if use_agent_runner and agent_def is not None:
-                    result = await run_test_case_via_agent(
-                        case_id, mcp_manager, batch_db, agent_def,
-                        llm_client=agent_llm_client,
-                        base_url=base_url_override,
-                        batch_id=batch_id,
-                        run_id=_rid,
-                    )
-                    if result is None:
-                        result = await run_test_case_in_browser(
-                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                            batch_id=batch_id, run_id=_rid,
-                            base_url_override=base_url_override,
-                            debug_mode=debug_mode,
-                        )
-                else:
-                    result = await run_test_case_in_browser(
-                        case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                        batch_id=batch_id, run_id=_rid,
-                        base_url_override=base_url_override,
-                        debug_mode=debug_mode,
-                    )
-                results.append(result)
-                logger.info(
-                    f"Batch: case {case_id} finished: {result['status']}"
-                )
-            except Exception as exc:  # noqa: BLE001 - 见下方注释
-                # Broad catch is necessary: run_test_case_in_browser touches DB,
-                # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
-                # unhandled error must be recorded on the pre-created TestRun
-                # row so the report page stays consistent.
-                logger.exception(
-                    "Batch: case %s failed with exception",
-                    case_id,
-                )
-                await _record_batch_case_failure(
-                    batch_db, precreated_run_ids, case_id, batch_id,
-                    message=f"Batch executor exception: {exc}",
-                )
-                results.append({
-                    "case_id": case_id,
-                    "status": "failed",
-                    "error": str(exc),
-                    "batch_id": batch_id,
-                })
-
-        return results
+    finally:
+        if batch_id is not None:
+            await execution_control.clear_batch(batch_id)

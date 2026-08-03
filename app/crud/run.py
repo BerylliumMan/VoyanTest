@@ -175,12 +175,15 @@ async def cancel_remaining_batch_runs(
     db: AsyncSession,
     batch_id: int,
     message: str = "用户停止执行",
+    *,
+    include_running: bool = False,
 ) -> int:
-    """将批次内仍为 pending/running 的 TestRun 标为 cancelled。返回更新条数。"""
+    """将批次内仍为 pending（可选 running）的 TestRun 标为 cancelled。返回更新条数。"""
+    statuses = ("pending", "running") if include_running else ("pending",)
     result = await db.execute(
         select(db_models.TestRun).where(
             db_models.TestRun.batch_id == batch_id,
-            db_models.TestRun.status.in_(("pending", "running")),
+            db_models.TestRun.status.in_(statuses),
         )
     )
     runs = result.scalars().all()
@@ -242,6 +245,8 @@ async def _compute_batch_status(db: AsyncSession, batch, preloaded_runs: list = 
         # 超过阈值仍无 TestRun → 后台任务可能已死。
         # browser-use / 客户端 NL 跑完才落库，阈值需远大于 30s，
         # 否则轮询 GET /batches/{id} 会把仍在执行的批次误判为 failed。
+        if batch.status in ("paused", "cancelled"):
+            return
         created = batch.created_at
         if created and created.tzinfo is None:
             created = created.replace(tzinfo=now.tzinfo)
