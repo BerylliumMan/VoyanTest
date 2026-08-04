@@ -364,9 +364,16 @@ class AgentBridge:
                 if nav_result.get("success"):
                     logger.info("Bridge: navigation successful")
                 else:
-                    logger.warning("Bridge: navigation failed: %s", nav_result.get("error"))
+                    reason = nav_result.get("error") or "unknown"
+                    msg = f"导航失败，已停止执行: {case_url} — {reason}"
+                    logger.error("Bridge: %s", msg)
+                    await self._fail(run.id, msg)
+                    return
             except Exception as e:
-                logger.warning("Bridge: navigation exception: %s", e)
+                msg = f"导航失败，已停止执行: {case_url} — {e}"
+                logger.error("Bridge: %s", msg)
+                await self._fail(run.id, msg)
+                return
 
         for turn in range(1, max_turns + 1):
             logger.info("━━━ Turn %d/%d (run #%d) ━━━", turn, max_turns, run.id)

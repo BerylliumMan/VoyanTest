@@ -29,6 +29,8 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconFile className={styles.icon} />;
     case 'testcases/ui':
       return <IconCode className={styles.icon} />;
+    case 'testcases/suites':
+      return <IconList className={styles.icon} />;
     case 'gen':
       return <IconThunderbolt className={styles.icon} />;
     case 'gen-history':

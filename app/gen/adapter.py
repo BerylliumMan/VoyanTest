@@ -295,6 +295,15 @@ async def import_test_cases(
             steps_text, _split_expected_results(gen_tc.expected_result)
         )
         structured_list = list(getattr(gen_tc, "structured_steps", None) or [])
+        from core.step_normalize import coerce_structured_step, parse_instant_to_structured
+        # Drop Nones / non-dicts; keep index alignment when aligned list provided
+        if structured_list and all(x is None or isinstance(x, dict) for x in structured_list):
+            pass
+        elif case_kind == "ui" and steps_text and not any(
+            isinstance(x, dict) and x.get("action") for x in structured_list
+        ):
+            structured_list = [parse_instant_to_structured(s) for s in steps_text]
+
         for idx, step_text in enumerate(steps_text, start=1):
             structured = None
             if idx - 1 < len(structured_list):
@@ -302,8 +311,10 @@ async def import_test_cases(
             if isinstance(structured, dict) and not structured.get("action"):
                 structured = None
             if structured is None and case_kind == "ui" and step_text:
-                from core.step_normalize import parse_instant_to_structured
                 structured = parse_instant_to_structured(step_text)
+            # Align with recordings save-as-case: keep selector / solidification fields
+            if isinstance(structured, dict):
+                structured = coerce_structured_step(structured) or structured
             step = db_models.TestStep(
                 case_id=tc.id,
                 step_order=idx,

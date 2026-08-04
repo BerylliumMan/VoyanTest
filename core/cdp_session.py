@@ -91,6 +91,17 @@ _INJECT_RECORDER_SCRIPT = r"""
     return ('' + val).replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g, '\\$&');
   }
 
+  // Element UI / Plus 动态 id（每次打开页面都会变，禁止固化）
+  function _isEphemeralId(id) {
+    if (!id || typeof id !== 'string') return false;
+    if (/^el-(popover|popper|tooltip|message|notification|dialog|drawer|select)-\d+/i.test(id)) {
+      return true;
+    }
+    // 其它 el-xxx-数字 临时节点
+    if (/^el-[a-z]+-\d+$/i.test(id)) return true;
+    return false;
+  }
+
   // ---- 判断 CSS 选择器是否唯一 ----
   function _isUnique(sel) {
     try { return document.querySelectorAll(sel).length === 1; }
@@ -129,7 +140,7 @@ _INJECT_RECORDER_SCRIPT = r"""
     return tag + ':nth-of-type(' + idx + ')';
   }
 
-  // ---- 构建祖先链（最多 depth 层，遇 id / body 提前停） ----
+  // ---- 构建祖先链（最多 depth 层；稳定 id / 语义 class 可作锚点） ----
   function _parentChain(el, depth) {
     var parts = [];
     var cur = el;
@@ -137,16 +148,109 @@ _INJECT_RECORDER_SCRIPT = r"""
       parts.unshift(_nthOfType(cur));
       cur = cur.parentElement;
       if (!cur || cur === document.body) {
-        // body 或到顶了，不继续拼接
         break;
       }
-      if (cur.id) {
-        // 遇到 id 祖先，直接用它作为锚点然后停止
+      // 动态 el-popover-N 等不能当锚点
+      if (cur.id && !_isEphemeralId(cur.id)) {
         parts.unshift('#' + _cssEscape(cur.id));
         break;
       }
+      // popover/dropdown 用稳定 class 锚点，避免 #el-popover-数字
+      var pClasses = _usefulClasses(cur);
+      for (var pci = 0; pci < pClasses.length; pci++) {
+        var pc = pClasses[pci];
+        if (/^(el-popover|el-popper|el-select-dropdown|el-picker-panel|ant-select-dropdown|ant-popover)$/i.test(pc)) {
+          var anchor = ((cur.tagName || '').toLowerCase() || 'div') + '.' + pc;
+          var trial = [anchor].concat(parts).join(' > ');
+          if (_isUnique(trial)) {
+            parts.unshift(anchor);
+            return parts.join(' > ');
+          }
+          // 即使不唯一，也优于动态 id；继续拼更深时再用
+          parts.unshift('.' + pc);
+          return parts.join(' > ');
+        }
+      }
     }
     return parts.join(' > ');
+  }
+
+  // 输入法拼音中间态（如 jing'zhou'shi'yuan），不应固化为最终 value
+  function _looksLikeImePinyin(v) {
+    if (!v || typeof v !== 'string') return false;
+    return /^[a-z]+('[a-z]+)+$/i.test(v.trim());
+  }
+
+  // popover 内筛选框常无 placeholder：仅对 input/textarea 借用当前展开的「请选择…」
+  function _borrowOpenSelectPlaceholder(el) {
+    var tag = ((el && el.tagName) || '').toLowerCase();
+    if (tag !== 'input' && tag !== 'textarea') return null;
+    var cur = el;
+    var inOverlay = false;
+    while (cur && cur !== document.body) {
+      var id = cur.id || '';
+      if (_isEphemeralId(id)) { inOverlay = true; break; }
+      var cls = _usefulClasses(cur);
+      for (var i = 0; i < cls.length; i++) {
+        if (/^(el-popover|el-popper|el-select-dropdown|ant-select-dropdown|ant-popover)$/i.test(cls[i])) {
+          inOverlay = true;
+          break;
+        }
+      }
+      if (inOverlay) break;
+      cur = cur.parentElement;
+    }
+    if (!inOverlay) return null;
+    // 筛选框自身已有「输入关键词…」等 placeholder 时不要借用
+    var own = el.getAttribute('placeholder');
+    if (own) return null;
+    var nodes = document.querySelectorAll('input[placeholder], textarea[placeholder]');
+    var fallback = null;
+    for (var n = 0; n < nodes.length; n++) {
+      var t = nodes[n];
+      if (t === el) continue;
+      var ph = t.getAttribute('placeholder') || '';
+      if (!ph || ph.indexOf('请选择') !== 0) continue;
+      var wrap = t.closest
+        ? t.closest('.el-select, .el-tree-select, .el-cascader, .ant-select')
+        : null;
+      if (wrap && (
+          wrap.classList.contains('is-focus') ||
+          wrap.classList.contains('is-active') ||
+          wrap.classList.contains('is-open') ||
+          (wrap.getAttribute('aria-expanded') === 'true')
+      )) {
+        return ph;
+      }
+      if (!fallback) fallback = ph;
+    }
+    return fallback;
+  }
+
+  function _isOptionLike(el) {
+    if (!el || el.nodeType !== 1) return false;
+    var role = (el.getAttribute('role') || '').toLowerCase();
+    if (role === 'option' || role === 'treeitem' || role === 'menuitem') return true;
+    try {
+      if (el.classList) {
+        if (el.classList.contains('el-tree-node__label') ||
+            el.classList.contains('el-tree-node__content') ||
+            el.classList.contains('el-select-dropdown__item') ||
+            el.classList.contains('el-cascader-node') ||
+            el.classList.contains('ant-select-item-option') ||
+            el.classList.contains('ant-tree-node-content-wrapper')) {
+          return true;
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function _optionText(el) {
+    if (!el) return '';
+    var t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (t.length > 60) t = t.slice(0, 57) + '...';
+    return t;
   }
 
   // ---- 主函数 ----
@@ -156,11 +260,32 @@ _INJECT_RECORDER_SCRIPT = r"""
     var tag = (el.tagName || '').toLowerCase();
     if (!tag) return null;
 
+    // 下拉/树选项：优先文本，禁止借用 placeholder 成 div[placeholder=…]
+    if (_isOptionLike(el)) {
+      var optText = _optionText(el);
+      if (optText) {
+        return tag + ':has-text("' + optText.replace(/"/g, '\\"') + '")';
+      }
+    }
+
     // ==================================================================
-    // L1: 唯一标识符层
+    // L1: 唯一标识符层（placeholder 优先于动态 id）
     // ==================================================================
 
-    if (el.id) {
+    // placeholder 最稳；仅 input/textarea 可借用触发器文案
+    var placeholder = el.getAttribute('placeholder');
+    if (!placeholder && (tag === 'input' || tag === 'textarea')) {
+      placeholder = _borrowOpenSelectPlaceholder(el);
+    }
+    if (placeholder && (tag === 'input' || tag === 'textarea')) {
+      var phSel = tag + '[placeholder="' + placeholder.replace(/"/g, '\\"') + '"]';
+      if (_isUnique(phSel) || placeholder.indexOf('请选择') === 0 || placeholder.indexOf('请输入') === 0 || placeholder.indexOf('输入') === 0) {
+        return phSel;
+      }
+    }
+
+    // 稳定 id；跳过 el-popover-N 等临时 id
+    if (el.id && !_isEphemeralId(el.id)) {
       return '#' + _cssEscape(el.id);
     }
 
@@ -200,6 +325,13 @@ _INJECT_RECORDER_SCRIPT = r"""
       if (_isUnique(typeSel)) return typeSel;
     }
 
+    // 2b2: placeholder + type (when bare placeholder was not unique)
+    if (placeholder && elType && (tag === 'input' || tag === 'textarea')) {
+      var phTypeSel = tag + '[type="' + elType.replace(/"/g, '\\"') + '"]'
+        + '[placeholder="' + placeholder.replace(/"/g, '\\"') + '"]';
+      if (_isUnique(phTypeSel)) return phTypeSel;
+    }
+
     // 2c: 双 class 组合（优先语义化的两个）
     if (classes.length >= 2) {
       for (var i = 0; i < Math.min(classes.length, 4); i++) {
@@ -227,10 +359,14 @@ _INJECT_RECORDER_SCRIPT = r"""
         var pTag = (parent.tagName || '').toLowerCase();
         if (pTag) {
           var childDesc = tag + '.' + classes[0];
-          var pSel = (parent.id) ? '#' + _cssEscape(parent.id) : _nthOfType(parent);
+          var pSel;
+          if (parent.id && !_isEphemeralId(parent.id)) {
+            pSel = '#' + _cssEscape(parent.id);
+          } else {
+            pSel = _nthOfType(parent);
+          }
           var pcSel = pSel + ' > ' + childDesc;
           if (_isUnique(pcSel)) return pcSel;
-          // 带 class 对的 parent > child
           if (classes.length >= 2) {
             var childDesc2 = tag + '.' + classes[0] + '.' + classes[1];
             var pcSel2 = pSel + ' > ' + childDesc2;
@@ -240,10 +376,10 @@ _INJECT_RECORDER_SCRIPT = r"""
       }
     }
 
-    // 3b: 递增祖先链 2→3 层（遇 id 锚点会提前停止）
+    // 3b: 递增祖先链 2→3 层（不会用动态 el-popover id 作锚点）
     for (var depth = 2; depth <= 3; depth++) {
       var chain = _parentChain(el, depth);
-      if (_isUnique(chain)) return chain;
+      if (chain && chain.indexOf('#el-') === -1 && _isUnique(chain)) return chain;
     }
 
     // ==================================================================
@@ -259,14 +395,86 @@ _INJECT_RECORDER_SCRIPT = r"""
     }
 
     // ==================================================================
-    // L5: 兜底层 — 仅 tag
+    // L5: 兜底层 — placeholder 仍优于裸 tag（避免固化 selector:"input"）
     // ==================================================================
+
+    if (placeholder) {
+      return tag + '[placeholder="' + placeholder.replace(/"/g, '\\"') + '"]';
+    }
 
     return tag;
   }
 
+  function _elMeta(el) {
+    if (!el || el.nodeType !== 1) return {};
+    var meta = {tag: (el.tagName || '').toLowerCase()};
+    var ph = el.getAttribute('placeholder');
+    if (!ph && (meta.tag === 'input' || meta.tag === 'textarea')) {
+      ph = _borrowOpenSelectPlaceholder(el);
+    }
+    if (ph) meta.placeholder = ph;
+    var role = el.getAttribute('role');
+    if (role) meta.role = role;
+    var aria = el.getAttribute('aria-label');
+    if (aria) meta.name = aria;
+    var txt = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (txt) meta.text = txt;
+    return meta;
+  }
+
   var _input_timers = {};
   var _input_latest = {};
+  var _composing = false;
+  var _lastInputSig = {}; // selector -> last reported value
+  var _skipClickUntil = 0;
+
+  function _reportInput(el, selector, value, meta) {
+    if (value == null) return;
+    var v = String(value);
+    if (!v.trim()) return; // 空输入不上报
+    if (_looksLikeImePinyin(v)) return;
+    if (_lastInputSig[selector] === v) return; // 去重：同 selector+value
+    _lastInputSig[selector] = v;
+    var payload = Object.assign({selector: selector, value: v}, meta || {});
+    report("input", payload);
+  }
+
+  function _resolveClickTarget(el) {
+    var target = el;
+    while (target && target !== document.body) {
+      if (_isOptionLike(target)) return target;
+      var tTag = (target.tagName || "").toLowerCase();
+      var tText = (target.textContent || "").trim();
+      if (["button", "a", "input", "select", "textarea", "label", "li"].indexOf(tTag) !== -1 ||
+          (target.getAttribute("role") || "").indexOf("button") !== -1 ||
+          (target.getAttribute("role") || "").indexOf("combobox") !== -1 ||
+          (target.getAttribute("role") || "").indexOf("option") !== -1 ||
+          (target.getAttribute("role") || "").indexOf("treeitem") !== -1 ||
+          target.getAttribute("onclick") ||
+          (tTag === "input" && target.getAttribute("placeholder"))) {
+        break;
+      }
+      if (["img", "span", "svg", "i", "em", "b", "strong"].indexOf(tTag) !== -1) {
+        // span 可能是树节点文案，若父级是 option-like 则继续上找
+        target = target.parentElement;
+        continue;
+      }
+      if (tText.length > 0 && tText.length < 80) {
+        break;
+      }
+      target = target.parentElement;
+    }
+    if (target === document.body || !target) target = el;
+    return target;
+  }
+
+  function _emitClick(target) {
+    var clickPayload = Object.assign(
+      {selector: describe(target)},
+      _elMeta(target)
+    );
+    report("click", clickPayload);
+  }
 
   window.__CDP_RECORDER_FLUSH__ = function () {
     var keys = Object.keys(_input_timers);
@@ -278,37 +486,56 @@ _INJECT_RECORDER_SCRIPT = r"""
       }
       var pending = _input_latest[k];
       if (pending) {
-        report("input", {selector: pending.selector, value: pending.value, tag: pending.tag});
+        _reportInput(null, pending.selector, pending.value, pending.meta || {});
         delete _input_latest[k];
       }
     }
   };
 
-  document.addEventListener("click", function (ev) {
+  document.addEventListener("compositionstart", function () {
+    _composing = true;
+  }, true);
+
+  document.addEventListener("compositionend", function (ev) {
+    _composing = false;
     var el = ev.target;
-    // 向上查找有意义的父元素（按钮、链接、带明显文本的元素），避免点击到内部 img/span/svg
-    var target = el;
-    while (target && target !== document.body) {
-      var tTag = (target.tagName || "").toLowerCase();
-      var tText = (target.textContent || "").trim();
-      if (["button", "a", "input", "select", "textarea", "label", "li"].indexOf(tTag) !== -1 ||
-          (target.getAttribute("role") || "").indexOf("button") !== -1 ||
-          target.getAttribute("onclick")) {
-        break;
+    if (!el) return;
+    var tag = (el.tagName || "").toLowerCase();
+    if (tag !== "input" && tag !== "textarea") return;
+    var key = describe(el) || tag;
+    var meta = _elMeta(el);
+    _input_latest[key] = {selector: key, value: el.value, meta: meta};
+    if (_input_timers[key]) clearTimeout(_input_timers[key]);
+    _input_timers[key] = setTimeout(function () {
+      _reportInput(el, key, el.value, meta);
+      delete _input_timers[key];
+      delete _input_latest[key];
+    }, 200);
+  }, true);
+
+  // 下拉选项在 mousedown 时记录（click 时 popover 往往已关闭，会点到触发器）
+  document.addEventListener("mousedown", function (ev) {
+    var raw = ev.target;
+    var target = _resolveClickTarget(raw);
+    if (!_isOptionLike(target) && !_isOptionLike(raw)) {
+      // 短文本树节点：父链上找 option-like
+      var cur = raw;
+      var found = null;
+      while (cur && cur !== document.body) {
+        if (_isOptionLike(cur)) { found = cur; break; }
+        cur = cur.parentElement;
       }
-      // img/span/svg/i 等是常见的图标包裹元素，继续向上查找
-      if (["img", "span", "svg", "i", "em", "b", "strong"].indexOf(tTag) !== -1) {
-        target = target.parentElement;
-        continue;
-      }
-      // 非图标元素且有文本 → 可能是有意义的容器
-      if (tText.length > 0) {
-        break;
-      }
-      target = target.parentElement;
+      if (!found) return;
+      target = found;
     }
-    if (target === document.body || !target) target = el;
-    report("click", {selector: describe(target), tag: target && target.tagName, text: (target && target.textContent || "").trim().slice(0, 80)});
+    _emitClick(target);
+    _skipClickUntil = Date.now() + 800;
+  }, true);
+
+  document.addEventListener("click", function (ev) {
+    if (Date.now() < _skipClickUntil) return;
+    var target = _resolveClickTarget(ev.target);
+    _emitClick(target);
   }, true);
 
   document.addEventListener("input", function (ev) {
@@ -317,10 +544,13 @@ _INJECT_RECORDER_SCRIPT = r"""
     var tag = (el.tagName || "").toLowerCase();
     if (tag !== "input" && tag !== "textarea") return;
     var key = describe(el) || tag;
-    _input_latest[key] = {selector: key, value: el.value, tag: tag};
+    var meta = _elMeta(el);
+    _input_latest[key] = {selector: key, value: el.value, meta: meta};
+    if (_composing || ev.isComposing) return;
+    if (_looksLikeImePinyin(el.value)) return;
     if (_input_timers[key]) clearTimeout(_input_timers[key]);
     _input_timers[key] = setTimeout(function() {
-      report("input", {selector: key, value: el.value, tag: tag});
+      _reportInput(el, key, el.value, meta);
       delete _input_timers[key];
       delete _input_latest[key];
     }, 500);
@@ -331,9 +561,11 @@ _INJECT_RECORDER_SCRIPT = r"""
     if (!el) return;
     var tag = (el.tagName || "").toLowerCase();
     if (tag === "select") {
-      report("select", {selector: describe(el), value: el.value, tag: tag});
+      report("select", Object.assign(
+        {selector: describe(el), value: el.value},
+        _elMeta(el)
+      ));
     }
-    // input/textarea change (blur): cancel pending timer and report immediately
     if (tag === "input" || tag === "textarea") {
       var key = describe(el) || tag;
       if (_input_timers[key]) {
@@ -341,7 +573,7 @@ _INJECT_RECORDER_SCRIPT = r"""
         delete _input_timers[key];
       }
       delete _input_latest[key];
-      report("input", {selector: key, value: el.value, tag: tag});
+      _reportInput(el, key, el.value, _elMeta(el));
     }
   }, true);
 })();
@@ -364,14 +596,32 @@ class RecordedEvent:
     url: str = ""
     screenshot: Optional[str] = None
     page_title: str = ""
+    # Element metadata from the injected recorder (optional; older events omit these)
+    tag: Optional[str] = None
+    placeholder: Optional[str] = None
+    role: Optional[str] = None
+    text: Optional[str] = None
+    name: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serialisable dict representation."""
-        return asdict(self)
+        """Return a JSON-serialisable dict representation (omit empty optionals)."""
+        raw = asdict(self)
+        return {
+            k: v
+            for k, v in raw.items()
+            if v is not None and v != ""
+        }
 
     def is_valid(self) -> bool:
         """Return True if the event_type is recognised."""
         return self.event_type in VALID_EVENT_TYPES
+
+
+def _opt_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +826,7 @@ class CDPRecordingSession:
           - url:        str
           - screenshot: str  (base64-encoded image data, if any)
           - page_title: str
+          - tag / placeholder / role / text / name: element metadata from JS recorder
         Extra keys are ignored. Missing optional keys fall back to defaults.
         """
         if not isinstance(event_data, dict):
@@ -596,17 +847,27 @@ class CDPRecordingSession:
         event = RecordedEvent(
             event_type=event_type,
             timestamp=float(event_data.get("timestamp") or time.time()),
-            selector=event_data.get("selector"),
-            value=event_data.get("value"),
+            selector=_opt_str(event_data.get("selector")),
+            value=(
+                None
+                if event_data.get("value") is None
+                else str(event_data.get("value"))
+            ),
             url=str(event_data.get("url") or self._last_page_url or ""),
             screenshot=event_data.get("screenshot"),
             page_title=str(event_data.get("page_title") or self._last_page_title or ""),
+            tag=_opt_str(event_data.get("tag")),
+            placeholder=_opt_str(event_data.get("placeholder")),
+            role=_opt_str(event_data.get("role")),
+            text=_opt_str(event_data.get("text")),
+            name=_opt_str(event_data.get("name")),
         )
         self._events.append(event)
         self.last_event_at = time.time()
         logger.debug(
             f"CDPRecordingSession[{self._session_id}]: recorded {event.event_type} "
-            f"selector={event.selector!r} value={event.value!r}"
+            f"selector={event.selector!r} placeholder={event.placeholder!r} "
+            f"value={event.value!r}"
         )
 
     # ------------------------------------------------------------------

@@ -106,8 +106,20 @@ async def preview_results(session_id: str, user=Depends(get_current_user),
             test_case_id=tc.test_case_id, module=tc.module, title=tc.title,
             preconditions=tc.preconditions, test_steps=tc.test_steps,
             expected_result=tc.expected_result, priority=tc.priority,
+            structured_steps=list(tc.structured_steps or [])
+            if isinstance(getattr(tc, "structured_steps", None), list) else [],
         ) for tc in row.test_cases] if row.test_cases else []
-        return GenPreviewResponse(session_id=session_id, functional_points=fps, test_cases=tcs)
+        return GenPreviewResponse(
+            session_id=session_id,
+            filename=row.filename or "",
+            status=row.status or "",
+            case_kind=(getattr(row, "case_kind", None) or "ui"),
+            project_id=row.project_id,
+            functional_points_count=len(fps),
+            test_cases_count=len(tcs),
+            functional_points=fps,
+            test_cases=tcs,
+        )
     if session.status != "completed":
         raise HTTPException(400, f"分析尚未完成，当前状态: {session.status}")
 
@@ -124,11 +136,19 @@ async def preview_results(session_id: str, user=Depends(get_current_user),
             test_steps=tc.test_steps,
             expected_result=tc.expected_result,
             priority=tc.priority,
+            structured_steps=list(getattr(tc, "structured_steps", None) or [])
+            if isinstance(getattr(tc, "structured_steps", None), list) else [],
         )
         for tc in session.test_cases
     ]
     return GenPreviewResponse(
         session_id=session_id,
+        filename=getattr(session, "filename", "") or "",
+        status=session.status or "",
+        case_kind=(getattr(session, "case_kind", None) or "ui"),
+        project_id=getattr(session, "project_id", None),
+        functional_points_count=len(fps),
+        test_cases_count=len(tcs),
         functional_points=fps,
         test_cases=tcs,
     )

@@ -31,6 +31,11 @@ class RecordedEventResponse(BaseModel):
     url: str = ""
     page_title: str = ""
     screenshot: str | None = None
+    tag: str | None = None
+    placeholder: str | None = None
+    role: str | None = None
+    text: str | None = None
+    name: str | None = None
 
 
 class RecordingListResponse(BaseModel):
@@ -38,12 +43,21 @@ class RecordingListResponse(BaseModel):
 
 
 class ConvertRequest(BaseModel):
-    session_id: str
+    session_id: str | None = None
+    # 为 True 时必须用当前录制事件重新跑转换（忽略任何历史/缓存结果）
+    force: bool = True
 
 
 class ConvertStepItem(BaseModel):
     step_description: str
-    expected_result: str
+    expected_result: str = ""
+    # UI StructuredStep fields (optional for backward compat)
+    action: str | None = None
+    target_name: str | None = None
+    target_role: str | None = None
+    value: str | None = None
+    selector: str | None = None
+    structured_step: dict | None = None
 
 
 class ConvertResponse(BaseModel):
@@ -58,6 +72,7 @@ class SaveAsCaseRequest(BaseModel):
     module_id: int | None = None
     name: str
     steps: list[ConvertStepItem]
+    case_kind: str = "ui"
 
 
 class SaveAsCaseResponse(BaseModel):

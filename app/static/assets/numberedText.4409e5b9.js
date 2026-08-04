@@ -1,0 +1,5 @@
+function f(r){if(!r||!String(r).trim())return[];const t=String(r).trim();if(/^(?:\d+[\.、]\s*)+$/.test(t))return[];const n=new Map,o=[];let s=!1;for(const e of t.split(`
+`)){const i=e.match(/^\s*(\d+)[\.、]\s*(.*)$/);if(i){s=!0;const u=Number.parseInt(i[1],10),l=(i[2]||"").trim();n.set(u,l),o.push(l)}else e.trim()&&o.push(e.trim())}if(s&&n.size>0){if(![...n.values()].some(u=>u))return[];const i=Math.max(...n.keys());return i<=100?Array.from({length:i},(u,l)=>n.get(l+1)||""):o}const c=/(?:^|\s)(\d+)[\.、]\s+([\s\S]+?)(?=\s+\d+[\.、]\s+|$)/g,m=[];let a;for(;(a=c.exec(t))!==null;)m.push(a[2].replace(/\s+/g," ").trim());if(m.length){const e=m.filter(Boolean);return e.length===1&&/^(?:\d+[\.、]\s*)+$/.test(e[0])?[]:e}return t.split(`
+`).map(e=>e.trim()).filter(Boolean)}function d(r){return f(r).filter(t=>t.trim())}function p(r){const t=[];return r.forEach((n,o)=>{const s=(n.parsed_result||"").trim();!s||/^(?:\d+[\.、]\s*)+$/.test(s)||t.push(`${o+1}. ${s}`)}),t.join(`
+`)}function h(r){return r.map((t,n)=>`${n+1}. ${(t.description||"").trim()}`).join(`
+`)}export{p as a,f as b,h as f,d as s};

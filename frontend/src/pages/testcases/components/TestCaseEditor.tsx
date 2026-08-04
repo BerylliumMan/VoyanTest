@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import {
-  Modal, Form, Input, Select, Message, Tag,
+  Modal, Form, Input, Select, Message, Tag, Button, Space,
 } from '@arco-design/web-react';
+import axios from 'axios';
 import { Step, Module, TestCase, CaseKind } from '../types';
 import StepList from './StepList';
 import styles from '../style/components.module.less';
@@ -23,16 +24,35 @@ interface TestCaseEditorProps {
   steps: Step[];
   setSteps: React.Dispatch<React.SetStateAction<Step[]>>;
   caseKind?: CaseKind;
+  onCompiledScriptCleared?: () => void;
 }
 
 const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   visible, editingCase, onCancel, onSubmit, modules, projectId, t, form, steps, setSteps, caseKind = 'ui',
+  onCompiledScriptCleared,
 }) => {
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
+  const [scriptModalVisible, setScriptModalVisible] = useState(false);
+  const [clearingScript, setClearingScript] = useState(false);
   const kindLabel = caseKind === 'functional'
     ? (t['menu.testcases.functional'] || '功能测试用例')
     : (t['menu.testcases.ui'] || 'UI自动化用例');
 
+  const hasCompiledScript = Boolean(editingCase?.compiled_script);
+
+  const handleClearCompiledScript = async () => {
+    if (!editingCase?.id) return;
+    setClearingScript(true);
+    try {
+      await axios.delete(`/api/testcases/${editingCase.id}/compiled-script`);
+      Message.success(t['compiled_script.cleared'] || '已清除固化脚本');
+      onCompiledScriptCleared?.();
+    } catch {
+      Message.error(t['compiled_script.clear_failed'] || '清除固化脚本失败');
+    } finally {
+      setClearingScript(false);
+    }
+  };
 
   const addStep = () => setSteps([...steps, {
     step_order: steps.length + 1,
@@ -102,8 +122,44 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
     >
       <Form form={form} layout="vertical">
         <Form.Item label={t['case.kind'] || '用例类型'}>
-          <Tag color={caseKind === 'functional' ? 'arcoblue' : 'green'}>{kindLabel}</Tag>
+          <div className={styles['editor-kind-row']}>
+            <Tag color={caseKind === 'functional' ? 'arcoblue' : 'green'}>{kindLabel}</Tag>
+          </div>
         </Form.Item>
+        {caseKind === 'ui' && hasCompiledScript ? (
+          <div
+            style={{
+              marginBottom: 16,
+              padding: '10px 12px',
+              background: 'var(--color-fill-2)',
+              borderRadius: 6,
+              fontSize: 13,
+            }}
+          >
+            <div style={{ marginBottom: 8 }}>
+              {t['compiled_script.hint']
+                || '已固化为 Playwright 脚本：下次优先回放；修改步骤并保存后将自动清除。可由自然语言目标跑通后自动合成。'}
+              {editingCase?.compiled_at ? (
+                <span style={{ color: 'var(--color-text-3)', marginLeft: 8 }}>
+                  {String(editingCase.compiled_at)}
+                </span>
+              ) : null}
+            </div>
+            <Space>
+              <Button size="mini" type="outline" onClick={() => setScriptModalVisible(true)}>
+                {t['compiled_script.view'] || '查看脚本'}
+              </Button>
+              <Button
+                size="mini"
+                status="warning"
+                loading={clearingScript}
+                onClick={handleClearCompiledScript}
+              >
+                {t['compiled_script.clear'] || '清除脚本'}
+              </Button>
+            </Space>
+          </div>
+        ) : null}
         <Form.Item field="name" label={t['name']} rules={[{ required: true, message: t['case.name.placeholder'] }]}>
           <Input placeholder={t['case.name.placeholder']} />
         </Form.Item>
@@ -137,6 +193,20 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
           />
         </Form.Item>
       </Form>
+      <Modal
+        visible={scriptModalVisible}
+        onCancel={() => setScriptModalVisible(false)}
+        title={t['compiled_script.view'] || '查看固化脚本'}
+        footer={null}
+        style={{ width: 720 }}
+      >
+        <Input.TextArea
+          value={editingCase?.compiled_script || ''}
+          readOnly
+          autoSize={{ minRows: 16, maxRows: 28 }}
+          style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12 }}
+        />
+      </Modal>
     </Modal>
   );
 };

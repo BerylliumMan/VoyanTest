@@ -29,6 +29,7 @@ async def list_gen_sessions(
     page_size: int,
     project_id: int | None = None,
     user_id_filter: int | None = None,
+    case_kind: str | None = None,
 ) -> dict:
     """分页获取生成会话列表（按 ``created_at`` 倒序，可按项目筛选、用户隔离）。
 
@@ -45,12 +46,16 @@ async def list_gen_sessions(
         items_stmt = items_stmt.where(db_models.GenSession.project_id == project_id)
     if user_id_filter is not None:
         items_stmt = items_stmt.where(db_models.GenSession.user_id == user_id_filter)
+    if case_kind in ("ui", "functional"):
+        items_stmt = items_stmt.where(db_models.GenSession.case_kind == case_kind)
 
     count_stmt = select(func.count()).select_from(db_models.GenSession)
     if project_id is not None:
         count_stmt = count_stmt.where(db_models.GenSession.project_id == project_id)
     if user_id_filter is not None:
         count_stmt = count_stmt.where(db_models.GenSession.user_id == user_id_filter)
+    if case_kind in ("ui", "functional"):
+        count_stmt = count_stmt.where(db_models.GenSession.case_kind == case_kind)
     total = (await db.execute(count_stmt)).scalar()
 
     items_stmt = items_stmt.offset((page - 1) * page_size).limit(page_size)
@@ -60,8 +65,12 @@ async def list_gen_sessions(
 
 async def get_gen_session(db: AsyncSession, session_id: str) -> db_models.GenSession | None:
     """通过 ID 获取单个 GenSession，不存在返回 None。"""
+    from sqlalchemy.orm import selectinload
+
     result = await db.execute(
-        select(db_models.GenSession).where(db_models.GenSession.id == session_id)
+        select(db_models.GenSession)
+        .where(db_models.GenSession.id == session_id)
+        .options(selectinload(db_models.GenSession.project))
     )
     return result.scalar_one_or_none()
 
@@ -218,12 +227,16 @@ async def persist_gen_session_results(
                 ))
         if test_cases:
             for tc in test_cases:
+                structured = getattr(tc, "structured_steps", None) or None
+                if structured is None:
+                    structured = getattr(tc, "structured_steps_aligned", None) or None
                 db.add(db_models.GenTestCase(
                     session_id=session_id, test_case_id=tc.test_case_id,
                     module=tc.module, title=tc.title,
                     preconditions=tc.preconditions, test_steps=tc.test_steps,
                     expected_result=tc.expected_result, priority=tc.priority,
                     validation_errors=getattr(tc, "validation_errors", None) or None,
+                    structured_steps=structured if isinstance(structured, list) else None,
                 ))
 
     await db.commit()

@@ -54,6 +54,7 @@ async def get_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     project_id: Optional[int] = Query(None, description="按项目筛选"),
+    case_kind: Optional[str] = Query(None, description="按用例类型筛选：ui / functional"),
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> GenHistoryListResponse:
@@ -67,9 +68,11 @@ async def get_history(
 
     # 非管理员只能看到自己的会话
     user_id_filter = None if user.role == "admin" else user.id
+    kind = case_kind if case_kind in ("ui", "functional") else None
     result = await crud.gen.list_gen_sessions(
         db, page=page, page_size=page_size,
         project_id=project_id, user_id_filter=user_id_filter,
+        case_kind=kind,
     )
     items = result["items"]
     total = result["total"]
@@ -90,6 +93,7 @@ async def get_history(
                 functional_points_count=item.functional_points_count or 0,
                 test_cases_count=item.test_cases_count or 0,
                 imported_count=item.imported_count or 0,
+                case_kind=(getattr(item, "case_kind", None) or "ui"),
                 created_at=item.created_at,
                 completed_at=item.completed_at,
                 can_retry=_session_can_retry(item),
@@ -221,6 +225,9 @@ async def get_history_detail(
             priority=tc.priority or "中",
             selected=not bool(getattr(tc, "validation_errors", None)),
             validation_errors=getattr(tc, "validation_errors", None) or "",
+            structured_steps=list(tc.structured_steps or [])
+            if isinstance(getattr(tc, "structured_steps", None), list)
+            else [],
         )
         for tc in db_tcs
     ]
@@ -234,6 +241,9 @@ async def get_history_detail(
         progress_message=record.progress_message or "",
         functional_points_count=record.functional_points_count or len(fps),
         test_cases_count=record.test_cases_count or len(tcs),
+        case_kind=(getattr(record, "case_kind", None) or "ui"),
+        project_id=record.project_id,
+        project_name=record.project.name if getattr(record, "project", None) else "",
         functional_points=fps,
         test_cases=tcs,
     )

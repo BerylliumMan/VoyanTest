@@ -31,6 +31,7 @@ _LOCATOR_FAIL_HINTS = (
     "not visible",
     "ambiguous or missing",
     "structured bind failed",
+    "solidified selector",
     "找不到",
     "无法定位",
     "定位失败",
@@ -41,6 +42,13 @@ _LOCATOR_FAIL_HINTS = (
     "没有找到",
     "未找到",
     "element is not",
+    # Search/filter option: MCP skipped weak tooltip — still need browser-use
+    "跳过 tooltip",
+    "筛选结果",
+    "可点节点",
+    "单位未选中",
+    "尚无 option",
+    "尚无",
 )
 
 

@@ -10,6 +10,7 @@ import {
   Select,
   Message,
   Badge,
+  Modal,
 } from '@arco-design/web-react';
 import {
   IconRecord,
@@ -162,8 +163,8 @@ const Recordings: React.FC = () => {
     }
   };
 
-  const handleConvert = async () => {
-    const result = await convertToSteps();
+  const runConvert = async () => {
+    const result = await convertToSteps({ force: true });
     if (result.ok) {
       Message.success(
         result.count > 0
@@ -173,6 +174,23 @@ const Recordings: React.FC = () => {
     } else {
       Message.error(t['recordings.convert_failed']);
     }
+  };
+
+  const handleConvert = () => {
+    // 已有结果时二次点击：确认后强制按当前事件重新请求 convert
+    if (steps.length > 0) {
+      Modal.confirm({
+        title: t['recordings.reconvert_title'] || '重新生成步骤',
+        content:
+          t['recordings.reconvert_confirm'] ||
+          '已有转换结果。将根据当前录制事件重新生成测试步骤，是否继续？',
+        okText: t['recordings.reconvert'] || '重新生成',
+        cancelText: t['cancel'] || '取消',
+        onOk: runConvert,
+      });
+      return;
+    }
+    void runConvert();
   };
 
   const handleLoadHistory = async (sid: string, sessionUrl?: string) => {
@@ -427,7 +445,9 @@ const Recordings: React.FC = () => {
                   onClick={handleConvert}
                   disabled={status === 'recording'}
                 >
-                  {t['recordings.convert']}
+                  {steps.length > 0
+                    ? t['recordings.reconvert'] || '重新转换'
+                    : t['recordings.convert']}
                 </Button>
                 {converting && <Spin />}
                 {steps.length > 0 && (
@@ -467,6 +487,10 @@ const Recordings: React.FC = () => {
         onSaved={(caseId) => {
           setSaveDialogVisible(false);
           setUrl('');
+          // UI cases only appear under /testcases/ui (not the functional tab)
+          window.setTimeout(() => {
+            window.location.assign('/testcases/ui');
+          }, 400);
         }}
       />
     </>

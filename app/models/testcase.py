@@ -30,6 +30,12 @@ class TestCase(Base):
     # functional = 功能测试用例；ui = UI 自动化用例（默认可执行）
     case_kind = Column(String(32), default="functional", nullable=False, index=True)
 
+    # Whole-case Playwright script solidified after a successful run.
+    # Cleared whenever steps are modified.
+    compiled_script = Column(Text, nullable=True, default=None)
+    compiled_script_hash = Column(String(64), nullable=True, default=None)
+    compiled_at = Column(DateTime(timezone=True), nullable=True, default=None)
+
     steps = relationship("TestStep", backref="test_case", lazy="selectin", cascade="all, delete-orphan", order_by="TestStep.step_order")
 
 

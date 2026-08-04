@@ -71,6 +71,10 @@ export const routes: IRoute[] = [
         name: 'menu.testcases.ui',
         key: 'testcases/ui',
       },
+      {
+        name: 'menu.testcases.suites',
+        key: 'testcases/suites',
+      },
     ],
   },
   {

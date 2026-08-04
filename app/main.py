@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .routers import project_router, testcase_router, module_router, report_router, config_router, environment_router, scheduler_router, agent_router
-from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router, agent_definition_router, agent_run_router
+from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router, agent_definition_router, agent_run_router, suite_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -193,6 +193,7 @@ async def _run_startup_init():
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress INTEGER DEFAULT 0",
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS progress_message VARCHAR(500)",
             "ALTER TABLE gen_test_cases ADD COLUMN IF NOT EXISTS validation_errors TEXT",
+            "ALTER TABLE gen_test_cases ADD COLUMN IF NOT EXISTS structured_steps JSONB",
         ):
             await _ddl(_col_sql, "gen 表字段迁移")
         await _ddl(
@@ -214,6 +215,18 @@ async def _run_startup_init():
         await _ddl(
             "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'functional'",
             "test_cases.case_kind 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS compiled_script TEXT",
+            "test_cases.compiled_script 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS compiled_script_hash VARCHAR(64)",
+            "test_cases.compiled_script_hash 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS compiled_at TIMESTAMPTZ",
+            "test_cases.compiled_at 迁移",
         )
         await _ddl(
             "ALTER TABLE test_cases ALTER COLUMN case_kind SET DEFAULT 'functional'",
@@ -309,9 +322,10 @@ async def _run_startup_init():
                             updated,
                         )
                     # 一次性：UI 用例缺 structured_step 时用 Instant 描述尽力回填
+                    # v5：兼容 jsonb 字面 null（历史写入），并覆盖进入/关窗等解析增强
                     done_ss = (
                         await db.execute(
-                            _t("SELECT 1 FROM schema_patches WHERE id = 'structured_step_backfill_ui'")
+                            _t("SELECT 1 FROM schema_patches WHERE id = 'structured_step_backfill_ui_v5'")
                         )
                     ).scalar()
                     if not done_ss:
@@ -323,7 +337,11 @@ async def _run_startup_init():
                                     "SELECT s.id, s.description FROM test_steps s "
                                     "JOIN test_cases tc ON tc.id = s.case_id "
                                     "WHERE tc.case_kind = 'ui' "
-                                    "AND s.structured_step IS NULL "
+                                    "AND ("
+                                    "  s.structured_step IS NULL "
+                                    "  OR s.structured_step::jsonb = 'null'::jsonb "
+                                    "  OR s.structured_step::jsonb = '{}'::jsonb"
+                                    ") "
                                     "AND s.description IS NOT NULL "
                                     "AND TRIM(s.description) <> ''"
                                 )
@@ -344,13 +362,13 @@ async def _run_startup_init():
                             filled += 1
                         await db.execute(
                             _t(
-                                "INSERT INTO schema_patches (id) VALUES ('structured_step_backfill_ui') "
+                                "INSERT INTO schema_patches (id) VALUES ('structured_step_backfill_ui_v5') "
                                 "ON CONFLICT (id) DO NOTHING"
                             )
                         )
                         await db.commit()
                         logger.info(
-                            "UI structured_step Instant 回填完成，filled=%s scanned=%s",
+                            "UI structured_step Instant 回填完成(v5)，filled=%s scanned=%s",
                             filled,
                             len(rows),
                         )
@@ -801,6 +819,7 @@ templates = Jinja2Templates(directory="app/templates")
 app.include_router(project_router.router)
 app.include_router(testcase_router.router)
 app.include_router(module_router.router)
+app.include_router(suite_router.router)
 app.include_router(report_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)

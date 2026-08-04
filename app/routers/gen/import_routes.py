@@ -51,6 +51,9 @@ async def import_test_cases(
                 test_steps=tc.test_steps or "",
                 expected_result=tc.expected_result or "",
                 priority=tc.priority or "中",
+                structured_steps=list(tc.structured_steps or [])
+                if isinstance(getattr(tc, "structured_steps", None), list)
+                else [],
             )
             for tc in db_tcs
         ]
@@ -67,14 +70,17 @@ async def import_test_cases(
     from app.gen.adapter import import_test_cases as do_import
 
     case_kind = "ui"
-    async with _lock:
-        mem = _sessions.get(body.session_id)
-    if mem and getattr(mem, "case_kind", None) in ("functional", "ui"):
-        case_kind = mem.case_kind
+    if body.case_kind in ("functional", "ui"):
+        case_kind = body.case_kind
     else:
-        record_for_kind = await crud.get_gen_session(db, body.session_id)
-        if record_for_kind and getattr(record_for_kind, "case_kind", None) in ("functional", "ui"):
-            case_kind = record_for_kind.case_kind
+        async with _lock:
+            mem = _sessions.get(body.session_id)
+        if mem and getattr(mem, "case_kind", None) in ("functional", "ui"):
+            case_kind = mem.case_kind
+        else:
+            record_for_kind = await crud.get_gen_session(db, body.session_id)
+            if record_for_kind and getattr(record_for_kind, "case_kind", None) in ("functional", "ui"):
+                case_kind = record_for_kind.case_kind
 
     created, skipped = await do_import(
         db,
@@ -91,4 +97,7 @@ async def import_test_cases(
         imported_count=len(created),
         skipped_count=skipped,
         test_case_ids=[tc.id for tc in created],
+        case_kind=case_kind,
+        project_id=body.project_id,
+        project_name=project.name or "",
     )

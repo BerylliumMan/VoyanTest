@@ -11,7 +11,16 @@ import { apiGet, apiPost } from '@/utils/apiRequest';
 interface SaveAsCaseDialogProps {
   visible: boolean;
   onClose: () => void;
-  steps: { step_description: string; expected_result: string }[];
+  steps: {
+    step_description: string;
+    expected_result: string;
+    action?: string | null;
+    target_name?: string | null;
+    target_role?: string | null;
+    value?: string | null;
+    selector?: string | null;
+    structured_step?: Record<string, unknown> | null;
+  }[];
   onSaved: (caseId: number) => void;
 }
 
@@ -55,10 +64,19 @@ const SaveAsCaseDialog: React.FC<SaveAsCaseDialogProps> = ({
           steps: steps.map((s) => ({
             step_description: s.step_description,
             expected_result: s.expected_result,
+            action: s.action,
+            target_name: s.target_name,
+            target_role: s.target_role,
+            value: s.value,
+            selector: s.selector,
+            structured_step: s.structured_step,
           })),
+          case_kind: 'ui',
         },
       );
-      Message.success(`已保存为用例「${data.name}」(${data.steps_count} 步)`);
+      Message.success(
+        `已保存为用例「${data.name}」(${data.steps_count} 步) — 请在「UI自动化用例」中查看`,
+      );
       onSaved(data.case_id);
     } catch (e: any) {
       if (e?.errors) return; // form validation error

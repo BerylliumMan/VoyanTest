@@ -243,9 +243,11 @@ async def _run_test_case_in_browser_impl(
         if nav_url:
             nav_result = await mcp_manager.call_tool('browser_navigate', {'url': nav_url})
             if not nav_result.get('success'):
-                logger.warning("Failed to navigate to %s: %s", nav_url, nav_result.get('text'))
-            else:
-                logger.info("Navigated to %s", nav_url)
+                reason = nav_result.get('text') or nav_result.get('error') or 'unknown'
+                msg = f"导航失败，已停止执行: {nav_url} — {reason}"
+                logger.error(msg)
+                raise RuntimeError(msg)
+            logger.info("Navigated to %s", nav_url)
 
         llm_client = await create_openai_client(agent_type="execution")
         _, _, resolved_model = await _resolve_llm_config()
