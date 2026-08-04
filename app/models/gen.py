@@ -1,6 +1,6 @@
 # app/models/gen.py
 # AI 生成会话、定时任务及其相关 ORM 模型
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Float, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -59,6 +59,8 @@ class GenTestCase(Base):
     expected_result = Column(Text, nullable=True)
     priority = Column(String(20), nullable=True)
     validation_errors = Column(Text, nullable=True)
+    # UI StructuredStep list (JSON array); survives reload for import
+    structured_steps = Column(JSON, nullable=True)
 
 
 # ----------------------------

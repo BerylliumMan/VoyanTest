@@ -15,6 +15,12 @@ interface RecordedEvent {
 interface TestStep {
   step_description: string;
   expected_result: string;
+  action?: string | null;
+  target_name?: string | null;
+  target_role?: string | null;
+  value?: string | null;
+  selector?: string | null;
+  structured_step?: Record<string, unknown> | null;
 }
 
 type RecordingStatus = 'idle' | 'recording' | 'stopped';
@@ -167,27 +173,48 @@ export function useRecordings() {
     }
   }, [sessionId]);
 
-  const convertToSteps = useCallback(async (): Promise<{ ok: boolean; count: number }> => {
-    if (!sessionId) return { ok: false, count: 0 };
-    setConverting(true);
-    try {
-      const data = await apiRequest<{ steps?: TestStep[] }>(
-        {
-          method: 'POST',
-          url: `/api/recordings/${sessionId}/convert`,
-          data: { session_id: sessionId },
-        },
-        { showError: false }
-      );
-      const newSteps: TestStep[] = Array.isArray(data?.steps) ? data.steps : [];
-      setSteps(newSteps);
-      return { ok: true, count: newSteps.length };
-    } catch {
-      return { ok: false, count: 0 };
-    } finally {
-      setConverting(false);
-    }
-  }, [sessionId]);
+  const convertToSteps = useCallback(
+    async (opts?: { force?: boolean }): Promise<{ ok: boolean; count: number }> => {
+      if (!sessionId) return { ok: false, count: 0 };
+      const force = opts?.force !== false;
+      const previousSteps = steps;
+      setConverting(true);
+      // 二次转换先清空，避免界面仍展示上一次结果造成「未重新生成」的错觉
+      setSteps([]);
+      try {
+        // 转换前拉一次最新事件，保证前端列表与转换输入一致
+        try {
+          const latest = await apiRequest<RecordedEvent[]>(
+            { method: 'GET', url: `/api/recordings/${sessionId}/events` },
+            { showSuccess: false, showError: false }
+          );
+          setEvents(Array.isArray(latest) ? latest : []);
+        } catch {
+          // 事件刷新失败不阻断转换：后端仍会按服务端当前事件转换
+        }
+        const data = await apiRequest<{ steps?: TestStep[] }>(
+          {
+            method: 'POST',
+            url: `/api/recordings/${sessionId}/convert`,
+            // _ts 防止中间层对相同 body 做响应复用；force 声明强制重跑
+            params: { _ts: Date.now() },
+            data: { session_id: sessionId, force },
+            headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+          },
+          { showError: false, showSuccess: false }
+        );
+        const newSteps: TestStep[] = Array.isArray(data?.steps) ? data.steps : [];
+        setSteps(newSteps);
+        return { ok: true, count: newSteps.length };
+      } catch {
+        setSteps(previousSteps);
+        return { ok: false, count: 0 };
+      } finally {
+        setConverting(false);
+      }
+    },
+    [sessionId, steps]
+  );
 
   const loadHistorySession = useCallback(async (sid: string, sessionUrl?: string): Promise<boolean> => {
     if (!sid) return false;

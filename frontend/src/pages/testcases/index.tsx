@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useHistory } from 'react-router-dom';
-import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox } from '@arco-design/web-react';
+import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox, Input } from '@arco-design/web-react';
 import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
@@ -14,6 +14,7 @@ import TestCaseEditor from './components/TestCaseEditor';
 import ModuleEditor from './components/ModuleEditor';
 import BatchMoveCopyModal from './components/BatchMoveCopyModal';
 import EnvironmentManager from './components/EnvironmentManager';
+import { hydrateStructuredFromDescription } from './utils/parseInstantStep';
 import styles from './index.module.less';
 
 interface TestCasesProps {
@@ -58,6 +59,9 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const [batchRunInitCaseIds, setBatchRunInitCaseIds] = useState<number[]>([]);
   const [batchRunLoading, setBatchRunLoading] = useState(false);
   const batchRunModeRef = useRef<'server' | 'client'>('server');
+  const [saveSuiteVisible, setSaveSuiteVisible] = useState(false);
+  const [saveSuiteName, setSaveSuiteName] = useState('');
+  const [saveSuiteLoading, setSaveSuiteLoading] = useState(false);
 
   const { data, total, loading, modules, moduleTree, environments, selectedEnvironment, setSelectedEnvironment, fetchData, fetchModules, fetchEnvironments } = useTestCaseData(selectedProject, selectedModuleId, page, pageSize, submittedQuery, caseKind);
 
@@ -114,7 +118,34 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const handleDeleteEnv = async (id: number) => { try { await axios.delete(`/api/environments/${id}`); Message.success(t['environment.delete_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleSetDefaultEnv = async (id: number) => { try { await axios.put(`/api/environments/${id}/default`); Message.success(t['environment.set_default_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const openCreate = () => { setEditingCase(null); form.resetFields(); if (selectedModuleId) form.setFieldsValue({ module_id: selectedModuleId }); setSteps([{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0, cacheable: true, structured_step: caseKind === 'ui' ? { action: 'click' } : null }]); setVisible(true); };
-  const openEdit = (tc: TestCase) => { setEditingCase(tc); form.setFieldsValue({ name: tc.name, description: tc.description, module_id: tc.module_id }); setSteps(tc.steps && tc.steps.length ? tc.steps.map((s, i) => ({ step_order: i + 1, description: s.description, parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0, healed_selector: s.healed_selector, learned_locator: s.learned_locator ?? null, structured_step: (s as any).structured_step ?? null, cacheable: s.cacheable !== false })) : [{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0, cacheable: true, structured_step: caseKind === 'ui' ? { action: 'click' } : null }]); setVisible(true); };
+  const openEdit = (tc: TestCase) => {
+    setEditingCase(tc);
+    form.setFieldsValue({ name: tc.name, description: tc.description, module_id: tc.module_id });
+    // UI 步骤：历史数据常只有 Instant description，structured_step 为空 → 输入框空白而预览有文案
+    setSteps(
+      tc.steps && tc.steps.length
+        ? tc.steps.map((s, i) => {
+            const rawStructured = (s as any).structured_step ?? null;
+            const structured =
+              caseKind === 'ui'
+                ? hydrateStructuredFromDescription(s.description || '', rawStructured)
+                : rawStructured;
+            return {
+              step_order: i + 1,
+              description: s.description,
+              parsed_result: s.parsed_result || '',
+              retry_max: s.retry_max ?? 0,
+              retry_delay: s.retry_delay ?? 1.0,
+              healed_selector: s.healed_selector,
+              learned_locator: s.learned_locator ?? null,
+              structured_step: structured,
+              cacheable: s.cacheable !== false,
+            };
+          })
+        : [{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0, cacheable: true, structured_step: caseKind === 'ui' ? { action: 'click' } : null }],
+    );
+    setVisible(true);
+  };
   const handleSubmit = async () => { try { const values = await form.validate(); const payload = { project_id: selectedProject, module_id: values.module_id || null, name: values.name, description: values.description, case_kind: caseKind, steps: steps.filter((s) => s.description.trim() || !!(s.structured_step && (s.structured_step as any).target_name)).map((s) => ({ step_order: s.step_order, description: s.description || '步骤', parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0, learned_locator: s.learned_locator ?? null, structured_step: s.structured_step ?? null, healed_selector: s.healed_selector, cacheable: s.cacheable !== false })) }; if (editingCase) { const { case_kind: _ck, ...updatePayload } = payload; await axios.put(`/api/testcases/${editingCase.id}`, updatePayload); Message.success(t['update.success']); } else { await axios.post('/api/testcases/', payload); Message.success(t['create.success']); } setVisible(false); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; if (err.response?.data?.detail) Message.error(err.response.data.detail); } };
   const handleDelete = async (id: number) => { try { await axios.delete(`/api/testcases/${id}`); Message.success(t['deleted']); fetchData(); } catch (err: unknown) { const e = err as { response?: { data?: { detail?: string } } }; Message.error(e?.response?.data?.detail || '操作失败'); } };
   const handleBatchDelete = async () => { if (selectedRowKeys.length === 0) return; try { await Promise.all(selectedRowKeys.map((id) => axios.delete(`/api/testcases/${id}`))); Message.success(t['delete.batch'].replace('{count}', String(selectedRowKeys.length))); setSelectedRowKeys([]); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
@@ -145,7 +176,12 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
 
   const doBatchRun = async (initCaseIds: number[]) => {
     try {
-      const payload: { case_ids: number[]; environment_id?: number; init_case_ids?: number[] } = { case_ids: selectedRowKeys };
+      const payload: {
+        case_ids: number[];
+        environment_id?: number;
+        init_case_ids?: number[];
+        init_policy: 'before_each';
+      } = { case_ids: selectedRowKeys, init_policy: 'before_each' };
       if (selectedEnvironment) payload.environment_id = selectedEnvironment;
       if (batchRunIncludeInit && initCaseIds.length > 0) payload.init_case_ids = initCaseIds;
       await axios.post('/api/testcases/batch-run', payload);
@@ -160,7 +196,12 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const doBatchRunClient = async (initCaseIds: number[]) => {
     try {
       if (!selectedAgent) { Message.warning(t['select.agent']); return; }
-      const payload: { case_ids: number[]; agent_name: string; init_case_ids?: number[] } = { case_ids: selectedRowKeys, agent_name: selectedAgent };
+      const payload: {
+        case_ids: number[];
+        agent_name: string;
+        init_case_ids?: number[];
+        init_policy: 'before_each';
+      } = { case_ids: selectedRowKeys, agent_name: selectedAgent, init_policy: 'before_each' };
       if (batchRunIncludeInit && initCaseIds.length > 0) payload.init_case_ids = initCaseIds;
       await axios.post('/api/testcases/batch-run-client', payload);
       Message.success(t['run.triggered']);
@@ -168,6 +209,30 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
       Message.error(err.response?.data?.detail || t['run.failed']);
+    }
+  };
+
+  const handleSaveAsSuite = async () => {
+    if (!selectedProject) return;
+    const name = saveSuiteName.trim();
+    if (!name) { Message.warning(t['suite.name']); return; }
+    if (selectedRowKeys.length === 0) return;
+    setSaveSuiteLoading(true);
+    try {
+      await axios.post('/api/suites', {
+        project_id: selectedProject,
+        name,
+        case_kind: caseKind,
+        case_ids: selectedRowKeys,
+      });
+      Message.success(t['suite.created']);
+      setSaveSuiteVisible(false);
+      setSaveSuiteName('');
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      Message.error(err.response?.data?.detail || t['save.failed'] || '保存失败');
+    } finally {
+      setSaveSuiteLoading(false);
     }
   };
 
@@ -243,6 +308,7 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     <Popconfirm title={t['confirm.delete.item']} onOk={handleBatchDelete}><Button type="primary" status="danger" icon={<IconDelete />}>{t['delete.batch'].replace('{count}', String(selectedRowKeys.length))}</Button></Popconfirm>
     <Button type="outline" onClick={() => openBatchModal('move')}>{t['batch.move']}</Button>
     <Button type="outline" onClick={() => openBatchModal('copy')}>{t['batch.copy']}</Button>
+    <Button type="outline" onClick={() => { setSaveSuiteName(''); setSaveSuiteVisible(true); }}>{t['suite.save']}</Button>
     {allowRun && (
       <>
         <Button type="primary" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('server')}>{t['batch.run.server']}</Button>
@@ -299,14 +365,59 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
 
   return (
     <>
-      <style>{`.testcase-select .arco-select-view { background-color: var(--color-fill-2) !important; } .arco-tree-node { position: relative; } .arco-tree-node-title { width: 100%; padding-right: 0 !important; } .arco-tree-node-title .module-node-title { display: flex; align-items: center; justify-content: space-between; flex: 1; min-width: 0; } .step-row.drag-over { background: var(--color-primary-light-1); border-radius: 4px; } .step-row { cursor: default; }`}</style>
+      <style>{`.testcase-select .arco-select-view { background-color: var(--color-fill-2) !important; } .arco-tree-node { position: relative; } .arco-tree-node-title { width: 100%; padding-right: 0 !important; } .arco-tree-node-title .module-node-title { display: flex; align-items: center; justify-content: space-between; flex: 1; min-width: 0; } .step-row.drag-over { border-color: rgb(var(--primary-6)) !important; box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.12); }`}</style>
       <div className={styles.layout}>
         <ModuleTree projects={projects} selectedProject={selectedProject} onProjectChange={handleProjectChange} selectedEnvironment={selectedEnvironment} environments={environments} onEnvironmentChange={handleEnvironmentChange} modules={modules} moduleTree={moduleTree} selectedModuleId={selectedModuleId} onSelectModule={handleSelectModule} onCreateModule={() => openModuleModal()} onEditModule={openModuleModal} onDeleteModule={(id, name) => Modal.confirm({ title: t['confirm.delete'], content: t['confirm.delete.module'].replace('{name}', name), onOk: () => handleModuleDelete(id) })} onRunModule={allowRun ? handleRunModule : undefined} onRunAll={allowRun ? handleRunAll : undefined} allowRun={allowRun} t={t} openCreateEnv={openCreateEnv} openEnvManage={openEnvManage} />
         <TestCaseTable data={filteredData} loading={loading} total={total} page={page} pageSize={pageSize} columns={columns} selectedRowKeys={selectedRowKeys} onSelectionChange={setSelectedRowKeys} onPageChange={(p, ps) => { setPage(p); setPageSize(ps); }} searchQuery={searchQuery} onSearchChange={setSearchQuery} onSearch={(v) => { setPage(1); setSubmittedQuery(v); }} onClearSearch={() => { setSearchQuery(''); setSubmittedQuery(''); }} batchActions={batchActions} onCreate={openCreate} canCreate={!!selectedProject} filterExtra={filterExtra} t={t} />
-        <TestCaseEditor visible={visible} editingCase={editingCase} onCancel={() => setVisible(false)} onSubmit={handleSubmit} modules={modules} projectId={selectedProject} t={t} form={form} steps={steps} setSteps={setSteps} caseKind={caseKind} />
+        <TestCaseEditor
+          visible={visible}
+          editingCase={editingCase}
+          onCancel={() => setVisible(false)}
+          onSubmit={handleSubmit}
+          modules={modules}
+          projectId={selectedProject}
+          t={t}
+          form={form}
+          steps={steps}
+          setSteps={setSteps}
+          caseKind={caseKind}
+          onCompiledScriptCleared={() => {
+            if (editingCase) {
+              setEditingCase({
+                ...editingCase,
+                compiled_script: null,
+                compiled_script_hash: null,
+                compiled_at: null,
+              });
+            }
+            fetchData();
+          }}
+        />
         <BatchMoveCopyModal visible={batchModalVisible} batchAction={batchAction} onCancel={() => setBatchModalVisible(false)} onSubmit={handleBatchAction} projects={projects} targetProjectId={targetProjectId} onTargetProjectChange={handleBatchTargetProjectChange} targetModuleId={targetModuleId} onTargetModuleChange={setTargetModuleId} targetModules={targetModules} submitting={batchSubmitting} t={t} />
         <ModuleEditor visible={moduleVisible} editingModule={editingModule} onCancel={() => setModuleVisible(false)} onSubmit={handleModuleSubmit} modules={modules} form={moduleForm} t={t} />
         <EnvironmentManager manageVisible={envManageVisible} onCloseManage={() => setEnvManageVisible(false)} onCreate={openCreateEnv} environments={environments} onEdit={openEditEnv} onDelete={handleDeleteEnv} onSetDefault={handleSetDefaultEnv} t={t} formVisible={envFormVisible} editingEnv={editingEnv} onCancelForm={() => { setEnvFormVisible(false); setEditingEnv(null); }} onSubmitForm={handleEnvSubmit} form={envForm} />
+
+        <Modal
+          title={t['suite.save']}
+          visible={saveSuiteVisible}
+          onCancel={() => setSaveSuiteVisible(false)}
+          onOk={handleSaveAsSuite}
+          confirmLoading={saveSuiteLoading}
+        >
+          <Form layout="vertical">
+            <Form.Item label={t['suite.name']} required>
+              <Input
+                value={saveSuiteName}
+                onChange={setSaveSuiteName}
+                placeholder={t['suite.name']}
+                maxLength={255}
+              />
+            </Form.Item>
+            <div className={styles.modalCount}>
+              {(t['suite.case_count'] || '{count}').replace('{count}', String(selectedRowKeys.length))}
+            </div>
+          </Form>
+        </Modal>
 
         {/* Batch Run Dialog */}
         <Modal

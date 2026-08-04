@@ -21,6 +21,7 @@ from app.database import AsyncSessionLocal
 
 from core.runner._execution import run_test_case_in_browser
 from core.runner._persistence import (
+    build_batch_execution_queue,
     mark_run_failed,
     precreate_pending_runs,
     save_run_results,
@@ -41,19 +42,13 @@ logger = logging.getLogger(__name__)
 
 async def _record_batch_case_failure(
     db,
-    precreated_run_ids: dict[int, int],
-    case_id: int,
+    run_id: int | None,
     batch_id: int,
     message: str,
 ) -> None:
-    """批量执行中单条用例抛异常时，把预创建的 TestRun 标记为 failed。
-
-    precreated_run_ids 是 run_batch_test_cases 内维护的
-    ``{case_id: run_id}`` 映射；本函数仅在 key 命中时落库。
-    """
-    _run_id = precreated_run_ids.get(case_id)
-    if _run_id:
-        await mark_run_failed(db, _run_id, message, batch_id=batch_id)
+    """批量执行中单条用例抛异常时，把预创建的 TestRun 标记为 failed。"""
+    if run_id:
+        await mark_run_failed(db, run_id, message, batch_id=batch_id)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +390,7 @@ async def run_batch_test_cases(
     batch_id: int | None = None,
     environment_id: int | None = None,
     init_case_ids: list[int] | None = None,
+    init_policy: str = "once",
     debug_mode: bool = False,
     triggered_by: str | None = None,
 ):
@@ -413,10 +409,14 @@ async def run_batch_test_cases(
     environment_id : int, optional
         Environment ID to use for browser settings and base URL.
     init_case_ids : list[int], optional
-        IDs of initialization cases to run first.
+        IDs of initialization cases.
+    init_policy : str
+        ``once`` — run inits once at batch start；
+        ``before_each`` — re-run inits before every main case.
 
-    Each case executes in order; failures are caught per-case and logged,
-    and the loop continues.  Browser cleanup happens in a finally block.
+    Each case executes in order; main-case failures are caught per-case and
+    logged, and the loop continues. Init-case failure aborts remaining cases.
+    Browser cleanup happens in a finally block.
 
     Note: 该函数通过 FastAPI BackgroundTasks.add_task 调用。FastAPI 的
     BackgroundTasks 原生支持 async 协程，无需额外包装。
@@ -427,9 +427,8 @@ async def run_batch_test_cases(
     from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
 
-    total_main = len(case_ids)
-    total_init = len(init_case_ids) if init_case_ids else 0
-    total_cases = total_main + total_init
+    exec_queue = build_batch_execution_queue(case_ids, init_case_ids, init_policy)
+    total_cases = len(exec_queue)
 
     # 创建批次（如果未提供 batch_id）
     if batch_id is None:
@@ -491,9 +490,15 @@ async def run_batch_test_cases(
 
             # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
             # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
-            precreated_run_ids = await precreate_pending_runs(
-                batch_db, case_ids, batch_id, init_case_ids=init_case_ids
+            precreated_runs = await precreate_pending_runs(
+                batch_db, case_ids, batch_id,
+                init_case_ids=init_case_ids, init_policy=init_policy,
             )
+
+            async def _abort_remaining_from(start_idx: int, message: str) -> None:
+                for j in range(start_idx, len(precreated_runs)):
+                    _, rid, _ = precreated_runs[j]
+                    await mark_run_failed(batch_db, rid, message, batch_id=batch_id)
 
             # Scheme B: browser-use batch — per-case session, skip Playwright MCP pool
             from app.runtime_config import execution_backend_config as _exec_backend
@@ -501,7 +506,7 @@ async def run_batch_test_cases(
                 from core.browser_use_runner import run_test_case_via_browser_use
 
                 results = []
-                for case_id in (init_case_ids or []) + case_ids:
+                for idx, (case_id, _rid, is_init) in enumerate(precreated_runs):
                     from app import execution_control
                     await execution_control.wait_if_paused(batch_id)
                     if execution_control.is_stopped(batch_id):
@@ -510,7 +515,6 @@ async def run_batch_test_cases(
                         )
                         await batch_db.commit()
                         break
-                    _rid = precreated_run_ids.get(case_id)
                     try:
                         result = await run_test_case_via_browser_use(
                             case_id,
@@ -521,14 +525,24 @@ async def run_batch_test_cases(
                             max_steps_per_nl=_exec_backend.max_steps_per_nl,
                         )
                         results.append(result)
+                        status = (result or {}).get("status")
                         logger.info(
-                            "Batch browser-use case %s finished: %s",
-                            case_id, (result or {}).get("status"),
+                            "Batch browser-use case %s finished: %s (init=%s)",
+                            case_id, status, is_init,
                         )
+                        if is_init and status == "failed":
+                            logger.warning(
+                                "Init case %s failed — abort remaining in batch %s",
+                                case_id, batch_id,
+                            )
+                            await _abort_remaining_from(
+                                idx + 1, f"因初始化用例 {case_id} 失败而跳过",
+                            )
+                            break
                     except Exception as exc:  # noqa: BLE001
                         logger.exception("Batch browser-use case %s failed", case_id)
                         await _record_batch_case_failure(
-                            batch_db, precreated_run_ids, case_id, batch_id,
+                            batch_db, _rid, batch_id,
                             message=f"browser-use executor exception: {exc}",
                         )
                         results.append({
@@ -538,6 +552,11 @@ async def run_batch_test_cases(
                             "batch_id": batch_id,
                             "backend": "browser_use",
                         })
+                        if is_init:
+                            await _abort_remaining_from(
+                                idx + 1, f"因初始化用例 {case_id} 失败而跳过",
+                            )
+                            break
                 return results
 
             # 创建或复用浏览器
@@ -561,9 +580,9 @@ async def run_batch_test_cases(
                 # "browser startup failed" so all pre-created pending TestRun
                 # records get marked as failed consistently.
                 logger.exception("Failed to start browser for batch %s", batch_id)
-                for cid in ((init_case_ids or []) + case_ids):
+                for _cid, _rid, _is_init in precreated_runs:
                     await _record_batch_case_failure(
-                        batch_db, precreated_run_ids, cid, batch_id,
+                        batch_db, _rid, batch_id,
                         message=f"Browser startup failed: {exc}",
                     )
                 return
@@ -572,8 +591,7 @@ async def run_batch_test_cases(
             await mcp_manager.clear_cookies()
 
             results = []
-            # 先运行初始化用例，再运行主用例
-            for case_id in (init_case_ids or []):
+            for idx, (case_id, _rid, is_init) in enumerate(precreated_runs):
                 from app import execution_control
                 await execution_control.wait_if_paused(batch_id)
                 if execution_control.is_stopped(batch_id):
@@ -582,7 +600,6 @@ async def run_batch_test_cases(
                     )
                     await batch_db.commit()
                     break
-                _rid = precreated_run_ids.get(case_id)
                 try:
                     if use_agent_runner and agent_def is not None:
                         result = await run_test_case_via_agent(
@@ -607,65 +624,30 @@ async def run_batch_test_cases(
                             debug_mode=debug_mode,
                         )
                     results.append(result)
-                    logger.info("Batch init-case %s finished: %s", case_id, result['status'])
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Batch init-case %s failed", case_id)
-                    await _record_batch_case_failure(
-                        batch_db, precreated_run_ids, case_id, batch_id,
-                        message=f"Batch init-case executor exception: {exc}",
-                    )
-                    results.append({"case_id": case_id, "status": "failed", "error": str(exc), "batch_id": batch_id})
-
-            # 运行主用例
-            for case_id in case_ids:
-                from app import execution_control
-                await execution_control.wait_if_paused(batch_id)
-                if execution_control.is_stopped(batch_id):
-                    await crud.cancel_remaining_batch_runs(
-                        batch_db, batch_id, message="用户停止执行",
-                    )
-                    await batch_db.commit()
-                    break
-                _rid = precreated_run_ids.get(case_id)
-                try:
-                    if use_agent_runner and agent_def is not None:
-                        result = await run_test_case_via_agent(
-                            case_id, mcp_manager, batch_db, agent_def,
-                            llm_client=agent_llm_client,
-                            base_url=base_url_override,
-                            batch_id=batch_id,
-                            run_id=_rid,
-                        )
-                        if result is None:
-                            result = await run_test_case_in_browser(
-                                case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                                batch_id=batch_id, run_id=_rid,
-                                base_url_override=base_url_override,
-                                debug_mode=debug_mode,
-                            )
-                    else:
-                        result = await run_test_case_in_browser(
-                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                            batch_id=batch_id, run_id=_rid,
-                            base_url_override=base_url_override,
-                            debug_mode=debug_mode,
-                        )
-                    results.append(result)
+                    status = result.get("status") if isinstance(result, dict) else None
                     logger.info(
-                        f"Batch: case {case_id} finished: {result['status']}"
+                        "Batch case %s finished: %s (init=%s policy=%s)",
+                        case_id, status, is_init, init_policy,
                     )
+                    if is_init and status == "failed":
+                        logger.warning(
+                            "Init case %s failed — abort remaining in batch %s",
+                            case_id, batch_id,
+                        )
+                        await _abort_remaining_from(
+                            idx + 1, f"因初始化用例 {case_id} 失败而跳过",
+                        )
+                        break
                 except Exception as exc:  # noqa: BLE001 - 见下方注释
                     # Broad catch is necessary: run_test_case_in_browser touches DB,
                     # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
                     # unhandled error must be recorded on the pre-created TestRun
                     # row so the report page stays consistent.
-                    logger.exception(
-                        "Batch: case %s failed with exception",
-                        case_id,
-                    )
+                    label = "init-case" if is_init else "case"
+                    logger.exception("Batch %s %s failed with exception", label, case_id)
                     await _record_batch_case_failure(
-                        batch_db, precreated_run_ids, case_id, batch_id,
-                        message=f"Batch executor exception: {exc}",
+                        batch_db, _rid, batch_id,
+                        message=f"Batch {label} executor exception: {exc}",
                     )
                     results.append({
                         "case_id": case_id,
@@ -673,6 +655,11 @@ async def run_batch_test_cases(
                         "error": str(exc),
                         "batch_id": batch_id,
                     })
+                    if is_init:
+                        await _abort_remaining_from(
+                            idx + 1, f"因初始化用例 {case_id} 失败而跳过",
+                        )
+                        break
 
             return results
     finally:

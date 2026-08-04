@@ -41,6 +41,7 @@ interface GenHistoryItem {
   functional_points_count: number;
   test_cases_count: number;
   imported_count: number;
+  case_kind?: 'ui' | 'functional' | string;
   created_at: string;
   completed_at: string | null;
   can_retry?: boolean;
@@ -60,9 +61,14 @@ const GenHistoryPage: React.FC = () => {
   const [pageSize, setPageSize] = useState(20);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
+  const [filterKind, setFilterKind] = useState<string | undefined>(undefined);
   const [importing, setImporting] = useState<string | null>(null);
   const [stopping, setStopping] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [importModalVisible, setImportModalVisible] = useState(false);
+  const [importTarget, setImportTarget] = useState<GenHistoryItem | null>(null);
+  const [importProjectId, setImportProjectId] = useState<number | undefined>(undefined);
+  const [importCaseKind, setImportCaseKind] = useState<'ui' | 'functional'>('ui');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dataRef = useRef<GenHistoryItem[]>([]);
   dataRef.current = data;
@@ -75,6 +81,9 @@ const GenHistoryPage: React.FC = () => {
       const params: Record<string, string | number> = { page, page_size: pageSize };
       if (selectedProject) {
         params.project_id = selectedProject;
+      }
+      if (filterKind) {
+        params.case_kind = filterKind;
       }
       const res = await axios.get('/api/gen/history', { params });
       setData(res.data.items || []);
@@ -91,7 +100,7 @@ const GenHistoryPage: React.FC = () => {
 
   useEffect(() => {
     fetchData();
-  }, [page, pageSize, selectedProject]);
+  }, [page, pageSize, selectedProject, filterKind]);
 
   useEffect(() => {
     pollRef.current = setInterval(() => {
@@ -108,7 +117,7 @@ const GenHistoryPage: React.FC = () => {
         pollRef.current = null;
       }
     };
-  }, [page, pageSize, selectedProject]);
+  }, [page, pageSize, selectedProject, filterKind]);
 
   useEffect(() => {
     axios
@@ -174,19 +183,42 @@ const GenHistoryPage: React.FC = () => {
     });
   };
 
-  const handleImport = async (sessionId: string) => {
-    if (!selectedProject) {
-      Message.warning('请先选择目标项目');
+  const handleImportClick = (record: GenHistoryItem) => {
+    const kind = record.case_kind === 'functional' ? 'functional' : 'ui';
+    setImportTarget(record);
+    setImportCaseKind(kind);
+    setImportProjectId(
+      typeof record.project_id === 'number'
+        ? record.project_id
+        : selectedProject,
+    );
+    setImportModalVisible(true);
+  };
+
+  const handleImportConfirm = async () => {
+    if (!importTarget) return;
+    if (!importProjectId) {
+      Message.warning('请选择导入目标项目');
       return;
     }
-
-    setImporting(sessionId);
+    const projectName =
+      projects.find((p) => p.id === importProjectId)?.name || String(importProjectId);
+    const kindLabel = importCaseKind === 'ui' ? 'UI 用例' : '功能用例';
+    setImporting(importTarget.id);
     try {
       const res = await axios.post('/api/gen/import', {
-        session_id: sessionId,
-        project_id: selectedProject,
+        session_id: importTarget.id,
+        project_id: importProjectId,
+        case_kind: importCaseKind,
       });
-      Message.success(`成功导入 ${res.data.imported_count} 个用例`);
+      const skipped = res.data.skipped_count || 0;
+      Message.success(
+        skipped > 0
+          ? `已导入 ${res.data.imported_count} 条${kindLabel}到「${projectName}」（跳过重复 ${skipped}）`
+          : `已导入 ${res.data.imported_count} 条${kindLabel}到「${projectName}」`,
+      );
+      setImportModalVisible(false);
+      setImportTarget(null);
       fetchData();
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string }; status?: number } };
@@ -204,6 +236,13 @@ const GenHistoryPage: React.FC = () => {
   const handleViewDetail = (id: string) => {
     history.push(`/gen-history-detail/${id}`);
   };
+
+  const getCaseKindTag = (kind?: string) =>
+    kind === 'functional' ? (
+      <Tag color="arcoblue">功能</Tag>
+    ) : (
+      <Tag color="purple">UI</Tag>
+    );
 
   const getStatusTag = (status: string) => {
     switch (status) {
@@ -271,6 +310,12 @@ const GenHistoryPage: React.FC = () => {
       dataIndex: 'project_name',
       width: 140,
       render: (val: string) => val || <span className={styles.placeholderText}>-</span>,
+    },
+    {
+      title: '类型',
+      dataIndex: 'case_kind',
+      width: 90,
+      render: (val: string) => getCaseKindTag(val),
     },
     {
       title: '状态',
@@ -346,7 +391,7 @@ const GenHistoryPage: React.FC = () => {
             size="small"
             icon={<IconImport />}
             loading={importing === record.id}
-            onClick={() => handleImport(record.id)}
+            onClick={() => handleImportClick(record)}
             disabled={record.status !== 'completed'}
             aria-label="导入"
           />
@@ -385,7 +430,7 @@ const GenHistoryPage: React.FC = () => {
           <Space>
             <Select
               className={styles.projectSelect}
-              placeholder="全部项目"
+              placeholder="筛选项目"
               allowClear
               value={selectedProject}
               onChange={(v) =>
@@ -393,6 +438,17 @@ const GenHistoryPage: React.FC = () => {
               }
               options={[
                 ...projects.map((p) => ({ label: p.name, value: p.id })),
+              ]}
+            />
+            <Select
+              style={{ width: 120 }}
+              placeholder="用例类型"
+              allowClear
+              value={filterKind}
+              onChange={(v) => setFilterKind(v || undefined)}
+              options={[
+                { label: 'UI', value: 'ui' },
+                { label: '功能', value: 'functional' },
               ]}
             />
             <Button icon={<IconRefresh />} onClick={() => fetchData()} loading={loading}>
@@ -416,6 +472,50 @@ const GenHistoryPage: React.FC = () => {
           }}
         />
       </Card>
+      <Modal
+        title="导入到测试用例"
+        visible={importModalVisible}
+        onOk={handleImportConfirm}
+        onCancel={() => {
+          setImportModalVisible(false);
+          setImportTarget(null);
+        }}
+        confirmLoading={!!importing}
+        okText="确认导入"
+      >
+        {importTarget && (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Typography.Text type="secondary">
+              文件：{importTarget.filename}（共 {importTarget.test_cases_count} 条）
+            </Typography.Text>
+            <div>
+              <div style={{ marginBottom: 6 }}>目标项目</div>
+              <Select
+                style={{ width: '100%' }}
+                placeholder="选择要导入到的项目"
+                value={importProjectId}
+                onChange={(v) => setImportProjectId(v as number)}
+                options={projects.map((p) => ({ label: p.name, value: p.id }))}
+              />
+            </div>
+            <div>
+              <div style={{ marginBottom: 6 }}>用例类型（导入后归入对应页签）</div>
+              <Select
+                style={{ width: '100%' }}
+                value={importCaseKind}
+                onChange={(v) => setImportCaseKind(v as 'ui' | 'functional')}
+                options={[
+                  { label: 'UI 用例', value: 'ui' },
+                  { label: '功能用例', value: 'functional' },
+                ]}
+              />
+            </div>
+            <Typography.Text type="secondary">
+              模块路径按用例内「一级——二级」自动创建；导入后可在「测试用例」页对应类型下查看。
+            </Typography.Text>
+          </Space>
+        )}
+      </Modal>
     </div>
   );
 };

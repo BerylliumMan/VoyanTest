@@ -45,6 +45,7 @@ def _sanitize_step(desc: str) -> str:
 
 # 「单位下拉框选择【汉东省院】」/「在【单位】下拉中选择【汉东省院】」
 # 「点击单位下拉框，点击【汉东省院】单位」/「点击【单位】下拉框后选择【汉东省院】」
+# 「点击【京州市院】（搜索结果中的）」
 _DROPDOWN_SELECT_RE = re.compile(
     r"(?:"
     r"(?:在)?【(?P<label1>[^】]{1,40})】(?:的)?(?:下拉框|下拉菜单|下拉|选择器)\s*(?:中)?\s*(?:选择|选)\s*【(?P<option1>[^】]+)】"
@@ -58,14 +59,26 @@ _DROPDOWN_SELECT_RE = re.compile(
     r"|"
     r"(?:在)?【(?P<label6>[^】]{1,40})】\s*(?:中)?\s*(?:选择|选)\s*【(?P<option6>[^】]+)】"
     r"|"
+    r"(?:点击|单击|选择|选中)\s*【(?P<option7>[^】]+)】\s*"
+    r"[（(](?P<ctx7>[^）)]*(?:搜索结果|筛选结果|下拉|列表|选项)[^）)]*)[）)]"
+    r"|"
     r"(?:选择|选中)\s*【(?P<option3>[^】]+)】"
     r")"
 )
 
-# Roles that mean the option list is already open / option is clickable
-_OPTION_ROLES = frozenset({
-    "option", "menuitem", "treeitem", "listitem", "row", "checkbox",
+# Roles that mean the option list is already open / option is clickable.
+# Strong filter-panel rows first. treeitem is often the background org tree
+# (same label as the filter hit) — do not treat it as "filter ready".
+_OPTION_ROLES_STRONG = frozenset({
+    "option", "menuitem", "listitem", "row", "checkbox",
 })
+_OPTION_ROLES_TREE = frozenset({"treeitem"})
+# Filtered Ant Design tree rows often expose the label as text/generic (not tooltip).
+_OPTION_ROLES_LABEL = frozenset({"text", "generic"})
+_OPTION_ROLES_WEAK = frozenset({
+    "tooltip", "text", "generic",
+})
+_OPTION_ROLES = _OPTION_ROLES_STRONG | _OPTION_ROLES_TREE | _OPTION_ROLES_WEAK
 
 
 def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
@@ -87,6 +100,7 @@ def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
         or gd.get("option2")
         or gd.get("option4")
         or gd.get("option6")
+        or gd.get("option7")
         or gd.get("option3")
         or ""
     ).strip()
@@ -99,8 +113,110 @@ def parse_dropdown_select(desc: str) -> tuple[str | None, str | None]:
     return (label or None), option
 
 
-def option_choice_visible_in_snapshot(snapshot: str, option: str) -> bool:
-    """True when option text is already exposed as a selectable AX node (list open)."""
+async def wait_for_option_in_snapshot(
+    get_snapshot,
+    option: str,
+    *,
+    timeout_s: float = 4.0,
+    interval_s: float = 0.35,
+    prefer_strong: bool = True,
+    include_tree: bool = False,
+) -> str:
+    """Poll snapshot until option appears; prefer real option rows over tooltip."""
+    import asyncio
+    import time
+
+    deadline = time.monotonic() + max(0.2, timeout_s)
+    snap = ""
+    weak_snap = ""
+    while True:
+        try:
+            snap = await get_snapshot() or ""
+        except Exception:
+            snap = ""
+        if prefer_strong and option_choice_visible_in_snapshot(
+            snap,
+            option,
+            strong_only=True,
+            include_tree=include_tree,
+            include_label_text=include_tree,
+        ):
+            return snap
+        if option_choice_visible_in_snapshot(
+            snap,
+            option,
+            strong_only=False,
+            include_tree=include_tree,
+            include_label_text=include_tree,
+        ):
+            weak_snap = snap
+            if not prefer_strong:
+                return snap
+        if time.monotonic() >= deadline:
+            return snap
+        await asyncio.sleep(interval_s)
+
+
+def option_choice_visible_in_snapshot(
+    snapshot: str,
+    option: str,
+    *,
+    strong_only: bool = False,
+    include_tree: bool = False,
+    include_label_text: bool = False,
+) -> bool:
+    """True when option text is exposed as a selectable AX node (list open)."""
+    if not option or not snapshot:
+        return False
+    from core.locator_memory import parse_snapshot_elements
+
+    opt = option.strip()
+    if strong_only:
+        roles = set(_OPTION_ROLES_STRONG)
+        if include_tree:
+            roles |= _OPTION_ROLES_TREE
+        if include_label_text:
+            roles |= _OPTION_ROLES_LABEL
+    else:
+        roles = set(_OPTION_ROLES)
+        # Never treat tooltip-only as “ready to click” for search waits
+        if include_label_text:
+            roles = roles - {"tooltip"}
+    for el in parse_snapshot_elements(snapshot):
+        role = (el.get("role") or "").lower()
+        name = (el.get("name") or "").strip()
+        if role not in roles:
+            continue
+        # Exact name only — never fuzzy 京州市院 ↔ 山西省院
+        if name == opt:
+            return True
+    return False
+
+
+def _option_text_matches(display: str, option: str) -> bool:
+    """True when control display text equals/contains option (not peer org labels)."""
+    text = (display or "").strip()
+    opt = (option or "").strip()
+    if not text or not opt:
+        return False
+    if text.startswith("请选择") or text.startswith("请输入"):
+        return False
+    if text == opt:
+        return True
+    if opt in text:
+        # Reject peer org labels that only share a suffix (山西省院)
+        if abs(len(text) - len(opt)) <= 1 and text != opt and text[-1:] == opt[-1:]:
+            return False
+        return True
+    return False
+
+
+def option_selected_in_snapshot(snapshot: str, option: str) -> bool:
+    """True when a form control displays the chosen option after click.
+
+    Ant Design Select/TreeSelect often keeps accessible name as「请选择单位」
+    while the selected label is the Playwright trailing value after ``:``.
+    """
     if not option or not snapshot:
         return False
     from core.locator_memory import parse_snapshot_elements
@@ -108,10 +224,14 @@ def option_choice_visible_in_snapshot(snapshot: str, option: str) -> bool:
     opt = option.strip()
     for el in parse_snapshot_elements(snapshot):
         role = (el.get("role") or "").lower()
-        name = (el.get("name") or "").strip()
-        if role not in _OPTION_ROLES:
+        if role not in ("textbox", "combobox", "searchbox"):
             continue
-        if name == opt or opt in name or name in opt:
+        # Prefer trailing value (selected content) over placeholder name
+        value = (el.get("value") or "").strip()
+        if _option_text_matches(value, opt):
+            return True
+        name = (el.get("name") or "").strip()
+        if _option_text_matches(name, opt):
             return True
     return False
 
@@ -279,6 +399,27 @@ async def _level1_verify(mcp_manager, conditions: list) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _execute_resolved_tool_call(mcp_manager, tool_call, step_timeout_ms: int):
+    """Run one resolved tool call via MCP; normalize timeout errors."""
+    if tool_call is None:
+        return {'success': False, 'error': 'LLM 生成操作指令超时'}
+    if getattr(tool_call, "action", None) == 'error':
+        return {
+            'success': False,
+            'error': f"LLM 无法确定操作: {getattr(tool_call, 'value', None)}",
+        }
+    try:
+        return await asyncio.wait_for(
+            mcp_manager.execute_tool_call(tool_call.model_dump()),
+            timeout=step_timeout_ms / 1000.0,
+        )
+    except asyncio.TimeoutError:
+        return {
+            'success': False,
+            'error': f'Step execution timeout after {step_timeout_ms}ms',
+        }
+
+
 async def _llm_tool_and_run(
     *,
     desc: str,
@@ -290,10 +431,66 @@ async def _llm_tool_and_run(
     system_prompt_override: str | None,
     step_timeout_ms: int,
     structured_step: dict | None = None,
+    prefer_selector: bool = True,
+    base_url: str | None = None,
 ):
-    """Generate one tool call via two-phase Intent+bind (Midscene-style) and execute."""
-    from core.step_intent import resolve_tool_call_from_step
+    """Generate one tool call via two-phase Intent+bind (Midscene-style) and execute.
 
+    When ``prefer_selector`` and ``structured_step.selector`` exist, try that CSS
+    target first; on MCP failure fall back to semantic AX bind.
+    """
+    from core.locator_memory import extract_page_url
+    from core.step_intent import (
+        goto_is_redundant,
+        resolve_tool_call_from_step,
+        selector_tool_call_candidates,
+    )
+
+    # Skip goto that would navigate away from a deeper BASE/current path.
+    if isinstance(structured_step, dict):
+        act = (structured_step.get("action") or "").strip().lower()
+        if act == "goto":
+            goto_url = structured_step.get("value")
+            current = extract_page_url(snapshot or "")
+            if goto_is_redundant(current, goto_url, base_url):
+                from core.llm_wrapper import PlaywrightMCPToolCall
+                tc = PlaywrightMCPToolCall(
+                    action="goto",
+                    selector=None,
+                    value=goto_url,
+                    thinking=(
+                        f"skip redundant goto (already at {current or base_url!r}; "
+                        f"target={goto_url!r})"
+                    ),
+                    next_goal="verify this step only",
+                )
+                logger.info(
+                    "Skip redundant goto current=%r target=%r base=%r",
+                    current, goto_url, base_url,
+                )
+                return tc, {"success": True, "error": None, "skipped_goto": True}
+
+    # 1) Prefer solidified / derived CSS (recording solidification + placeholder)
+    if prefer_selector:
+        for sel_tc in selector_tool_call_candidates(
+            structured_step, timeout_ms=step_timeout_ms,
+        ):
+            logger.info(
+                "Trying solidified selector action=%s selector=%r",
+                sel_tc.action, sel_tc.selector,
+            )
+            exec_result = await _execute_resolved_tool_call(
+                mcp_manager, sel_tc, step_timeout_ms,
+            )
+            if exec_result.get("success"):
+                return sel_tc, exec_result
+            logger.info(
+                "Solidified selector failed (%s); "
+                "trying next selector or semantic bind",
+                (exec_result.get("error") or "")[:160],
+            )
+
+    # 2) Semantic Intent + AX bind (do not re-prefer selector)
     try:
         tool_call = await asyncio.wait_for(
             resolve_tool_call_from_step(
@@ -307,6 +504,7 @@ async def _llm_tool_and_run(
                 use_vision_fallback=True,
                 timeout_ms=step_timeout_ms,
                 structured_step=structured_step,
+                prefer_selector=False,
             ),
             timeout=120,
         )
@@ -316,22 +514,9 @@ async def _llm_tool_and_run(
     if tool_call is None:
         return None, {'success': False, 'error': 'LLM 生成操作指令超时'}
 
-    if tool_call.action == 'error':
-        return tool_call, {
-            'success': False,
-            'error': f"LLM 无法确定操作: {tool_call.value}",
-        }
-
-    try:
-        exec_result = await asyncio.wait_for(
-            mcp_manager.execute_tool_call(tool_call.model_dump()),
-            timeout=step_timeout_ms / 1000.0,
-        )
-    except asyncio.TimeoutError:
-        exec_result = {
-            'success': False,
-            'error': f'Step execution timeout after {step_timeout_ms}ms',
-        }
+    exec_result = await _execute_resolved_tool_call(
+        mcp_manager, tool_call, step_timeout_ms,
+    )
     return tool_call, exec_result
 
 
@@ -346,10 +531,11 @@ async def _llm_tool_and_run_with_relocate(
     system_prompt_override: str | None,
     step_timeout_ms: int,
     structured_step: dict | None = None,
+    base_url: str | None = None,
 ):
     """Run `_llm_tool_and_run`; on failure, settle + refresh snapshot + retry once.
 
-    Triggers when LLM returns action=error or MCP execution fails.
+    First attempt prefers solidified selector; relocate retry uses semantic bind only.
     Returns (tool_call, exec_result, relocate_attempted).
     """
     tool_call, exec_result = await _llm_tool_and_run(
@@ -362,6 +548,8 @@ async def _llm_tool_and_run_with_relocate(
         system_prompt_override=system_prompt_override,
         step_timeout_ms=step_timeout_ms,
         structured_step=structured_step,
+        prefer_selector=True,
+        base_url=base_url,
     )
     if exec_result.get('success'):
         return tool_call, exec_result, False
@@ -377,6 +565,7 @@ async def _llm_tool_and_run_with_relocate(
         logger.warning("Hybrid relocate: snapshot refresh failed: %s", exc, exc_info=True)
         return tool_call, exec_result, True
 
+    # Relocate: semantic only (selector already tried on first attempt)
     tool_call2, exec_result2 = await _llm_tool_and_run(
         desc=desc,
         snapshot=snapshot,
@@ -387,6 +576,8 @@ async def _llm_tool_and_run_with_relocate(
         system_prompt_override=system_prompt_override,
         step_timeout_ms=step_timeout_ms,
         structured_step=structured_step,
+        prefer_selector=False,
+        base_url=base_url,
     )
     return tool_call2, exec_result2, True
 
@@ -616,6 +807,48 @@ async def execute_step_mcp(
                     system_prompt_override=system_prompt_override,
                     step_timeout_ms=step_timeout_ms,
                 )
+            elif option:
+                # 点击【京州市院】（搜索结果中的）
+                import asyncio as _aio
+                await _aio.sleep(HYBRID_SETTLE_SECONDS)
+                if not option_choice_visible_in_snapshot(
+                    snapshot, option, strong_only=True,
+                ):
+                    snapshot = await wait_for_option_in_snapshot(
+                        mcp_manager.get_dom_snapshot,
+                        option,
+                        timeout_s=5.0,
+                        prefer_strong=True,
+                    )
+                pick_desc = dropdown_pick_description(option)
+                pick_struct = {
+                    "action": "click",
+                    "target_name": option,
+                    "disambiguation": "搜索结果中的",
+                }
+                tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
+                    desc=pick_desc,
+                    snapshot=snapshot,
+                    expected_result=expected_result,
+                    mcp_manager=mcp_manager,
+                    llm_client=llm_client,
+                    model=model,
+                    system_prompt_override=system_prompt_override,
+                    step_timeout_ms=step_timeout_ms,
+                    structured_step=pick_struct,
+                )
+                if exec_result.get("success"):
+                    await _aio.sleep(HYBRID_SETTLE_SECONDS)
+                    post = await mcp_manager.get_dom_snapshot()
+                    if not option_selected_in_snapshot(post or "", option):
+                        exec_result = {
+                            **exec_result,
+                            "success": False,
+                            "error": (
+                                f"选项「{option}」点击后单位未选中"
+                                "（可能点到了同层其它节点）"
+                            ),
+                        }
             else:
                 tool_call, exec_result, relocate_attempted = await _llm_tool_and_run_with_relocate(
                     desc=desc,

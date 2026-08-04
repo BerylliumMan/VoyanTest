@@ -43,6 +43,16 @@ from app.crud.testcase import (
     get_init_test_cases,
     delete_test_case,
 )
+from app.crud.suite import (
+    list_suites,
+    get_suite,
+    get_suite_ordered_case_ids,
+    create_suite,
+    update_suite,
+    delete_suite,
+    suite_to_dict,
+    enrich_suite_cases,
+)
 from app.crud.run import (
     create_test_run,
     update_test_run_status,
@@ -180,6 +190,15 @@ __all__ = [
     "update_test_case_is_init",
     "get_init_test_cases",
     "delete_test_case",
+    # suite
+    "list_suites",
+    "get_suite",
+    "get_suite_ordered_case_ids",
+    "create_suite",
+    "update_suite",
+    "delete_suite",
+    "suite_to_dict",
+    "enrich_suite_cases",
     # run
     "create_test_run",
     "update_test_run_status",

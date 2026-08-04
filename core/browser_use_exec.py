@@ -20,6 +20,15 @@ ProgressCallback = Callable[[str], Any]  # sync or returns awaitable
 # Early-stop when browser-use loop detection reports prolonged stagnation
 STAGNATION_STOP_THRESHOLD = 8
 _STAGNATION_RE = re.compile(r"stagnation\s*=\s*(\d+)", re.I)
+_OPENED_TAB_RE = re.compile(
+    r"opened a new tab\s*\(tab_id:\s*([0-9A-Fa-f]+)\)", re.I,
+)
+_CLICKED_TEXT_RE = re.compile(
+    r'Clicked\s+\w+\s+"([^"]+)"', re.I,
+)
+_TYPED_TEXT_RE = re.compile(
+    r'Typed\s+"([^"]+)"', re.I,
+)
 _BROWSER_DEAD_MARKERS = (
     "No tabs remain",
     "Cannot navigate - browser not connected",
@@ -140,10 +149,57 @@ def _make_new_step_callback(
     return _cb
 
 
+def _schedule_focus_tab_by_short_id(session, short_id: str) -> None:
+    """Non-blocking: match CDP targetId by suffix and switch focus."""
+    if session is None or not short_id:
+        return
+    try:
+        import asyncio
+
+        async def _run() -> None:
+            # Wait out browser-use click watchdog (≈0.1s) that refocuses opener.
+            await asyncio.sleep(0.35)
+            ok = await focus_tab_by_short_id(session, short_id)
+            if ok:
+                # Second pass: opener may steal focus again after first switch.
+                await asyncio.sleep(0.35)
+                await focus_tab_by_short_id(session, short_id)
+
+        asyncio.get_running_loop().create_task(_run())
+    except Exception:
+        logger.debug("schedule focus_tab_by_short_id failed", exc_info=True)
+
+
+async def focus_tab_by_short_id(session, short_id: str) -> bool:
+    """Focus page whose targetId ends with ``short_id`` (browser-use tab_id)."""
+    sid = (short_id or "").strip()
+    if session is None or not sid:
+        return False
+    pages = await list_browser_use_page_ids(session)
+    match = next(
+        (p for p in pages if p.upper().endswith(sid.upper())),
+        None,
+    )
+    if not match:
+        return False
+    _set_preferred_tab(session, match)
+    focus = getattr(getattr(session, "agent_focus", None), "target_id", None)
+    if focus == match:
+        return True
+    ok = await _dispatch_switch_tab(session, match)
+    if ok:
+        logger.info(
+            "browser-use focused tab by short_id %s → %s",
+            sid, match[-8:],
+        )
+    return ok
+
+
 def attach_browser_use_log_handler(
     *,
     on_progress: ProgressCallback | None,
     stop_watch_ref: dict[str, Any] | None = None,
+    browser_session: Any | None = None,
     logger_names: tuple[str, ...] = ("browser_use", "bubus"),
 ) -> list[tuple[logging.Logger, logging.Handler]]:
     """Attach temporary handlers that forward library logs to on_progress.
@@ -151,9 +207,12 @@ def attach_browser_use_log_handler(
     When ``stop_watch_ref`` is provided (``{\"state\": step_stop_dict}``), also
     watch for stagnation / browser-dead markers to request early stop.
 
+    When ``browser_session`` is set, ``opened a new tab (tab_id: …)`` log lines
+    immediately schedule a focus switch (LLM often ignores the note and re-clicks).
+
     Returns list of (logger, handler) to remove later via ``detach_browser_use_log_handlers``.
     """
-    if not on_progress and not stop_watch_ref:
+    if not on_progress and not stop_watch_ref and browser_session is None:
         return []
 
     class _ProgressHandler(logging.Handler):
@@ -164,6 +223,10 @@ def attach_browser_use_log_handler(
                     state = stop_watch_ref.get("state")
                     if isinstance(state, dict):
                         note_browser_use_log_for_stop(state, msg)
+                if browser_session is not None:
+                    m = _OPENED_TAB_RE.search(msg or "")
+                    if m:
+                        _schedule_focus_tab_by_short_id(browser_session, m.group(1))
                 if not on_progress:
                     return
                 # Skip extremely noisy debug noise if somehow attached at DEBUG
@@ -259,6 +322,27 @@ def build_step_task(
             "禁止重新打开/刷新/navigate 到首页或登录页；"
             "除非本步骤明确要求打开新地址，否则只在当前页操作。\n\n"
         )
+    close_dialog = bool(
+        re.search(
+            r"(?:"
+            r"关闭.*(?:对话框|弹窗|提示框|消息弹|通知)"
+            r"|(?:对话框|弹窗|提示框|消息弹|通知).*(?:关闭|关掉|【X】|关闭标志)"
+            r"|点击【(?:关闭|X|×)】"
+            r"|【X】形状的关闭"
+            r"|关掉.*(?:对话框|弹窗|提示)"
+            r"|所有对话框"
+            r")",
+            description or "",
+            re.IGNORECASE,
+        )
+    )
+    close_rules = ""
+    if close_dialog:
+        close_rules = (
+            "- 本步是关闭对话框/通知弹层：只点关闭控件（关闭 / Close / X / ×）；"
+            "禁止点「去查看」「立即查看」「查看」「消息列表」或通知正文/条目；"
+            "禁止打开消息列表页、新标签或跳转订阅/消息中心；关完即可 done(success=true)\n"
+        )
     base = (
         f"{session_note}"
         f"当前步骤编号: {step_order}\n"
@@ -273,9 +357,13 @@ def build_step_task(
         "- 除非步骤明确要求打开/跳转/进入新地址，否则禁止 navigate、刷新或离开当前页；未完成选择前不要关掉下拉/弹层\n"
         "- 不要把任务说明里的任何提示当成需要打开的 URL；会话已在正确页面时直接操作\n"
         "- 下拉框/树选择/联想选项：输入文字后必须再点击匹配项完成选择，仅输入不算完成\n"
+        "- 树/单位选择：优先点选项行本身或行内复选框，不要只点悬浮 tooltip；选中后主字段必须显示目标全文（如「京州市院」），若仍是「请选择…」或变成其它近似名（如「山西省院」）则未成功，需重试\n"
         "- 下拉/筛选选完后弹层关闭、主字段已显示所选值 = 成功；禁止因「筛选框/弹层消失」而 done(success=false)\n"
-        "- 若点击打开了新浏览器标签页：立刻 switch 到新标签再继续（运行时也会自动切换）\n"
-        "- 优先少步完成；看到目标选项就立刻点击，不要反复探索无关区域\n"
+        f"{close_rules}"
+        "- 若工具返回 Note: This opened a new tab：下一步必须 switch 到该 tab_id；"
+        "禁止再次点击同一选项（重复点击会再开标签页）。运行时也会自动切到新标签\n"
+        "- 输入并点选后若已打开新标签页：switch 到新标签后即可 done(success=true)，不要在原页反复点选\n"
+        "- 优先少步完成；看到目标选项就立刻点击一次，不要反复探索无关区域\n"
         "- 完成后必须 done：成功则 success=true，失败则 success=false 并说明原因\n"
         "- 判断成败时只依据页面真实可见内容与本步预期（看主字段最终状态），不要臆造文案\n"
     )
@@ -894,6 +982,111 @@ def history_to_step_fields(history) -> dict[str, Any]:
     }
 
 
+def _interacted_element_name(el: Any) -> str:
+    if el is None:
+        return ""
+    if isinstance(el, dict):
+        name = (el.get("ax_name") or "").strip()
+        if name:
+            return name
+        attrs = el.get("attributes") or {}
+        if isinstance(attrs, dict):
+            for key in ("aria-label", "placeholder", "title", "value"):
+                v = (attrs.get(key) or "").strip()
+                if v:
+                    return v
+        return (el.get("node_name") or "").strip()
+    name = (getattr(el, "ax_name", None) or "").strip()
+    if name:
+        return name
+    attrs = getattr(el, "attributes", None) or {}
+    if isinstance(attrs, dict):
+        for key in ("aria-label", "placeholder", "title", "value"):
+            v = (attrs.get(key) or "").strip()
+            if v:
+                return v
+    return (getattr(el, "node_name", None) or "").strip()
+
+
+def _bracket_target_from_description(description: str) -> str:
+    m = re.search(r"[【\[]([^】\]]+)[】\]]", description or "")
+    return (m.group(1).strip() if m else "") or ""
+
+
+def extract_learned_plan_from_history(
+    history,
+    *,
+    description: str = "",
+) -> dict[str, Any] | None:
+    """Build a locator-memory plan blob from successful browser-use actions.
+
+    Used to solidify hybrid fallback / NL runs so the next MCP pass can replay.
+    """
+    plan: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _add(action: str, name: str, *, role: str = "", value: str | None = None) -> None:
+        nm = (name or "").strip()
+        if not nm or len(nm) > 120:
+            return
+        key = (action, nm, value or "")
+        if key in seen:
+            return
+        seen.add(key)
+        step: dict[str, Any] = {"action": action, "name": nm}
+        if role:
+            step["role"] = role
+        if value is not None and value != "":
+            step["value"] = value
+        plan.append(step)
+
+    # 1) Structured model actions + interacted elements
+    try:
+        for item in history.model_actions() or []:
+            if not isinstance(item, dict):
+                continue
+            if "done" in item or "switch" in item or "navigate" in item:
+                continue
+            el_name = _interacted_element_name(item.get("interacted_element"))
+            if "input" in item or "type_text" in item or "type" in item:
+                payload = item.get("input") or item.get("type_text") or item.get("type") or {}
+                text = ""
+                if isinstance(payload, dict):
+                    text = str(payload.get("text") or "")
+                name = el_name or _bracket_target_from_description(description) or "输入框"
+                _add("fill", name, role="textbox", value=text)
+            elif "click" in item or "browser_click" in item:
+                name = el_name
+                if name:
+                    role = "option" if ("（" in name or "(" in name) else "link"
+                    _add("click", name, role=role)
+    except Exception:
+        logger.debug("extract plan from model_actions failed", exc_info=True)
+
+    # 2) Fallback only when model_actions yielded nothing usable
+    if not plan:
+        try:
+            contents = history.extracted_content() if hasattr(history, "extracted_content") else []
+            for text in contents or []:
+                s = str(text or "")
+                for m in _TYPED_TEXT_RE.finditer(s):
+                    name = _bracket_target_from_description(description) or "输入框"
+                    _add("fill", name, role="textbox", value=m.group(1))
+                for m in _CLICKED_TEXT_RE.finditer(s):
+                    name = m.group(1).strip()
+                    if name:
+                        role = "option" if ("（" in name or "(" in name) else "link"
+                        _add("click", name, role=role)
+        except Exception:
+            logger.debug("extract plan from extracted_content failed", exc_info=True)
+
+    if not plan:
+        return None
+    from core.locator_memory import build_plan_blob
+
+    return build_plan_blob(plan, page_url_hint="", hit_count=1) | {"source": "browser_use"}
+
+
 _history_to_step_fields = history_to_step_fields
 
 
@@ -929,9 +1122,6 @@ async def execute_nl_steps_browser_use(
         stop_browser = False
 
     stop_watch_ref: dict[str, Any] = {"state": None}
-    log_handlers = attach_browser_use_log_handler(
-        on_progress=on_progress, stop_watch_ref=stop_watch_ref,
-    )
 
     # Disable default extensions: sync download can block the asyncio loop
     # (WS heartbeat dies → server unregisters the agent mid-run).
@@ -940,6 +1130,12 @@ async def execute_nl_steps_browser_use(
         keep_alive=True,
         enable_default_extensions=False,
         cdp_url=cdp_url,
+    )
+    # Forward library logs + immediately focus tabs reported as "opened a new tab".
+    log_handlers = attach_browser_use_log_handler(
+        on_progress=on_progress,
+        stop_watch_ref=stop_watch_ref,
+        browser_session=browser,
     )
     # Register TabCreated listener early (armed=False). Do NOT monkeypatch
     # browser-use click handlers — bubus requires handler.__name__ == on_<Event>
@@ -978,8 +1174,10 @@ async def execute_nl_steps_browser_use(
             try:
                 await open_agent.run(max_steps=8)
             except Exception as exc:
-                logger.warning("browser-use 打开 BASE URL 失败: %s", exc, exc_info=True)
-                _emit_progress(on_progress, f"BASE URL open failed: {exc}")
+                msg = f"导航失败，已停止执行: {base_url} — {exc}"
+                logger.error("browser-use 打开 BASE URL 失败 — aborting: %s", exc, exc_info=True)
+                _emit_progress(on_progress, msg)
+                raise RuntimeError(msg) from exc
             if not headless and not cdp_url:
                 await ensure_browser_window_maximized(browser)
         else:
@@ -1074,6 +1272,7 @@ async def execute_nl_steps_browser_use(
                     max_actions_per_step=8,
                     **agent_kwargs,
                 )
+                history = None
                 try:
                     history = await agent.run(max_steps=max_steps_per_nl)
                     fields = history_to_step_fields(history)
@@ -1109,6 +1308,7 @@ async def execute_nl_steps_browser_use(
                             f"原步骤:\n{desc}\n\n"
                             f"上次进度/原因:\n{fields.get('error') or ''}\n\n"
                             "若是下拉/树选择，直接点击已出现的匹配选项。"
+                            "若已打开新标签页：先 switch 再 done，禁止重复点击同一选项。"
                             "完成后 done(success=true)；仍无法完成则 done(success=false)。"
                         )
                         cont_agent = Agent(
@@ -1151,10 +1351,19 @@ async def execute_nl_steps_browser_use(
                     )
                 except Exception as exc:
                     logger.warning("post-step new-tab switch failed: %s", exc)
+
+                if fields.get("success") and history is not None:
+                    learned = extract_learned_plan_from_history(
+                        history, description=desc,
+                    )
+                    if learned:
+                        fields["learned_locator"] = learned
             else:
                 logger.info("--- browser-use Step %s: locator replay ---", order)
                 _emit_progress(on_progress, f"--- Step {order}: locator replay ---")
                 pages_before = await list_browser_use_page_ids(browser)
+                if memory_enabled and cached_fp:
+                    fields["learned_locator"] = cached_fp
 
             assert fields is not None
 
@@ -1177,6 +1386,7 @@ async def execute_nl_steps_browser_use(
                 "screenshot_base64": ss_b64,
                 "duration_ms": (time.monotonic() - t0) * 1000,
                 "backend": "browser_use",
+                "learned_locator": fields.get("learned_locator"),
             }
             step_results.append(result)
             status = "passed" if result["success"] else "failed"

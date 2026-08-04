@@ -58,6 +58,9 @@ interface GenPreviewResponse {
   progress_message?: string;
   functional_points_count?: number;
   test_cases_count?: number;
+  case_kind?: 'ui' | 'functional' | string;
+  project_id?: number | null;
+  project_name?: string;
   functional_points: FunctionalPoint[];
   test_cases: TestCase[];
 }
@@ -68,6 +71,7 @@ interface HistoryItem {
   status: string;
   functional_points_count: number;
   test_cases_count: number;
+  case_kind?: string;
 }
 
 interface ProjectItem {
@@ -183,6 +187,7 @@ const GenHistoryDetailPage: React.FC = () => {
   const [selectedPrimary, setSelectedPrimary] = useState<string | null>(null);
   const [projectModules, setProjectModules] = useState<{ id: number; name: string; parent_id: number | null }[]>([]);
   const [parentModuleId, setParentModuleId] = useState<number | undefined>(undefined);
+  const [importCaseKind, setImportCaseKind] = useState<'ui' | 'functional'>('ui');
 
   useEffect(() => {
     const fetchData = async () => {
@@ -192,6 +197,11 @@ const GenHistoryDetailPage: React.FC = () => {
         const previewRes = await axios.get<GenPreviewResponse>(`/api/gen/history/${id}`);
         const data = previewRes.data;
         setPreviewData(data);
+        const kind = data.case_kind === 'functional' ? 'functional' : 'ui';
+        setImportCaseKind(kind);
+        if (typeof data.project_id === 'number') {
+          setSelectedProjectId(data.project_id);
+        }
         setHistoryItem({
           id,
           filename: data.filename || `会话 ${id.slice(0, 8)}...`,
@@ -199,6 +209,7 @@ const GenHistoryDetailPage: React.FC = () => {
           functional_points_count:
             data.functional_points_count ?? data.functional_points.length,
           test_cases_count: data.test_cases_count ?? data.test_cases.length,
+          case_kind: kind,
         });
       } catch (err: unknown) {
         const axiosError = err as { response?: { status?: number; data?: { detail?: string } } };
@@ -292,17 +303,25 @@ const GenHistoryDetailPage: React.FC = () => {
         imported_count: number;
         skipped_count?: number;
         test_case_ids: number[];
+        case_kind?: string;
+        project_name?: string;
       }>('/api/gen/import', {
         session_id: id,
         project_id: selectedProjectId,
         selected_ids: selectedIds,
         parent_module_id: parentModuleId ?? null,
+        case_kind: importCaseKind,
       });
       const skipped = res.data.skipped_count || 0;
+      const projectName =
+        res.data.project_name ||
+        projects.find((p) => p.id === selectedProjectId)?.name ||
+        '';
+      const kindLabel = (res.data.case_kind || importCaseKind) === 'ui' ? 'UI 用例' : '功能用例';
       Message.success(
         skipped > 0
-          ? `成功导入 ${res.data.imported_count} 条，跳过重复 ${skipped} 条`
-          : `成功导入 ${res.data.imported_count} 条测试用例`,
+          ? `已导入 ${res.data.imported_count} 条${kindLabel}到「${projectName}」（跳过重复 ${skipped}）`
+          : `已导入 ${res.data.imported_count} 条${kindLabel}到「${projectName}」`,
       );
       setSelectedRowKeys([]);
     } catch {
@@ -669,6 +688,11 @@ const GenHistoryDetailPage: React.FC = () => {
               {historyItem?.filename || '分析详情'}
             </Title>
             {historyItem && getStatusTag(historyItem.status)}
+            {historyItem && (
+              historyItem.case_kind === 'functional'
+                ? <Tag color="arcoblue">功能用例</Tag>
+                : <Tag color="purple">UI 用例</Tag>
+            )}
           </div>
         </div>
 
@@ -681,6 +705,11 @@ const GenHistoryDetailPage: React.FC = () => {
                 </Text>
                 <Text>
                   测试用例: <Text bold>{historyItem.test_cases_count}</Text>
+                </Text>
+                <Text type="secondary">
+                  导入后进入「测试用例」页的
+                  {importCaseKind === 'ui' ? ' UI ' : ' 功能 '}
+                  页签
                 </Text>
               </Space>
             </div>
@@ -697,6 +726,15 @@ const GenHistoryDetailPage: React.FC = () => {
                     {p.name}
                   </Select.Option>
                 ))}
+              </Select>
+              <Select
+                placeholder="用例类型"
+                className={styles.projectSelect}
+                value={importCaseKind}
+                onChange={(val) => setImportCaseKind(val as 'ui' | 'functional')}
+              >
+                <Select.Option value="ui">UI 用例</Select.Option>
+                <Select.Option value="functional">功能用例</Select.Option>
               </Select>
               <Select
                 placeholder="挂到已有一级模块下（可选）"

@@ -29,38 +29,27 @@ logger = logging.getLogger(__name__)
 # LLM prompt for CDP events → test steps conversion
 # ------------------------------------------------------------------
 
-CDP_TO_STEPS_PROMPT = """You are a test case designer analyzing raw browser interaction events captured via Chrome DevTools Protocol (CDP).
+CDP_TO_STEPS_PROMPT = """你是 UI 自动化测试工程师。将 CDP 录制事件转为**浏览器可执行**的 StructuredStep。
 
-INPUT: A chronological timeline of browser events from a real user session. Each event describes what the user did (navigation, click, typing, selection, etc.) with the page URL, page title, target selector, and input value.
+输入：按时间排序的浏览器事件（navigate/click/input…），含 url、selector、value。
 
-YOUR JOB: Group consecutive related events into logical test steps. For each step, produce:
-1. "step_description": A concise natural language description in Chinese (e.g. "打开登录页面", "输入用户名 admin", "点击登录按钮").
-2. "expected_result": What should happen after this step completes, in Chinese (e.g. "登录页面加载完成", "用户名输入成功", "成功跳转到首页").
+硬规则：
+- 一步 = 一个浏览器动作；合并同一输入框的连续 input。
+- **禁止**只输出自然语言散文；每步必须含 action / target_name（及 fill/select 的 value）。
+- target_name 只写页面可见文案 / aria-label；禁止「按钮」「输入框」「下拉框」等类型词，禁止省略号。
+- 下拉筛选：先 click(textbox，target_name 用完整 placeholder 如「请选择单位」) 展开 → fill 筛选词 → select/click 选项。
+- selector 优先固化稳定属性（如 input[placeholder=\"请选择单位\"]）；禁止裸 input；禁止把 placeholder 截成过短的「单位」。
+- 输出 ONLY JSON 数组，无 Markdown。
 
-EVENT TYPES you may encounter:
-- "navigate" / "navigation": User navigated to a new URL. step: "打开 <url 或页面名>", expected: "页面加载完成"
-- "click": User clicked an element. step: "点击 <按钮/链接名称>", expected: "点击生效 / 页面响应"
-- "input" / "type" / "fill": User typed into a field. step: "在 <字段名> 输入 <值>", expected: "<字段名> 输入成功"
-- "change" / "select": User selected a dropdown option. step: "选择 <下拉框> 为 <选项>", expected: "选项已选中"
-- "submit" / "form_submit": User submitted a form. step: "提交表单", expected: "表单提交成功"
-- "keypress" / "key": Keyboard event. fold into the nearest input/click step.
-- "scroll" / "hover" / "focus": Usually auxiliary — only emit a step if standalone meaningful.
-
-RULES:
-- Group rapid input events (multiple characters typed into same field) into a single "fill" step.
-- A navigation event always starts a new step.
-- A click on a submit/login/search button typically expects a result like "页面跳转" or "搜索结果展示".
-- Use Chinese for ALL descriptions and expected results. Keep descriptions short and imperative (verb-first).
-- Infer expected results from context (e.g. clicking "登录" → "成功登录" or "跳转到首页" if you can tell from the URL/title).
-- Do not invent steps that are not represented in the events.
-- Output ONLY the JSON array, no markdown fences, no extra text.
-
-OUTPUT SCHEMA (exact JSON):
+OUTPUT SCHEMA：
 [
-  {"step_description": "打开登录页面", "expected_result": "登录页面加载完成"},
-  {"step_description": "输入用户名 admin", "expected_result": "用户名输入成功"},
-  {"step_description": "输入密码 123456", "expected_result": "密码输入成功"},
-  {"step_description": "点击登录按钮", "expected_result": "成功跳转到首页"}
+  {"action":"goto","target_name":"登录","value":"http://example.com/login","expected_result":"页面加载完成"},
+  {"action":"click","target_name":"请选择单位","target_role":"textbox","selector":"input[placeholder=\\"请选择单位\\"]","expected_result":"下拉展开"},
+  {"action":"fill","target_name":"请选择单位","target_role":"textbox","value":"京州市院","expected_result":"输入成功"},
+  {"action":"select","target_name":"京州市院","target_role":"option","value":"京州市院","expected_result":"选项已选中"},
+  {"action":"fill","target_name":"用户名","target_role":"textbox","value":"admin","expected_result":"输入成功"},
+  {"action":"fill","target_name":"密码","target_role":"textbox","value":"***","expected_result":"输入成功"},
+  {"action":"click","target_name":"登录","target_role":"button","expected_result":"登录成功或页面跳转"}
 ]"""
 
 
@@ -173,17 +162,15 @@ def _repair_and_parse_json(content: str) -> Any:
 
 
 def _normalize_steps(parsed: Any) -> list[dict]:
-    """Normalize LLM output into a list of {step_description, expected_result} dicts.
+    """Normalize LLM/rule output into UI-executable step dicts.
 
-    Accepts:
-    - A list of dicts with the two required keys
-    - A dict with a "steps" key wrapping such a list
-    - A single dict (wrapped into a one-element list)
-
-    Skips entries missing required keys. Fills in defaults for partial entries.
+    Each item preferably has StructuredStep fields (action/target_name/…) plus
+    step_description / expected_result for display.
     """
     if parsed is None:
         return []
+
+    from core.step_normalize import coerce_structured_step, render_structured_step
 
     # Unwrap {"steps": [...]} envelope if present
     if isinstance(parsed, dict) and 'steps' in parsed and isinstance(parsed['steps'], list):
@@ -199,16 +186,38 @@ def _normalize_steps(parsed: Any) -> list[dict]:
     for item in parsed:
         if not isinstance(item, dict):
             continue
-        desc = item.get('step_description') or item.get('description') or item.get('step')
         expected = item.get('expected_result') or item.get('expected') or item.get('result')
-        if not desc:
-            # Skip entries that have no description at all
+        structured = coerce_structured_step(item)
+        if structured is None and item.get("action"):
+            structured = {
+                k: item.get(k)
+                for k in (
+                    "action", "target_name", "target_role", "value",
+                    "disambiguation", "icon_hint", "frame_hint", "note",
+                    "selector",
+                )
+                if item.get(k) not in (None, "")
+            }
+        desc = item.get('step_description') or item.get('description') or item.get('step')
+        if structured:
+            desc = desc or render_structured_step(structured)
+        if not desc and not structured:
             continue
-        # Coerce to strings, default missing expected_result
-        result.append({
-            'step_description': str(desc).strip(),
+        row = {
+            'step_description': str(desc or "").strip(),
             'expected_result': str(expected).strip() if expected else '步骤执行成功',
-        })
+        }
+        if structured:
+            row['structured_step'] = structured
+            row['action'] = structured.get('action')
+            row['target_name'] = structured.get('target_name')
+            row['target_role'] = structured.get('target_role')
+            row['value'] = structured.get('value')
+            if structured.get('selector'):
+                row['selector'] = structured.get('selector')
+            if not row['step_description']:
+                row['step_description'] = render_structured_step(structured) or ""
+        result.append(row)
     return result
 
 
@@ -234,6 +243,20 @@ async def convert_events_to_steps(
     """
     if not events:
         return []
+
+    # Prefer deterministic StructuredStep mapping — recording must be UI-executable.
+    try:
+        from core.cdp_events_to_steps import events_to_structured_steps
+
+        rule_steps = events_to_structured_steps(events)
+        if rule_steps:
+            logger.info(
+                "CDP convert: using rule-based StructuredStep path (%d steps)",
+                len(rule_steps),
+            )
+            return rule_steps
+    except Exception:
+        logger.exception("rule-based CDP convert failed; falling back to LLM")
 
     system_prompt = CDP_TO_STEPS_PROMPT
     resolved_model = model

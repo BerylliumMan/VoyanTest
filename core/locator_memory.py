@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Playwright MCP accessibility snapshot lines, e.g.:
 #   - button "登录" [ref=e15]
 #   - textbox "用户名" [ref=e12] [cursor=pointer]:
+#   - textbox "请选择单位" [ref=e19]: 京州市院   ← value after colon
 #   - textbox "Username" [ref=f4e11]   (frame-prefixed refs)
 _SNAP_LINE_RE = re.compile(
     r"^\s*-\s+"
@@ -26,7 +27,9 @@ _SNAP_LINE_RE = re.compile(
     r"(?:\s+"
     r"(?:\"(?P<name>[^\"]*)\"|'(?P<name2>[^']*)')"
     r")?"
-    r".*?\[ref=(?P<ref>[a-zA-Z]*\d*e\d+)\]",
+    r".*?\[ref=(?P<ref>[a-zA-Z]*\d*e\d+)\]"
+    r"(?:\s+\[[^\]]+\])*"
+    r"(?:\s*:\s*(?P<value>.*?))?\s*$",
     re.MULTILINE,
 )
 
@@ -118,13 +121,20 @@ def learn_fingerprint_after_success(
             value=value,
         )
         if fp:
-            # Merge structured target_name when snapshot name empty
-            struct = structured_step if isinstance(structured_step, dict) else None
-            if struct and not (fp.get("name") or "").strip():
-                tn = (struct.get("target_name") or "").strip()
-                if tn:
-                    fp = {**fp, "name": tn}
-            return fp
+            # Do not memorize tooltip/text mirrors — they cause false-success replays
+            weak = {"tooltip", "text", "generic", "label", "paragraph", "heading"}
+            if act in ("click", "browser_click") and (fp.get("role") or "").lower() in weak:
+                logger.info(
+                    "locator_memory: skip learning weak role=%r name=%r",
+                    fp.get("role"), fp.get("name"),
+                )
+            else:
+                struct = structured_step if isinstance(structured_step, dict) else None
+                if struct and not (fp.get("name") or "").strip():
+                    tn = (struct.get("target_name") or "").strip()
+                    if tn:
+                        fp = {**fp, "name": tn}
+                return fp
 
     struct = structured_step if isinstance(structured_step, dict) else None
     if not struct:
@@ -161,14 +171,20 @@ def page_url_hint(url: str) -> str:
 
 
 def parse_snapshot_elements(snapshot: str) -> list[dict[str, str]]:
-    """Parse accessibility snapshot into {role, name, ref} rows."""
+    """Parse accessibility snapshot into {role, name, ref, value} rows.
+
+    ``value`` is the trailing Playwright text after ``[ref=…]:`` (e.g. selected
+    Ant Design Select content while the accessible name stays「请选择…」).
+    """
     rows: list[dict[str, str]] = []
     for m in _SNAP_LINE_RE.finditer(snapshot or ""):
         name = (m.group("name") or m.group("name2") or "").strip()
+        value = (m.group("value") or "").strip()
         rows.append({
             "role": (m.group("role") or "").strip().lower(),
             "name": name,
             "ref": m.group("ref"),
+            "value": value,
         })
     return rows
 
@@ -204,7 +220,11 @@ def extract_from_snapshot(
 
 
 def fingerprint_matches_step_description(fp: dict[str, Any], description: str) -> bool:
-    """Require fingerprint name to appear in step text / 【】 so we avoid cross-page same-label."""
+    """Require fingerprint name to relate to step text so we avoid cross-page reuse.
+
+    Allow placeholder controls like AX name「请选择单位」for step「点击单位下拉框」
+    when the field keyword from the step is contained in the fingerprint name.
+    """
     name = (fp.get("name") or "").strip()
     if not name:
         return True  # role-only fingerprints rely on unique match + URL
@@ -212,8 +232,28 @@ def fingerprint_matches_step_description(fp: dict[str, Any], description: str) -
     if name in desc:
         return True
     for m in _BRACKET_TEXT_RE.finditer(desc):
-        if name in m.group(1) or m.group(1) in name:
+        bracket = (m.group(1) or "").strip()
+        if not bracket:
+            continue
+        if name in bracket or bracket in name:
             return True
+        # 请选择单位 ↔ 单位
+        if len(bracket) >= 2 and bracket in name:
+            return True
+    # Unbracketed field: 点击单位下拉框 / 点击单位
+    bare = re.sub(
+        r"(?:点击|单击|在|输入|填写|选择|选中)",
+        "",
+        desc,
+    )
+    bare = re.sub(
+        r"(?:下拉框|下拉菜单|下拉|选择器|输入框|文本框|按钮|组合框)",
+        "",
+        bare,
+    )
+    bare = re.sub(r"[【】\[\]（）()\s：:，,。]+", "", bare).strip()
+    if len(bare) >= 2 and bare in name:
+        return True
     return False
 
 

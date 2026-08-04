@@ -146,7 +146,7 @@ async def get_all_test_cases_for_project_paginated(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
         .where(*conditions)
-        .order_by(db_models.TestCase.id.asc())
+        .order_by(db_models.TestCase.id.desc())
         .offset(offset)
         .limit(size)
     )
@@ -162,7 +162,7 @@ async def get_all_test_cases_for_module(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
         .where(*conditions)
-        .order_by(db_models.TestCase.id.asc())
+        .order_by(db_models.TestCase.id.desc())
     )
     return result.scalars().all()
 
@@ -182,7 +182,7 @@ async def get_all_test_cases_for_module_paginated(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
         .where(*conditions)
-        .order_by(db_models.TestCase.id.asc())
+        .order_by(db_models.TestCase.id.desc())
         .offset(offset)
         .limit(size)
     )
@@ -210,7 +210,7 @@ async def search_test_cases(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
         .where(*conditions)
-        .order_by(db_models.TestCase.id.asc())
+        .order_by(db_models.TestCase.id.desc())
         .offset((page - 1) * size)
         .limit(size)
     )
@@ -251,6 +251,10 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
 
     # 删除旧步骤并创建新步骤（单事务）
     await delete_steps_for_case(db, case_id)
+
+    # Steps changed → invalidate solidified Playwright script
+    from core.compiled_script import clear_compiled_script
+    clear_compiled_script(db_case)
 
     for step_data in case.steps:
         fields_set = getattr(step_data, "model_fields_set", None) or set()

@@ -83,11 +83,162 @@
 }
 
 /* StepList */
-.step-row {
+.step-list {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step-card {
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.step-card:hover {
+  border-color: var(--color-border-3);
+}
+
+.step-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
-  align-items: flex-start;
+  padding: 8px 10px;
+  background: var(--color-fill-1);
+  border-bottom: 1px solid var(--color-border-1);
+}
+
+.step-card-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-1);
+  background: var(--color-fill-3);
+  flex-shrink: 0;
+}
+
+.step-preview-inline {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
+.step-card-actions {
+  flex-shrink: 0;
+}
+
+.step-card-body {
+  padding: 10px 12px 8px;
+}
+
+.step-grid {
+  display: grid;
+  grid-template-columns: 128px minmax(160px, 1.4fr) minmax(120px, 1fr) minmax(110px, 0.9fr);
+  gap: 8px 10px;
+  align-items: end;
+}
+
+.step-grid-functional {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.step-field-wide {
+  grid-column: span 1;
+}
+
+.step-field-full {
+  grid-column: 1 / -1;
+}
+
+.step-label {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-text-3);
+}
+
+.step-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--color-border-1);
+  min-height: 28px;
+}
+
+.step-meta-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.step-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-text-3);
+  max-width: 100%;
+}
+
+.step-meta-clear {
+  margin-left: 2px;
+  padding: 0 4px;
+}
+
+.step-cache {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-3);
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.step-add {
+  margin-top: 2px;
+}
+
+.step-row {
+  /* class kept for drag-over targeting from index.tsx */
+}
+
+:global(.step-row.drag-over) {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.12);
 }
 
 .step-fields {
@@ -107,10 +258,23 @@
 }
 
 .drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-3);
   cursor: grab;
-  padding: 0 4px;
-  min-width: 24px;
-  margin-top: 4px;
+  flex-shrink: 0;
+}
+
+.drag-handle:hover {
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
 }
 
 .step-number-tag {
@@ -126,7 +290,16 @@
 }
 
 .healed-hint {
-  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-3);
+  display: block;
+  margin-top: 2px;
+  line-height: 1.6;
+}
+
+.healed-hint .arco-icon {
+  margin-right: 3px;
+  vertical-align: -2px;
 }
 
 /* EnvironmentManager */
@@ -148,19 +321,6 @@
   width: 120px;
 }
 
-.healed-hint {
-  font-size: 12px;
-  color: var(--color-text-3);
-  display: block;
-  margin-top: 2px;
-  line-height: 1.6;
-}
-
-.healed-hint .arco-icon {
-  margin-right: 3px;
-  vertical-align: -2px;
-}
-
 /* EnvironmentManager cookies */
 .cookie-collapse {
   margin-bottom: 0;
@@ -179,7 +339,18 @@
 
 /* TestCaseEditor */
 .editor-modal {
-  width: 900px;
+  width: min(960px, 94vw);
+}
+
+.editor-modal :global(.arco-modal-content) {
+  max-height: min(82vh, 860px);
+  overflow: auto;
+}
+
+.editor-kind-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* utils.tsx dropdown trigger */
@@ -187,4 +358,14 @@
   font-size: 12px;
   padding: 0 2px;
   min-width: 20px;
+}
+
+@media (max-width: 860px) {
+  .step-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .step-field-full {
+    grid-column: 1 / -1;
+  }
 }

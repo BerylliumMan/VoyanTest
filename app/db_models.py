@@ -31,6 +31,11 @@ from app.models.testcase import (  # noqa: F401
     TestCase, TestStep,
 )
 
+# Test suites (ordered case lists)
+from app.models.suite import (  # noqa: F401
+    TestSuite, TestSuiteCase,
+)
+
 # Run batch / runs / logs
 from app.models.batch import (  # noqa: F401
     RunBatch, TestRun, RunLog,

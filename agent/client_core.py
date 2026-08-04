@@ -571,15 +571,31 @@ class AgentClient:
         except Exception as exc:
             self._log_warning(f"MCP invalidate stop failed: {exc}")
 
-    async def _ensure_mcp_session(self, *, shared_cdp: bool) -> None:
-        """Start MCP or restart if the reused browser/CDP session is dead."""
+    async def _ensure_mcp_session(
+        self, *, shared_cdp: bool, reuse_existing: bool = False
+    ) -> None:
+        """Start MCP or restart if the reused browser/CDP session is dead.
+
+        ``reuse_existing``: nl_goal step fallback — keep the current browser/page.
+        Do not treat "no hybrid CDP yet" as a reason to launch a blank Chromium
+        when the plain MCP session is still healthy.
+        """
         if not self._mcp_process_alive():
             if self._mcp_process is not None:
                 self._log_warning(
                     f"MCP process already exited code={self._mcp_process.returncode} — restarting"
                 )
                 await self._invalidate_mcp_session("process exited")
-            await self._start_mcp(shared_cdp=shared_cdp)
+            # Dead session: if reuse was requested but only plain MCP existed,
+            # prefer plain restart over a brand-new hybrid CDP (page already lost).
+            start_shared = shared_cdp
+            if reuse_existing and shared_cdp and not self._exec_cdp_http:
+                start_shared = False
+                self._log_warning(
+                    "reuse existing browser requested but session dead — "
+                    "restarting MCP without new Hybrid CDP (page state lost)"
+                )
+            await self._start_mcp(shared_cdp=start_shared)
             return
 
         self._log_info("Reusing existing MCP subprocess (browser stays open)")
@@ -589,8 +605,15 @@ class AgentClient:
         # Switching into hybrid (or Chrome closed) while MCP still running
         if shared_cdp:
             if not await self._is_exec_cdp_alive():
-                need_restart = True
-                reason = "hybrid CDP browser closed or unreachable"
+                if reuse_existing:
+                    # Keep current MCP page — do NOT launch a new Hybrid CDP Chromium
+                    self._log_info(
+                        "reuse existing browser for nl_goal step fallback "
+                        "(skip new Hybrid CDP Chromium)"
+                    )
+                else:
+                    need_restart = True
+                    reason = "hybrid CDP browser closed or unreachable"
         elif self._exec_chrome_process is not None:
             # Leftover hybrid Chrome state while now on plain MCP
             if self._exec_chrome_process.returncode is not None:
@@ -622,7 +645,11 @@ class AgentClient:
         if need_restart:
             self._log_warning(f"Existing browser session unusable ({reason}) — restarting")
             await self._invalidate_mcp_session(reason)
-            await self._start_mcp(shared_cdp=shared_cdp)
+            start_shared = shared_cdp
+            if reuse_existing and shared_cdp and not await self._is_exec_cdp_alive():
+                # Avoid blank Hybrid CDP when the prior page is already gone
+                start_shared = bool(self._exec_cdp_http)
+            await self._start_mcp(shared_cdp=start_shared)
 
     async def _restart_mcp_for_dead_browser(self, *, shared_cdp: bool, why: str) -> None:
         self._log_warning(f"{why} — restarting MCP+browser")
@@ -1195,9 +1222,18 @@ class AgentClient:
                 return
 
             shared_cdp = backend == "hybrid"
-            self._log_info(
-                f"Run {msg.run_id} started — launching browser backend={backend} shared_cdp={shared_cdp}"
-            )
+            reuse_existing = bool(payload.get("reuse_existing_browser"))
+            navigate = payload.get("navigate_base_url", True)
+            if reuse_existing:
+                self._log_info(
+                    f"Run {msg.run_id} — reuse existing browser for nl_goal step "
+                    f"fallback backend={backend} shared_cdp={shared_cdp}"
+                )
+            else:
+                self._log_info(
+                    f"Run {msg.run_id} started — launching browser "
+                    f"backend={backend} shared_cdp={shared_cdp}"
+                )
             self._active_run_id = msg.run_id
             self._active_backend = backend
             self._cancel_requested = False
@@ -1205,10 +1241,11 @@ class AgentClient:
             ready_ok = False
             ready_err = ""
             try:
-                await self._ensure_mcp_session(shared_cdp=shared_cdp)
+                await self._ensure_mcp_session(
+                    shared_cdp=shared_cdp, reuse_existing=reuse_existing
+                )
 
                 # BASE URL 由 Playwright MCP 直接导航，不经 LLM（批量后续用例可跳过）
-                navigate = payload.get("navigate_base_url", True)
                 base_url = (payload.get("base_url") or "").strip()
                 if navigate and base_url:
                     self._log_info(f"Playwright navigating to BASE URL: {base_url}")
@@ -1411,8 +1448,16 @@ class AgentClient:
 
             from playwright.async_api import async_playwright
 
+            # Dry-run / solidify verify must not pop a visible window — that looks
+            # like "starting over" next to the live nl_goal browser. Always headless.
+            launch_kwargs: dict = {"headless": True}
+            chrome_exe = self._resolve_chrome_exe()
+            if chrome_exe and os.path.isfile(chrome_exe):
+                launch_kwargs["executable_path"] = chrome_exe
+                self._log_info(f"compiled_script Using Chromium: {chrome_exe}")
+
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=False)
+                browser = await p.chromium.launch(**launch_kwargs)
                 context = await browser.new_context()
                 page = await context.new_page()
                 if base_url:
@@ -1431,13 +1476,18 @@ class AgentClient:
                 },
             )
         except Exception as exc:
-            self._log_error(f"compiled_script failed: {exc}")
+            err_s = str(exc)
+            # Infra / missing-browser: warning only — manager may fall back to NL
+            if "Executable doesn't exist" in err_s or "playwright install" in err_s.lower():
+                self._log_info(f"compiled_script dry-run infra fail: {err_s[:180]}")
+            else:
+                self._log_error(f"compiled_script failed: {err_s[:300]}")
             await self._send(
                 WSMessageType.COMPILED_SCRIPT_RESULT,
                 msg.run_id,
                 {
                     "success": False,
-                    "error": str(exc),
+                    "error": err_s,
                     "duration_ms": int((_time.monotonic() - t0) * 1000),
                 },
             )

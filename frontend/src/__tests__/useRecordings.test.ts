@@ -81,7 +81,7 @@ interface HookReturn {
   startRecording: (targetUrl: string) => Promise<boolean>;
   stopRecording: () => Promise<boolean>;
   refreshEvents: () => Promise<boolean>;
-  convertToSteps: () => Promise<{ ok: boolean; count: number }>;
+  convertToSteps: (opts?: { force?: boolean }) => Promise<{ ok: boolean; count: number }>;
   loadHistorySession: (sid: string, url?: string) => Promise<boolean>;
 }
 
@@ -263,11 +263,14 @@ describe('useRecordings', () => {
       { step_description: '打开登录页', expected_result: '进入登录页' },
       { step_description: '输入用户名', expected_result: '用户名回显正确' },
     ];
-    mockedAxios.post.mockResolvedValueOnce({ data: { steps: fakeSteps } });
+    // convert 会先 GET events，再 POST convert
+    mockedAxios.post
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: { steps: fakeSteps } });
 
     let result = { ok: false, count: 0 };
     await act(async () => {
-      result = await get().convertToSteps();
+      result = await get().convertToSteps({ force: true });
     });
 
     expect(result).toEqual({ ok: true, count: 2 });
@@ -275,11 +278,49 @@ describe('useRecordings', () => {
       expect.objectContaining({
         method: 'POST',
         url: '/api/recordings/sess-3/convert',
-        data: { session_id: 'sess-3' },
+        data: { session_id: 'sess-3', force: true },
       })
     );
     expect(get().steps).toEqual(fakeSteps);
     expect(get().converting).toBe(false);
+  });
+
+  it('convertToSteps 再次调用会强制重新请求并覆盖旧步骤', async () => {
+    const { get } = mountHook();
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { session_id: 'sess-3b', status: 'recording' },
+    });
+    await act(async () => {
+      await get().startRecording('https://example.com');
+    });
+
+    const first = [{ step_description: '旧步骤', expected_result: '旧' }];
+    const second = [
+      { step_description: '新步骤A', expected_result: 'A' },
+      { step_description: '新步骤B', expected_result: 'B' },
+    ];
+    mockedAxios.post
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: { steps: first } });
+    await act(async () => {
+      await get().convertToSteps({ force: true });
+    });
+    expect(get().steps).toEqual(first);
+
+    mockedAxios.post
+      .mockResolvedValueOnce({ data: [{ event_type: 'click', timestamp: 1 }] })
+      .mockResolvedValueOnce({ data: { steps: second } });
+    let result = { ok: false, count: 0 };
+    await act(async () => {
+      result = await get().convertToSteps({ force: true });
+    });
+
+    expect(result).toEqual({ ok: true, count: 2 });
+    expect(get().steps).toEqual(second);
+    const convertCalls = mocks.axiosDefault.mock.calls.filter(
+      (c: [{ url?: string }]) => String(c[0]?.url || '').includes('/convert')
+    );
+    expect(convertCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('convertToSteps 在没有 sessionId 时直接返回 false', async () => {
@@ -307,10 +348,13 @@ describe('useRecordings', () => {
       await get().startRecording('https://example.com');
     });
 
-    mockedAxios.post.mockRejectedValueOnce(new Error('convert fail'));
+    // 先 GET events 成功，再 POST convert 失败；失败后应恢复清空前的步骤（此处为空）
+    mockedAxios.post
+      .mockResolvedValueOnce({ data: [] })
+      .mockRejectedValueOnce(new Error('convert fail'));
     let result = { ok: true, count: 1 };
     await act(async () => {
-      result = await get().convertToSteps();
+      result = await get().convertToSteps({ force: true });
     });
 
     expect(result).toEqual({ ok: false, count: 0 });

@@ -266,38 +266,58 @@ async def append_run_logs(db: AsyncSession, run_id: int, log_entries: list[dict]
             pass
 
 
+def build_batch_execution_queue(
+    case_ids: list[int],
+    init_case_ids: list[int] | None = None,
+    init_policy: str = "once",
+) -> list[tuple[int, bool]]:
+    """按 init_policy 展开执行队列：``[(case_id, is_init), ...]``。
+
+    - ``once``：init… 然后 main…
+    - ``before_each``：每个 main 前重复跑全部 init
+    """
+    inits = list(init_case_ids or [])
+    mains = list(case_ids or [])
+    queue: list[tuple[int, bool]] = []
+    if init_policy == "before_each" and inits:
+        for main_id in mains:
+            for init_id in inits:
+                queue.append((init_id, True))
+            queue.append((main_id, False))
+    else:
+        for init_id in inits:
+            queue.append((init_id, True))
+        for main_id in mains:
+            queue.append((main_id, False))
+    return queue
+
+
 async def precreate_pending_runs(
     db: AsyncSession,
     case_ids: list[int],
     batch_id: int,
     init_case_ids: list[int] | None = None,
-) -> dict[int, int]:
+    init_policy: str = "once",
+) -> list[tuple[int, int, bool]]:
     """在浏览器启动之前预创建 pending TestRun 记录。
 
-    Returns ``{case_id: run_id}`` 映射。失败会 rollback 并返回已创建的
-    部分映射（best-effort）。``init_case_ids`` 内的用例会被标记为
-    ``is_init=True``。
+    Returns ``[(case_id, run_id, is_init), ...]`` 按执行顺序。
+    ``before_each`` 下同一 init 可对应多条 TestRun。
+    失败会 rollback 并返回已创建的部分列表（best-effort）。
     """
     from app import db_models
 
-    precreated: dict[int, int] = {}
+    queue = build_batch_execution_queue(case_ids, init_case_ids, init_policy)
+    precreated: list[tuple[int, int, bool]] = []
     try:
-        for cid in (init_case_ids or []):
+        for cid, is_init in queue:
             pending_run = db_models.TestRun(
                 case_id=cid, batch_id=batch_id, status="pending",
-                start_time=None, end_time=None, is_init=True,
+                start_time=None, end_time=None, is_init=is_init,
             )
             db.add(pending_run)
             await db.flush()
-            precreated[cid] = pending_run.id
-        for cid in case_ids:
-            pending_run = db_models.TestRun(
-                case_id=cid, batch_id=batch_id, status="pending",
-                start_time=None, end_time=None,
-            )
-            db.add(pending_run)
-            await db.flush()
-            precreated[cid] = pending_run.id
+            precreated.append((cid, pending_run.id, is_init))
         await db.commit()
     except SQLAlchemyError:
         logger.exception("Failed to pre-create TestRun records")

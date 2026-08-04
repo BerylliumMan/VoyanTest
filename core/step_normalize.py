@@ -38,7 +38,7 @@ _ACTION_ALIASES = {
 
 _CTRL_TYPE_SUFFIX = (
     r"(?:下拉框|下拉菜单|下拉列表|选择器|输入框|文本框|文本域|编辑框|"
-    r"组合框|按钮|控件|弹窗|对话框|提示框|"
+    r"组合框|按钮|控件|弹窗|对话框|提示框|模块|菜单|页签|选项卡|链接|区域|"
     r"图标|图片|图像|箭头|符号|徽标|logo|icon|image|img)"
 )
 
@@ -97,20 +97,44 @@ def expand_compound_ui_step(step: str) -> list[str]:
     s = (step or "").strip()
     if not s:
         return []
-    close_all = (
-        re.search(r"(?:把|将)?所有(?:的)?(?:对话框|弹窗|提示框)", s)
-        or re.search(r"(?:关闭|关掉)所有(?:的)?(?:对话框|弹窗|提示框)", s)
-    )
-    mentions_close = re.search(
-        r"点击【(?:关闭|X|×)】|点击.*(?:关闭|【X】)|关闭标志|关闭按钮",
-        s,
-    )
-    if close_all and (mentions_close or "关闭" in s or "【X】" in s):
+    if _is_close_all_dialogs_step(s):
         return [
             "等待弹窗或对话框出现",
             "点击【关闭】",
         ]
     return [s]
+
+
+def _is_close_all_dialogs_step(step: str) -> bool:
+    s = (step or "").strip()
+    if not s:
+        return False
+    close_all = (
+        re.search(r"(?:把|将)?所有(?:的)?(?:对话框|弹窗|提示框)", s)
+        or re.search(r"(?:关闭|关掉)所有(?:的)?(?:对话框|弹窗|提示框)", s)
+    )
+    mentions_close = re.search(
+        r"点击【(?:关闭|X|×)】|点击.*(?:关闭|【X】)|关闭标志|关闭按钮|【X】|形状的关闭",
+        s,
+    )
+    return bool(close_all and (mentions_close or "关闭" in s or "【X】" in s))
+
+
+def parse_close_all_dialogs_step(step: str) -> Optional[dict[str, Any]]:
+    """Keep wait / close-all / X intent in one structured step for the editor."""
+    if not _is_close_all_dialogs_step(step):
+        return None
+    return {
+        "action": "click",
+        "target_name": "关闭",
+        "target_role": "button",
+        "disambiguation": "所有对话框",
+        "icon_hint": "【X】形状的关闭标志",
+        "note": (
+            "先等待页面中间对话框出现，再关闭全部（关闭按钮或X）；"
+            "禁止点「去查看」/消息列表/通知正文"
+        ),
+    }
 
 
 def sanitize_ui_step(step: str) -> str:
@@ -121,8 +145,16 @@ def sanitize_ui_step(step: str) -> str:
 
     s = sanitize_brackets_ellipsis(s)
 
+    # Fix doubled Instant brackets: 在【在【处理状态】】中选择【已归档】
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r"【\s*在\s*【([^】]+)】\s*】", r"【\1】", s)
+        s = re.sub(r"【\s*【([^】]+)】\s*】", r"【\1】", s)
+
     if re.fullmatch(
-        r"等待(?:页面)?(?:加载)?完成|等待加载完成|等待页面稳定",
+        r"等待(?:页面)?(?:加载)?完成|等待加载完成|等待页面稳定|"
+        r"等待系统(?:自动)?(?:处理|验证|响应)|等待系统处理",
         s,
     ):
         return "等待页面稳定"
@@ -139,11 +171,81 @@ def sanitize_ui_step(step: str) -> str:
         if label and label.lower() not in _GENERIC_BRACKET_ONLY:
             return f"点击【{label}】"
 
-    m = re.match(rf"^点击\s*(.+?){_CTRL_TYPE_SUFFIX}\s*$", s)
+    # 点击【产品授权】模块 → 点击【产品授权】（控件词在括号外）
+    # Keep 下拉框 so parse can set combobox (Ant Design: 请选择单位 textbox).
+    m = re.match(rf"^点击\s*【([^】]+)】\s*({_CTRL_TYPE_SUFFIX})\s*$", s)
+    if m:
+        label = m.group(1).strip()
+        ctrl = m.group(2)
+        if label and label.lower() not in _GENERIC_BRACKET_ONLY:
+            if re.search(r"下拉|选择器|组合框", ctrl):
+                return f"点击【{label}】下拉框"
+            return f"点击【{label}】"
+
+    m = re.match(rf"^点击\s*(.+?)({_CTRL_TYPE_SUFFIX})\s*$", s)
     if m and "【" not in s:
         label = m.group(1).strip(" ：:的")
+        ctrl = m.group(2)
         if label and label.lower() not in _GENERIC_BRACKET_ONLY:
+            if re.search(r"下拉|选择器|组合框", ctrl):
+                return f"点击【{label}】下拉框"
             return f"点击【{label}】"
+
+    # 查看/检查/观察 …区域 → 等待【…】出现（可读预览用）
+    m = re.match(r"^(?:查看|检查|观察)\s*【([^】]+)】\s*(?:区域|面板|页面|内容|栏)?\s*$", s)
+    if m:
+        return f"等待【{m.group(1).strip()}】出现"
+    m = re.match(r"^(?:查看|检查|观察)\s*(.+?)\s*(?:区域|面板|页面|内容|栏)\s*$", s)
+    if m and "【" not in s:
+        label = m.group(1).strip(" ：:的")
+        if label:
+            return f"等待【{label}】出现"
+
+    # 设置【字段】为【值】 / 清空【字段】
+    m = re.match(r"^设置\s*【([^】]+)】\s*(?:为|成)\s*【([^】]+)】\s*$", s)
+    if m:
+        return f"在【{m.group(1).strip()}】中选择【{m.group(2).strip()}】"
+    m = re.match(r"^清空\s*【([^】]+)】", s)
+    if m:
+        return f"在【{m.group(1).strip()}】输入 "
+
+    # 登录系统并进入【产品授权】页面 → 打开【产品授权】
+    m = re.match(r"^(?:登录系统)?(?:并)?进入\s*【([^】]+)】", s)
+    if m:
+        return f"打开【{m.group(1).strip()}】"
+    # 进入大模型配置列表 / 登录系统进入卷宗列表
+    m = re.match(
+        r"^(?:登录系统)?(?:并)?进入\s*(.+?)(?:页面|页)?\s*$",
+        s,
+    )
+    if m and "【" not in s:
+        label = m.group(1).strip(" ：:的")
+        if label and len(label) <= 40:
+            return f"打开【{label}】"
+    if re.fullmatch(r"登录系统", s):
+        return "点击【登录】"
+
+    # 点击搜索结果中的【京州市院】 / 点击【搜索结果中的】京州市院
+    m = re.match(
+        r"^点击\s*(?:【)?(?P<ctx>搜索结果|筛选结果|列表|下拉|弹窗|菜单)中的?】?\s*【(?P<label>[^】]+)】\s*$",
+        s,
+    )
+    if m:
+        return f"点击【{m.group('label').strip()}】（{m.group('ctx')}中的）"
+    m = re.match(
+        r"^点击\s*【(?P<ctx>搜索结果|筛选结果|列表|下拉|弹窗|菜单)中的?】\s*(?P<label>[^【】\s]+)\s*$",
+        s,
+    )
+    if m:
+        return f"点击【{m.group('label').strip()}】（{m.group('ctx')}中的）"
+    m = re.match(
+        r"^点击\s*(?P<ctx>搜索结果|筛选结果|列表|下拉|弹窗|菜单)中的?\s*(?P<label>.+?)\s*$",
+        s,
+    )
+    if m and "【" not in s:
+        label = m.group("label").strip(" ：:的")
+        if label:
+            return f"点击【{label}】（{m.group('ctx')}中的）"
 
     m = re.match(
         r"^点击【(?P<br>[^】]+)】\s*[（(](?P<hint>[^）)]+)[）)]\s*$",
@@ -171,13 +273,22 @@ def sanitize_ui_step(step: str) -> str:
         if field and value:
             return f"在【{field}】输入 {value}"
 
+    # 在弹出的'输入关键词…'中输入 【值】（须先于下方宽松填值规则）
+    m = re.match(
+        r"^(?:在\s*)?(?:弹出的)?[\"'「『]([^\"'」』]+)[\"'」』]\s*(?:中)?\s*"
+        r"(?:输入|填写|填入)\s*【([^】]+)】\s*$",
+        s,
+    )
+    if m:
+        return f"在【{m.group(1).strip()}】输入 {m.group(2).strip()}"
+
     m = re.match(
         rf"^(?:在\s*)?(.+?)(?:{_CTRL_TYPE_SUFFIX})?\s*(?:输入|填写|填入)\s*【([^】]+)】\s*$",
         s,
     )
     if m:
         field, value = m.group(1).strip(" ：:的"), m.group(2).strip()
-        if field and value and "【" not in field:
+        if field and value and "【" not in field and "'" not in field and '"' not in field:
             field = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", field).strip(" ：:的")
             if field:
                 return f"在【{field}】输入 {value}"
@@ -210,6 +321,42 @@ def _clean_name(name: Optional[str]) -> Optional[str]:
     if cleaned and cleaned.lower() not in _GENERIC_BRACKET_ONLY:
         s = cleaned
     return s or None
+
+
+_CONTEXT_CLICK_NAME_RE = re.compile(
+    r"(?:搜索结果|筛选结果|下拉|列表|弹窗|对话框|菜单|树|表格|选项).{0,6}中的?$"
+    r"|^.+?(?:中的|里的)$"
+)
+
+
+def _normalize_context_click_fields(
+    action: str,
+    target_name: Optional[str],
+    value: Optional[str],
+    disambiguation: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """点击【搜索结果中的】+ value=京州市院 → 目标=京州市院，消歧=搜索结果中的。"""
+    if action != "click":
+        return target_name, value, disambiguation
+    name = (target_name or "").strip()
+    val = (value or "").strip() if value is not None else ""
+    if not name or not val:
+        return target_name, value, disambiguation
+    if _CONTEXT_CLICK_NAME_RE.search(name) or name.endswith("中的") or name.endswith("里的"):
+        dis = disambiguation or name
+        return val, None, dis
+    return target_name, value, disambiguation
+
+
+def _clean_fill_field_name(name: Optional[str]) -> Optional[str]:
+    """弹出的\"输入关键词进行筛选\"中 → 输入关键词进行筛选。"""
+    if not name:
+        return name
+    s = str(name).strip().replace("\\", "")
+    s = re.sub(r"^(?:在\s*)?(?:弹出的)?", "", s).strip()
+    s = s.strip(" \"'「『」』")
+    s = re.sub(r"中\s*$", "", s).strip(" \"'「『」』")
+    return s or name
 
 
 def coerce_structured_step(raw: Any) -> Optional[dict[str, Any]]:
@@ -258,11 +405,23 @@ def coerce_structured_step(raw: Any) -> Optional[dict[str, Any]]:
     if note is not None:
         note = str(note).strip() or None
 
+    # Recorded Playwright/CSS selector (optional; solidified from CDP events)
+    selector = raw.get("selector")
+    if selector is not None:
+        selector = str(selector).strip() or None
+
     if not action:
         desc = raw.get("description") or raw.get("desc") or ""
         if desc:
             return parse_instant_to_structured(sanitize_ui_step(str(desc)))
         return None
+
+    if action == "fill" and target_name:
+        target_name = _clean_name(_clean_fill_field_name(target_name))
+
+    target_name, value, disambiguation = _normalize_context_click_fields(
+        action, target_name, value, disambiguation,
+    )
 
     # select with field+option in one object may use target_name=field, value=option
     out: dict[str, Any] = {"action": action}
@@ -280,6 +439,8 @@ def coerce_structured_step(raw: Any) -> Optional[dict[str, Any]]:
         out["frame_hint"] = frame_hint
     if note is not None:
         out["note"] = note
+    if selector is not None:
+        out["selector"] = selector
     return out
 
 
@@ -299,8 +460,32 @@ def render_structured_step(step: dict[str, Any] | None) -> str:
         label = name or value_s
         return f"打开【{label}】" if label else "打开页面"
     if action == "click":
-        if name:
-            return f"点击【{name}】{suffix}"
+        # Prefer real option label in value when name is only context (“搜索结果中的”)
+        label = name
+        ctx = dis
+        if value_s and (_CONTEXT_CLICK_NAME_RE.search(name) or name.endswith("中的") or name.endswith("里的")):
+            label, ctx = value_s, (dis or name)
+        elif value_s and not name:
+            label = value_s
+        note = (step.get("note") or "").strip()
+        # Close-all dialogs: restore the Instant-style sentence for preview
+        if label == "关闭" and (
+            "所有对话框" in (ctx or "")
+            or "对话框" in note
+            or "【X】" in icon
+        ):
+            parts = ["等待页面中间出现对话框"]
+            if "所有" in (ctx or note):
+                parts.append("把所有对话框都点击【关闭】按钮")
+            else:
+                parts.append("点击【关闭】按钮")
+            if icon or "【X】" in note:
+                parts.append("或【X】形状的关闭标志")
+            return "，".join(parts)
+        if label:
+            suffix2 = f"（{ctx}）" if ctx else suffix
+            extra = f"；备选：{icon}" if icon else ""
+            return f"点击【{label}】{suffix2}{extra}"
         return f"点击{suffix}" if suffix else "点击"
     if action == "fill":
         if name:
@@ -346,9 +531,48 @@ def render_structured_step(step: dict[str, Any] | None) -> str:
 
 def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     """Best-effort parse of Instant NL into StructuredStep. Returns None if unknown."""
-    s = sanitize_ui_step(step or "").strip()
+    raw = (step or "").strip()
+    if not raw:
+        return None
+
+    # Close-all dialogs: keep wait + all + X as enriched fields (not just 点击关闭)
+    close_all = parse_close_all_dialogs_step(raw)
+    if close_all:
+        return close_all
+
+    # Compound Instant phrases (e.g. close-all dialogs) → primary executable atom.
+    parts = expand_compound_ui_step(raw)
+    if len(parts) > 1:
+        parsed_parts: list[dict[str, Any]] = []
+        for part in parts:
+            parsed = parse_instant_to_structured(part)
+            if parsed:
+                parsed_parts.append(parsed)
+        if parsed_parts:
+            for p in reversed(parsed_parts):
+                if (p.get("action") or "") != "wait":
+                    return p
+            return parsed_parts[-1]
+
+    s = sanitize_ui_step(raw).strip()
     if not s:
         return None
+
+    # fill: 在弹出的'输入关键词…'中输入 【值】 / 在弹出的"…"中输入 值
+    m = re.match(
+        r"^(?:在\s*)?(?:弹出的)?[\"'「『]?([^\"'」』【】]+)[\"'」』]?\s*(?:中)?\s*"
+        r"(?:输入|填写|填入)\s*【([^】]+)】\s*$",
+        s,
+    )
+    if m:
+        field = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", m.group(1).strip(" ：:的")).strip()
+        if field:
+            return {
+                "action": "fill",
+                "target_name": strip_ellipsis_in_label(field),
+                "target_role": "textbox",
+                "value": m.group(2).strip(),
+            }
 
     # click blank
     if re.search(r"点击\s*(?:页面)?(?:空白|外侧|遮罩)", s):
@@ -375,6 +599,30 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     if re.fullmatch(r"等待(?:页面稳定|弹窗或对话框出现|加载完成)", s):
         return {"action": "wait", "value": None, "target_name": None, "note": s}
 
+    # Dropdown open-only: 点击单位下拉框 / 点击【单位】下拉框
+    m = re.match(
+        rf"^点击\s*【([^】]+)】\s*(?:的)?(?:下拉框|下拉菜单|下拉列表|选择器|组合框)\s*$",
+        s,
+    )
+    if m:
+        return {
+            "action": "click",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "combobox",
+        }
+    m = re.match(
+        rf"^点击\s*(.+?)(?:的)?(?:下拉框|下拉菜单|下拉列表|选择器|组合框)\s*$",
+        s,
+    )
+    if m and "【" not in s:
+        label = strip_ellipsis_in_label(m.group(1).strip(" ：:的"))
+        if label and label.lower() not in _GENERIC_BRACKET_ONLY:
+            return {
+                "action": "click",
+                "target_name": label,
+                "target_role": "combobox",
+            }
+
     # assert
     m = re.match(r"^断言页面包含\s*【([^】]+)】", s)
     if m:
@@ -384,9 +632,9 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     if m:
         return {"action": "assert_visible", "target_name": strip_ellipsis_in_label(m.group(1))}
 
-    # fill
+    # fill（允许清空：值为空）
     m = re.match(
-        r"^(?:在\s*)?【([^】]+)】\s*(?:中)?\s*(?:输入|填写|填入)\s*(.+)$",
+        r"^(?:在\s*)?【([^】]+)】\s*(?:中)?\s*(?:输入|填写|填入)\s*(.*)$",
         s,
     )
     if m:
@@ -441,9 +689,9 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     if m:
         return {"action": "hover", "target_name": strip_ellipsis_in_label(m.group(1))}
 
-    # click with optional disambiguation
+    # click with optional disambiguation / trailing control-type word
     m = re.match(
-        r"^点击\s*【([^】]+)】\s*(?:[（(]([^）)]+)[）)])?\s*$",
+        rf"^点击\s*【([^】]+)】\s*(?:[（(]([^）)]+)[）)])?\s*(?:{_CTRL_TYPE_SUFFIX})?\s*$",
         s,
     )
     if m:
@@ -453,8 +701,89 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
             "target_role": "button",
         }
         if m.group(2):
-            out["disambiguation"] = m.group(2).strip()
+            dis = m.group(2).strip()
+            out["disambiguation"] = dis
+            # 搜索结果/筛选结果 clicks are not toolbar buttons
+            if re.search(r"搜索结果|筛选结果|下拉|列表|选项", dis):
+                out.pop("target_role", None)
         return out
+
+    # 查看/检查/观察… → wait for label
+    m = re.match(r"^(?:查看|检查|观察)\s*【([^】]+)】", s)
+    if m:
+        label = strip_ellipsis_in_label(m.group(1))
+        return {"action": "wait", "target_name": label, "value": label}
+    m = re.match(r"^(?:查看|检查|观察)\s*(.+?)\s*(?:区域|面板|页面|内容|栏)\s*$", s)
+    if m and "【" not in s:
+        label = strip_ellipsis_in_label(m.group(1).strip(" ：:的"))
+        if label:
+            return {"action": "wait", "target_name": label, "value": label}
+
+    # 点击…的【执行日志】按钮 / 点击未连接配置行的【设为默认】按钮
+    m = re.match(
+        rf"^点击.+?【([^】]+)】\s*(?:{_CTRL_TYPE_SUFFIX})?\s*$",
+        s,
+    )
+    if m:
+        return {
+            "action": "click",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "button",
+        }
+
+    # 在【创建时间】选择特定起止日期（选项非【】）
+    m = re.match(
+        r"^(?:在\s*)?【([^】]+)】\s*(?:中)?\s*选择\s*(.+)$",
+        s,
+    )
+    if m:
+        return {
+            "action": "select",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "combobox",
+            "value": m.group(2).strip(),
+        }
+
+    # 选择/上传 …文件
+    m = re.match(r"^(?:选择|上传)\s*(.+?文件.*?)\s*$", s)
+    if m:
+        return {
+            "action": "select",
+            "target_name": "文件",
+            "value": m.group(1).strip(),
+            "note": s,
+        }
+
+    # Last resort: first 【label】 as click target (align frontend hydrate)
+    m = re.search(r"【([^】]+)】", s)
+    if m:
+        label = strip_ellipsis_in_label(m.group(1))
+        if label and label.lower() not in _GENERIC_BRACKET_ONLY:
+            return {
+                "action": "click",
+                "target_name": label,
+                "target_role": "button",
+            }
+
+    # 半角/缺失括号：点击【确定]
+    m = re.match(r"^点击\s*【?\s*([^】\]]+?)\s*[】\]]\s*$", s)
+    if m:
+        return {
+            "action": "click",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "button",
+        }
+    m = re.match(r"^在弹出的确认框中点击\s*【?\s*([^】\]]+?)\s*[】\]]?\s*$", s)
+    if m:
+        return {
+            "action": "click",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "button",
+        }
+
+    # 观察/查看/检查/等待/确认…（无【】）→ wait，原文进目标/值，避免编辑器空白
+    if re.match(r"^(?:观察|查看|检查|等待|确认|核对|确保)", s):
+        return {"action": "wait", "target_name": s, "value": s, "note": s}
 
     return None
 

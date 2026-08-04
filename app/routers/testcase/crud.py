@@ -199,6 +199,44 @@ async def delete_test_case(case_id: int, user=Depends(get_current_user), db: Asy
         raise HTTPException(status_code=500, detail="删除测试用例时发生内部错误")
 
 
+@router.delete("/{case_id}/compiled-script")
+async def clear_case_compiled_script(
+    case_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """Manually clear the solidified Playwright script for a case."""
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    from core.compiled_script import clear_compiled_script
+    changed = clear_compiled_script(db_case)
+    if changed:
+        await db.commit()
+    return {"ok": True, "cleared": changed}
+
+
+@router.get("/{case_id}/compiled-script")
+async def get_case_compiled_script(
+    case_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """Return solidified Playwright script metadata + source (if any)."""
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    return {
+        "case_id": case_id,
+        "has_script": bool(getattr(db_case, "compiled_script", None)),
+        "compiled_script": getattr(db_case, "compiled_script", None),
+        "compiled_script_hash": getattr(db_case, "compiled_script_hash", None),
+        "compiled_at": getattr(db_case, "compiled_at", None),
+    }
+
+
 @router.put("/{case_id}", response_model=models.TestCase)
 async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     """

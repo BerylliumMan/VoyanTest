@@ -89,6 +89,26 @@ class TestStepBase(BaseModel):
     # Midscene-style: when False, never read/write locator memory for this step
     cacheable: bool = True
 
+    @field_validator("retry_max", mode="before")
+    @classmethod
+    def _coerce_retry_max(cls, v):
+        return 0 if v is None else v
+
+    @field_validator("retry_delay", mode="before")
+    @classmethod
+    def _coerce_retry_delay(cls, v):
+        return 1.0 if v is None else v
+
+    @field_validator("assertions", mode="before")
+    @classmethod
+    def _coerce_assertions(cls, v):
+        return [] if v is None else v
+
+    @field_validator("cacheable", mode="before")
+    @classmethod
+    def _coerce_cacheable(cls, v):
+        return True if v is None else v
+
 class ModuleBase(BaseModel):
     project_id: int
     name: str = Field(..., min_length=1, max_length=255)
@@ -177,6 +197,9 @@ class TestCase(TestCaseBase):
     steps: List[TestStep] = []
     is_init: bool = False
     case_kind: str = "functional"
+    compiled_script: Optional[str] = None
+    compiled_script_hash: Optional[str] = None
+    compiled_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -448,3 +471,49 @@ class AgentMessageResponse(BaseModel):
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+# ----------------------------
+# 测试用例集
+# ----------------------------
+
+class TestSuiteCaseItem(BaseModel):
+    case_id: int
+    order_index: int = 0
+    name: Optional[str] = None
+    module_id: Optional[int] = None
+
+
+class TestSuiteCreate(BaseModel):
+    project_id: int
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    case_kind: str = Field("ui", pattern="^(functional|ui)$")
+    case_ids: List[int] = []
+
+
+class TestSuiteUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    case_ids: Optional[List[int]] = None  # 有序完整列表；None 表示不改用例
+
+
+class TestSuite(BaseModel):
+    id: int
+    project_id: int
+    name: str
+    description: Optional[str] = None
+    case_kind: str = "ui"
+    case_count: int = 0
+    cases: List[TestSuiteCaseItem] = []
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class SuiteRunRequest(BaseModel):
+    environment_id: Optional[int] = None
+    init_case_ids: List[int] = []
+    agent_name: Optional[str] = None
+    backend: Optional[str] = None

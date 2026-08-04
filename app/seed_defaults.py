@@ -305,7 +305,7 @@ def get_seed_prompts() -> dict[str, dict]:
             "category": "recording",
             "content": CDP_TO_STEPS_PROMPT.strip(),
             "variables": [],
-            "description": "将 CDP 录制事件时间线转换为自然语言测试步骤 JSON",
+            "description": "将 CDP 录制事件转换为 UI StructuredStep（可执行）JSON",
         },
         "verify_expected": {
             "name": "预期结果验证",

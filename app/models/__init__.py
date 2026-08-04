@@ -31,6 +31,8 @@ from .schemas import (  # noqa: F401
     TestStepBase, TestStepCreate, TestStepCreatePayload, TestStepUpdate, TestStep,
     # batch
     RunBatchCreate, RunBatch, RunBatchUpdate, TestRun,
+    # suite
+    TestSuiteCreate, TestSuiteUpdate, TestSuite, TestSuiteCaseItem, SuiteRunRequest,
     # schedule
     ScheduleBase, ScheduleCreate, ScheduleUpdate, Schedule,
     # agent
@@ -43,6 +45,7 @@ from .schemas import (  # noqa: F401
 from . import auth  # noqa: F401
 from . import project  # noqa: F401
 from . import testcase  # noqa: F401
+from . import suite  # noqa: F401
 from . import batch  # noqa: F401
 from . import config  # noqa: F401
 from . import agent  # noqa: F401

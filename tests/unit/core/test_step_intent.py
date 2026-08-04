@@ -5,9 +5,14 @@ from __future__ import annotations
 from core.locator_memory import build_plan_blob, get_plan_steps
 from core.step_intent import (
     StepIntent,
+    derived_selector_candidates,
     extract_label_hints,
     intent_to_tool_call,
+    is_usable_solidified_selector,
     match_intent_candidates,
+    selector_tool_call_candidates,
+    solidified_selector,
+    tool_call_from_solidified_selector,
 )
 from core.verification_strategy import VerificationStrategy
 
@@ -122,3 +127,28 @@ Page URL: https://example.com/form
         try_replay_plan_mcp(_M(), bad, snapshot=snap_open, step_description="点【不存在】"),
     )
     assert not fail["success"]
+
+
+def test_bare_input_selector_not_usable():
+    assert not is_usable_solidified_selector("input")
+    assert not is_usable_solidified_selector("button")
+    assert not is_usable_solidified_selector("#el-popover-9684 > div > input")
+    assert is_usable_solidified_selector('input[placeholder*="单位"]')
+    assert is_usable_solidified_selector('button:has-text("登录")')
+
+
+def test_skip_weak_solidified_prefer_derived_placeholder():
+    struct = {
+        "action": "click",
+        "target_name": "单位",
+        "target_role": "combobox",
+        "selector": "input",
+    }
+    assert solidified_selector(struct) is None
+    assert tool_call_from_solidified_selector(struct) is None
+    derived = derived_selector_candidates(struct)
+    assert 'input[placeholder*="单位"]' in derived
+    cands = selector_tool_call_candidates(struct)
+    assert cands
+    assert cands[0].selector == 'input[placeholder*="单位"]'
+    assert cands[0].action == "click"

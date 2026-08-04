@@ -395,7 +395,11 @@ async def convert_to_test_steps(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> ConvertResponse:
-    """读取录制事件并转换为测试步骤（不 drain 内存缓冲，可重复转换）。"""
+    """读取录制事件并转换为测试步骤（不 drain 内存缓冲，可重复转换）。
+
+    每次请求都重新从当前事件跑规则/LLM 转换，不读取历史 convert 结果。
+    ``force=true``（默认）显式声明强制重新生成，便于前端二次点击语义对齐。
+    """
     if req.session_id and req.session_id != session_id:
         raise HTTPException(
             status_code=400,
@@ -405,6 +409,7 @@ async def convert_to_test_steps(
             ),
         )
 
+    force = bool(getattr(req, "force", True))
     state = await get_session(session_id)
     page_title = ""
     if state is not None:
@@ -425,6 +430,13 @@ async def convert_to_test_steps(
         page_title = row.page_title or ""
         event_dicts = await _load_recording_event_dicts(session_id, type("S", (), {"cdp_session_ref": None})(), db)
 
+    logger.info(
+        "录制转换开始: session_id=%s force=%s events=%d",
+        session_id,
+        force,
+        len(event_dicts or []),
+    )
+
     if not event_dicts:
         return ConvertResponse(
             session_id=session_id,
@@ -433,6 +445,7 @@ async def convert_to_test_steps(
             events_count=0,
         )
     try:
+        # 始终用当前事件重新转换；force 仅作显式语义（无结果缓存可跳过）
         raw_steps = await convert_events_to_steps(
             events=event_dicts,
             page_title=page_title or "",
@@ -445,13 +458,31 @@ async def convert_to_test_steps(
             status_code=500, detail=f"LLM 转换失败: {exc}"
         )
 
-    steps = [
-        ConvertStepItem(
-            step_description=str(s.get("step_description", "") or "").strip(),
-            expected_result=str(s.get("expected_result", "") or "").strip(),
+    steps = []
+    for s in (raw_steps or []):
+        structured = s.get("structured_step") if isinstance(s.get("structured_step"), dict) else None
+        if structured is None and s.get("action"):
+            structured = {
+                k: s.get(k)
+                for k in (
+                    "action", "target_name", "target_role", "value",
+                    "disambiguation", "icon_hint", "frame_hint", "note",
+                    "selector",
+                )
+                if s.get(k) not in (None, "")
+            }
+        steps.append(
+            ConvertStepItem(
+                step_description=str(s.get("step_description", "") or "").strip(),
+                expected_result=str(s.get("expected_result", "") or "").strip(),
+                action=s.get("action") or (structured or {}).get("action"),
+                target_name=s.get("target_name") or (structured or {}).get("target_name"),
+                target_role=s.get("target_role") or (structured or {}).get("target_role"),
+                value=s.get("value") if s.get("value") is not None else (structured or {}).get("value"),
+                selector=s.get("selector") or (structured or {}).get("selector"),
+                structured_step=structured,
+            )
         )
-        for s in (raw_steps or [])
-    ]
 
     logger.info(
         "录制转换完成: session_id=%s events=%d steps=%d",
@@ -519,8 +550,10 @@ async def replay_recording(
     tc = db_models.TestCase(
         project_id=target_project.id,
         module_id=None,
+        project_case_number=await crud.get_next_project_case_number(db, target_project.id),
         name=f"录制回放-{session_id[:8]}-{datetime.utcnow().strftime('%H%M%S')}",
         description=f"由录制会话 {session_id} 自动生成",
+        case_kind="ui",
     )
     db.add(tc)
     await db.flush()
@@ -573,22 +606,49 @@ async def save_as_case(
     if allowed_ids is not None and req.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    tc = db_models.TestCase(
-        project_id=req.project_id,
-        module_id=req.module_id,
-        name=req.name,
-    )
-    db.add(tc)
-    await db.flush()
+    case_kind = (req.case_kind or "ui").strip().lower()
+    if case_kind not in ("ui", "functional"):
+        case_kind = "ui"
 
+    from core.step_normalize import coerce_structured_step, parse_instant_to_structured
+    from app.models import schemas as api_schemas
+
+    step_payloads: list[api_schemas.TestStepCreatePayload] = []
     for i, step in enumerate(req.steps):
-        db.add(db_models.TestStep(
-            case_id=tc.id,
-            step_order=i + 1,
-            description=step.step_description,
-            parsed_result=step.expected_result,
-        ))
-    await db.commit()
-    await db.refresh(tc)
+        structured = step.structured_step if isinstance(step.structured_step, dict) else None
+        if structured is None and step.action:
+            structured = {
+                k: getattr(step, k)
+                for k in (
+                    "action", "target_name", "target_role", "value", "selector",
+                )
+                if getattr(step, k, None) not in (None, "")
+            }
+        if structured is None and case_kind == "ui" and step.step_description:
+            structured = parse_instant_to_structured(step.step_description)
+        if isinstance(structured, dict):
+            structured = coerce_structured_step(structured) or structured
+        desc = (step.step_description or "").strip() or f"步骤 {i + 1}"
+        step_payloads.append(
+            api_schemas.TestStepCreatePayload(
+                step_order=i + 1,
+                description=desc,
+                parsed_result=step.expected_result,
+                structured_step=structured if isinstance(structured, dict) else None,
+            )
+        )
 
-    return SaveAsCaseResponse(case_id=tc.id, name=tc.name, steps_count=len(req.steps))
+    created = await crud.create_test_case(
+        db,
+        api_schemas.TestCaseCreate(
+            project_id=req.project_id,
+            module_id=req.module_id,
+            name=req.name,
+            case_kind=case_kind,
+            steps=step_payloads,
+        ),
+    )
+
+    return SaveAsCaseResponse(
+        case_id=created.id, name=created.name, steps_count=len(req.steps),
+    )

@@ -31,6 +31,7 @@ class GenPreviewItem(BaseModel):
     priority: str
     selected: bool = True
     validation_errors: str = ""
+    structured_steps: list = []
 
 
 class GenPreviewResponse(BaseModel):
@@ -43,6 +44,9 @@ class GenPreviewResponse(BaseModel):
     progress_message: str = ""
     functional_points_count: int = 0
     test_cases_count: int = 0
+    case_kind: str = "ui"  # ui | functional
+    project_id: Optional[int] = None
+    project_name: str = ""
     functional_points: list[dict]
     test_cases: list[GenPreviewItem]
 
@@ -52,12 +56,16 @@ class GenImportRequest(BaseModel):
     project_id: int
     selected_ids: list[str] | None = None  # None = import all
     parent_module_id: int | None = None
+    case_kind: str | None = None  # optional override: ui | functional
 
 
 class GenImportResponse(BaseModel):
     imported_count: int
     skipped_count: int = 0
     test_case_ids: list[int]
+    case_kind: str = "ui"
+    project_id: int | None = None
+    project_name: str = ""
 
 
 class GenHistoryItem(BaseModel):
@@ -74,6 +82,7 @@ class GenHistoryItem(BaseModel):
     functional_points_count: int
     test_cases_count: int
     imported_count: int
+    case_kind: str = "ui"  # ui | functional
     created_at: datetime
     completed_at: Optional[datetime]
     can_retry: bool = False
