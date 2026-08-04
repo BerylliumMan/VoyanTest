@@ -39,6 +39,7 @@ class WSMessageType(str, Enum):
     RUN_START = "run_start"
     STEP_EXECUTE = "step_execute"
     STEP_BROWSER_USE = "step_browser_use"  # hybrid: one NL step via browser-use on shared CDP
+    RUN_COMPILED_SCRIPT = "run_compiled_script"  # whole-case solidified Playwright .py
     GET_SNAPSHOT = "get_snapshot"
     GET_SCREENSHOT = "get_screenshot"
     RUN_END = "run_end"
@@ -51,6 +52,7 @@ class WSMessageType(str, Enum):
     SNAPSHOT_RESULT = "snapshot_result"
     SCREENSHOT_RESULT = "screenshot_result"
     STEP_RESULT = "step_result"
+    COMPILED_SCRIPT_RESULT = "compiled_script_result"
     RUN_COMPLETE = "run_complete"
     RUN_LOG = "run_log"  # Agent → Server: fire-and-forget progress log (no ACK)
     RECORDING_READY = "recording_ready"

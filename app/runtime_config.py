@@ -5,7 +5,7 @@
 - ``core/runner/`` 模块在用例执行时读取。
 
 ``execution_backend`` 会持久化到 ``data/execution_backend.json``（Docker 数据卷），
-避免换镜像/重启后静默回到 playwright_mcp。
+避免换镜像/重启后静默回到旧引擎。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,36 @@ logger = logging.getLogger(__name__)
 _EXEC_BACKEND_PATH = Path(
     os.environ.get("VOYANTEST_EXEC_BACKEND_FILE", "data/execution_backend.json")
 )
+
+# Canonical backends after Cursor-session alignment
+BackendName = Literal[
+    "nl_goal",
+    "compiled_script",
+    "legacy_hybrid",
+    "legacy_mcp",
+    "browser_use",
+    # legacy aliases accepted on disk / API
+    "hybrid",
+    "playwright_mcp",
+]
+
+
+def normalize_execution_backend(raw: str | None) -> str:
+    """Map aliases → canonical backend name."""
+    b = (raw or "nl_goal").strip()
+    if b in ("hybrid",):
+        return "legacy_hybrid"
+    if b in ("playwright_mcp",):
+        return "legacy_mcp"
+    if b in (
+        "nl_goal",
+        "compiled_script",
+        "legacy_hybrid",
+        "legacy_mcp",
+        "browser_use",
+    ):
+        return b
+    return "nl_goal"
 
 
 class HealingConfig(BaseModel):
@@ -42,16 +72,25 @@ healing_config = HealingConfig()
 
 
 class ExecutionBackendConfig(BaseModel):
-    """服务端 UI 执行后端。
+    """UI 执行后端。
 
-    - playwright_mcp: 现有 NL → LLM tool_call → Playwright MCP
-    - browser_use: NL 步骤交给 browser-use Agent 多轮观察执行（试点）
-    - hybrid: 客户端 MCP 默认；定位失败时同浏览器 CDP 挂 browser-use 救场一步
+    - nl_goal: Cursor 式整案 NL 目标循环（默认）→ journal → 合成 Playwright
+    - compiled_script: 仅跑已固化脚本，失败即败
+    - legacy_hybrid / legacy_mcp: 旧逐步 snapshot 路径
+    - browser_use: 整案 NL（browser-use）过渡
     """
 
-    backend: Literal["playwright_mcp", "browser_use", "hybrid"] = "hybrid"
-    max_steps_per_nl: int = Field(default=30, ge=3, le=50)
+    backend: BackendName = "nl_goal"
+    max_steps_per_nl: int = Field(default=40, ge=3, le=80)
     headless: bool = True
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _coerce_backend(cls, v):
+        if v in ("hybrid", "playwright_mcp"):
+            # Migrate old defaults to nl_goal once (product cutover)
+            return "nl_goal"
+        return v or "nl_goal"
 
 
 execution_backend_config = ExecutionBackendConfig()
@@ -65,6 +104,13 @@ def load_execution_backend_config() -> ExecutionBackendConfig:
         if not path.is_file():
             return execution_backend_config
         raw = json.loads(path.read_text(encoding="utf-8"))
+        # Cut over old defaults stored as hybrid / playwright_mcp → nl_goal
+        if isinstance(raw, dict) and raw.get("backend") in ("hybrid", "playwright_mcp"):
+            logger.info(
+                "Migrating execution backend %s → nl_goal",
+                raw.get("backend"),
+            )
+            raw["backend"] = "nl_goal"
         execution_backend_config = ExecutionBackendConfig.model_validate(raw)
         logger.info(
             "Loaded execution backend from %s: backend=%s",
@@ -97,7 +143,7 @@ def save_execution_backend_config(cfg: ExecutionBackendConfig | None = None) -> 
         logger.warning("Failed to save execution backend to %s: %s", path, exc)
 
 
-# 模块导入时尝试恢复（容器挂载 data 卷后可保留 hybrid）
+# 模块导入时尝试恢复（容器挂载 data 卷后可保留配置）
 load_execution_backend_config()
 
 

@@ -40,8 +40,13 @@ async def _resolve_agent_tool_call(
     base_url_override: Optional[str],
     structured_step: Optional[dict] = None,
     mcp_manager=None,
+    prefer_selector: bool = True,
 ):
-    """Intent → unique AX bind; prefer shared resolve_tool_call_from_step (+ vision)."""
+    """Intent → unique AX bind; prefer shared resolve_tool_call_from_step (+ vision).
+
+    When ``prefer_selector`` and structured_step has a recorded selector, resolve
+    returns that CSS target first (recording solidification).
+    """
     from core.blank_click import BLANK_CLICK_ACTION, is_blank_area_click_step
     from core.llm_wrapper import PlaywrightMCPToolCall, generate_tool_call
     from core.step_intent import resolve_tool_call_from_step
@@ -65,6 +70,7 @@ async def _resolve_agent_tool_call(
             model=model,
             use_vision_fallback=True,
             structured_step=structured_step,
+            prefer_selector=prefer_selector,
         )
     except Exception:
         return await generate_tool_call(
@@ -127,6 +133,9 @@ class AgentManager:
         # One client browser run at a time per agent (init must finish before next case).
         self._agent_run_locks: Dict[str, asyncio.Lock] = {}
         self._agent_busy: set[str] = set()
+        self._last_compiled_script_failed: Optional[dict] = None
+        self._last_action_journal: Optional[list] = None
+        self._last_synthesized_script: Optional[dict] = None
 
     def _run_lock_for(self, agent_id: str) -> asyncio.Lock:
         lock = self._agent_run_locks.get(agent_id)
@@ -238,16 +247,15 @@ class AgentManager:
                                 *,
                                 navigate_base_url: bool = True,
                                 manage_busy: bool = True,
-                                batch_id: Optional[int] = None) -> dict:
-        """Execute all steps via the agent. Server handles LLM, agent handles browser.
+                                batch_id: Optional[int] = None,
+                                case_id: Optional[int] = None,
+                                compiled_script: Optional[str] = None,
+                                compiled_script_hash: Optional[str] = None,
+                                case_description: Optional[str] = None) -> dict:
+        """Execute via agent. UI default is nl_goal (Cursor-style); legacy_* for old paths.
 
         Serialized per agent so batch/init cases never overlap on the same browser.
         Returns a full step results list compatible with the existing report format.
-
-        ``backend``: ``playwright_mcp`` (default) or ``browser_use`` (client-local NL agent).
-        ``navigate_base_url``: when False, skip BASE URL navigation (batch follow-up cases).
-        ``manage_busy``: when False, caller owns ``_agent_busy`` for the whole job lifecycle.
-        ``batch_id``: optional RunBatch id for pause/stop checkpoints.
         """
         if manage_busy:
             self._agent_busy.add(agent_id)
@@ -260,6 +268,10 @@ class AgentManager:
                     backend=backend,
                     navigate_base_url=navigate_base_url,
                     batch_id=batch_id,
+                    case_id=case_id,
+                    compiled_script=compiled_script,
+                    compiled_script_hash=compiled_script_hash,
+                    case_description=case_description,
                 )
         finally:
             if manage_busy:
@@ -273,11 +285,24 @@ class AgentManager:
         backend: Optional[str] = None,
         navigate_base_url: bool = True,
         batch_id: Optional[int] = None,
+        case_id: Optional[int] = None,
+        compiled_script: Optional[str] = None,
+        compiled_script_hash: Optional[str] = None,
+        case_description: Optional[str] = None,
     ) -> dict:
         """Inner implementation; caller must hold ``_run_lock_for(agent_id)``."""
-        from app.runtime_config import execution_backend_config
+        from app.runtime_config import (
+            execution_backend_config,
+            normalize_execution_backend,
+        )
+        from core.compiled_script import steps_content_hash
 
-        selected = (backend or execution_backend_config.backend or "playwright_mcp").strip()
+        selected = normalize_execution_backend(
+            backend or execution_backend_config.backend or "nl_goal"
+        )
+        self._last_action_journal = None
+        self._last_synthesized_script = None
+
         if selected == "browser_use":
             return await self._execute_on_agent_browser_use(
                 agent_id, run_id, case_name, steps,
@@ -289,6 +314,688 @@ class AgentManager:
                 batch_id=batch_id,
             )
 
+        # Prefer solidified Playwright script when hash matches current steps
+        script = (compiled_script or "").strip()
+        script_ok_to_try = bool(script)
+        if script_ok_to_try:
+            current_hash = steps_content_hash(steps)
+            if compiled_script_hash and compiled_script_hash != current_hash:
+                logger.info(
+                    "compiled_script hash mismatch case=%s stored=%s current=%s — ignore script",
+                    case_id, compiled_script_hash[:12], current_hash[:12],
+                )
+                script = ""
+                script_ok_to_try = False
+
+        if script_ok_to_try and script:
+            py_results = await self._try_run_compiled_script(
+                agent_id, run_id, case_name, steps,
+                script=script,
+                base_url=base_url_override,
+                case_id=case_id,
+                steps_hash=compiled_script_hash or steps_content_hash(steps),
+            )
+            if py_results is not None:
+                failed = any(r.get("compiled_script_failed") for r in py_results)
+                if not failed and py_results and all(r.get("success") for r in py_results):
+                    return py_results
+                logger.info("compiled_script failed — fall back (unless compiled_script-only)")
+                self._last_compiled_script_failed = {
+                    "case_id": case_id,
+                    "error": next(
+                        (r.get("error") for r in py_results if r.get("error")),
+                        "compiled_script failed",
+                    ),
+                }
+                if selected == "compiled_script":
+                    return py_results
+            else:
+                logger.info(
+                    "compiled_script unsupported/timeout — fall back"
+                )
+                if selected == "compiled_script":
+                    return [
+                        {
+                            "step_number": s.get("step_order") or i + 1,
+                            "original_description": s.get("description") or "",
+                            "success": False,
+                            "status": "failed",
+                            "thinking": "compiled_script",
+                            "action": "compiled_script",
+                            "next_goal": "",
+                            "error": "compiled_script unsupported or timeout",
+                            "screenshot_path": None,
+                            "duration_ms": 0,
+                            "backend": "compiled_script",
+                            "compiled_script_failed": True,
+                        }
+                        for i, s in enumerate(steps or [])
+                    ]
+
+        if selected in ("legacy_hybrid", "legacy_mcp"):
+            legacy_backend = "hybrid" if selected == "legacy_hybrid" else "playwright_mcp"
+            return await self._execute_on_agent_snapshot_path(
+                agent_id, run_id, case_name, steps,
+                output_dir=output_dir,
+                base_url_override=base_url_override,
+                backend=legacy_backend,
+                navigate_base_url=navigate_base_url,
+                batch_id=batch_id,
+                selected=legacy_backend,
+            )
+
+        # Default / nl_goal: Cursor-style whole-case goal loop
+        return await self._execute_on_agent_nl_goal(
+            agent_id, run_id, case_name, steps,
+            output_dir=output_dir,
+            base_url_override=base_url_override,
+            navigate_base_url=navigate_base_url,
+            batch_id=batch_id,
+            case_id=case_id,
+            case_description=case_description,
+        )
+
+    async def _execute_on_agent_nl_goal(
+        self,
+        agent_id: str,
+        run_id: str,
+        case_name: str,
+        steps: List[dict],
+        output_dir: Optional[str] = None,
+        base_url_override: Optional[str] = None,
+        navigate_base_url: bool = True,
+        batch_id: Optional[int] = None,
+        case_id: Optional[int] = None,
+        case_description: Optional[str] = None,
+    ) -> list:
+        """Cursor-style whole-case NL goal loop → journal → synthesize+verify script.
+
+        If goal succeeds but synthesize/dry-run(+one repair) fails, fall back once
+        to legacy hybrid (per-step NL) and return those step results.
+        """
+        import time as _time
+
+        from app.runtime_config import execution_backend_config
+        from core.compiled_script import steps_content_hash
+        from core.goal_agent_loop import (
+            DEFAULT_MAX_TURNS,
+            build_goal_text,
+            decide_next_goal_action,
+            detect_stagnation,
+            journal_entry,
+            steps_results_from_goal,
+            tool_call_from_decision,
+        )
+        from core.script_synthesize import repair_playwright_script, synthesize_playwright_script
+
+        session = await self.get_session(agent_id)
+        if not session:
+            raise ValueError(f"Agent {agent_id} not connected")
+
+        max_turns = int(
+            getattr(execution_backend_config, "max_steps_per_nl", None) or DEFAULT_MAX_TURNS
+        )
+        # Whole-case NL needs more turns than per-step hybrid rescue
+        max_turns = max(DEFAULT_MAX_TURNS, max_turns)
+        goal_text = build_goal_text(
+            case_name=case_name,
+            description=case_description,
+            steps=steps,
+        )
+        journal: list = []
+        goal_error: Optional[str] = None
+        goal_ok = False
+
+        session.agent.status = AgentStatus.BUSY
+        logger.info(
+            "nl_goal start case=%s agent=%s max_turns=%s",
+            case_id or case_name,
+            agent_id,
+            max_turns,
+        )
+
+        try:
+            ready = await session.request(
+                WSMessage(
+                    type=WSMessageType.RUN_START,
+                    agent_id=agent_id,
+                    run_id=run_id,
+                    payload={
+                        "case_id": run_id,
+                        "case_name": case_name,
+                        "steps": steps,
+                        "base_url": (base_url_override or "") if navigate_base_url else "",
+                        "backend": "playwright_mcp",
+                        "navigate_base_url": navigate_base_url,
+                    },
+                ),
+                timeout=90,
+            )
+            if isinstance(ready, dict) and ready.get("ready") is False:
+                err = ready.get("error") or ready.get("message") or "browser not ready"
+                raise RuntimeError(f"Agent browser failed to start: {err}")
+            if isinstance(ready, dict) and ready.get("message") and "MCP start failed" in str(
+                ready.get("message")
+            ):
+                raise RuntimeError(str(ready.get("message")))
+
+            llm_client = await create_openai_client()
+            _, _, model = await _llm_resolve_config()
+
+            await self._get_snapshot(session, agent_id, run_id)
+            if navigate_base_url and base_url_override:
+                nav_result = await self.send_act(
+                    agent_id,
+                    run_id,
+                    {
+                        "name": "browser_navigate",
+                        "tool": "browser_navigate",
+                        "args": {"value": base_url_override, "url": base_url_override},
+                    },
+                )
+                if not nav_result.get("success"):
+                    reason = nav_result.get("error") or "unknown"
+                    raise RuntimeError(
+                        f"导航失败，已停止执行: {base_url_override} — {reason}"
+                    )
+
+            for turn in range(1, max_turns + 1):
+                if batch_id is not None:
+                    from app import execution_control
+
+                    await execution_control.wait_if_paused(batch_id)
+                    if execution_control.is_stopped(batch_id):
+                        goal_error = "用户停止执行"
+                        break
+
+                snap = await self._get_snapshot(session, agent_id, run_id)
+                if self._snapshot_indicates_browser_closed(snap):
+                    goal_error = "浏览器已关闭"
+                    break
+
+                try:
+                    decision = await decide_next_goal_action(
+                        client=llm_client,
+                        model=model,
+                        goal_text=goal_text,
+                        snapshot=snap,
+                        journal_tail=journal,
+                    )
+                except Exception as exc:
+                    goal_error = f"goal LLM failed: {exc}"
+                    logger.exception("nl_goal decide failed turn=%s", turn)
+                    break
+
+                if decision.status == "done":
+                    journal.append(
+                        journal_entry(
+                            turn=turn,
+                            decision=decision,
+                            success=True,
+                        )
+                    )
+                    goal_ok = True
+                    logger.info("nl_goal DONE case=%s turns=%s", case_id, turn)
+                    break
+
+                async def _save_nl_goal_fail_shot(
+                    entry: dict,
+                    *,
+                    turn_n: int,
+                    checklist_idx,
+                    fallback_b64: Optional[str] = None,
+                ) -> None:
+                    """Capture fail screenshot into output_dir/screenshots (legacy-style path)."""
+                    try:
+                        shot = await self._get_screenshot(session, agent_id, run_id)
+                        b64 = None
+                        if isinstance(shot, dict):
+                            b64 = shot.get("screenshot_base64") or shot.get("base64")
+                        if not b64:
+                            b64 = fallback_b64
+                        if b64 and output_dir:
+                            ss_dir = os.path.join(output_dir, "screenshots")
+                            os.makedirs(ss_dir, exist_ok=True)
+                            idx = checklist_idx or turn_n
+                            ss_path = os.path.join(
+                                ss_dir, f"nl_goal_step_{idx}_turn_{turn_n}.png"
+                            )
+                            with open(ss_path, "wb") as f:
+                                f.write(base64.b64decode(b64))
+                            # FE loads /{screenshot_path}; output_dir is reports/run_...
+                            entry["screenshot_path"] = ss_path.replace("\\", "/")
+                            entry["screenshot_on_fail"] = True
+                        elif b64:
+                            entry["screenshot_on_fail"] = True
+                    except Exception:
+                        logger.debug("nl_goal fail screenshot skipped", exc_info=True)
+
+                if decision.status == "fail":
+                    goal_error = decision.reason or decision.thinking or "nl_goal fail"
+                    entry = journal_entry(
+                        turn=turn,
+                        decision=decision,
+                        success=False,
+                        error=goal_error,
+                    )
+                    await _save_nl_goal_fail_shot(
+                        entry,
+                        turn_n=turn,
+                        checklist_idx=decision.checklist_index,
+                    )
+                    journal.append(entry)
+                    break
+
+                action = (decision.action or "").strip().lower()
+                if not action or action == "done":
+                    journal.append(
+                        journal_entry(turn=turn, decision=decision, success=True)
+                    )
+                    goal_ok = True
+                    break
+
+                tc = tool_call_from_decision(decision)
+                t0 = _time.monotonic()
+                result = await self._execute_step(
+                    session,
+                    agent_id,
+                    run_id,
+                    turn,
+                    decision.checklist_note or decision.thinking or action,
+                    tc,
+                )
+                dur = (_time.monotonic() - t0) * 1000
+                ok = bool(result.get("success"))
+                err = result.get("error")
+                if self._error_indicates_browser_closed(err):
+                    goal_error = err or "浏览器已关闭"
+                    journal.append(
+                        journal_entry(
+                            turn=turn,
+                            decision=decision,
+                            success=False,
+                            error=goal_error,
+                            duration_ms=dur,
+                        )
+                    )
+                    break
+
+                entry = journal_entry(
+                    turn=turn,
+                    decision=decision,
+                    success=ok,
+                    error=None if ok else (err or "action failed"),
+                    duration_ms=dur,
+                    result_snippet=str(
+                        result.get("text")
+                        or result.get("thinking")
+                        or result.get("action")
+                        or ""
+                    ),
+                    screenshot_on_fail=False,
+                    screenshot_path=None,
+                )
+                if not ok:
+                    await _save_nl_goal_fail_shot(
+                        entry,
+                        turn_n=turn,
+                        checklist_idx=decision.checklist_index,
+                        fallback_b64=result.get("screenshot_base64"),
+                    )
+                journal.append(entry)
+                logger.info(
+                    "nl_goal turn=%s %s %s selector=%r ok=%s",
+                    turn,
+                    action,
+                    "✓" if ok else "✗",
+                    (decision.selector or "")[:80],
+                    ok,
+                )
+
+                if detect_stagnation(journal):
+                    goal_error = "nl_goal stagnation — repeated failing/identical actions"
+                    logger.warning(goal_error)
+                    break
+
+            else:
+                goal_error = goal_error or f"nl_goal hit max_turns={max_turns}"
+
+            # Ensure a failure screenshot exists when goal did not complete
+            if not goal_ok and output_dir and journal:
+                has_shot = any(e.get("screenshot_path") for e in journal)
+                if not has_shot:
+                    try:
+                        shot = await self._get_screenshot(session, agent_id, run_id)
+                        b64 = (shot or {}).get("screenshot_base64") if isinstance(shot, dict) else None
+                        if b64:
+                            ss_dir = os.path.join(output_dir, "screenshots")
+                            os.makedirs(ss_dir, exist_ok=True)
+                            ss_path = os.path.join(ss_dir, "nl_goal_final_fail.png")
+                            with open(ss_path, "wb") as f:
+                                f.write(base64.b64decode(b64))
+                            journal[-1]["screenshot_path"] = ss_path.replace("\\", "/")
+                            journal[-1]["screenshot_on_fail"] = True
+                    except Exception:
+                        logger.debug("nl_goal final fail screenshot skipped", exc_info=True)
+
+            try:
+                await session.send(
+                    WSMessage(type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id)
+                )
+            except Exception:
+                logger.debug("RUN_END after nl_goal failed", exc_info=True)
+
+        except ConnectionError:
+            raise
+        except Exception as exc:
+            goal_error = str(exc)
+            logger.exception("nl_goal aborted: %s", exc)
+            try:
+                await session.send(
+                    WSMessage(type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id)
+                )
+            except Exception:
+                pass
+        finally:
+            session.agent.status = AgentStatus.ONLINE
+
+        self._last_action_journal = journal
+
+        if not goal_ok:
+            return steps_results_from_goal(
+                steps,
+                success=False,
+                journal=journal,
+                error=goal_error or "nl_goal failed",
+                backend="nl_goal",
+            )
+
+        # Success → synthesize Playwright + dry-run verify (one repair)
+        results = steps_results_from_goal(
+            steps, success=True, journal=journal, backend="nl_goal"
+        )
+        script_ok = False
+        try:
+            llm_client = await create_openai_client()
+            _, _, model = await _llm_resolve_config()
+            cid = int(case_id or 0)
+            script = await synthesize_playwright_script(
+                client=llm_client,
+                model=model,
+                case_id=cid or 1,
+                case_name=case_name,
+                goal_text=goal_text,
+                journal=journal,
+                base_url=base_url_override,
+            )
+            verify = await self._try_run_compiled_script(
+                agent_id,
+                f"{run_id}_dry",
+                case_name,
+                steps,
+                script=script,
+                base_url=base_url_override,
+                case_id=cid or None,
+                steps_hash=steps_content_hash(steps),
+            )
+            dry_fail = (
+                verify is None
+                or any(r.get("compiled_script_failed") for r in (verify or []))
+                or not (verify and all(r.get("success") for r in verify))
+            )
+            if dry_fail:
+                err = ""
+                if verify:
+                    err = next(
+                        (r.get("error") for r in verify if r.get("error")),
+                        "dry-run failed",
+                    )
+                else:
+                    err = "dry-run unsupported/timeout"
+                logger.info("nl_goal script dry-run failed — repair once: %s", err)
+                try:
+                    script = await repair_playwright_script(
+                        client=llm_client,
+                        model=model,
+                        case_id=cid or 1,
+                        script=script,
+                        error=str(err),
+                        journal=journal,
+                    )
+                    verify2 = await self._try_run_compiled_script(
+                        agent_id,
+                        f"{run_id}_dry2",
+                        case_name,
+                        steps,
+                        script=script,
+                        base_url=base_url_override,
+                        case_id=cid or None,
+                        steps_hash=steps_content_hash(steps),
+                    )
+                    dry_fail = (
+                        verify2 is None
+                        or any(r.get("compiled_script_failed") for r in (verify2 or []))
+                        or not (verify2 and all(r.get("success") for r in verify2))
+                    )
+                except Exception:
+                    logger.warning("script repair failed", exc_info=True)
+                    dry_fail = True
+
+            if not dry_fail and script:
+                h = steps_content_hash(steps)
+                self._last_synthesized_script = {
+                    "case_id": case_id,
+                    "script": script,
+                    "steps_hash": h,
+                }
+                script_ok = True
+                logger.info(
+                    "nl_goal synthesized script ok case=%s bytes=%s",
+                    case_id,
+                    len(script),
+                )
+            else:
+                logger.warning(
+                    "nl_goal goal passed but script verify failed — not persisting"
+                )
+        except Exception:
+            logger.warning("nl_goal synthesize/verify failed", exc_info=True)
+            script_ok = False
+
+        # Solidify failed after goal passed → one NL (legacy hybrid) re-run.
+        # Avoids marking the case failed solely for script verify; report uses
+        # real per-step NL results. Never recurse into nl_goal (no infinite loop).
+        if not script_ok:
+            logger.info(
+                "nl_goal script verify failed — falling back to NL step execution"
+            )
+            try:
+                nl_results = await self._execute_on_agent_snapshot_path(
+                    agent_id,
+                    f"{run_id}_nl_fb",
+                    case_name,
+                    steps,
+                    output_dir=output_dir,
+                    base_url_override=base_url_override,
+                    backend="hybrid",
+                    navigate_base_url=navigate_base_url,
+                    batch_id=batch_id,
+                    selected="hybrid",
+                )
+                if isinstance(nl_results, list) and nl_results:
+                    for r in nl_results:
+                        if not isinstance(r, dict):
+                            continue
+                        r.setdefault("backend", "legacy_hybrid")
+                        r["nl_goal_script_fallback"] = True
+                    if journal:
+                        nl_results[0]["action_journal"] = journal
+                    # Secondary solidify from hybrid locators (no further NL loop)
+                    if all(r.get("success") for r in nl_results if isinstance(r, dict)):
+                        try:
+                            from core.compiled_script import build_script_from_run
+
+                            cid = int(case_id or 0)
+                            h = steps_content_hash(steps)
+                            built = build_script_from_run(
+                                case_id=cid or 1,
+                                case_name=case_name,
+                                steps=steps,
+                                step_results=nl_results,
+                                base_url=base_url_override,
+                                steps_hash=h,
+                            )
+                            if built:
+                                v_fb = await self._try_run_compiled_script(
+                                    agent_id,
+                                    f"{run_id}_fb_dry",
+                                    case_name,
+                                    steps,
+                                    script=built,
+                                    base_url=base_url_override,
+                                    case_id=cid or None,
+                                    steps_hash=h,
+                                )
+                                fb_ok = (
+                                    v_fb is not None
+                                    and not any(
+                                        r.get("compiled_script_failed") for r in v_fb
+                                    )
+                                    and all(r.get("success") for r in v_fb)
+                                )
+                                if fb_ok:
+                                    self._last_synthesized_script = {
+                                        "case_id": case_id,
+                                        "script": built,
+                                        "steps_hash": h,
+                                    }
+                                    logger.info(
+                                        "nl_goal fallback solidify ok case=%s bytes=%s",
+                                        case_id,
+                                        len(built),
+                                    )
+                                else:
+                                    logger.info(
+                                        "nl_goal fallback solidify dry-run failed — skip persist"
+                                    )
+                        except Exception:
+                            logger.debug(
+                                "nl_goal fallback solidify skipped", exc_info=True
+                            )
+                    return nl_results
+            except Exception:
+                logger.warning(
+                    "nl_goal script-verify NL fallback failed — keeping goal results",
+                    exc_info=True,
+                )
+
+        return results
+
+    async def _try_run_compiled_script(
+        self,
+        agent_id: str,
+        run_id: str,
+        case_name: str,
+        steps: List[dict],
+        *,
+        script: str,
+        base_url: Optional[str],
+        case_id: Optional[int],
+        steps_hash: str,
+    ) -> Optional[list]:
+        """Ask agent to run solidified Playwright script. None = fall back."""
+        session = await self.get_session(agent_id)
+        if not session:
+            return None
+        try:
+            session.agent.status = AgentStatus.BUSY
+            logger.info(
+                "Trying compiled_script case=%s agent=%s hash=%s",
+                case_id, agent_id, (steps_hash or "")[:12],
+            )
+            resp = await session.request(WSMessage(
+                type=WSMessageType.RUN_COMPILED_SCRIPT,
+                agent_id=agent_id,
+                run_id=run_id,
+                payload={
+                    "script": script,
+                    "base_url": base_url or "",
+                    "case_id": case_id or 0,
+                    "steps_hash": steps_hash,
+                    "case_name": case_name,
+                },
+            ), timeout=600)
+        except Exception as exc:
+            logger.warning("compiled_script request failed: %s", exc)
+            return None
+        finally:
+            session.agent.status = AgentStatus.ONLINE
+
+        if not isinstance(resp, dict):
+            return None
+        if resp.get("unsupported"):
+            return None
+        if not resp.get("success"):
+            logger.info(
+                "compiled_script run failed: %s",
+                (resp.get("error") or "")[:200],
+            )
+            return [
+                {
+                    "step_number": 1,
+                    "original_description": case_name,
+                    "success": False,
+                    "thinking": "compiled_script",
+                    "action": "compiled_script",
+                    "next_goal": "",
+                    "error": resp.get("error") or "compiled_script failed",
+                    "screenshot_path": None,
+                    "duration_ms": float(resp.get("duration_ms") or 0),
+                    "backend": "compiled_script",
+                    "compiled_script_failed": True,
+                }
+            ]
+
+        results = []
+        for s in steps:
+            results.append({
+                "step_number": s.get("step_order"),
+                "step_id": s.get("id"),
+                "original_description": s.get("description"),
+                "success": True,
+                "thinking": "compiled_script",
+                "action": "compiled_script",
+                "next_goal": "",
+                "error": None,
+                "screenshot_path": None,
+                "duration_ms": 0,
+                "backend": "compiled_script",
+                "resolved_selector": (
+                    (s.get("structured_step") or {}).get("selector")
+                    if isinstance(s.get("structured_step"), dict) else None
+                ),
+            })
+        logger.info("compiled_script SUCCESS case=%s steps=%s", case_id, len(results))
+        return results
+
+    async def _execute_on_agent_snapshot_path(
+        self, agent_id: str, run_id: str,
+        case_name: str, steps: List[dict],
+        output_dir: Optional[str] = None,
+        base_url_override: Optional[str] = None,
+        backend: Optional[str] = None,
+        navigate_base_url: bool = True,
+        batch_id: Optional[int] = None,
+        selected: Optional[str] = None,
+    ) -> dict:
+        """LEGACY Snapshot → bind ref → MCP (hybrid browser-use fallback).
+
+        Prefer ``_execute_on_agent_nl_goal`` for UI. Kept for ``legacy_hybrid`` /
+        ``legacy_mcp`` backends only.
+        """
+        from app.runtime_config import execution_backend_config
+
+        selected = (selected or backend or execution_backend_config.backend or "playwright_mcp").strip()
         session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
@@ -335,7 +1042,10 @@ class AgentManager:
             if isinstance(ready, dict) and ready.get("ready") is False:
                 err = ready.get("error") or ready.get("message") or ready.get("text") or "browser not ready"
                 logger.error("Agent %s browser failed to start: %s", agent_id, err)
-                raise RuntimeError(f"Agent browser failed to start: {err}")
+                err_s = str(err)
+                if err_s.startswith("导航失败"):
+                    raise RuntimeError(err_s)
+                raise RuntimeError(f"Agent browser failed to start: {err_s}")
             if isinstance(ready, dict) and ready.get("message") and "MCP start failed" in str(ready.get("message")):
                 raise RuntimeError(str(ready.get("message")))
 
@@ -356,10 +1066,10 @@ class AgentManager:
                     },
                 )
                 if not nav_result.get("success"):
-                    logger.warning(
-                        "BASE URL Playwright navigation failed: %s",
-                        nav_result.get("error") or "unknown",
-                    )
+                    reason = nav_result.get("error") or "unknown"
+                    msg = f"导航失败，已停止执行: {base_url_override} — {reason}"
+                    logger.error("BASE URL Playwright navigation failed — aborting run: %s", reason)
+                    raise RuntimeError(msg)
             elif not navigate_base_url:
                 logger.info(
                     "Batch follow-up case %r — skip BASE URL navigation (keep session)",
@@ -542,7 +1252,20 @@ class AgentManager:
                     label, option = parse_dropdown_select(desc)
                     resolve_desc = normalize_step_description(desc)
 
-                    async def _resolve_and_run(step_desc: str, snap_text: str, expect, struct=None):
+                    async def _resolve_and_run(
+                        step_desc: str,
+                        snap_text: str,
+                        expect,
+                        struct=None,
+                        prefer_selector: bool = True,
+                    ):
+                        from core.locator_memory import extract_page_url
+                        from core.llm_wrapper import PlaywrightMCPToolCall
+                        from core.step_intent import (
+                            goto_is_redundant,
+                            selector_tool_call_candidates,
+                        )
+
                         class _SnapAdapter:
                             def __init__(self, outer):
                                 self._outer = outer
@@ -556,6 +1279,57 @@ class AgentManager:
                                 # vision may call screenshot APIs — best-effort via snapshot only
                                 return None
 
+                        # Skip goto that would leave deeper BASE/current path
+                        if isinstance(struct, dict) and (
+                            (struct.get("action") or "").strip().lower() == "goto"
+                        ):
+                            goto_url = struct.get("value")
+                            current = extract_page_url(snap_text or "")
+                            if goto_is_redundant(
+                                current, goto_url, base_url_override,
+                            ):
+                                tc = PlaywrightMCPToolCall(
+                                    action="goto",
+                                    selector=None,
+                                    value=goto_url,
+                                    thinking=(
+                                        f"skip redundant goto "
+                                        f"(already at {current or base_url_override!r}; "
+                                        f"target={goto_url!r})"
+                                    ),
+                                    next_goal="verify this step only",
+                                )
+                                logger.info(
+                                    "Skip redundant goto current=%r target=%r base=%r",
+                                    current, goto_url, base_url_override,
+                                )
+                                return tc, {
+                                    "success": True,
+                                    "action": f"goto({goto_url})",
+                                    "error": None,
+                                    "skipped_goto": True,
+                                    "duration_ms": 0,
+                                }
+
+                        # Prefer solidified/derived CSS → execute; on fail → semantic
+                        if prefer_selector:
+                            for sel_tc in selector_tool_call_candidates(struct):
+                                logger.info(
+                                    "Trying solidified selector action=%s selector=%r",
+                                    sel_tc.action, sel_tc.selector,
+                                )
+                                res = await self._execute_step(
+                                    session, agent_id, run_id, step_order, desc,
+                                    sel_tc.model_dump(),
+                                )
+                                if res.get("success"):
+                                    return sel_tc, res
+                                logger.info(
+                                    "Solidified selector failed (%s); "
+                                    "trying next selector or semantic bind",
+                                    (res.get("error") or "")[:160],
+                                )
+
                         tc = await _resolve_agent_tool_call(
                             desc=step_desc,
                             snap=snap_text or "",
@@ -565,6 +1339,7 @@ class AgentManager:
                             base_url_override=base_url_override,
                             structured_step=struct,
                             mcp_manager=_SnapAdapter(self),
+                            prefer_selector=False,
                         )
                         act = (tc.action or "").lower()
                         if act in ("error", "done"):
@@ -601,6 +1376,79 @@ class AgentManager:
                             tool_call, result = await _resolve_and_run(
                                 dropdown_pick_description(option), snap or "", expected_result,
                             )
+                    elif option:
+                        # 点击【京州市院】（搜索结果中的）— wait for filter rows, verify selection
+                        from core.step_executor import (
+                            option_selected_in_snapshot,
+                            wait_for_option_in_snapshot,
+                        )
+
+                        # Fill often finishes before filter rows paint — settle briefly
+                        await asyncio.sleep(max(HYBRID_SETTLE_SECONDS, 0.5))
+                        snap = await self._get_snapshot(session, agent_id, run_id)
+                        if not option_choice_visible_in_snapshot(
+                            snap or "",
+                            option,
+                            strong_only=True,
+                            include_tree=True,
+                            include_label_text=True,
+                        ):
+                            snap = await wait_for_option_in_snapshot(
+                                lambda: self._get_snapshot(session, agent_id, run_id),
+                                option,
+                                timeout_s=4.0,
+                                prefer_strong=True,
+                                include_tree=True,
+                            )
+                        # Click option/treeitem/text — never tooltip (click-through → 山西省院)
+                        if not option_choice_visible_in_snapshot(
+                            snap or "",
+                            option,
+                            strong_only=True,
+                            include_tree=True,
+                            include_label_text=True,
+                        ):
+                            logger.info(
+                                "search option: no non-tooltip AX hit for %r — "
+                                "skip MCP tooltip click, fail fast to hybrid",
+                                option,
+                            )
+                            tool_call = None
+                            result = {
+                                "success": False,
+                                "error": (
+                                    f"筛选结果「{option}」尚无 option/treeitem 等可点节点，"
+                                    "跳过 tooltip 误点"
+                                ),
+                                "duration_ms": 0,
+                            }
+                        else:
+                            pick_struct = {
+                                "action": "click",
+                                "target_name": option,
+                                "disambiguation": "搜索结果中的",
+                            }
+                            tool_call, result = await _resolve_and_run(
+                                dropdown_pick_description(option),
+                                snap or "",
+                                expected_result,
+                                pick_struct,
+                            )
+                            if result.get("success"):
+                                await asyncio.sleep(max(HYBRID_SETTLE_SECONDS, 0.5))
+                                post = await self._get_snapshot(session, agent_id, run_id)
+                                if not option_selected_in_snapshot(post or "", option):
+                                    logger.warning(
+                                        "option click did not stick: want=%r",
+                                        option,
+                                    )
+                                    result = {
+                                        **result,
+                                        "success": False,
+                                        "error": (
+                                            f"选项「{option}」点击后单位未选中"
+                                        ),
+                                    }
                     else:
                         tool_call, result = await _resolve_and_run(
                             resolve_desc, snap or "", expected_result, structured_step,
@@ -635,6 +1483,7 @@ class AgentManager:
                     resolve_desc = normalize_step_description(desc)
 
                     async def _resolve_and_run_retry(step_desc: str, snap_text: str, expect, struct=None):
+                        # Relocate: semantic bind only (selector already tried)
                         tc = await _resolve_agent_tool_call(
                             desc=step_desc,
                             snap=snap_text or "",
@@ -643,6 +1492,7 @@ class AgentManager:
                             model=model,
                             base_url_override=base_url_override,
                             structured_step=struct,
+                            prefer_selector=False,
                         )
                         act = (tc.action or "").lower()
                         if act in ("error", "done"):
@@ -682,6 +1532,76 @@ class AgentManager:
                                 snap or "",
                                 expected_result,
                             )
+                    elif option:
+                        from core.step_executor import (
+                            option_selected_in_snapshot,
+                            wait_for_option_in_snapshot,
+                        )
+
+                        await asyncio.sleep(max(HYBRID_SETTLE_SECONDS, 0.5))
+                        snap = await self._get_snapshot(session, agent_id, run_id)
+                        if not option_choice_visible_in_snapshot(
+                            snap or "",
+                            option,
+                            strong_only=True,
+                            include_tree=True,
+                            include_label_text=True,
+                        ):
+                            snap = await wait_for_option_in_snapshot(
+                                lambda: self._get_snapshot(session, agent_id, run_id),
+                                option,
+                                timeout_s=4.0,
+                                prefer_strong=True,
+                                include_tree=True,
+                            )
+                        if not option_choice_visible_in_snapshot(
+                            snap or "",
+                            option,
+                            strong_only=True,
+                            include_tree=True,
+                            include_label_text=True,
+                        ):
+                            logger.info(
+                                "search option (relocate): no non-tooltip AX hit for %r — "
+                                "skip MCP tooltip click",
+                                option,
+                            )
+                            tool_call = None
+                            result = {
+                                "success": False,
+                                "error": (
+                                    f"筛选结果「{option}」尚无 option/treeitem 等可点节点，"
+                                    "跳过 tooltip 误点"
+                                ),
+                                "duration_ms": 0,
+                                "relocate_attempted": True,
+                            }
+                        else:
+                            pick_struct = {
+                                "action": "click",
+                                "target_name": option,
+                                "disambiguation": "搜索结果中的",
+                            }
+                            tool_call, result = await _resolve_and_run_retry(
+                                dropdown_pick_description(option),
+                                snap or "",
+                                expected_result,
+                                pick_struct,
+                            )
+                            if result.get("success"):
+                                await asyncio.sleep(max(HYBRID_SETTLE_SECONDS, 0.5))
+                                post = await self._get_snapshot(session, agent_id, run_id)
+                                if not option_selected_in_snapshot(post or "", option):
+                                    logger.warning(
+                                        "option click did not stick (relocate): want=%r",
+                                        option,
+                                    )
+                                    result = {
+                                        **result,
+                                        "success": False,
+                                        "error": f"选项「{option}」点击后单位未选中",
+                                        "relocate_attempted": True,
+                                    }
                     else:
                         tool_call, result = await _resolve_and_run_retry(
                             resolve_desc, snap or "", expected_result, structured_step,
@@ -691,10 +1611,21 @@ class AgentManager:
                 if _should_hybrid_browser_use_fallback(
                     hybrid=hybrid, result=result, action_lower=action_lower
                 ):
+                    err_s = str(result.get("error") or "")
                     logger.info(
                         "Hybrid browser-use fallback: step %s after MCP locator failure: %s",
-                        step_order, (result.get("error") or "")[:200],
+                        step_order, err_s[:200],
                     )
+                    # Option/search mis-bind: keep browser-use short — do not burn 20 turns
+                    fb_max = min(
+                        20, int(execution_backend_config.max_steps_per_nl or 20)
+                    )
+                    if (
+                        "跳过 tooltip" in err_s
+                        or "筛选结果" in err_s
+                        or "单位未选中" in err_s
+                    ):
+                        fb_max = min(fb_max, 8)
                     fb = await self._execute_step_browser_use_fallback(
                         session,
                         agent_id,
@@ -702,9 +1633,7 @@ class AgentManager:
                         step_order=step_order,
                         description=desc,
                         expected_result=expected_result,
-                        max_steps_per_nl=min(
-                            20, int(execution_backend_config.max_steps_per_nl or 20)
-                        ),
+                        max_steps_per_nl=fb_max,
                     )
                     if fb.get("success"):
                         result = fb
@@ -854,10 +1783,21 @@ class AgentManager:
                     "failure_kind": failure_kind,
                     "learned_locator": None,
                     "invalidate_learned_locator": False,
+                    "resolved_selector": (
+                        tool_call.selector if tool_call and getattr(tool_call, "selector", None) else None
+                    ),
                 }
 
                 if invalidate or (used_replay and not step_result["success"]):
                     step_result["invalidate_learned_locator"] = True
+                elif (
+                    step_result["success"]
+                    and can_write_memory
+                    and step_backend == "browser_use_fallback"
+                    and isinstance(result.get("learned_locator"), dict)
+                ):
+                    # Solidify browser-use rescue actions for next MCP/hybrid run.
+                    step_result["learned_locator"] = result["learned_locator"]
                 elif step_result["success"] and can_write_memory and tool_call is not None:
                     from core.locator_memory import learn_fingerprint_after_success
 
@@ -1390,6 +2330,11 @@ class AgentManager:
                         "learned_locator": getattr(s, "learned_locator", None)
                         if isinstance(getattr(s, "learned_locator", None), dict)
                         else None,
+                        # Required for compiled_script hash match (same shape as client exec)
+                        "structured_step": getattr(s, "structured_step", None)
+                        if isinstance(getattr(s, "structured_step", None), dict)
+                        else None,
+                        "cacheable": bool(getattr(s, "cacheable", True)),
                     }
                     for s in steps_db
                 ]
@@ -1429,28 +2374,78 @@ class AgentManager:
                     _steps=steps,
                     _run_row_id=run_row_id,
                     _navigate=navigate,
+                    _compiled_script=getattr(tc, "compiled_script", None),
+                    _compiled_script_hash=getattr(tc, "compiled_script_hash", None),
                 ):
                     try:
                         # manage_busy=False: poller holds _agent_busy until DB update finishes
+                        self._last_compiled_script_failed = None
+                        self._last_synthesized_script = None
                         result = await self.execute_on_agent(
                             _agent_id, _run_id,
                             _tc.name or f"Case #{_case_id}", _steps,
                             base_url_override=_base_url,
                             navigate_base_url=_navigate,
                             manage_busy=False,
+                            case_id=int(_case_id),
+                            compiled_script=_compiled_script,
+                            compiled_script_hash=_compiled_script_hash,
+                            case_description=getattr(_tc, "description", None),
                         )
                         try:
                             from core.locator_memory import persist_learned_locators_from_results
+                            from core.compiled_script import (
+                                clear_compiled_script,
+                                persist_compiled_script,
+                            )
                             async with AsyncSessionLocal() as _ldb:
                                 from app import crud as _crud
                                 _steps_db = await _crud.get_steps_for_case(_ldb, int(_case_id))
+                                step_results = result if isinstance(result, list) else []
                                 await persist_learned_locators_from_results(
                                     _ldb,
-                                    result if isinstance(result, list) else [],
+                                    step_results,
                                     steps_by_order={s.step_order: s for s in _steps_db},
                                 )
+                                _tc_fresh = await _crud.get_test_case(_ldb, int(_case_id))
+                                failed_meta = getattr(self, "_last_compiled_script_failed", None)
+                                if (
+                                    failed_meta
+                                    and _tc_fresh
+                                    and failed_meta.get("case_id") == int(_case_id)
+                                ):
+                                    if clear_compiled_script(_tc_fresh):
+                                        await _ldb.commit()
+                                        logger.info(
+                                            "cleared compiled_script after failed replay case=%s",
+                                            _case_id,
+                                        )
+                                    self._last_compiled_script_failed = None
+                                synth = getattr(self, "_last_synthesized_script", None)
+                                if (
+                                    _tc_fresh
+                                    and isinstance(synth, dict)
+                                    and synth.get("case_id") == int(_case_id)
+                                    and synth.get("script")
+                                    and synth.get("steps_hash")
+                                ):
+                                    persist_compiled_script(
+                                        _tc_fresh,
+                                        script=synth["script"],
+                                        steps_hash=synth["steps_hash"],
+                                    )
+                                    await _ldb.commit()
+                                    logger.info(
+                                        "persisted LLM-synthesized compiled_script case=%s hash=%s",
+                                        _case_id,
+                                        str(synth["steps_hash"])[:12],
+                                    )
+                                    self._last_synthesized_script = None
                         except Exception:
-                            logger.warning("poller persist learned_locator failed", exc_info=True)
+                            logger.warning(
+                                "poller persist learned_locator/compiled_script failed",
+                                exc_info=True,
+                            )
                         async with AsyncSessionLocal() as _edb:
                             await _edb.execute(
                                 text(

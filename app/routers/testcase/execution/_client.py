@@ -156,24 +156,28 @@ async def run_test_case_on_client(
 ) -> dict:
     """Run a test case on a connected client agent via WebSocket.
 
-    Query ``backend``: ``playwright_mcp`` | ``browser_use`` | ``hybrid``（默认 hybrid，定位失败同浏览器救场）。
+    Query ``backend``: ``nl_goal``（默认）| ``compiled_script`` | ``legacy_hybrid`` | ``legacy_mcp`` | ``browser_use``。
     """
     from agent.manager import agent_manager
-    from app.runtime_config import execution_backend_config
+    from app.runtime_config import execution_backend_config, normalize_execution_backend
 
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
     if backend is None:
-        backend = execution_backend_config.backend or "hybrid"
-        if getattr(db_case, "case_kind", None) == "ui" and backend == "playwright_mcp":
-            backend = "hybrid"
+        backend = execution_backend_config.backend or "nl_goal"
+    backend = normalize_execution_backend(backend)
 
-    if backend is not None and backend not in ("playwright_mcp", "browser_use", "hybrid"):
+    if backend not in (
+        "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
+    ):
         raise HTTPException(
             status_code=400,
-            detail="backend must be playwright_mcp, browser_use, or hybrid",
+            detail=(
+                "backend must be nl_goal, compiled_script, legacy_hybrid, "
+                "legacy_mcp, or browser_use"
+            ),
         )
 
     allowed_ids = get_user_project_filter(user)
@@ -203,7 +207,7 @@ async def run_test_case_on_client(
     else:
         agent = agents[0]
 
-    if backend in ("browser_use", "hybrid") and "browser_use" not in (agent.capabilities or []):
+    if backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -305,14 +309,25 @@ async def run_test_case_on_client(
             logger.exception("Failed to create AgentRun record")
 
         try:
+            # Clear stale compiled script failure / synth markers
+            agent_manager._last_compiled_script_failed = None
+            agent_manager._last_synthesized_script = None
             step_results = await agent_manager.execute_on_agent(
                 agent.id, run_id, db_case.name, steps, output_dir=output_dir,
                 base_url_override=base_url_override,
                 backend=backend,
                 batch_id=batch.id,
+                case_id=case_id,
+                compiled_script=getattr(db_case, "compiled_script", None),
+                compiled_script_hash=getattr(db_case, "compiled_script_hash", None),
+                case_description=getattr(db_case, "description", None),
             )
             try:
                 from core.locator_memory import persist_learned_locators_from_results
+                from core.compiled_script import (
+                    clear_compiled_script,
+                    persist_compiled_script,
+                )
                 # Use a fresh session — request-scoped db may be stale after long agent runs
                 async with db_mod.AsyncSessionLocal() as _persist_db:
                     orm_steps = await crud.get_steps_for_case(_persist_db, case_id)
@@ -320,8 +335,34 @@ async def run_test_case_on_client(
                     await persist_learned_locators_from_results(
                         _persist_db, step_results, steps_by_order=by_order,
                     )
+                    tc = await crud.get_test_case(_persist_db, case_id)
+                    failed_meta = getattr(agent_manager, "_last_compiled_script_failed", None)
+                    if failed_meta and tc and failed_meta.get("case_id") == case_id:
+                        if clear_compiled_script(tc):
+                            await _persist_db.commit()
+                            logger.info("cleared compiled_script after failed replay case=%s", case_id)
+                        agent_manager._last_compiled_script_failed = None
+                    synth = getattr(agent_manager, "_last_synthesized_script", None)
+                    if (
+                        tc
+                        and isinstance(synth, dict)
+                        and synth.get("case_id") == case_id
+                        and synth.get("script")
+                        and synth.get("steps_hash")
+                    ):
+                        persist_compiled_script(
+                            tc,
+                            script=synth["script"],
+                            steps_hash=synth["steps_hash"],
+                        )
+                        await _persist_db.commit()
+                        logger.info(
+                            "persisted LLM-synthesized compiled_script case=%s hash=%s",
+                            case_id, str(synth["steps_hash"])[:12],
+                        )
+                        agent_manager._last_synthesized_script = None
             except Exception:
-                logger.warning("persist learned_locator after client exec failed", exc_info=True)
+                logger.warning("persist learned_locator/compiled_script after client exec failed", exc_info=True)
             # empty list: all([]) is True in Python — treat as failed
             all_passed = bool(step_results) and all(r.get("success") for r in step_results)
             status = "passed" if all_passed else "failed"
@@ -439,40 +480,35 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         db_agent = await _find_online_agent_in_db(db, body.agent_name)
         if not db_agent:
             raise HTTPException(status_code=400, detail="No client agents available")
-        # 跨 worker：创建统一 RunBatch；初始化用例先入队，再入队主用例（按 id 顺序执行）
+        # 跨 worker：创建统一 RunBatch；按 init_policy 展开队列后入队
         from app.db_models import RunBatch
+        from core.runner._persistence import build_batch_execution_queue
         queued = []
         tc0 = None
         init_ids = list(body.init_case_ids or [])
         main_ids = list(body.case_ids or [])
-        ordered_ids: list[int] = []
-        seen: set[int] = set()
-        for cid in init_ids + main_ids:
-            if cid in seen:
-                continue
-            seen.add(cid)
-            ordered_ids.append(cid)
-        init_set = set(init_ids)
-        for cid in ordered_ids:
+        init_policy = getattr(body, "init_policy", None) or "before_each"
+        exec_queue = build_batch_execution_queue(main_ids, init_ids, init_policy)
+        for cid, _is_init in exec_queue:
             tc = await crud.get_test_case(db, cid)
             if tc and tc0 is None:
                 tc0 = tc
         batch = RunBatch(
             status="running",
             project_id=tc0.project_id if tc0 else 0,
-            total_cases=len(ordered_ids),
+            total_cases=len(exec_queue),
             triggered_by=body.agent_name,
         )
         db.add(batch)
         await db.commit()
         await db.refresh(batch)
-        for seq, cid in enumerate(ordered_ids):
+        for seq, (cid, is_init) in enumerate(exec_queue):
             tc = await crud.get_test_case(db, cid)
             if tc:
-                pend = await _create_pending_execution(
+                await _create_pending_execution(
                     db, cid, body.agent_name, tc,
                     batch_id=batch.id, environment_id=body.environment_id,
-                    is_init=cid in init_set, seq=seq,
+                    is_init=is_init, seq=seq,
                 )
                 queued.append(cid)
         if queued:
@@ -480,7 +516,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                 "status": "queued",
                 "case_ids": queued,
                 "agent_name": body.agent_name,
-                "message": f"{len(queued)} cases queued for batch #{batch.id} (init first)",
+                "message": f"{len(queued)} cases queued for batch #{batch.id} (policy={init_policy})",
             }
         raise HTTPException(status_code=400, detail="No test cases to queue")
     
@@ -492,9 +528,21 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     else:
         agent = agents[0]
 
-    if body.backend is not None and body.backend not in ("playwright_mcp", "browser_use", "hybrid"):
-        raise HTTPException(status_code=400, detail="backend must be playwright_mcp, browser_use, or hybrid")
-    if body.backend in ("browser_use", "hybrid") and "browser_use" not in (agent.capabilities or []):
+    if body.backend is not None:
+        from app.runtime_config import normalize_execution_backend
+        nb = normalize_execution_backend(body.backend)
+        if nb not in (
+            "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "backend must be nl_goal, compiled_script, legacy_hybrid, "
+                    "legacy_mcp, or browser_use"
+                ),
+            )
+        body.backend = nb
+    if body.backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -505,20 +553,14 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
 
     case_ids = body.case_ids
     init_case_ids = body.init_case_ids or []
+    init_policy = getattr(body, "init_policy", None) or "before_each"
     if not case_ids:
         raise HTTPException(status_code=400, detail="No test case IDs provided")
 
-    # 严格顺序：初始化用例在前（去重），再跑主用例（排除已作为 init 的 id）
-    ordered_ids: list[int] = []
-    seen: set[int] = set()
-    for cid in list(init_case_ids) + list(case_ids):
-        if cid in seen:
-            continue
-        seen.add(cid)
-        ordered_ids.append(cid)
-    init_set = set(init_case_ids)
+    from core.runner._persistence import build_batch_execution_queue, precreate_pending_runs
+    exec_queue = build_batch_execution_queue(list(case_ids), list(init_case_ids), init_policy)
 
-    async def _load_case_info(cid: int) -> Optional[dict]:
+    async def _load_case_info(cid: int, is_init: bool) -> Optional[dict]:
         tc = await crud.get_test_case(db, cid)
         if not tc:
             return None
@@ -542,19 +584,26 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         return {
             "id": tc.id,
             "name": tc.name,
+            "description": getattr(tc, "description", None),
             "project_id": tc.project_id,
             "steps": steps,
-            "is_init": cid in init_set,
+            "is_init": is_init,
+            "compiled_script": getattr(tc, "compiled_script", None),
+            "compiled_script_hash": getattr(tc, "compiled_script_hash", None),
         }
 
-    case_infos = [await _load_case_info(cid) for cid in ordered_ids]
-    case_infos = [c for c in case_infos if c]
+    case_infos = []
+    for cid, is_init in exec_queue:
+        info = await _load_case_info(cid, is_init)
+        if info:
+            case_infos.append(info)
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
 
     logger.info(
-        "Client batch order (%s cases): %s",
+        "Client batch order (%s slots, policy=%s): %s",
         len(case_infos),
+        init_policy,
         [(c["id"], c["name"], "init" if c["is_init"] else "main") for c in case_infos],
     )
 
@@ -579,13 +628,13 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
 
     # 预创建 pending TestRun，避免按序落库期间轮询把批次误判为 partial
-    from core.runner._persistence import precreate_pending_runs
-    _init_ids = [c["id"] for c in case_infos if c.get("is_init")]
-    _main_ids = [c["id"] for c in case_infos if not c.get("is_init")]
     async with db_mod.AsyncSessionLocal() as _pr_db:
-        precreated_run_ids = await precreate_pending_runs(
-            _pr_db, _main_ids, batch.id, init_case_ids=_init_ids,
+        precreated_runs = await precreate_pending_runs(
+            _pr_db, list(case_ids), batch.id,
+            init_case_ids=list(init_case_ids), init_policy=init_policy,
         )
+    # 按执行序号取 run_id（before_each 下同一 case 可有多条）
+    precreated_run_ids_by_idx = {i: rid for i, (_cid, rid, _is_init) in enumerate(precreated_runs)}
 
     async def _run_batch() -> None:
         from app import execution_control
@@ -605,7 +654,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     break
 
                 case_id = info["id"]
-                db_run_id = precreated_run_ids.get(case_id)
+                db_run_id = precreated_run_ids_by_idx.get(idx)
                 steps = info["steps"]
                 if not steps:
                     logger.warning("Skip case %s — no steps", case_id)
@@ -676,15 +725,25 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
 
                 case_failed = False
                 try:
+                    agent_manager._last_compiled_script_failed = None
+                    agent_manager._last_synthesized_script = None
                     step_results = await agent_manager.execute_on_agent(
                         agent.id, run_id, info["name"], steps, output_dir=output_dir,
                         base_url_override=base_url_override,
                         backend=getattr(body, "backend", None),
                         navigate_base_url=navigate_base,
                         batch_id=batch.id,
+                        case_id=case_id,
+                        compiled_script=info.get("compiled_script"),
+                        compiled_script_hash=info.get("compiled_script_hash"),
+                        case_description=info.get("description"),
                     )
                     try:
                         from core.locator_memory import persist_learned_locators_from_results
+                        from core.compiled_script import (
+                            clear_compiled_script,
+                            persist_compiled_script,
+                        )
                         # Batch path: steps_raw is local to _load_case_info — reload ORM rows here
                         async with db_mod.AsyncSessionLocal() as _persist_db:
                             orm_steps = await crud.get_steps_for_case(_persist_db, case_id)
@@ -692,9 +751,38 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                             await persist_learned_locators_from_results(
                                 _persist_db, step_results, steps_by_order=by_order,
                             )
+                            tc = await crud.get_test_case(_persist_db, case_id)
+                            failed_meta = getattr(agent_manager, "_last_compiled_script_failed", None)
+                            if failed_meta and tc and failed_meta.get("case_id") == case_id:
+                                if clear_compiled_script(tc):
+                                    await _persist_db.commit()
+                                    logger.info(
+                                        "cleared compiled_script after failed replay case=%s",
+                                        case_id,
+                                    )
+                                agent_manager._last_compiled_script_failed = None
+                            synth = getattr(agent_manager, "_last_synthesized_script", None)
+                            if (
+                                tc
+                                and isinstance(synth, dict)
+                                and synth.get("case_id") == case_id
+                                and synth.get("script")
+                                and synth.get("steps_hash")
+                            ):
+                                persist_compiled_script(
+                                    tc,
+                                    script=synth["script"],
+                                    steps_hash=synth["steps_hash"],
+                                )
+                                await _persist_db.commit()
+                                logger.info(
+                                    "persisted LLM-synthesized compiled_script case=%s hash=%s",
+                                    case_id, str(synth["steps_hash"])[:12],
+                                )
+                                agent_manager._last_synthesized_script = None
                     except Exception:
                         logger.warning(
-                            "persist learned_locator after batch client exec failed",
+                            "persist learned_locator/compiled_script after batch client exec failed",
                             exc_info=True,
                         )
                     # empty list: all([]) is True — must not mark batch as success
@@ -761,7 +849,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                         "Init case %s failed — abort remaining %s case(s) in batch",
                         case_id, len(case_infos) - idx - 1,
                     )
-                    for remaining in case_infos[idx + 1:]:
+                    for rem_idx, remaining in enumerate(case_infos[idx + 1:], start=idx + 1):
                         await save_run_results(
                             remaining["id"], "failed", tz_now(), tz_now(), 0.0,
                             None, None,
@@ -770,7 +858,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                                 "message": f"因初始化用例 {case_id} 失败而跳过",
                             }],
                             batch_id=batch.id,
-                            run_id=precreated_run_ids.get(remaining["id"]),
+                            run_id=precreated_run_ids_by_idx.get(rem_idx),
                             is_init=remaining.get("is_init", False),
                         )
                     break

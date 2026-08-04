@@ -13,7 +13,12 @@ import {
 } from '@arco-design/web-react';
 import { apiGet, apiPut } from '@/utils/apiRequest';
 
-type Backend = 'playwright_mcp' | 'browser_use' | 'hybrid';
+type Backend =
+  | 'nl_goal'
+  | 'compiled_script'
+  | 'legacy_hybrid'
+  | 'legacy_mcp'
+  | 'browser_use';
 
 interface ExecutionBackendConfig {
   backend: Backend;
@@ -24,15 +29,21 @@ interface ExecutionBackendConfig {
 const ExecutionBackendConfigPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [backend, setBackend] = useState<Backend>('playwright_mcp');
-  const [maxSteps, setMaxSteps] = useState(30);
+  const [backend, setBackend] = useState<Backend>('nl_goal');
+  const [maxSteps, setMaxSteps] = useState(40);
   const [headless, setHeadless] = useState(true);
 
   useEffect(() => {
     apiGet<ExecutionBackendConfig>('/api/config/execution-backend')
       .then((data) => {
-        setBackend(data.backend ?? 'playwright_mcp');
-        setMaxSteps(data.max_steps_per_nl ?? 30);
+        const b = (data.backend as string) || 'nl_goal';
+        // migrate old names shown in UI
+        if (b === 'hybrid' || b === 'playwright_mcp') {
+          setBackend('nl_goal');
+        } else {
+          setBackend(b as Backend);
+        }
+        setMaxSteps(data.max_steps_per_nl ?? 40);
         setHeadless(data.headless ?? true);
       })
       .catch(() => Message.error('加载执行后端配置失败'))
@@ -57,48 +68,54 @@ const ExecutionBackendConfigPage: React.FC = () => {
 
   if (loading) return <Spin loading className="spin-center" />;
 
-  const buStepsEnabled = backend === 'browser_use' || backend === 'hybrid';
+  const turnsHint =
+    backend === 'nl_goal' || backend === 'browser_use' || backend === 'legacy_hybrid';
 
   return (
     <Card title="执行后端">
       <Alert
         type="info"
         style={{ marginBottom: 16 }}
-        content="影响服务端执行与客户端 Agent 的默认引擎（未单独指定 backend 时）。hybrid 仅客户端生效：MCP 默认，定位失败时同浏览器 CDP 挂 browser-use 救场。「无头模式」仅作用于服务端；客户端以本地设置为准。配置在内存中，服务重启后恢复默认 Playwright MCP。"
+        content="UI 客户端默认：自然语言目标（整案多轮观察→操作→成功后合成 Playwright 脚本）。已固化脚本会优先回放。旧版逐步 MCP/hybrid 仅作兼容。"
       />
-      <Form layout="vertical" style={{ maxWidth: 560 }}>
+      <Form layout="vertical" style={{ maxWidth: 640 }}>
         <Form.Item label="默认执行引擎" required>
           <Select
             value={backend}
             onChange={setBackend}
             options={[
               {
-                label: 'Playwright MCP（逐步：快照 → LLM → 操作）',
-                value: 'playwright_mcp',
+                label: '自然语言目标（推荐，对齐 Cursor：整案 NL → 固化脚本）',
+                value: 'nl_goal',
               },
               {
-                label: 'browser-use（自然语言多轮自主执行）',
+                label: '仅固化脚本（失败即败，不回退 NL）',
+                value: 'compiled_script',
+              },
+              {
+                label: '旧版混合（逐步 MCP + 单步 browser-use 救场）',
+                value: 'legacy_hybrid',
+              },
+              {
+                label: '旧版 Playwright MCP（逐步快照绑定）',
+                value: 'legacy_mcp',
+              },
+              {
+                label: 'browser-use 整案 NL（过渡）',
                 value: 'browser_use',
-              },
-              {
-                label: '混合（MCP 默认，定位失败同浏览器 browser-use 救场）',
-                value: 'hybrid',
               },
             ]}
           />
         </Form.Item>
-        <Form.Item
-          label="browser-use 每步最大轮数"
-          disabled={!buStepsEnabled}
-        >
+        <Form.Item label="NL / 目标循环最大轮数" disabled={!turnsHint}>
           <InputNumber
             value={maxSteps}
             min={3}
-            max={50}
-            onChange={(v) => setMaxSteps(Number(v) || 30)}
+            max={80}
+            onChange={(v) => setMaxSteps(Number(v) || 40)}
           />
           <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
-            browser-use / hybrid 救场步生效
+            nl_goal 整案轮数；browser-use / 旧版 hybrid 救场步也使用
           </Typography.Text>
         </Form.Item>
         <Form.Item label="无头模式（仅服务端执行）">
