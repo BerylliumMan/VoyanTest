@@ -71,6 +71,9 @@ class HealingConfig(BaseModel):
 healing_config = HealingConfig()
 
 
+DryRunMode = Literal["skip", "attach", "isolated"]
+
+
 class ExecutionBackendConfig(BaseModel):
     """UI 执行后端。
 
@@ -78,11 +81,17 @@ class ExecutionBackendConfig(BaseModel):
     - compiled_script: 仅跑已固化脚本，失败即败
     - legacy_hybrid / legacy_mcp: 旧逐步 snapshot 路径
     - browser_use: 整案 NL（browser-use）过渡
+
+    dry_run_mode（仅 nl_goal 成功后脚本校验）:
+    - skip（默认）: 合成脚本后不整案重放；不新开 Chromium；报告以 goal journal 为准
+    - attach: 附着 nl_goal 同一浏览器校验（未实现时等同 skip）
+    - isolated: 新开 headless Chromium 整案 dry-run（用户可见「从头重放」日志）
     """
 
     backend: BackendName = "nl_goal"
     max_steps_per_nl: int = Field(default=40, ge=3, le=80)
     headless: bool = True
+    dry_run_mode: DryRunMode = "skip"
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -91,6 +100,14 @@ class ExecutionBackendConfig(BaseModel):
             # Migrate old defaults to nl_goal once (product cutover)
             return "nl_goal"
         return v or "nl_goal"
+
+    @field_validator("dry_run_mode", mode="before")
+    @classmethod
+    def _coerce_dry_run_mode(cls, v):
+        m = (v or "skip").strip().lower() if isinstance(v, str) else "skip"
+        if m in ("skip", "attach", "isolated"):
+            return m
+        return "skip"
 
 
 execution_backend_config = ExecutionBackendConfig()
@@ -103,7 +120,7 @@ def load_execution_backend_config() -> ExecutionBackendConfig:
     try:
         if not path.is_file():
             return execution_backend_config
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
         # Cut over old defaults stored as hybrid / playwright_mcp → nl_goal
         if isinstance(raw, dict) and raw.get("backend") in ("hybrid", "playwright_mcp"):
             logger.info(

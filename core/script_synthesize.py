@@ -22,18 +22,34 @@ Requirements:
 2. Define exactly: async def test_case_{case_id}(page) -> None:
 3. Prefer get_by_placeholder / get_by_role / get_by_text(exact) / locator with stable CSS.
 4. NEVER use ephemeral accessibility refs (e12, e15, …).
-5. For Element UI / Ant Design unit/tree selects:
+5. ALWAYS disambiguate duplicate placeholders (Ant/Element often keep visible+hidden twins).
+   Prefer CSS :visible / :not([disabled]):visible, then .first — e.g.
+   page.locator('input[placeholder="请选择单位"]:visible').first.click()
+   page.locator('input[placeholder="输入关键词进行筛选"]:not([disabled]):visible').first.press_sequentially(...)
+   Never bare get_by_placeholder(...).click() (strict mode). Bare .first alone may hit a hidden/disabled twin.
+6. For Element UI / Ant Design unit/tree selects:
    - open the visible combobox/placeholder
-   - type into the visible filter input (prefer press_sequentially for filter-as-you-type)
+   - type into the enabled+visible filter input (prefer press_sequentially)
    - click the tree/list label with EXACT text match (not a longer similar name)
-6. For closing homepage dialogs/notifications: loop visible dialogs and click 关闭 / header close.
-7. Use await page.wait_for_timeout(...) sparingly for UI settle.
-8. Include short comments matching checklist intents.
-9. Assume caller may already have navigated to base_url; still call page.goto(base) at start if base_url provided.
-10. Import only what you need from playwright.async_api if helpers need expect — or use plain awaits.
+7. For closing homepage dialogs/notifications (Element UI, Cursor-proven):
+   - loop .el-dialog__wrapper:visible → click footer button matching /关\\s*闭/ else .el-dialog__headerbtn
+   - then .el-notification:visible → click .el-notification__closeBtn (or remove node)
+   - NEVER click 消息铃铛 / 去查看. Repeat 2–3 times until no visible overlays.
+8. Use await page.wait_for_timeout(...) sparingly for UI settle.
+9. Include short comments matching checklist intents.
+10. Assume caller may already have navigated to base_url; still call page.goto(base) at start if base_url provided.
+11. Import only what you need from playwright.async_api if helpers need expect — or use plain awaits.
 
 Style reference (conceptual): placeholder clicks, exact tree label, close dialogs loop — like a hand-written login script.
 """
+
+# Bare get_by_*().action → insert .first before action (strict-mode safety net).
+_GET_BY_FIRST_RE = re.compile(
+    r"""(?P<loc>page\.get_by_(?:placeholder|role|text|label|title|alt_text)\([^;\n]*?\))"""
+    r"""(?!\s*\.first)"""
+    r"""(?P<trail>\s*\.\s*(?:click|fill|press|press_sequentially|type|check|uncheck|select_option|hover|focus|blur|wait_for)\s*\()""",
+    re.I,
+)
 
 
 def _strip_fences(text: str) -> str:
@@ -58,6 +74,13 @@ def _ensure_entrypoint(script: str, case_id: int) -> str:
         f"async def {name}(page) -> None:\n"
         "    raise RuntimeError('synthesized script missing body')\n"
     )
+
+
+def harden_locators_with_first(script: str) -> str:
+    """Insert .first before actions on bare get_by_* locators (strict mode)."""
+    if not script:
+        return script
+    return _GET_BY_FIRST_RE.sub(r"\g<loc>.first\g<trail>", script)
 
 
 async def synthesize_playwright_script(
@@ -96,7 +119,7 @@ async def synthesize_playwright_script(
     script = _strip_fences(resp.choices[0].message.content or "")
     if not script or "async def" not in script:
         raise ValueError("LLM returned empty/invalid Playwright script")
-    return _ensure_entrypoint(script, int(case_id))
+    return harden_locators_with_first(_ensure_entrypoint(script, int(case_id)))
 
 
 async def repair_playwright_script(
@@ -131,4 +154,4 @@ async def repair_playwright_script(
     fixed = _strip_fences(resp.choices[0].message.content or "")
     if not fixed or "async def" not in fixed:
         raise ValueError("LLM repair returned empty/invalid script")
-    return _ensure_entrypoint(fixed, int(case_id))
+    return harden_locators_with_first(_ensure_entrypoint(fixed, int(case_id)))

@@ -300,7 +300,15 @@ async def _compute_batch_status(db: AsyncSession, batch, preloaded_runs: list = 
     if running > 0:
         batch.status = "running"
     elif completed >= batch.total_cases:
-        batch.status = "passed" if counts.get("failed", 0) == 0 else "failed"
+        n_passed = counts.get("passed", 0)
+        n_failed = counts.get("failed", 0)
+        if n_failed == 0:
+            batch.status = "passed"
+        elif n_passed > 0:
+            # 有通过也有失败 → partial（避免 UI「全部失败」与汇总 通过1失败1 矛盾）
+            batch.status = "partial"
+        else:
+            batch.status = "failed"
         if batch.finished_at is None:
             batch.finished_at = now
     elif batch.finished_at is None:
