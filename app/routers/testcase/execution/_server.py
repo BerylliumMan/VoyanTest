@@ -46,17 +46,26 @@ async def run_test_case_endpoint(
 ) -> dict:
     """运行单个测试用例 - 创建单用例批次
 
-    Query ``backend``: ``playwright_mcp``（默认）| ``browser_use``（试点 NL Agent）。
+    Query ``backend``: ``nl_goal`` | ``browser_use`` | ``legacy_*``.
     """
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    if backend is not None and backend not in ("playwright_mcp", "browser_use", "hybrid"):
-        raise HTTPException(
-            status_code=400,
-            detail="backend must be playwright_mcp, browser_use, or hybrid",
-        )
+    if backend is not None:
+        from app.runtime_config import normalize_execution_backend
+        backend = normalize_execution_backend(backend)
+        if backend not in (
+            "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp",
+            "browser_use",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "backend must be nl_goal, compiled_script, legacy_hybrid, "
+                    "legacy_mcp, or browser_use"
+                ),
+            )
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
@@ -210,6 +219,7 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
 
     case_ids = [c.id for c in test_cases]
     init_case_ids = req.init_case_ids or []
+    init_policy = req.init_policy or "before_each"
 
     if init_case_ids:
         init_tcs = await _load_test_cases(init_case_ids)
@@ -217,7 +227,8 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
             if tc.project_id != project_id:
                 raise HTTPException(status_code=400, detail=f"Init case {tc.id} is not in the same project")
 
-    total = len(case_ids) + len(init_case_ids)
+    from core.runner._persistence import build_batch_execution_queue
+    total = len(build_batch_execution_queue(case_ids, init_case_ids, init_policy))
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total, triggered_by=getattr(user, 'username', None))
     from app.routers.testcase import execution as _exec
     batch_id = batch.id
@@ -231,6 +242,7 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
                 batch_id=batch_id,
                 environment_id=req.environment_id,
                 init_case_ids=init_case_ids,
+                init_policy=init_policy,
             )
         finally:
             if user_id:

@@ -50,6 +50,8 @@ def _resolve_mcp_tool(action: str) -> str:
         'assert_text': 'browser_wait_for',
         'press_key': 'browser_press_key',
         'hover': 'browser_hover',
+        'evaluate': 'browser_evaluate',
+        'browser_evaluate': 'browser_evaluate',
     }
     return TOOL_MAP.get(action, action)
 
@@ -1128,6 +1130,16 @@ class AgentClient:
             return {'key': value or 'Escape'}
         elif action in ('hover', 'browser_hover'):
             return {'element': selector or '', 'target': selector or ''}
+        elif action in ('evaluate', 'browser_evaluate'):
+            # Playwright MCP: function is a JS function body or expression
+            fn = (value or selector or "").strip()
+            if fn and not fn.lstrip().startswith(("(", "function", "async")):
+                # wrap statement list / expression as function
+                if "return" not in fn:
+                    fn = f"() => {{ return Boolean(({fn})); }}"
+                else:
+                    fn = f"() => {{ {fn} }}"
+            return {"function": fn or "() => true"}
         return {}
 
     # ---- messaging ----
@@ -1222,8 +1234,8 @@ class AgentClient:
                             nav = await self._mcp_call_tool("goto", "", base_url)
                             err_text = str(nav.get("error") or nav.get("text") or "unknown")
                         if not nav.get("success"):
-                            self._log_warning(f"BASE URL navigation failed: {err_text}")
-                            ready_err = err_text
+                            ready_err = f"导航失败，已停止执行: {base_url} — {err_text}"
+                            self._log_warning(ready_err)
                         else:
                             ready_ok = True
                     else:
@@ -1299,6 +1311,9 @@ class AgentClient:
         elif msg.type == WSMessageType.STEP_BROWSER_USE:
             await self._handle_step_browser_use(msg)
 
+        elif msg.type == WSMessageType.RUN_COMPILED_SCRIPT:
+            await self._handle_run_compiled_script(msg)
+
         elif msg.type == WSMessageType.SHUTDOWN:
             self._log_info("Shutdown signal received — closing browser")
             try:
@@ -1353,6 +1368,85 @@ class AgentClient:
                 await browser.close()
         except Exception as exc:
             self._log_warning(f"browser-use session stop: {exc}")
+
+    async def _handle_run_compiled_script(self, msg: WSMessage):
+        """Run a solidified whole-case Playwright Python script on a fresh browser."""
+        import tempfile
+        import time as _time
+        from pathlib import Path
+
+        payload = msg.payload or {}
+        script = payload.get("script") or ""
+        base_url = (payload.get("base_url") or "").strip()
+        case_id = payload.get("case_id") or 0
+        t0 = _time.monotonic()
+        if not script.strip():
+            await self._send(
+                WSMessageType.COMPILED_SCRIPT_RESULT,
+                msg.run_id,
+                {"success": False, "error": "empty compiled_script", "duration_ms": 0},
+            )
+            return
+
+        self._log_info(f"Running compiled Playwright script for case={case_id}")
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix=f"vt_case_{case_id}_", suffix=".py")
+            os.close(fd)
+            Path(tmp_path).write_text(script, encoding="utf-8")
+
+            # Prefer executing the embedded test_case_N(page) against a local Chromium
+            ns: dict = {"__name__": "__vt_compiled__"}
+            code = compile(script, tmp_path, "exec")
+            exec(code, ns, ns)
+            fn = ns.get(f"test_case_{int(case_id)}")
+            if not callable(fn):
+                # fallback: any test_case_* 
+                for k, v in ns.items():
+                    if k.startswith("test_case_") and callable(v):
+                        fn = v
+                        break
+            if not callable(fn):
+                raise RuntimeError("compiled script has no test_case_* entrypoint")
+
+            from playwright.async_api import async_playwright
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=False)
+                context = await browser.new_context()
+                page = await context.new_page()
+                if base_url:
+                    await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(800)
+                await fn(page)
+                await browser.close()
+
+            await self._send(
+                WSMessageType.COMPILED_SCRIPT_RESULT,
+                msg.run_id,
+                {
+                    "success": True,
+                    "error": None,
+                    "duration_ms": int((_time.monotonic() - t0) * 1000),
+                },
+            )
+        except Exception as exc:
+            self._log_error(f"compiled_script failed: {exc}")
+            await self._send(
+                WSMessageType.COMPILED_SCRIPT_RESULT,
+                msg.run_id,
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "duration_ms": int((_time.monotonic() - t0) * 1000),
+                },
+            )
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     async def _handle_step_browser_use(self, msg: WSMessage):
         """Hybrid fallback: run one NL step via browser-use on the shared CDP browser."""
@@ -1412,21 +1506,25 @@ class AgentClient:
                 on_progress=_progress,
             )
             r = results[0] if results else {"success": False, "error": "empty result"}
+            result_payload = {
+                "step_order": step_order,
+                "success": bool(r.get("success")),
+                "thinking": r.get("thinking") or "",
+                "action": r.get("action") or "browser_use_fallback",
+                "next_goal": "",
+                "error": r.get("error"),
+                "duration_ms": r.get("duration_ms")
+                or (time.monotonic() - t0) * 1000,
+                "screenshot_base64": r.get("screenshot_base64"),
+                "backend": "browser_use_fallback",
+            }
+            learned = r.get("learned_locator")
+            if isinstance(learned, dict):
+                result_payload["learned_locator"] = learned
             await self._send(
                 WSMessageType.STEP_RESULT,
                 msg.run_id,
-                {
-                    "step_order": step_order,
-                    "success": bool(r.get("success")),
-                    "thinking": r.get("thinking") or "",
-                    "action": r.get("action") or "browser_use_fallback",
-                    "next_goal": "",
-                    "error": r.get("error"),
-                    "duration_ms": r.get("duration_ms")
-                    or (time.monotonic() - t0) * 1000,
-                    "screenshot_base64": r.get("screenshot_base64"),
-                    "backend": "browser_use_fallback",
-                },
+                result_payload,
             )
             self._log_info(
                 f"Hybrid fallback step {step_order} "
