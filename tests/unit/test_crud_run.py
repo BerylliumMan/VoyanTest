@@ -397,7 +397,7 @@ class TestComputeBatchStatusAdvanced:
 
         await _compute_batch_status(db, batch, preloaded_runs=[r_pass, r_fail])
 
-        assert batch.status == "failed"
+        assert batch.status == "partial"
         assert batch.passed == 1
         assert batch.failed == 1
 

@@ -157,7 +157,10 @@ function Dashboard() {
                        }
                        if (s === 'paused') return <Tag color="orangered">{t['paused']}</Tag>;
                        if (s === 'cancelled') return <Tag color="gray">{t['cancelled']}</Tag>;
-                       if (s === 'partial') return <Tag color="orange">{t['partial.passed']}</Tag>;
+                       // 有通过也有失败 → 部分通过（优先于 status=failed）
+                       if (s === 'partial' || ((r.passed || 0) > 0 && failed > 0)) {
+                         return <Tag color="orange">{t['partial.passed']}</Tag>;
+                       }
                        if (s === 'passed' || (r.passed === r.total_cases && r.total_cases > 0)) {
                          return <Tag color="green">{t['all.passed']}</Tag>;
                        }
@@ -165,7 +168,6 @@ function Dashboard() {
                        if (r.total_cases > 0 && (r.passed || 0) + failed < r.total_cases) {
                          return <Tag color="blue"><IconLoading className={styles.iconMarginRight} />{t['running']}</Tag>;
                        }
-                       if ((r.passed || 0) > 0 && failed > 0) return <Tag color="orange">{t['partial.passed']}</Tag>;
                        if (r.total_cases > 0) return <Tag color="red">{t['all.failed']}</Tag>;
                        return <Tag color="gray">--</Tag>;
                      } },

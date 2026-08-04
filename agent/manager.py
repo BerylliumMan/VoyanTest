@@ -30,6 +30,86 @@ from core.locator_failure import (
 logger = logging.getLogger("agent.manager")
 
 
+def _locate_script_verify_failed_step_orders(
+    verify: Optional[list],
+    steps: List[dict],
+    error: str = "",
+) -> Optional[List[int]]:
+    """Locate 1-based checklist step_orders that script dry-run failed on.
+
+    Returns ``None`` when the failure cannot be attributed to specific steps
+    (e.g. whole-script blob with placeholder ``step_number=1`` / infra errors).
+    """
+    import re
+
+    orders: List[int] = []
+    if verify:
+        blob = (
+            len(verify) == 1
+            and isinstance(verify[0], dict)
+            and bool(verify[0].get("compiled_script_failed"))
+        )
+        if not blob:
+            for r in verify:
+                if not isinstance(r, dict):
+                    continue
+                sn = r.get("step_number")
+                if sn is None:
+                    continue
+                if not r.get("success") or r.get("compiled_script_failed"):
+                    try:
+                        orders.append(int(sn))
+                    except (TypeError, ValueError):
+                        pass
+
+    if not orders and error:
+        m = re.search(
+            r"(?:checklist|step|步骤)\s*[#:_=-]?\s*(\d+)",
+            str(error),
+            re.IGNORECASE,
+        )
+        if m:
+            try:
+                orders.append(int(m.group(1)))
+            except ValueError:
+                pass
+
+    if not orders:
+        return None
+
+    known: set[int] = set()
+    for i, s in enumerate(steps or []):
+        so = s.get("step_order") if isinstance(s, dict) else None
+        known.add(int(so) if so is not None else i + 1)
+    valid = sorted({o for o in orders if o in known})
+    return valid or None
+
+
+def _pick_nl_script_fallback_step(
+    steps: List[dict],
+    *,
+    dry_verify: Optional[list] = None,
+    dry_error: str = "",
+) -> Optional[tuple]:
+    """Choose the single step to hybrid-NL after solidify/dry-run failure.
+
+    Returns ``(step_dict, step_order)`` only when dry-run/error can attribute a
+    checklist step. Returns ``None`` when unlocated — caller must keep goal
+    results and must not blindly re-run (whole case or last step).
+    """
+    if not steps:
+        return None
+    located = _locate_script_verify_failed_step_orders(dry_verify, steps, dry_error)
+    if not located:
+        return None
+    target_order = located[0]
+    for i, s in enumerate(steps):
+        so = int(s.get("step_order") or s.get("step_number") or i + 1)
+        if so == target_order:
+            return s, so
+    return None
+
+
 async def _resolve_agent_tool_call(
     *,
     desc: str,
@@ -408,29 +488,50 @@ class AgentManager:
         case_id: Optional[int] = None,
         case_description: Optional[str] = None,
     ) -> list:
-        """Cursor-style whole-case NL goal loop → journal → synthesize+verify script.
+        """Cursor-style whole-case NL goal loop → journal → synthesize script.
 
-        If goal succeeds but synthesize/dry-run(+one repair) fails, fall back once
-        to legacy hybrid (per-step NL) and return those step results.
+        After goal DONE, report is always based on the journal (passed). Script
+        solidify follows ``execution_backend_config.dry_run_mode``:
+
+        - ``skip`` (default): synthesize only; never launch a second Chromium /
+          whole-case ``compiled_script`` replay (what looked like "restarting
+          from step 1"). Persist synthesized script without isolated verify.
+        - ``attach``: reserved; currently same as skip (no whole-case relaunch).
+        - ``isolated``: optional headless dry-run(+one repair). On verify fail,
+          may remediate one located checklist step via hybrid on the *same*
+          browser; never re-RUN_START the whole case. Fail → warning, no persist.
         """
         import time as _time
 
         from app.runtime_config import execution_backend_config
         from core.compiled_script import steps_content_hash
         from core.goal_agent_loop import (
+            CLOSE_ALL_PAGE_PROMPTS_JS,
             DEFAULT_MAX_TURNS,
+            GoalAction,
             build_goal_text,
+            close_messages_step_orders,
             decide_next_goal_action,
             detect_stagnation,
             journal_entry,
+            seed_open_steps_after_navigation,
             steps_results_from_goal,
             tool_call_from_decision,
+            uncovered_checklist_orders,
         )
         from core.script_synthesize import repair_playwright_script, synthesize_playwright_script
 
         session = await self.get_session(agent_id)
         if not session:
             raise ValueError(f"Agent {agent_id} not connected")
+
+        # Prefer hybrid shared-CDP so script-verify step fallback can reuse the
+        # same Chromium/page. Plain playwright_mcp has no CDP endpoint; a later
+        # hybrid RUN_START would launch a blank browser.
+        caps = session.agent.capabilities or []
+        nl_backend = (
+            "hybrid" if "browser_use" in caps else "playwright_mcp"
+        )
 
         max_turns = int(
             getattr(execution_backend_config, "max_steps_per_nl", None) or DEFAULT_MAX_TURNS
@@ -445,13 +546,15 @@ class AgentManager:
         journal: list = []
         goal_error: Optional[str] = None
         goal_ok = False
+        run_started = False
 
         session.agent.status = AgentStatus.BUSY
         logger.info(
-            "nl_goal start case=%s agent=%s max_turns=%s",
+            "nl_goal start case=%s agent=%s max_turns=%s backend=%s",
             case_id or case_name,
             agent_id,
             max_turns,
+            nl_backend,
         )
 
         try:
@@ -465,12 +568,13 @@ class AgentManager:
                         "case_name": case_name,
                         "steps": steps,
                         "base_url": (base_url_override or "") if navigate_base_url else "",
-                        "backend": "playwright_mcp",
+                        "backend": nl_backend,
                         "navigate_base_url": navigate_base_url,
                     },
                 ),
                 timeout=90,
             )
+            run_started = True
             if isinstance(ready, dict) and ready.get("ready") is False:
                 err = ready.get("error") or ready.get("message") or "browser not ready"
                 raise RuntimeError(f"Agent browser failed to start: {err}")
@@ -498,7 +602,11 @@ class AgentManager:
                     raise RuntimeError(
                         f"导航失败，已停止执行: {base_url_override} — {reason}"
                     )
+                journal.extend(
+                    seed_open_steps_after_navigation(steps, base_url_override)
+                )
 
+            close_helper_runs = 0
             for turn in range(1, max_turns + 1):
                 if batch_id is not None:
                     from app import execution_control
@@ -513,20 +621,104 @@ class AgentManager:
                     goal_error = "浏览器已关闭"
                     break
 
-                try:
-                    decision = await decide_next_goal_action(
-                        client=llm_client,
-                        model=model,
-                        goal_text=goal_text,
-                        snapshot=snap,
-                        journal_tail=journal,
+                # Cursor pattern: AFTER earlier checklist is done, when
+                # close-messages is the next uncovered item, run proven
+                # Element UI dismiss JS (dialogs + notifications) — do not
+                # let the LLM click the message bell / 去查看.
+                uncovered_now = uncovered_checklist_orders(steps, journal)
+                close_orders = [
+                    o
+                    for o in close_messages_step_orders(steps)
+                    if o in set(uncovered_now)
+                ]
+                close_idx = min(close_orders) if close_orders else None
+                earlier_blocking = (
+                    [o for o in uncovered_now if o < close_idx]
+                    if close_idx is not None
+                    else uncovered_now
+                )
+                use_close_helper = (
+                    close_idx is not None
+                    and not earlier_blocking
+                    and close_helper_runs < 3
+                )
+                if use_close_helper:
+                    close_helper_runs += 1
+                    logger.info(
+                        "nl_goal Cursor-style close_all_prompts helper "
+                        "case=%s turn=%s step=%s run=%s",
+                        case_id,
+                        turn,
+                        close_idx,
+                        close_helper_runs,
                     )
-                except Exception as exc:
-                    goal_error = f"goal LLM failed: {exc}"
-                    logger.exception("nl_goal decide failed turn=%s", turn)
-                    break
+                    decision = GoalAction(
+                        status="continue",
+                        thinking=(
+                            "Cursor-style: dismiss all visible Element UI "
+                            "dialogs/notifications via evaluate click loop"
+                        ),
+                        action="evaluate",
+                        selector="",
+                        value=CLOSE_ALL_PAGE_PROMPTS_JS,
+                        stable_hint="CLOSE_ALL_PAGE_PROMPTS",
+                        checklist_index=close_idx,
+                        checklist_note=(
+                            f"CLOSE_ALL_PAGE_PROMPTS checklist item {close_idx}"
+                        ),
+                    )
+                else:
+                    try:
+                        decision = await decide_next_goal_action(
+                            client=llm_client,
+                            model=model,
+                            goal_text=goal_text,
+                            snapshot=snap,
+                            journal_tail=journal,
+                            steps=steps,
+                        )
+                    except Exception as exc:
+                        goal_error = f"goal LLM failed: {exc}"
+                        logger.exception("nl_goal decide failed turn=%s", turn)
+                        break
 
                 if decision.status == "done":
+                    uncovered = uncovered_checklist_orders(steps, journal)
+                    if uncovered:
+                        logger.warning(
+                            "nl_goal rejecting premature DONE case=%s turn=%s "
+                            "uncovered=%s",
+                            case_id,
+                            turn,
+                            uncovered,
+                        )
+                        journal.append(
+                            {
+                                "turn": turn,
+                                "status": "done_rejected",
+                                "thinking": decision.thinking,
+                                "action": None,
+                                "selector": None,
+                                "value": None,
+                                "stable_hint": None,
+                                "checklist_index": None,
+                                "checklist_note": (
+                                    f"premature DONE rejected; still uncovered: "
+                                    f"{uncovered}"
+                                ),
+                                "success": False,
+                                "error": (
+                                    f"premature DONE: checklist steps "
+                                    f"{uncovered} not yet executed"
+                                ),
+                                "duration_ms": 0,
+                                "result_snippet": None,
+                                "screenshot_on_fail": False,
+                                "screenshot_path": None,
+                            }
+                        )
+                        continue
+
                     journal.append(
                         journal_entry(
                             turn=turn,
@@ -588,6 +780,41 @@ class AgentManager:
 
                 action = (decision.action or "").strip().lower()
                 if not action or action == "done":
+                    uncovered = uncovered_checklist_orders(steps, journal)
+                    if uncovered:
+                        logger.warning(
+                            "nl_goal rejecting empty/done action case=%s turn=%s "
+                            "uncovered=%s",
+                            case_id,
+                            turn,
+                            uncovered,
+                        )
+                        journal.append(
+                            {
+                                "turn": turn,
+                                "status": "done_rejected",
+                                "thinking": decision.thinking,
+                                "action": action or None,
+                                "selector": None,
+                                "value": None,
+                                "stable_hint": None,
+                                "checklist_index": None,
+                                "checklist_note": (
+                                    f"premature done action rejected; still "
+                                    f"uncovered: {uncovered}"
+                                ),
+                                "success": False,
+                                "error": (
+                                    f"premature DONE: checklist steps "
+                                    f"{uncovered} not yet executed"
+                                ),
+                                "duration_ms": 0,
+                                "result_snippet": None,
+                                "screenshot_on_fail": False,
+                                "screenshot_path": None,
+                            }
+                        )
+                        continue
                     journal.append(
                         journal_entry(turn=turn, decision=decision, success=True)
                     )
@@ -678,30 +905,309 @@ class AgentManager:
                     except Exception:
                         logger.debug("nl_goal final fail screenshot skipped", exc_info=True)
 
-            try:
-                await session.send(
-                    WSMessage(type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id)
+            # Do NOT RUN_END here — synthesize dry-run is separate, but the
+            # single-step hybrid fallback must reuse this same browser/page.
+            self._last_action_journal = journal
+
+            if not goal_ok:
+                return steps_results_from_goal(
+                    steps,
+                    success=False,
+                    journal=journal,
+                    error=goal_error or "nl_goal failed",
+                    backend="nl_goal",
                 )
+
+            # Success → synthesize Playwright; verify only when dry_run_mode=isolated
+            results = steps_results_from_goal(
+                steps, success=True, journal=journal, backend="nl_goal"
+            )
+            if not all(
+                isinstance(r, dict) and r.get("success") for r in (results or [])
+            ):
+                logger.warning(
+                    "nl_goal DONE but some checklist steps not truly covered — "
+                    "report keeps failures; skip script solidify case=%s",
+                    case_id,
+                )
+                return results
+            script_ok = False
+            dry_verify_last: Optional[list] = None
+            dry_error_last = ""
+            dry_mode = (
+                getattr(execution_backend_config, "dry_run_mode", None) or "skip"
+            )
+            dry_mode = str(dry_mode).strip().lower()
+            if dry_mode not in ("skip", "attach", "isolated"):
+                dry_mode = "skip"
+            # attach: same browser verify not wired yet — never fall back to
+            # isolated whole-case Chromium relaunch (user complaint path).
+            if dry_mode == "attach":
+                logger.info(
+                    "nl_goal dry_run_mode=attach not implemented — "
+                    "treating as skip (no whole-case compiled_script replay)"
+                )
+                dry_mode = "skip"
+
+            try:
+                llm_client = await create_openai_client()
+                _, _, model = await _llm_resolve_config()
+                cid = int(case_id or 0)
+                script = await synthesize_playwright_script(
+                    client=llm_client,
+                    model=model,
+                    case_id=cid or 1,
+                    case_name=case_name,
+                    goal_text=goal_text,
+                    journal=journal,
+                    base_url=base_url_override,
+                )
+
+                if dry_mode == "skip":
+                    # Cursor semantics: goal DONE is the verdict. Persist script
+                    # from journal without a second browser replay from step 1.
+                    if script:
+                        h = steps_content_hash(steps)
+                        self._last_synthesized_script = {
+                            "case_id": case_id,
+                            "script": script,
+                            "steps_hash": h,
+                        }
+                        script_ok = True
+                        logger.info(
+                            "nl_goal synthesized script ok case=%s bytes=%s "
+                            "(dry_run_mode=skip — no compiled_script replay)",
+                            case_id,
+                            len(script),
+                        )
+                    return results
+
+                # dry_run_mode=isolated only: optional headless whole-script verify
+                verify = await self._try_run_compiled_script(
+                    agent_id,
+                    f"{run_id}_dry",
+                    case_name,
+                    steps,
+                    script=script,
+                    base_url=base_url_override,
+                    case_id=cid or None,
+                    steps_hash=steps_content_hash(steps),
+                )
+                dry_verify_last = verify
+                dry_fail = (
+                    verify is None
+                    or any(r.get("compiled_script_failed") for r in (verify or []))
+                    or not (verify and all(r.get("success") for r in verify))
+                )
+                if dry_fail:
+                    err = ""
+                    if verify:
+                        err = next(
+                            (r.get("error") for r in verify if r.get("error")),
+                            "dry-run failed",
+                        )
+                    else:
+                        err = "dry-run unsupported/timeout"
+                    # Truncate — Playwright missing-browser dumps a huge box
+                    err_short = " ".join(str(err).split())[:180]
+                    dry_error_last = err_short
+                    logger.warning(
+                        "nl_goal script dry-run failed — repair once: %s", err_short
+                    )
+                    try:
+                        script = await repair_playwright_script(
+                            client=llm_client,
+                            model=model,
+                            case_id=cid or 1,
+                            script=script,
+                            error=err_short,
+                            journal=journal,
+                        )
+                        verify2 = await self._try_run_compiled_script(
+                            agent_id,
+                            f"{run_id}_dry2",
+                            case_name,
+                            steps,
+                            script=script,
+                            base_url=base_url_override,
+                            case_id=cid or None,
+                            steps_hash=steps_content_hash(steps),
+                        )
+                        dry_verify_last = verify2
+                        dry_fail = (
+                            verify2 is None
+                            or any(r.get("compiled_script_failed") for r in (verify2 or []))
+                            or not (verify2 and all(r.get("success") for r in verify2))
+                        )
+                        if dry_fail and verify2:
+                            err2 = next(
+                                (r.get("error") for r in verify2 if r.get("error")),
+                                "",
+                            )
+                            if err2:
+                                dry_error_last = " ".join(str(err2).split())[:180]
+                    except Exception:
+                        logger.warning("script repair failed", exc_info=True)
+                        dry_fail = True
+
+                if not dry_fail and script:
+                    h = steps_content_hash(steps)
+                    self._last_synthesized_script = {
+                        "case_id": case_id,
+                        "script": script,
+                        "steps_hash": h,
+                    }
+                    script_ok = True
+                    logger.info(
+                        "nl_goal synthesized script ok case=%s bytes=%s",
+                        case_id,
+                        len(script),
+                    )
+                else:
+                    logger.warning(
+                        "nl_goal goal passed but script verify failed — not persisting"
+                    )
             except Exception:
-                logger.debug("RUN_END after nl_goal failed", exc_info=True)
+                logger.warning("nl_goal synthesize/verify failed", exc_info=True)
+                script_ok = False
+
+            # isolated verify failed → hybrid NL for the located failed step only
+            # (do NOT re-RUN_START the whole case). Unlocated → keep goal results.
+            if not script_ok and dry_mode == "isolated":
+                picked = _pick_nl_script_fallback_step(
+                    steps,
+                    dry_verify=dry_verify_last,
+                    dry_error=dry_error_last,
+                )
+                if not picked:
+                    logger.warning(
+                        "nl_goal script verify failed — cannot locate failed step; "
+                        "keeping goal success results (no whole-case / blind hybrid re-run)"
+                    )
+                    for r in results:
+                        if isinstance(r, dict):
+                            r["nl_goal_script_fallback_attempted"] = True
+                            r["nl_goal_script_verify_unlocated"] = True
+                    return results
+                fb_step, fb_order = picked
+                logger.warning(
+                    "nl_goal script verify failed — remediating located step %s only",
+                    fb_order,
+                )
+                try:
+                    nl_results = await self._execute_on_agent_snapshot_path(
+                        agent_id,
+                        f"{run_id}_nl_fb",
+                        case_name,
+                        [fb_step],
+                        output_dir=output_dir,
+                        base_url_override=base_url_override,
+                        backend="hybrid",
+                        navigate_base_url=False,
+                        reuse_existing_browser=True,
+                        batch_id=batch_id,
+                        selected="hybrid",
+                    )
+                    if isinstance(nl_results, list) and nl_results:
+                        fb_row = next(
+                            (
+                                r
+                                for r in nl_results
+                                if isinstance(r, dict)
+                                and int(r.get("step_number") or 0) == int(fb_order)
+                            ),
+                            nl_results[0] if isinstance(nl_results[0], dict) else None,
+                        )
+                        if not isinstance(fb_row, dict):
+                            logger.warning(
+                                "nl_goal NL fallback returned no usable step row — "
+                                "keeping goal results"
+                            )
+                        else:
+                            fb_row.setdefault("backend", "legacy_hybrid")
+                            fb_row["nl_goal_script_fallback"] = True
+                            fb_row["step_number"] = int(fb_order)
+                            fb_ok_step = bool(fb_row.get("success"))
+                            if not fb_ok_step:
+                                logger.warning(
+                                    "nl_goal NL fallback step %s did not pass — "
+                                    "keeping goal success results (script not persisted)",
+                                    fb_order,
+                                )
+                                for r in results:
+                                    if isinstance(r, dict):
+                                        r["nl_goal_script_fallback_attempted"] = True
+                                return results
+
+                            # Merge: keep goal-passed rows for other steps
+                            merged: list = []
+                            replaced = False
+                            for r in results:
+                                if not isinstance(r, dict):
+                                    continue
+                                if int(r.get("step_number") or 0) == int(fb_order):
+                                    merged.append(fb_row)
+                                    replaced = True
+                                else:
+                                    merged.append(r)
+                            if not replaced:
+                                merged.append(fb_row)
+                            if journal and merged:
+                                merged[0]["action_journal"] = journal
+
+                            # Secondary solidify from merged locators — still no
+                            # whole-case dry-run under skip; only when isolated.
+                            try:
+                                from core.compiled_script import build_script_from_run
+
+                                cid = int(case_id or 0)
+                                h = steps_content_hash(steps)
+                                built = build_script_from_run(
+                                    case_id=cid or 1,
+                                    case_name=case_name,
+                                    steps=steps,
+                                    step_results=merged,
+                                    base_url=base_url_override,
+                                    steps_hash=h,
+                                )
+                                if built:
+                                    # Persist without another isolated Chromium
+                                    # relaunch — goal already passed; locators
+                                    # came from the live page remediation.
+                                    self._last_synthesized_script = {
+                                        "case_id": case_id,
+                                        "script": built,
+                                        "steps_hash": h,
+                                    }
+                                    logger.info(
+                                        "nl_goal fallback solidify ok case=%s bytes=%s "
+                                        "(no secondary compiled_script replay)",
+                                        case_id,
+                                        len(built),
+                                    )
+                            except Exception:
+                                logger.warning(
+                                    "nl_goal fallback solidify skipped",
+                                    exc_info=True,
+                                )
+                            return merged
+                    logger.warning(
+                        "nl_goal NL fallback returned empty — keeping goal results"
+                    )
+                except Exception:
+                    logger.warning(
+                        "nl_goal script-verify NL fallback failed — keeping goal results",
+                        exc_info=True,
+                    )
+
+            return results
 
         except ConnectionError:
             raise
         except Exception as exc:
             goal_error = str(exc)
             logger.exception("nl_goal aborted: %s", exc)
-            try:
-                await session.send(
-                    WSMessage(type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id)
-                )
-            except Exception:
-                pass
-        finally:
-            session.agent.status = AgentStatus.ONLINE
-
-        self._last_action_journal = journal
-
-        if not goal_ok:
+            self._last_action_journal = journal
             return steps_results_from_goal(
                 steps,
                 success=False,
@@ -709,187 +1215,19 @@ class AgentManager:
                 error=goal_error or "nl_goal failed",
                 backend="nl_goal",
             )
-
-        # Success → synthesize Playwright + dry-run verify (one repair)
-        results = steps_results_from_goal(
-            steps, success=True, journal=journal, backend="nl_goal"
-        )
-        script_ok = False
-        try:
-            llm_client = await create_openai_client()
-            _, _, model = await _llm_resolve_config()
-            cid = int(case_id or 0)
-            script = await synthesize_playwright_script(
-                client=llm_client,
-                model=model,
-                case_id=cid or 1,
-                case_name=case_name,
-                goal_text=goal_text,
-                journal=journal,
-                base_url=base_url_override,
-            )
-            verify = await self._try_run_compiled_script(
-                agent_id,
-                f"{run_id}_dry",
-                case_name,
-                steps,
-                script=script,
-                base_url=base_url_override,
-                case_id=cid or None,
-                steps_hash=steps_content_hash(steps),
-            )
-            dry_fail = (
-                verify is None
-                or any(r.get("compiled_script_failed") for r in (verify or []))
-                or not (verify and all(r.get("success") for r in verify))
-            )
-            if dry_fail:
-                err = ""
-                if verify:
-                    err = next(
-                        (r.get("error") for r in verify if r.get("error")),
-                        "dry-run failed",
-                    )
-                else:
-                    err = "dry-run unsupported/timeout"
-                logger.info("nl_goal script dry-run failed — repair once: %s", err)
+        finally:
+            if run_started:
                 try:
-                    script = await repair_playwright_script(
-                        client=llm_client,
-                        model=model,
-                        case_id=cid or 1,
-                        script=script,
-                        error=str(err),
-                        journal=journal,
-                    )
-                    verify2 = await self._try_run_compiled_script(
-                        agent_id,
-                        f"{run_id}_dry2",
-                        case_name,
-                        steps,
-                        script=script,
-                        base_url=base_url_override,
-                        case_id=cid or None,
-                        steps_hash=steps_content_hash(steps),
-                    )
-                    dry_fail = (
-                        verify2 is None
-                        or any(r.get("compiled_script_failed") for r in (verify2 or []))
-                        or not (verify2 and all(r.get("success") for r in verify2))
+                    await session.send(
+                        WSMessage(
+                            type=WSMessageType.RUN_END,
+                            agent_id=agent_id,
+                            run_id=run_id,
+                        )
                     )
                 except Exception:
-                    logger.warning("script repair failed", exc_info=True)
-                    dry_fail = True
-
-            if not dry_fail and script:
-                h = steps_content_hash(steps)
-                self._last_synthesized_script = {
-                    "case_id": case_id,
-                    "script": script,
-                    "steps_hash": h,
-                }
-                script_ok = True
-                logger.info(
-                    "nl_goal synthesized script ok case=%s bytes=%s",
-                    case_id,
-                    len(script),
-                )
-            else:
-                logger.warning(
-                    "nl_goal goal passed but script verify failed — not persisting"
-                )
-        except Exception:
-            logger.warning("nl_goal synthesize/verify failed", exc_info=True)
-            script_ok = False
-
-        # Solidify failed after goal passed → one NL (legacy hybrid) re-run.
-        # Avoids marking the case failed solely for script verify; report uses
-        # real per-step NL results. Never recurse into nl_goal (no infinite loop).
-        if not script_ok:
-            logger.info(
-                "nl_goal script verify failed — falling back to NL step execution"
-            )
-            try:
-                nl_results = await self._execute_on_agent_snapshot_path(
-                    agent_id,
-                    f"{run_id}_nl_fb",
-                    case_name,
-                    steps,
-                    output_dir=output_dir,
-                    base_url_override=base_url_override,
-                    backend="hybrid",
-                    navigate_base_url=navigate_base_url,
-                    batch_id=batch_id,
-                    selected="hybrid",
-                )
-                if isinstance(nl_results, list) and nl_results:
-                    for r in nl_results:
-                        if not isinstance(r, dict):
-                            continue
-                        r.setdefault("backend", "legacy_hybrid")
-                        r["nl_goal_script_fallback"] = True
-                    if journal:
-                        nl_results[0]["action_journal"] = journal
-                    # Secondary solidify from hybrid locators (no further NL loop)
-                    if all(r.get("success") for r in nl_results if isinstance(r, dict)):
-                        try:
-                            from core.compiled_script import build_script_from_run
-
-                            cid = int(case_id or 0)
-                            h = steps_content_hash(steps)
-                            built = build_script_from_run(
-                                case_id=cid or 1,
-                                case_name=case_name,
-                                steps=steps,
-                                step_results=nl_results,
-                                base_url=base_url_override,
-                                steps_hash=h,
-                            )
-                            if built:
-                                v_fb = await self._try_run_compiled_script(
-                                    agent_id,
-                                    f"{run_id}_fb_dry",
-                                    case_name,
-                                    steps,
-                                    script=built,
-                                    base_url=base_url_override,
-                                    case_id=cid or None,
-                                    steps_hash=h,
-                                )
-                                fb_ok = (
-                                    v_fb is not None
-                                    and not any(
-                                        r.get("compiled_script_failed") for r in v_fb
-                                    )
-                                    and all(r.get("success") for r in v_fb)
-                                )
-                                if fb_ok:
-                                    self._last_synthesized_script = {
-                                        "case_id": case_id,
-                                        "script": built,
-                                        "steps_hash": h,
-                                    }
-                                    logger.info(
-                                        "nl_goal fallback solidify ok case=%s bytes=%s",
-                                        case_id,
-                                        len(built),
-                                    )
-                                else:
-                                    logger.info(
-                                        "nl_goal fallback solidify dry-run failed — skip persist"
-                                    )
-                        except Exception:
-                            logger.debug(
-                                "nl_goal fallback solidify skipped", exc_info=True
-                            )
-                    return nl_results
-            except Exception:
-                logger.warning(
-                    "nl_goal script-verify NL fallback failed — keeping goal results",
-                    exc_info=True,
-                )
-
-        return results
+                    logger.debug("RUN_END after nl_goal failed", exc_info=True)
+            session.agent.status = AgentStatus.ONLINE
 
     async def _try_run_compiled_script(
         self,
@@ -936,9 +1274,9 @@ class AgentManager:
         if resp.get("unsupported"):
             return None
         if not resp.get("success"):
-            logger.info(
+            logger.warning(
                 "compiled_script run failed: %s",
-                (resp.get("error") or "")[:200],
+                " ".join(str(resp.get("error") or "").split())[:180],
             )
             return [
                 {
@@ -987,11 +1325,15 @@ class AgentManager:
         navigate_base_url: bool = True,
         batch_id: Optional[int] = None,
         selected: Optional[str] = None,
+        reuse_existing_browser: bool = False,
     ) -> dict:
         """LEGACY Snapshot → bind ref → MCP (hybrid browser-use fallback).
 
         Prefer ``_execute_on_agent_nl_goal`` for UI. Kept for ``legacy_hybrid`` /
         ``legacy_mcp`` backends only.
+
+        ``reuse_existing_browser``: for nl_goal step fallback — tell the agent to
+        keep the current Chromium/page (do not launch a fresh Hybrid CDP browser).
         """
         from app.runtime_config import execution_backend_config
 
@@ -1009,11 +1351,12 @@ class AgentManager:
             hybrid = False
 
         logger.info(
-            "Client agent run backend selected=%s hybrid=%s agent=%s caps=%s",
+            "Client agent run backend selected=%s hybrid=%s agent=%s caps=%s reuse=%s",
             selected,
             hybrid,
             agent_id,
             session.agent.capabilities or [],
+            reuse_existing_browser,
         )
 
         session.agent.status = AgentStatus.BUSY
@@ -1021,40 +1364,54 @@ class AgentManager:
         consecutive_failures = 0
         max_failures = 1
         failed_step_number = None
+        # nl_goal step fallback: never RUN_START/RUN_END — parent keeps the session.
+        # Sending hybrid RUN_START would launch a blank Chromium on agents that
+        # started nl_goal with plain MCP (no shared CDP).
+        own_run_lifecycle = not reuse_existing_browser
 
         try:
-            # Wait until client browser/MCP is ready (ACK via SNAPSHOT_RESULT)
-            ready = await session.request(
-                WSMessage(
-                    type=WSMessageType.RUN_START, agent_id=agent_id,
-                    run_id=run_id,
-                    payload={
-                        "case_id": run_id,
-                        "case_name": case_name,
-                        "steps": steps,
-                        "base_url": (base_url_override or "") if navigate_base_url else "",
-                        "backend": "hybrid" if hybrid else "playwright_mcp",
-                        "navigate_base_url": navigate_base_url,
-                    },
-                ),
-                timeout=90,
-            )
-            if isinstance(ready, dict) and ready.get("ready") is False:
-                err = ready.get("error") or ready.get("message") or ready.get("text") or "browser not ready"
-                logger.error("Agent %s browser failed to start: %s", agent_id, err)
-                err_s = str(err)
-                if err_s.startswith("导航失败"):
-                    raise RuntimeError(err_s)
-                raise RuntimeError(f"Agent browser failed to start: {err_s}")
-            if isinstance(ready, dict) and ready.get("message") and "MCP start failed" in str(ready.get("message")):
-                raise RuntimeError(str(ready.get("message")))
+            if reuse_existing_browser:
+                logger.info(
+                    "reuse existing browser for nl_goal step fallback run=%s "
+                    "(skip RUN_START / no new Chromium / no BASE URL nav)",
+                    run_id,
+                )
+            else:
+                # Wait until client browser/MCP is ready (ACK via SNAPSHOT_RESULT)
+                ready = await session.request(
+                    WSMessage(
+                        type=WSMessageType.RUN_START, agent_id=agent_id,
+                        run_id=run_id,
+                        payload={
+                            "case_id": run_id,
+                            "case_name": case_name,
+                            "steps": steps,
+                            "base_url": (base_url_override or "") if navigate_base_url else "",
+                            "backend": "hybrid" if hybrid else "playwright_mcp",
+                            "navigate_base_url": navigate_base_url,
+                            "reuse_existing_browser": False,
+                        },
+                    ),
+                    timeout=90,
+                )
+                if isinstance(ready, dict) and ready.get("ready") is False:
+                    err = ready.get("error") or ready.get("message") or ready.get("text") or "browser not ready"
+                    logger.error("Agent %s browser failed to start: %s", agent_id, err)
+                    err_s = str(err)
+                    if err_s.startswith("导航失败"):
+                        raise RuntimeError(err_s)
+                    raise RuntimeError(f"Agent browser failed to start: {err_s}")
+                if isinstance(ready, dict) and ready.get("message") and "MCP start failed" in str(ready.get("message")):
+                    raise RuntimeError(str(ready.get("message")))
 
             llm_client = await create_openai_client()
             _, _, model = await _llm_resolve_config()
 
             # 等待浏览器就绪；仅首个用例（或显式要求时）导航 BASE URL
             await self._get_snapshot(session, agent_id, run_id)
-            if navigate_base_url and base_url_override:
+            if reuse_existing_browser:
+                pass  # stay on nl_goal's current page
+            elif navigate_base_url and base_url_override:
                 logger.info("Playwright navigating to BASE URL: %s", base_url_override)
                 nav_result = await self.send_act(
                     agent_id,
@@ -1668,7 +2025,19 @@ class AgentManager:
                     )
 
                 # 4. Verify expected result if step succeeded (Skyvern-style when expected set)
-                if result.get("success") and expected_result:
+                # Skip placeholder expectations like「步骤执行成功」— LLM often false-fails them.
+                _exp_norm = (expected_result or "").strip()
+                _trivial_expected = _exp_norm in (
+                    "",
+                    "步骤执行成功",
+                    "执行成功",
+                    "成功",
+                    "ok",
+                    "OK",
+                    "pass",
+                    "passed",
+                )
+                if result.get("success") and expected_result and not _trivial_expected:
                     try:
                         from core.verification_strategy import VerificationStrategy
                         from core.llm_wrapper import verify_expected_result
@@ -1847,13 +2216,14 @@ class AgentManager:
                         })
                     break
 
-            # Notify agent of run end
-            try:
-                await session.send(WSMessage(
-                    type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id,
-                ))
-            except ConnectionError as exc:
-                logger.warning("RUN_END not sent (agent disconnected): %s", exc)
+            # Notify agent of run end (skip when nested under nl_goal — parent owns lifecycle)
+            if own_run_lifecycle:
+                try:
+                    await session.send(WSMessage(
+                        type=WSMessageType.RUN_END, agent_id=agent_id, run_id=run_id,
+                    ))
+                except ConnectionError as exc:
+                    logger.warning("RUN_END not sent (agent disconnected): %s", exc)
 
         except ConnectionError as exc:
             logger.error(
@@ -1891,7 +2261,8 @@ class AgentManager:
                     last["error"] = f"Agent disconnected: {exc}"
 
         finally:
-            session.agent.status = AgentStatus.ONLINE
+            if own_run_lifecycle:
+                session.agent.status = AgentStatus.ONLINE
 
         return step_results
 
