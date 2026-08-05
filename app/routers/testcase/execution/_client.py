@@ -100,6 +100,7 @@ async def _create_pending_execution(
     environment_id: Optional[int] = None,
     is_init: bool = False,
     seq: int | None = None,
+    reuse_browser_session: bool = False,
 ) -> dict:
     """在 DB 中创建待执行记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
     from app.db_models import AgentRun
@@ -126,6 +127,8 @@ async def _create_pending_execution(
         goal["is_init"] = True
     if seq is not None:
         goal["seq"] = int(seq)
+    if reuse_browser_session:
+        goal["reuse_browser_session"] = True
 
     ar = AgentRun(
         agent_definition_id=dummy_def_id,
@@ -327,6 +330,7 @@ async def run_test_case_on_client(
                 from core.compiled_script import (
                     clear_compiled_script,
                     persist_compiled_script,
+                    should_clear_compiled_script_after_error,
                 )
                 # Use a fresh session — request-scoped db may be stale after long agent runs
                 async with db_mod.AsyncSessionLocal() as _persist_db:
@@ -338,9 +342,21 @@ async def run_test_case_on_client(
                     tc = await crud.get_test_case(_persist_db, case_id)
                     failed_meta = getattr(agent_manager, "_last_compiled_script_failed", None)
                     if failed_meta and tc and failed_meta.get("case_id") == case_id:
-                        if clear_compiled_script(tc):
-                            await _persist_db.commit()
-                            logger.info("cleared compiled_script after failed replay case=%s", case_id)
+                        if should_clear_compiled_script_after_error(
+                            failed_meta.get("error")
+                        ):
+                            if clear_compiled_script(tc):
+                                await _persist_db.commit()
+                                logger.info(
+                                    "cleared compiled_script after failed replay case=%s",
+                                    case_id,
+                                )
+                        else:
+                            logger.info(
+                                "keep compiled_script after infra fail case=%s: %s",
+                                case_id,
+                                str(failed_meta.get("error") or "")[:120],
+                            )
                         agent_manager._last_compiled_script_failed = None
                     synth = getattr(agent_manager, "_last_synthesized_script", None)
                     if (
@@ -489,6 +505,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         main_ids = list(body.case_ids or [])
         init_policy = getattr(body, "init_policy", None) or "before_each"
         exec_queue = build_batch_execution_queue(main_ids, init_ids, init_policy)
+        reuse_session = len(exec_queue) > 1
         for cid, _is_init in exec_queue:
             tc = await crud.get_test_case(db, cid)
             if tc and tc0 is None:
@@ -509,6 +526,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     db, cid, body.agent_name, tc,
                     batch_id=batch.id, environment_id=body.environment_id,
                     is_init=is_init, seq=seq,
+                    reuse_browser_session=reuse_session,
                 )
                 queued.append(cid)
         if queued:
@@ -670,6 +688,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
 
                 # 仅第一个用例导航 BASE URL；后续复用同一浏览器会话（保留登录态）
                 navigate_base = idx == 0
+                # Multi-case batch: never use ephemeral compiled_script browser
+                reuse_session = len(case_infos) > 1
 
                 run_id = uuid.uuid4().hex[:12]
                 start_time = tz_now()
@@ -677,8 +697,9 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                 await _asyncio.to_thread(_ensure_dir, output_dir)
 
                 logger.info(
-                    "Client batch case %s/%s: id=%s name=%r init=%s navigate=%s",
-                    idx + 1, len(case_infos), case_id, info["name"], info.get("is_init"), navigate_base,
+                    "Client batch case %s/%s: id=%s name=%r init=%s navigate=%s reuse_session=%s",
+                    idx + 1, len(case_infos), case_id, info["name"], info.get("is_init"),
+                    navigate_base, reuse_session,
                 )
 
                 # 检查是否有活跃 execution AgentDefinition — 显式 OTA 时走桥接
@@ -737,12 +758,14 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                         compiled_script=info.get("compiled_script"),
                         compiled_script_hash=info.get("compiled_script_hash"),
                         case_description=info.get("description"),
+                        reuse_browser_session=reuse_session,
                     )
                     try:
                         from core.locator_memory import persist_learned_locators_from_results
                         from core.compiled_script import (
                             clear_compiled_script,
                             persist_compiled_script,
+                            should_clear_compiled_script_after_error,
                         )
                         # Batch path: steps_raw is local to _load_case_info — reload ORM rows here
                         async with db_mod.AsyncSessionLocal() as _persist_db:
@@ -754,11 +777,20 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                             tc = await crud.get_test_case(_persist_db, case_id)
                             failed_meta = getattr(agent_manager, "_last_compiled_script_failed", None)
                             if failed_meta and tc and failed_meta.get("case_id") == case_id:
-                                if clear_compiled_script(tc):
-                                    await _persist_db.commit()
+                                if should_clear_compiled_script_after_error(
+                                    failed_meta.get("error")
+                                ):
+                                    if clear_compiled_script(tc):
+                                        await _persist_db.commit()
+                                        logger.info(
+                                            "cleared compiled_script after failed replay case=%s",
+                                            case_id,
+                                        )
+                                else:
                                     logger.info(
-                                        "cleared compiled_script after failed replay case=%s",
+                                        "keep compiled_script after infra fail case=%s: %s",
                                         case_id,
+                                        str(failed_meta.get("error") or "")[:120],
                                     )
                                 agent_manager._last_compiled_script_failed = None
                             synth = getattr(agent_manager, "_last_synthesized_script", None)

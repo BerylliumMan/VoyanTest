@@ -35,17 +35,25 @@ NEVER copy intermediate/failed journal values (typos, parent tree nodes).
 Requirements:
 1. Output ONLY Python source — no markdown fences, no commentary.
 2. Define exactly: async def test_case_{case_id}(page) -> None:
+   First lines inside the function MUST set global timeouts:
+     page.set_default_timeout(30000)
+     page.set_default_navigation_timeout(60000)
+   Rely on Playwright auto-wait. NEVER use page.wait_for_timeout / locator.wait_for /
+   explicit sleeps. After login you may use: await expect(page).to_have_url(...)
 3. For each successful journal step with playwright_locator, emit:
    await page.<playwright_locator>.first.click() / .fill(value) / .press_sequentially(value)
    (strip a leading page. if present). Use checklist ``value`` for fills.
 4. If playwright_locator is missing, use get_by_placeholder / get_by_role / get_by_text(exact=True).
-5. ALWAYS disambiguate duplicates with .first (or :visible / :not([disabled]) when needed).
-6. Filter/typeahead steps: prefer press_sequentially over fill alone.
-7. Option/tree node clicks: use EXACT text from checklist/replay.exact_text — never a parent prefix.
+5. ALWAYS disambiguate duplicates with .first (or .filter(visible=True) when needed).
+6. Filter/typeahead: AFTER opening a unit/org picker, first
+   await expect(page.get_by_role('treeitem').first).to_be_attached()
+   THEN type the filter — early keystrokes are ignored once the list loads.
+   Prefer press_sequentially; select via get_by_role('treeitem', name=...).
+7. Option clicks: get_by_role('treeitem', name=exact checklist text).
 8. Close overlays: loop visible dialogs → footer 关闭 / header close; then notifications.
    NEVER click 消息铃铛 / 去查看.
 9. page.goto(base_url) at start when base_url is provided.
-10. Import re / expect only when used.
+10. Import re / expect only when used. NEVER use wait_for_timeout / locator.wait_for.
 """
 
 # Bare get_by_*().action → insert .first before action (strict-mode safety net).
