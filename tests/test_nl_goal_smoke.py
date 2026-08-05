@@ -136,6 +136,34 @@ def test_steps_results_max_turns_after_cover_9():
     assert rows[9]["screenshot_path"] == shot
 
 
+def test_steps_results_gap_uncovered_gets_final_shot():
+    """covered={1..7,9} max_turns → fail step 8 (first gap) with final screenshot."""
+    shot = "reports/run_x/screenshots/nl_goal_final_fail.png"
+    journal = [
+        {"checklist_index": i, "success": True, "action": "click"}
+        for i in (1, 2, 3, 4, 5, 6, 7, 9)
+    ] + [
+        {
+            "checklist_index": None,
+            "success": False,
+            "error": "nl_goal hit max_turns=40",
+            "screenshot_path": shot,
+            "screenshot_on_fail": True,
+        }
+    ]
+    rows = steps_results_from_goal(
+        _ten_steps(),
+        success=False,
+        journal=journal,
+        error="nl_goal hit max_turns=40",
+    )
+    assert rows[7]["step_number"] == 8
+    assert rows[7]["status"] == "failed"
+    assert rows[7]["screenshot_path"] == shot
+    assert rows[8]["status"] == "skipped"  # 9 was covered but after fail cursor
+    assert rows[9]["status"] == "skipped"
+
+
 def test_fill_cannot_cover_click_checklist_step():
     """Successful fill/search must not mark a 点击 checklist item as passed."""
     from core.goal_agent_loop import (
@@ -401,8 +429,8 @@ def _nl_goal_session_patches(mgr, *, snap_return=None):
     )
 
 
-def test_nl_goal_default_skip_no_compiled_script_replay():
-    """Default dry_run_mode=skip: goal DONE → synthesize, never Trying compiled_script."""
+def test_nl_goal_default_skip_verifies_before_persist():
+    """skip: goal DONE → synthesize → headless verify → persist only if verify ok."""
     from agent.manager import AgentManager
     from app.runtime_config import execution_backend_config
 
@@ -417,7 +445,10 @@ def test_nl_goal_default_skip_no_compiled_script_replay():
     async def _run():
         _session, patches, snap = _nl_goal_session_patches(mgr)
         try_run = AsyncMock(
-            side_effect=AssertionError("must not call _try_run_compiled_script")
+            return_value=[
+                {"success": True, "step_number": 1},
+                {"success": True, "step_number": 2},
+            ]
         )
         with (
             patches[0],
@@ -442,7 +473,7 @@ def test_nl_goal_default_skip_no_compiled_script_replay():
                 case_id=42,
                 navigate_base_url=False,
             )
-            try_run.assert_not_awaited()
+            try_run.assert_awaited()
             snap.assert_not_awaited()
             assert isinstance(out, list) and len(out) == 2
             assert all(r.get("success") for r in out)
@@ -450,6 +481,66 @@ def test_nl_goal_default_skip_no_compiled_script_replay():
             assert out[0].get("action_journal")
             synth = mgr._last_synthesized_script
             assert synth and "test_case_42" in (synth.get("script") or "")
+
+    try:
+        asyncio.run(_run())
+    finally:
+        execution_backend_config.dry_run_mode = prev
+
+
+def test_nl_goal_skip_verify_fail_does_not_persist():
+    """skip + verify fail → case still passed, script not persisted."""
+    from agent.manager import AgentManager
+    from app.runtime_config import execution_backend_config
+
+    mgr = AgentManager()
+    steps = [
+        {"step_order": 1, "description": "a"},
+        {"step_order": 2, "description": "b"},
+    ]
+    prev = execution_backend_config.dry_run_mode
+    execution_backend_config.dry_run_mode = "skip"
+
+    async def _run():
+        _session, patches, snap = _nl_goal_session_patches(mgr)
+        try_run = AsyncMock(
+            return_value=[
+                {
+                    "success": False,
+                    "compiled_script_failed": True,
+                    "error": "boom",
+                }
+            ]
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patch(
+                "core.script_synthesize.synthesize_playwright_script",
+                new=AsyncMock(return_value="async def test_case_42(page):\n    pass\n"),
+            ),
+            patch(
+                "core.script_synthesize.repair_playwright_script",
+                new=AsyncMock(return_value="async def test_case_42(page):\n    pass\n"),
+            ),
+            patch.object(mgr, "_try_run_compiled_script", new=try_run),
+        ):
+            out = await mgr._execute_on_agent_nl_goal(
+                "agent-1",
+                "run-skip-fail",
+                "case",
+                steps,
+                case_id=42,
+                navigate_base_url=False,
+            )
+            assert all(r.get("success") for r in out)
+            assert mgr._last_synthesized_script is None
 
     try:
         asyncio.run(_run())
@@ -960,6 +1051,16 @@ def test_nl_goal_fail_triggers_probe_then_decide_receives():
                 "core.script_synthesize.synthesize_playwright_script",
                 new=AsyncMock(return_value="async def test_case_42(page):\n    pass\n"),
             ),
+            patch.object(
+                mgr,
+                "_try_run_compiled_script",
+                new=AsyncMock(
+                    return_value=[
+                        {"success": True, "step_number": 1},
+                        {"success": True, "step_number": 2},
+                    ]
+                ),
+            ),
         ):
             out = await mgr._execute_on_agent_nl_goal(
                 "agent-1", "run-probe", "case", steps,
@@ -990,3 +1091,371 @@ def test_nl_goal_fail_triggers_probe_then_decide_receives():
         asyncio.run(_run())
     finally:
         execution_backend_config.dry_run_mode = prev
+
+
+# ---------------------------------------------------------------------------
+# Script synthesis quality: journal sanitize + required-target gate
+# ---------------------------------------------------------------------------
+
+
+def _login_steps():
+    return [
+        {
+            "step_order": 1,
+            "description": "点击【单位选择】选择京州市院",
+            "structured_step": {
+                "action": "click",
+                "target_name": "单位选择",
+                "value": "京州市院",
+            },
+        },
+        {
+            "step_order": 2,
+            "description": "在【用户名】输入 test1804",
+            "structured_step": {"action": "fill", "target_name": "用户名", "value": "test1804"},
+        },
+        {
+            "step_order": 3,
+            "description": "在【密码】输入 Abc12345",
+            "structured_step": {"action": "fill", "target_name": "密码", "value": "Abc12345"},
+        },
+        {
+            "step_order": 4,
+            "description": "点击【登录】",
+            "structured_step": {"action": "click", "target_name": "登录"},
+        },
+        {
+            "step_order": 5,
+            "description": "点击（页面所有出现的消息的关闭按钮）",
+            "structured_step": {"action": "click", "target_name": "关闭"},
+        },
+    ]
+
+
+def test_sanitize_journal_keeps_last_cover_and_step_intent():
+    from core.script_synthesize import sanitize_journal_for_synth
+
+    steps = _login_steps()
+    journal = [
+        # step1: first attempt wrong (fill doesn't cover a click, filtered out by covers)
+        {"checklist_index": 1, "success": True, "action": "fill", "value": "汉东省院"},
+        # step1: correct click
+        {"checklist_index": 1, "success": True, "action": "click", "selector": "e1"},
+        # step2: intermediate wrong username then real one
+        {"checklist_index": 2, "success": True, "action": "fill", "value": "test10"},
+        {"checklist_index": 2, "success": True, "action": "fill", "value": "test1804"},
+        # noise: no checklist / failed
+        {"turn": 9, "success": False, "action": "click", "error": "missed"},
+        {"turn": 10, "success": True, "action": "screenshot"},
+    ]
+    cleaned = sanitize_journal_for_synth(journal, steps)
+    idxs = [e["checklist_index"] for e in cleaned]
+    assert idxs == [1, 2]
+    # step2 keeps only the LAST success (test1804), not test10
+    assert cleaned[1]["value"] == "test1804"
+    # intent is authoritative from the step, not the journal
+    assert "京州市院" in cleaned[0]["intent"]
+    assert "test1804" in cleaned[1]["intent"]
+    # fill cannot cover click step 1 → dropped
+    assert all(e["action"] != "fill" or e["checklist_index"] != 1 for e in cleaned)
+
+
+def test_extract_required_targets_and_gate():
+    from core.script_synthesize import (
+        check_script_covers_intents,
+        extract_required_targets,
+    )
+
+    steps = _login_steps()
+    required = extract_required_targets(steps)
+    # close-message step (5) excluded; 京州市院/test1804/Abc12345/登录 required
+    assert "京州市院" in required
+    assert "test1804" in required
+    assert "登录" in required
+    assert "关闭" not in required
+
+    good = """
+import re
+from playwright.async_api import expect
+async def test_case_5(page):
+    await page.locator("input[placeholder='请选择单位']:visible").first.click()
+    await page.locator("input[placeholder='输入关键词进行筛选']:not([disabled]):visible").first.press_sequentially("京州市院")
+    await page.locator(".el-tree-node__label", has_text=re.compile(r"^京州市院$")).first.click()
+    await page.locator("input[placeholder='请输入用户名']:visible").first.fill("test1804")
+    await page.locator("input[placeholder='请输入密码']:visible").first.fill("Abc12345")
+    await page.locator("button:has-text('登录')").first.click()
+"""
+    assert check_script_covers_intents(good, steps) == []
+
+    bad = """
+async def test_case_5(page):
+    await page.locator("span:has-text('汉东省院'):visible").first.click()
+    await page.locator("input").first.fill("test10")
+"""
+    missing = check_script_covers_intents(bad, steps)
+    assert "京州市院" in missing
+    assert "test1804" in missing
+
+
+def test_synthesize_payload_has_checklist_and_clean_journal():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core.script_synthesize import synthesize_playwright_script
+
+    # Steps that templates cannot fully cover → LLM path
+    weird_steps = [
+        {"step_order": 1, "description": "做一件很奇怪的事"},
+        {
+            "step_order": 2,
+            "description": "在【请输入用户名】输入 test1804",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "请输入用户名",
+                "value": "test1804",
+            },
+        },
+    ]
+
+    async def _run():
+        calls = {}
+        good_script = """
+async def test_case_5(page):
+    await page.locator("input[placeholder='请输入用户名']:visible").first.fill("test1804")
+    # 做一件很奇怪的事
+    await page.get_by_text("很奇怪的事").first.click()
+"""
+
+        async def _create(**kwargs):
+            calls["user"] = kwargs["messages"][1]["content"]
+            msg = MagicMock()
+            msg.content = good_script
+            choice = MagicMock()
+            choice.message = msg
+            resp = MagicMock()
+            resp.choices = [choice]
+            return resp
+
+        fake = MagicMock()
+        fake.chat.completions.create = AsyncMock(side_effect=_create)
+        await synthesize_playwright_script(
+            client=fake,
+            model="x",
+            case_id=5,
+            case_name="登录",
+            goal_text="登录系统",
+            journal=[
+                {"checklist_index": 2, "success": True, "action": "fill", "value": "test1804"},
+                {"turn": 0, "success": False, "action": "click"},
+            ],
+            steps=weird_steps,
+            base_url="http://192.168.9.125/xtmh",
+        )
+        return calls
+
+    calls = asyncio.run(_run())
+    user = calls["user"]
+    assert '"checklist"' in user
+    assert '"journal_clean"' in user
+    assert "test1804" in user
+    assert '"success": false' not in user
+
+
+def test_build_replay_and_codegen_template():
+    from core.codegen_locator import merge_codegen_into_replay, load_codegen_iife
+    from core.replay_resolve import build_replay_from_step
+    from core.script_templates import try_build_templated_script
+
+    assert "resolvePlaywrightLocator" in load_codegen_iife()
+
+    steps = [
+        {
+            "step_order": 1,
+            "description": "点击【请选择单位】",
+            "structured_step": {"action": "click", "target_name": "请选择单位"},
+        },
+        {
+            "step_order": 2,
+            "description": "在【输入关键词进行筛选】输入 京州市院",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "输入关键词进行筛选",
+                "value": "京州市院",
+            },
+        },
+        {
+            "step_order": 3,
+            "description": "在【京州市院】中选择【京州市院】",
+            "structured_step": {
+                "action": "select",
+                "target_name": "京州市院",
+                "value": "京州市院",
+            },
+        },
+        {
+            "step_order": 4,
+            "description": "在【请输入用户名】输入 test1804",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "请输入用户名",
+                "value": "test1804",
+            },
+        },
+        {
+            "step_order": 5,
+            "description": "在【请输入密码】输入 Abc12345",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "请输入密码",
+                "value": "Abc12345",
+            },
+        },
+        {
+            "step_order": 6,
+            "description": "点击【登录】",
+            "structured_step": {"action": "click", "target_name": "登录"},
+        },
+        {
+            "step_order": 7,
+            "description": "点击（页面所有出现的消息的关闭按钮）",
+            "structured_step": {"action": "click"},
+        },
+    ]
+    r1 = build_replay_from_step(steps[0], action="click", selector="f5e21")
+    assert r1["strategy"] == "click_placeholder"
+    assert r1.get("css") is None
+    r1 = merge_codegen_into_replay(
+        r1,
+        {
+            "ok": True,
+            "playwright_locator": 'get_by_placeholder("请选择单位")',
+            "locator_candidates": ['get_by_placeholder("请选择单位")'],
+        },
+    )
+    assert r1["playwright_locator"] == 'get_by_placeholder("请选择单位")'
+
+    r3 = build_replay_from_step(steps[2], action="click", selector="f5e193")
+    assert r3["strategy"] == "click_text"
+    assert r3["exact_text"] == "京州市院"
+
+    def _replay_for(i: int) -> dict:
+        st = steps[i].get("structured_step") or {}
+        act = str(st.get("action") or "click")
+        rp = build_replay_from_step(steps[i], action=act)
+        # Simulate codegen locators (no project tree CSS)
+        locs = {
+            0: 'get_by_placeholder("请选择单位")',
+            1: 'get_by_placeholder("输入关键词进行筛选")',
+            2: 'get_by_text("京州市院", exact=True)',
+            3: 'get_by_placeholder("请输入用户名")',
+            4: 'get_by_placeholder("请输入密码")',
+            5: 'get_by_role("button", name="登录")',
+        }
+        if i in locs:
+            rp = merge_codegen_into_replay(
+                rp, {"ok": True, "playwright_locator": locs[i]}
+            )
+        return rp
+
+    script = try_build_templated_script(
+        case_id=5,
+        steps=steps,
+        base_url="http://192.168.9.125/xtmh",
+        journal=[
+            {
+                "checklist_index": i,
+                "success": True,
+                "action": "click",
+                "replay": _replay_for(i - 1),
+            }
+            for i in range(1, 8)
+        ],
+    )
+    assert script is not None
+    assert "treeSelect_div" not in script
+    assert "get_by_placeholder" in script
+    assert "press_sequentially" in script
+    assert "京州市院" in script
+    assert "test1804" in script
+    assert "f5e" not in script
+    assert "el-dialog__wrapper" in script
+    assert 'page.goto("http://192.168.9.125/"' in script
+
+
+def test_synthesize_prefers_templates_without_llm():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core.script_synthesize import synthesize_playwright_script
+
+    steps = [
+        {
+            "step_order": 1,
+            "description": "点击【请选择单位】",
+            "structured_step": {"action": "click", "target_name": "请选择单位"},
+        },
+        {
+            "step_order": 2,
+            "description": "在【输入关键词进行筛选】输入 京州市院",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "输入关键词进行筛选",
+                "value": "京州市院",
+            },
+        },
+        {
+            "step_order": 3,
+            "description": "在【京州市院】中选择【京州市院】",
+            "structured_step": {
+                "action": "select",
+                "target_name": "京州市院",
+                "value": "京州市院",
+            },
+        },
+        {
+            "step_order": 4,
+            "description": "在【请输入用户名】输入 test1804",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "请输入用户名",
+                "value": "test1804",
+            },
+        },
+        {
+            "step_order": 5,
+            "description": "在【请输入密码】输入 Abc12345",
+            "structured_step": {
+                "action": "fill",
+                "target_name": "请输入密码",
+                "value": "Abc12345",
+            },
+        },
+        {
+            "step_order": 6,
+            "description": "点击【登录】",
+            "structured_step": {"action": "click", "target_name": "登录"},
+        },
+        {
+            "step_order": 7,
+            "description": "点击（页面所有出现的消息的关闭按钮）",
+        },
+    ]
+
+    async def _run():
+        fake = MagicMock()
+        fake.chat.completions.create = AsyncMock(
+            side_effect=AssertionError("LLM must not be called for templated case")
+        )
+        return await synthesize_playwright_script(
+            client=fake,
+            model="x",
+            case_id=5,
+            case_name="登录",
+            goal_text="登录",
+            journal=[],
+            steps=steps,
+            base_url="http://192.168.9.125/xtmh",
+        )
+
+    script = asyncio.run(_run())
+    assert "treeSelect_div" not in script
+    assert "press_sequentially" in script or "get_by_placeholder" in script
+    assert "test1804" in script

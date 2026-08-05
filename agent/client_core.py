@@ -1463,7 +1463,13 @@ class AgentClient:
                 browser = await p.chromium.launch(**launch_kwargs)
                 context = await browser.new_context()
                 page = await context.new_page()
-                if base_url:
+                # Scripts from templates already page.goto(...). Pre-navigating to
+                # env base_url (often /xtmh) lands on the wrong page for login
+                # and can leave an empty unit tree — skip when script navigates.
+                script_nav = bool(
+                    re.search(r"page\s*\.\s*goto\s*\(", script or "", re.I)
+                )
+                if base_url and not script_nav:
                     await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_timeout(800)
                 await fn(page)

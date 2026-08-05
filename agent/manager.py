@@ -497,13 +497,13 @@ class AgentManager:
         After goal DONE, report is always based on the journal (passed). Script
         solidify follows ``execution_backend_config.dry_run_mode``:
 
-        - ``skip`` (default): synthesize only; never launch a second Chromium /
-          whole-case ``compiled_script`` replay (what looked like "restarting
-          from step 1"). Persist synthesized script without isolated verify.
+        - ``skip`` (default): user-facing session is not re-run from step 1 in a
+          second *visible* browser. After synthesize we still run one **headless**
+          compiled_script verify before persist (fail → repair once → else no persist).
         - ``attach``: reserved; currently same as skip (no whole-case relaunch).
-        - ``isolated``: optional headless dry-run(+one repair). On verify fail,
-          may remediate one located checklist step via hybrid on the *same*
-          browser; never re-RUN_START the whole case. Fail → warning, no persist.
+        - ``isolated``: same headless verify(+repair); on verify fail may also
+          remediate one located checklist step via hybrid on the *same* browser;
+          never re-RUN_START the whole case.
         """
         import time as _time
 
@@ -519,10 +519,19 @@ class AgentManager:
             decide_next_goal_action,
             detect_stagnation,
             journal_entry,
+            parse_checklist_index,
             seed_open_steps_after_navigation,
             steps_results_from_goal,
             tool_call_from_decision,
             uncovered_checklist_orders,
+        )
+        from core.codegen_locator import (
+            build_codegen_inject_js,
+            build_codegen_resolve_js,
+        )
+        from core.replay_resolve import (
+            build_replay_from_step,
+            merge_dom_into_replay,
         )
         from core.script_synthesize import repair_playwright_script, synthesize_playwright_script
 
@@ -616,6 +625,20 @@ class AgentManager:
                 journal.extend(
                     seed_open_steps_after_navigation(steps, base_url_override)
                 )
+
+            # Install codegen selector generator once per page session (large IIFE).
+            try:
+                await self.send_act(
+                    agent_id,
+                    run_id,
+                    {
+                        "name": "browser_evaluate",
+                        "tool": "browser_evaluate",
+                        "args": {"function": build_codegen_inject_js()},
+                    },
+                )
+            except Exception:
+                logger.debug("codegen IIFE inject skipped", exc_info=True)
 
             close_helper_runs = 0
             for turn in range(1, max_turns + 1):
@@ -899,6 +922,66 @@ class AgentManager:
                     )
                     break
 
+                replay = None
+                if ok:
+                    idx = parse_checklist_index(
+                        decision.checklist_note,
+                        explicit=decision.checklist_index,
+                    )
+                    step_rec = None
+                    if idx is not None:
+                        for _si, _s in enumerate(steps or []):
+                            _o = int(
+                                _s.get("step_order")
+                                or _s.get("step_number")
+                                or _si + 1
+                            )
+                            if _o == idx:
+                                step_rec = _s
+                                break
+                    try:
+                        replay = build_replay_from_step(
+                            step_rec,
+                            action=action,
+                            selector=decision.selector,
+                            value=decision.value,
+                        )
+                        # Codegen: hint from checklist + capture → playwright_locator
+                        try:
+                            hint = {
+                                "placeholder": (replay or {}).get("placeholder"),
+                                "exact_text": (replay or {}).get("exact_text"),
+                                "name": (replay or {}).get("name"),
+                            }
+                            resolve_js = build_codegen_resolve_js(hint)
+                            dom_res = await self._execute_step(
+                                session,
+                                agent_id,
+                                run_id,
+                                turn,
+                                "resolve replay codegen locator",
+                                {
+                                    "action": "evaluate",
+                                    "selector": "",
+                                    "value": resolve_js,
+                                },
+                            )
+                            raw = (dom_res or {}).get("text") or ""
+                            if (dom_res or {}).get("success") and raw:
+                                import json as _json
+
+                                dom_attrs = _json.loads(raw) if isinstance(raw, str) else raw
+                                if isinstance(dom_attrs, dict):
+                                    replay = merge_dom_into_replay(replay, dom_attrs)
+                        except Exception:
+                            logger.debug(
+                                "nl_goal replay codegen resolve skipped",
+                                exc_info=True,
+                            )
+                    except Exception:
+                        logger.debug("nl_goal replay build skipped", exc_info=True)
+                        replay = None
+
                 entry = journal_entry(
                     turn=turn,
                     decision=decision,
@@ -913,6 +996,7 @@ class AgentManager:
                     ),
                     screenshot_on_fail=False,
                     screenshot_path=None,
+                    replay=replay,
                 )
                 if not ok:
                     await _save_nl_goal_fail_shot(
@@ -973,23 +1057,24 @@ class AgentManager:
             else:
                 goal_error = goal_error or f"nl_goal hit max_turns={max_turns}"
 
-            # Ensure a failure screenshot exists when goal did not complete
+            # Always capture final-page fail screenshot so the primary failed
+            # checklist step gets a current-state image (mid-turn shots may be stale
+            # or attached to a recovered checklist index).
             if not goal_ok and output_dir and journal:
-                has_shot = any(e.get("screenshot_path") for e in journal)
-                if not has_shot:
-                    try:
-                        shot = await self._get_screenshot(session, agent_id, run_id)
-                        b64 = (shot or {}).get("screenshot_base64") if isinstance(shot, dict) else None
-                        if b64:
-                            ss_dir = os.path.join(output_dir, "screenshots")
-                            os.makedirs(ss_dir, exist_ok=True)
-                            ss_path = os.path.join(ss_dir, "nl_goal_final_fail.png")
-                            with open(ss_path, "wb") as f:
-                                f.write(base64.b64decode(b64))
-                            journal[-1]["screenshot_path"] = ss_path.replace("\\", "/")
-                            journal[-1]["screenshot_on_fail"] = True
-                    except Exception:
-                        logger.debug("nl_goal final fail screenshot skipped", exc_info=True)
+                try:
+                    shot = await self._get_screenshot(session, agent_id, run_id)
+                    b64 = (shot or {}).get("screenshot_base64") if isinstance(shot, dict) else None
+                    if b64:
+                        ss_dir = os.path.join(output_dir, "screenshots")
+                        os.makedirs(ss_dir, exist_ok=True)
+                        ss_path = os.path.join(ss_dir, "nl_goal_final_fail.png")
+                        with open(ss_path, "wb") as f:
+                            f.write(base64.b64decode(b64))
+                        rel = ss_path.replace("\\", "/")
+                        journal[-1]["screenshot_path"] = rel
+                        journal[-1]["screenshot_on_fail"] = True
+                except Exception:
+                    logger.debug("nl_goal final fail screenshot skipped", exc_info=True)
 
             # Do NOT RUN_END here — synthesize dry-run is separate, but the
             # single-step hybrid fallback must reuse this same browser/page.
@@ -1046,29 +1131,12 @@ class AgentManager:
                     case_name=case_name,
                     goal_text=goal_text,
                     journal=journal,
+                    steps=steps,
                     base_url=base_url_override,
                 )
 
-                if dry_mode == "skip":
-                    # Cursor semantics: goal DONE is the verdict. Persist script
-                    # from journal without a second browser replay from step 1.
-                    if script:
-                        h = steps_content_hash(steps)
-                        self._last_synthesized_script = {
-                            "case_id": case_id,
-                            "script": script,
-                            "steps_hash": h,
-                        }
-                        script_ok = True
-                        logger.info(
-                            "nl_goal synthesized script ok case=%s bytes=%s "
-                            "(dry_run_mode=skip — no compiled_script replay)",
-                            case_id,
-                            len(script),
-                        )
-                    return results
-
-                # dry_run_mode=isolated only: optional headless whole-script verify
+                # Always headless-verify before persist (skip/isolated/attach).
+                # Goal DONE remains the case verdict; bad scripts must not land in DB.
                 verify = await self._try_run_compiled_script(
                     agent_id,
                     f"{run_id}_dry",
@@ -1108,6 +1176,7 @@ class AgentManager:
                             script=script,
                             error=err_short,
                             journal=journal,
+                            steps=steps,
                         )
                         verify2 = await self._try_run_compiled_script(
                             agent_id,
@@ -1145,7 +1214,8 @@ class AgentManager:
                     }
                     script_ok = True
                     logger.info(
-                        "nl_goal synthesized script ok case=%s bytes=%s",
+                        "nl_goal synthesized script ok case=%s bytes=%s "
+                        "(headless verify passed — persisting)",
                         case_id,
                         len(script),
                     )
@@ -1156,6 +1226,10 @@ class AgentManager:
             except Exception:
                 logger.warning("nl_goal synthesize/verify failed", exc_info=True)
                 script_ok = False
+
+            # On skip: case already passed — return without hybrid remediating script.
+            if dry_mode == "skip":
+                return results
 
             # isolated verify failed → hybrid NL for the located failed step only
             # (do NOT re-RUN_START the whole case). Unlocated → keep goal results.
