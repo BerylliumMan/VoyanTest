@@ -161,6 +161,7 @@ voyantest-docker.tar
 voyantest-docker.tar.gz
 agent-offline.zip
 VoyanTest-Agent*
+agent/dist/
 agent-build-windows*
 chromium/
 my-session.json
