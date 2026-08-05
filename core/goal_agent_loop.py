@@ -57,9 +57,17 @@ checklist_index = 1-based checklist step number this action advances (required w
 """
 
 REPAIR_SYSTEM_PROMPT = """You repair a Playwright Python script that failed on dry-run.
-Keep the same overall flow. Fix selectors/strict-mode issues (use .first, visible filters,
-exact text, press_sequentially for filter inputs). Output ONLY the full Python script,
-no markdown fences. The script MUST define async def test_case_{case_id}(page).
+Keep the same overall flow. Fix selectors/strict-mode issues:
+- use .first and :visible / :not([disabled]):visible filters for duplicate/hidden twins
+- for unit/tree selects: open the combobox (.treeSelect_div or the visible placeholder),
+  type into the enabled+visible filter input with press_sequentially (never .fill alone),
+  then click the EXACT .el-tree-node__label full-text match — never a parent/prefix node
+- for Element UI overlays: loop .el-dialog__wrapper:visible → footer /关\\s*闭/ else
+  .el-dialog__headerbtn; .el-notification → .el-notification__closeBtn
+- the CHECKLIST in the prompt is the source of truth: NEVER introduce intermediate or
+  failed journal values (wrong username, parent node) into the script
+Output ONLY the full Python script, no markdown fences. The script MUST define
+async def test_case_{case_id}(page).
 """
 
 
@@ -621,12 +629,13 @@ def journal_entry(
     result_snippet: str | None = None,
     screenshot_on_fail: bool = False,
     screenshot_path: str | None = None,
+    replay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     idx = parse_checklist_index(
         decision.checklist_note,
         explicit=decision.checklist_index,
     )
-    return {
+    out: dict[str, Any] = {
         "turn": turn,
         "status": decision.status,
         "thinking": decision.thinking,
@@ -643,6 +652,9 @@ def journal_entry(
         "screenshot_on_fail": bool(screenshot_on_fail),
         "screenshot_path": screenshot_path,
     }
+    if replay:
+        out["replay"] = replay
+    return out
 
 
 def detect_stagnation(journal: list[dict[str, Any]], limit: int = STAGNATION_LIMIT) -> bool:
@@ -716,7 +728,8 @@ def steps_results_from_goal(
         earlier uncovered steps just because fail_order is later)
       - Earliest unrecovered failed checklist item → failed (+ screenshot)
       - Uncovered steps before the fail cursor → failed ("was not executed")
-      - If no explicit fail (e.g. max_turns): fail the first step after max progress
+      - If no explicit fail (e.g. max_turns): fail the first uncovered step
+        (not max_progress+1, so gaps like covered={1..7,9} fail step 8 with shot)
       - Remaining later steps → skipped
     """
     orders = checklist_orders(steps)
@@ -761,10 +774,16 @@ def steps_results_from_goal(
     else:
         fail_order = None
 
-    max_progress = max(covered) if covered else 0
+    # Prefer last journal screenshot (incl. nl_goal_final_fail.png)
+    last_journal_shot: str | None = None
+    for e in reversed(journal or []):
+        if e.get("screenshot_path"):
+            last_journal_shot = e["screenshot_path"]
+            break
 
     # DONE / success=True: journal-truthful — never fake-pass uncovered steps
     if success:
+        first_uncovered = next((o for o in orders if o not in covered), None)
         results: list[dict[str, Any]] = []
         for o in orders:
             s = by_order.get(o) or {}
@@ -776,7 +795,7 @@ def steps_results_from_goal(
                     "failed",
                     False,
                     f"nl_goal marked done but step {o} was not executed",
-                    None,
+                    last_journal_shot if o == first_uncovered else None,
                 )
             results.append(
                 {
@@ -801,15 +820,23 @@ def steps_results_from_goal(
         return results
 
     if fail_order is None:
-        nxt = next((o for o in orders if o > max_progress), None)
-        fail_order = nxt if nxt is not None else (orders[-1] if orders else None)
+        # Prefer the first uncovered checklist item (not max_progress+1).
+        # Gaps like covered={1..7,9} with 8 missing must fail step 8 with a screenshot.
+        fail_order = next((o for o in orders if o not in covered), None)
+        if fail_order is None:
+            fail_order = orders[-1] if orders else None
         fail_error = error or "nl_goal failed"
 
-    if fail_shot is None:
-        for e in reversed(journal or []):
-            if e.get("screenshot_path"):
-                fail_shot = e["screenshot_path"]
-                break
+    # Final fail capture (journal tail) wins over mid-turn action shots
+    if last_journal_shot:
+        fail_shot = last_journal_shot
+
+    # Attach shot to primary fail step (fail_order if uncovered, else first uncovered)
+    shot_step = (
+        fail_order
+        if fail_order is not None and fail_order not in covered
+        else next((o for o in orders if o not in covered), fail_order)
+    )
 
     results = []
     for o in orders:
@@ -830,7 +857,7 @@ def steps_results_from_goal(
                 "failed",
                 False,
                 fail_error or error or "nl_goal failed",
-                fail_shot,
+                fail_shot if shot_step == o else None,
             )
         else:
             # Uncovered and at/before fail cursor → not executed
@@ -838,7 +865,7 @@ def steps_results_from_goal(
                 "failed",
                 False,
                 f"nl_goal step {o} was not executed",
-                None,
+                fail_shot if shot_step == o else None,
             )
         results.append(
             {
