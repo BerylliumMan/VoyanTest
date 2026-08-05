@@ -1,42 +1,54 @@
 <p align="center">
-  <em>Write tests in natural language, let AI drive the browser</em>
+  <em>Write tests in natural language; AI drives the browser. Successful runs solidify into Playwright scripts for zero-LLM replays.</em>
 </p>
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"></a>
   <a href="#"><img src="https://img.shields.io/badge/node-18%2B-green" alt="Node.js 18+"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT"></a>
-  <a href="#"><img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows%20wsl2-lightgrey" alt="Platform"></a>
+  <a href="#"><img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey" alt="Platform"></a>
   <a href="./README.md"><img src="https://img.shields.io/badge/lang-中文-red" alt="中文"></a>
 </p>
 
 ---
 
-VoyanTest is an **AI-powered Web UI testing platform**. Write test steps in **natural language** (Chinese or English), and the LLM translates them into Playwright MCP commands to drive a real browser — with automatic screenshot verification.
+VoyanTest is an **AI-powered Web UI testing platform**. Describe cases in **natural language**; the default **nl_goal** loop observes and acts. On success, Playwright codegen–compatible locators are solidified into a `compiled_script` for the next zero-LLM run.
 
 ```
-"Click the login button, enter username and password, verify redirect to homepage"
-  ↓ LLM translates
-Playwright: click #login-btn → fill #username → fill #password → click #submit → assert URL
+Natural-language case / checklist
+  ↓ nl_goal (LLM + snapshot / MCP / hybrid)
+journal + codegen locators
+  ↓ synthesize Playwright async script
+Next run: compiled_script first → fall back to nl_goal on failure
 ```
 
 ## ✨ Features
 
-- **🧠 AI Test Generation**: Upload requirement docs (docx/pdf/md/images); two-phase pipeline extracts fine-grained **test items**, then generates functional or UI-automation cases (normal / exception / boundary)
-- **📄 Multimodal docs**: Ordered text + embedded images for docx; chapter-aware chunking (~80% of context window) for long documents
-- **🗂️ Generation history**: Stop in-flight analysis; delete only after completed / failed / cancelled; preview, import, xlsx export
-- **🗣️ Natural Language Driven**: Write "click login button" in plain language — no Playwright API knowledge needed
-- **🖥️ Real Browser**: Controls Chromium via `@playwright/mcp`, supporting navigate, click, fill, screenshot, and more
-- **🔍 Expected Result Verification**: Auto-screenshots after execution, LLM compares screenshots to verify results
-- **📋 Execution Plan Preview**: Visual preview of LLM's understanding of each step before execution
-- **📊 Test Reports**: Detailed logs + step screenshots + summary statistics
-- **🌐 Distributed Execution**: Agent mechanism distributes tests to remote machines
-- **🔐 Auth & Permissions**: Admin/tester roles, session management, password security
-- **🌗 Dark Theme**: Light/dark theme toggle
+### Execution
+- **nl_goal (default)**: whole-case goal loop with checklist steps; hybrid MCP + browser-use
+- **Playwright solidify**: persist `compiled_script` with codegen `get_by_*` locators (no ephemeral refs)
+- **Script-first / AI fallback**: run script when valid; clear/re-solidify per policy on failure
+- **Init cases**: batch can run a login (or similar) init case and reuse the browser session
+- **Batch controls**: pause / resume / stop
+- **Real browser**: Playwright MCP / shared CDP Chromium; headed GUI client
+- Debug pause, retries, assertions, healer, CDP record/replay, xlsx, dashboard trends, notifications, API keys, CSRF
+
+### AI & platform
+- Requirement → test items → functional / UI cases; multimodal docs; generation history
+- Project RBAC, reports, distributed Agent (GUI / CLI), dark theme
 
 ## 🚀 Quick Start
 
-### Install
+### Docker Compose (recommended)
+
+```bash
+cd VoyanTest
+docker compose up -d
+```
+
+Open `http://localhost:8002/`; first visit may go through `/setup` for PostgreSQL.
+
+### From source
 
 ```bash
 # Linux
@@ -44,6 +56,7 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 cd frontend && npm install && npm run build && cd ..
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
 ```powershell
@@ -51,90 +64,80 @@ cd frontend && npm install && npm run build && cd ..
 python -m venv myenv && myenv\Scripts\activate
 pip install -r requirements_win.txt
 playwright install chromium
-cd frontend && npm install && npm run build && cd ..
+cd frontend && npm install --ignore-scripts && npm run build && cd ..
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
-### Run
+Default admin: `admin / Admin@2024`.
 
-```bash
-source venv/bin/activate    # Linux
-# myenv\Scripts\activate     # Windows
-python3 app/main.py
-# or uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+## 🧭 Main flow
+
+1. Log in → create project / module → write or AI-generate cases  
+2. Start GUI/CLI Agent → batch run (optional **init case** for shared login)  
+3. First run often **nl_goal**; success writes **compiled_script**  
+4. Later runs prefer the script; failures fall back to AI  
+
+Configure LLM under Settings. Execution backend defaults to **nl_goal** (`data/execution_backend.json`).
+
+### Windows Agent package
+
+```powershell
+.\install_and_build.bat
+# Output: dist\VoyanTest-Agent\VoyanTest-Agent.exe (onedir)
 ```
-
-Open `http://localhost:8002/` in your browser. Default admin: `admin / Admin@2024`.
-
-## 📖 Workflow
-
-```
-Login → Create Project → Add Module → Write Cases → Run Tests → View Reports
-                       ↘ AI Generate ↑                   ↓
-                         Upload doc → Preview → Import    Remote Agent
-```
-
-**Two ways to create test cases:**
-1. **Manual** — Create step by step with natural language steps and expected results
-2. **AI Generation** — Upload requirement documents; extract test items, generate cases, preview and import; stop analysis from generation history when needed
-
-Configure your LLM in "Settings → AI Config" before running (supports OpenAI and compatible APIs). Fresh installs seed default Agents and prompt templates on startup.
 
 ## 🏗️ Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Browser["Browser"]
-        CH[Chromium<br/>Screenshots Actions]
+    subgraph Client["Client Agent"]
+        GUI[GUI / CLI]
+        MCP[Playwright MCP]
+        CDP[Shared CDP]
+        PY[compiled_script]
     end
-    subgraph Backend["Backend FastAPI"]
-        direction TB
-        LLM[LLM Engine]
-        Runner[Test Runner]
-        Report[Report Generator]
+    subgraph Backend["FastAPI"]
+        NL[nl_goal]
+        SYN[synth / codegen]
+        RUN[orchestration]
+        REP[reports]
     end
-    subgraph Agent["Distributed Agent"]
-        AC[Agent Client<br/>Remote Browser]
-    end
-
-    CH <-->|Playwright MCP| Backend
-    Backend --> DB[(PostgreSQL)]
-    Backend --> UI[Web UI<br/>React + Arco]
-    Backend <-->|WebSocket| AC
+    GUI <-->|WebSocket| RUN
+    RUN → NL
+    NL → SYN
+    RUN → PY
+    Backend → PG[(PostgreSQL)]
+    Backend → UI[React]
 ```
 
 ## 🧪 Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | FastAPI + SQLAlchemy async + PostgreSQL 16 |
-| Browser Automation | Playwright MCP |
-| AI/LLM | OpenAI-compatible API (generation / execution / recording Agents) |
+| Backend | FastAPI + SQLAlchemy async + PostgreSQL |
+| Browser | Playwright MCP, CDP, Playwright Python scripts |
+| Locators | playwright-selector-generator (IIFE) |
 | Frontend | React 18 + Arco Design Pro + Vite |
-| Distributed | WebSocket + Custom Agent Protocol |
+| Agent build | PyInstaller onedir (`install_and_build.bat`) |
 
-## 📦 Project Structure
+## 📦 Structure
 
 ```
 VoyanTest/
-├── app/          # FastAPI backend
-│   ├── gen/      # AI generation (chunking / prompts / pipeline)
-│   ├── models/   # Domain models
-│   ├── seed_defaults.py  # Default Agents & prompt sync
-│   └── routers/  # API routes (including gen/ upload, history, cancel)
-├── frontend/     # React frontend (gen / gen-history / ...)
-├── core/         # Execution engine
-├── agent/        # Distributed agent client
-├── reports/      # Test reports & screenshots
-├── docs/         # Documentation
-└── tests/        # Unit / contract / e2e tests
+├── app/          # FastAPI
+├── core/         # nl_goal, codegen, synth, compiled_script
+├── agent/        # GUI / CLI client
+├── frontend/
+├── scripts/      # build_codegen_iife.mjs
+├── install_and_build.bat
+└── tests/
 ```
+
+Rebuild codegen asset after Playwright upgrades: `node scripts/build_codegen_iife.mjs`
 
 ## 📚 Docs
 
-- API Docs: visit `/docs` after starting (Swagger)
-- Deployment: see [DEPLOYMENT.md](DEPLOYMENT.md)
-- Chinese README: [README.md](README.md)
-- Database: PostgreSQL primary; startup adds missing columns / seeds defaults (Alembic optional)
+- API: `/docs` · Deploy: [DEPLOYMENT.md](DEPLOYMENT.md) · Chinese: [README.md](README.md)
 
 ## 📄 License
 
