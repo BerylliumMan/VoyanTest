@@ -9,9 +9,22 @@ from typing import Any
 from core.goal_agent_loop import is_close_messages_checklist_step
 from core.replay_resolve import build_replay_from_step
 
+# Playwright auto-waits on actions; set_default_timeout is the global budget.
+# Do NOT emit wait_for / wait_for_timeout (explicit waits).
+DEFAULT_ACTION_TIMEOUT_MS = 30_000
+DEFAULT_NAVIGATION_TIMEOUT_MS = 60_000
+
 
 def _esc(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
+
+
+def _emit_default_timeouts() -> list[str]:
+    return [
+        f"    page.set_default_timeout({DEFAULT_ACTION_TIMEOUT_MS})",
+        f"    page.set_default_navigation_timeout({DEFAULT_NAVIGATION_TIMEOUT_MS})",
+        "",
+    ]
 
 
 def _step_meta(step: dict[str, Any], i: int) -> tuple[int, str, dict[str, Any]]:
@@ -52,10 +65,8 @@ def _emit_locator_action(
         lines.append(f"    await {expr}.click()")
         lines.append(f"    await {expr}.fill('')")
         lines.append(f"    await {expr}.press_sequentially({_esc(value or '')}, delay=80)")
-        lines.append("    await page.wait_for_timeout(800)")
     else:
         lines.append(f"    await {expr}.click()")
-        lines.append("    await page.wait_for_timeout(300)")
     lines.append("")
     return lines
 
@@ -68,8 +79,35 @@ def _emit_fill_placeholder(placeholder: str, value: str) -> list[str]:
 
 
 def _emit_click_placeholder(placeholder: str) -> list[str]:
-    return [
+    lines = [
         f"    await page.get_by_placeholder({_esc(placeholder)}).first.click()",
+    ]
+    # Unit/org picker loads options async. Type-ahead before the list exists is
+    # ignored after load — wait for at least one treeitem to be attached first
+    # (Playwright expect auto-wait; not sleep / wait_for_timeout).
+    if re.search(r"选择单位|选择组织|请选择", placeholder or ""):
+        lines.append(
+            "    await expect(page.get_by_role('treeitem').first).to_be_attached()"
+        )
+    lines.append("")
+    return lines
+
+
+def _emit_filter_press(placeholder: str, value: str) -> list[str]:
+    """Type into a dropdown filter after the option list is ready."""
+    return [
+        f"    filt = page.get_by_placeholder({_esc(placeholder)}).filter(visible=True).last",
+        "    await filt.click()",
+        "    await filt.fill('')",
+        f"    await filt.press_sequentially({_esc(value)}, delay=80)",
+        "",
+    ]
+
+
+def _emit_click_text(text: str) -> list[str]:
+    # Tree options often expose accessible name via role=treeitem (title/label).
+    return [
+        f"    await page.get_by_role('treeitem', name={_esc(text)}).filter(visible=True).first.click()",
         "",
     ]
 
@@ -81,38 +119,35 @@ def _emit_click_button(name: str) -> list[str]:
     ]
 
 
-def _emit_click_text(text: str) -> list[str]:
-    return [
-        f"    await page.get_by_text({_esc(text)}, exact=True).first.click()",
-        "",
-    ]
-
-
 def _emit_close_overlays() -> list[str]:
     """Generic overlay close (Element-ish dialogs + notifications)."""
     return [
-        "    # Close visible dialogs / notifications",
+        "    # Close visible dialogs / notifications (short timeouts; skip if unstable)",
         "    for _ in range(5):",
         "        wrappers = page.locator('.el-dialog__wrapper:visible, [role=\"dialog\"]:visible')",
         "        if await wrappers.count() == 0:",
         "            break",
         "        footer = wrappers.first.get_by_role('button', name=re.compile(r'关\\s*闭'))",
         "        header = wrappers.first.locator('.el-dialog__headerbtn, [aria-label=\"Close\"]')",
-        "        if await footer.count() and await footer.first.is_visible():",
-        "            await footer.first.click()",
-        "        elif await header.count() and await header.first.is_visible():",
-        "            await header.first.click()",
-        "        else:",
+        "        try:",
+        "            if await footer.count() and await footer.first.is_visible():",
+        "                await footer.first.click(timeout=3000)",
+        "            elif await header.count() and await header.first.is_visible():",
+        "                await header.first.click(timeout=3000)",
+        "            else:",
+        "                break",
+        "        except Exception:",
         "            break",
-        "        await page.wait_for_timeout(400)",
         "    noti = page.locator('.el-notification:visible').first",
         "    if await noti.count() and await noti.is_visible():",
         "        btn = noti.locator('.el-notification__closeBtn')",
-        "        if await btn.count() and await btn.is_visible():",
-        "            await btn.click()",
-        "        else:",
+        "        try:",
+        "            if await btn.count() and await btn.is_visible():",
+        "                await btn.first.click(timeout=2000)",
+        "            else:",
+        "                await noti.evaluate('el => el.remove()')",
+        "        except Exception:",
         "            await noti.evaluate('el => el.remove()')",
-        "        await page.wait_for_timeout(300)",
         "",
     ]
 
@@ -120,7 +155,6 @@ def _emit_close_overlays() -> list[str]:
 def _emit_goto(url: str) -> list[str]:
     return [
         f"    await page.goto({_esc(url)}, wait_until='domcontentloaded')",
-        "    await page.wait_for_timeout(800)",
         "",
     ]
 
@@ -156,6 +190,7 @@ def try_build_templated_script(
         "",
         f"async def test_case_{int(case_id)}(page) -> None:",
     ]
+    lines.extend(_emit_default_timeouts())
 
     base = (base_url or "").strip()
     # Login pages often live at site origin; /xtmh is post-login app path.
@@ -233,8 +268,9 @@ def try_build_templated_script(
                 r"登录", str(rp.get("name") or rp.get("exact_text") or "")
             ):
                 if base and "xtmh" in base:
-                    lines.append("    await page.wait_for_url('**/xtmh**', timeout=60000)")
-                lines.append("    await page.wait_for_timeout(800)")
+                    lines.append(
+                        "    await expect(page).to_have_url(re.compile(r'.*xtmh.*'))"
+                    )
                 lines.append("")
             covered_orders.add(order)
             continue
@@ -246,15 +282,7 @@ def try_build_templated_script(
                 unknown = True
                 break
             if strategy == "fill_filter_press":
-                lines.append(
-                    f"    filt = page.get_by_placeholder({_esc(str(ph))}).last"
-                )
-                lines.append("    await filt.click()")
-                lines.append("    await filt.fill('')")
-                lines.append(
-                    f"    await filt.press_sequentially({_esc(str(val))}, delay=80)"
-                )
-                lines.append("")
+                lines.extend(_emit_filter_press(str(ph), str(val)))
             else:
                 lines.extend(_emit_fill_placeholder(str(ph), str(val)))
             covered_orders.add(order)
@@ -277,8 +305,9 @@ def try_build_templated_script(
             lines.extend(_emit_click_button(str(name)))
             if re.search(r"登录", str(name)):
                 if base and "xtmh" in base:
-                    lines.append("    await page.wait_for_url('**/xtmh**', timeout=60000)")
-                lines.append("    await page.wait_for_timeout(800)")
+                    lines.append(
+                        "    await expect(page).to_have_url(re.compile(r'.*xtmh.*'))"
+                    )
                 lines.append("")
             covered_orders.add(order)
             continue
@@ -317,7 +346,6 @@ def try_build_templated_script(
     if unknown or covered_orders != all_orders:
         return None
 
-    if lines[-1] != "":
-        lines.append("")
     lines.append("    # done")
-    return "\n".join(lines) + "\n"
+    lines.append("")
+    return "\n".join(lines)

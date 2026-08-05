@@ -335,11 +335,15 @@ class AgentManager:
                                 case_id: Optional[int] = None,
                                 compiled_script: Optional[str] = None,
                                 compiled_script_hash: Optional[str] = None,
-                                case_description: Optional[str] = None) -> dict:
+                                case_description: Optional[str] = None,
+                                reuse_browser_session: bool = False) -> dict:
         """Execute via agent. UI default is nl_goal (Cursor-style); legacy_* for old paths.
 
         Serialized per agent so batch/init cases never overlap on the same browser.
         Returns a full step results list compatible with the existing report format.
+
+        ``reuse_browser_session``: multi-case / init→main batches must keep one
+        shared Chromium; skip ephemeral compiled_script so login state survives.
         """
         if manage_busy:
             self._agent_busy.add(agent_id)
@@ -356,6 +360,7 @@ class AgentManager:
                     compiled_script=compiled_script,
                     compiled_script_hash=compiled_script_hash,
                     case_description=case_description,
+                    reuse_browser_session=reuse_browser_session,
                 )
         finally:
             if manage_busy:
@@ -373,6 +378,7 @@ class AgentManager:
         compiled_script: Optional[str] = None,
         compiled_script_hash: Optional[str] = None,
         case_description: Optional[str] = None,
+        reuse_browser_session: bool = False,
     ) -> dict:
         """Inner implementation; caller must hold ``_run_lock_for(agent_id)``."""
         from app.runtime_config import (
@@ -398,7 +404,9 @@ class AgentManager:
                 batch_id=batch_id,
             )
 
-        # Prefer solidified Playwright script when hash matches current steps
+        # Prefer solidified Playwright script when hash matches current steps.
+        # Batch/init→main still uses compiled_script, but agent runs it on the
+        # shared CDP Chromium and keeps the window open (see keep_browser).
         script = (compiled_script or "").strip()
         script_ok_to_try = bool(script)
         if script_ok_to_try:
@@ -412,12 +420,17 @@ class AgentManager:
                 script_ok_to_try = False
 
         if script_ok_to_try and script:
+            # Visible browser for user runs (agent GUI headless=False).
+            # Omit headless so the agent uses its own client setting.
+            # Batch: keep_browser so login state survives for the next case.
             py_results = await self._try_run_compiled_script(
                 agent_id, run_id, case_name, steps,
                 script=script,
                 base_url=base_url_override,
                 case_id=case_id,
                 steps_hash=compiled_script_hash or steps_content_hash(steps),
+                headless=None,
+                keep_browser=bool(reuse_browser_session) or not navigate_base_url,
             )
             if py_results is not None:
                 failed = any(r.get("compiled_script_failed") for r in py_results)
@@ -477,6 +490,7 @@ class AgentManager:
             batch_id=batch_id,
             case_id=case_id,
             case_description=case_description,
+            reuse_browser_session=reuse_browser_session,
         )
 
     async def _execute_on_agent_nl_goal(
@@ -491,6 +505,7 @@ class AgentManager:
         batch_id: Optional[int] = None,
         case_id: Optional[int] = None,
         case_description: Optional[str] = None,
+        reuse_browser_session: bool = False,
     ) -> list:
         """Cursor-style whole-case NL goal loop → journal → synthesize script.
 
@@ -1135,94 +1150,123 @@ class AgentManager:
                     base_url=base_url_override,
                 )
 
-                # Always headless-verify before persist (skip/isolated/attach).
-                # Goal DONE remains the case verdict; bad scripts must not land in DB.
-                verify = await self._try_run_compiled_script(
-                    agent_id,
-                    f"{run_id}_dry",
-                    case_name,
-                    steps,
-                    script=script,
-                    base_url=base_url_override,
-                    case_id=cid or None,
-                    steps_hash=steps_content_hash(steps),
-                )
-                dry_verify_last = verify
-                dry_fail = (
-                    verify is None
-                    or any(r.get("compiled_script_failed") for r in (verify or []))
-                    or not (verify and all(r.get("success") for r in verify))
-                )
-                if dry_fail:
-                    err = ""
-                    if verify:
-                        err = next(
-                            (r.get("error") for r in verify if r.get("error")),
-                            "dry-run failed",
+                # Batch init→main: skip headless dry-run so the next case starts
+                # immediately (failed dry-run + repair can burn 1–2 minutes).
+                if reuse_browser_session:
+                    logger.info(
+                        "nl_goal skip dry-run verify case=%s "
+                        "(reuse_browser_session — continue batch promptly)",
+                        case_id,
+                    )
+                    if script and script.strip():
+                        self._last_synthesized_script = {
+                            "case_id": case_id,
+                            "script": script,
+                            "steps_hash": steps_content_hash(steps),
+                        }
+                        script_ok = True
+                        logger.info(
+                            "nl_goal synthesized script ok case=%s bytes=%s "
+                            "(batch — persist without dry-run)",
+                            case_id,
+                            len(script),
+                        )
+                else:
+                    # Headless verify before persist — avoid a second visible window
+                    # beside the live nl_goal browser. Goal DONE remains the verdict.
+                    verify = await self._try_run_compiled_script(
+                        agent_id,
+                        f"{run_id}_dry",
+                        case_name,
+                        steps,
+                        script=script,
+                        base_url=base_url_override,
+                        case_id=cid or None,
+                        steps_hash=steps_content_hash(steps),
+                        headless=True,
+                    )
+                    dry_verify_last = verify
+                    dry_fail = (
+                        verify is None
+                        or any(r.get("compiled_script_failed") for r in (verify or []))
+                        or not (verify and all(r.get("success") for r in verify))
+                    )
+                    if dry_fail:
+                        err = ""
+                        if verify:
+                            err = next(
+                                (r.get("error") for r in verify if r.get("error")),
+                                "dry-run failed",
+                            )
+                        else:
+                            err = "dry-run unsupported/timeout"
+                        # Truncate — Playwright missing-browser dumps a huge box
+                        err_short = " ".join(str(err).split())[:180]
+                        dry_error_last = err_short
+                        logger.warning(
+                            "nl_goal script dry-run failed — repair once: %s", err_short
+                        )
+                        try:
+                            script = await repair_playwright_script(
+                                client=llm_client,
+                                model=model,
+                                case_id=cid or 1,
+                                script=script,
+                                error=err_short,
+                                journal=journal,
+                                steps=steps,
+                            )
+                            verify2 = await self._try_run_compiled_script(
+                                agent_id,
+                                f"{run_id}_dry2",
+                                case_name,
+                                steps,
+                                script=script,
+                                base_url=base_url_override,
+                                case_id=cid or None,
+                                steps_hash=steps_content_hash(steps),
+                                headless=True,
+                            )
+                            dry_verify_last = verify2
+                            dry_fail = (
+                                verify2 is None
+                                or any(
+                                    r.get("compiled_script_failed")
+                                    for r in (verify2 or [])
+                                )
+                                or not (
+                                    verify2 and all(r.get("success") for r in verify2)
+                                )
+                            )
+                            if dry_fail and verify2:
+                                err2 = next(
+                                    (r.get("error") for r in verify2 if r.get("error")),
+                                    "",
+                                )
+                                if err2:
+                                    dry_error_last = " ".join(str(err2).split())[:180]
+                        except Exception:
+                            logger.warning("script repair failed", exc_info=True)
+                            dry_fail = True
+
+                    if not dry_fail and script:
+                        h = steps_content_hash(steps)
+                        self._last_synthesized_script = {
+                            "case_id": case_id,
+                            "script": script,
+                            "steps_hash": h,
+                        }
+                        script_ok = True
+                        logger.info(
+                            "nl_goal synthesized script ok case=%s bytes=%s "
+                            "(headless verify passed — persisting)",
+                            case_id,
+                            len(script),
                         )
                     else:
-                        err = "dry-run unsupported/timeout"
-                    # Truncate — Playwright missing-browser dumps a huge box
-                    err_short = " ".join(str(err).split())[:180]
-                    dry_error_last = err_short
-                    logger.warning(
-                        "nl_goal script dry-run failed — repair once: %s", err_short
-                    )
-                    try:
-                        script = await repair_playwright_script(
-                            client=llm_client,
-                            model=model,
-                            case_id=cid or 1,
-                            script=script,
-                            error=err_short,
-                            journal=journal,
-                            steps=steps,
+                        logger.warning(
+                            "nl_goal goal passed but script verify failed — not persisting"
                         )
-                        verify2 = await self._try_run_compiled_script(
-                            agent_id,
-                            f"{run_id}_dry2",
-                            case_name,
-                            steps,
-                            script=script,
-                            base_url=base_url_override,
-                            case_id=cid or None,
-                            steps_hash=steps_content_hash(steps),
-                        )
-                        dry_verify_last = verify2
-                        dry_fail = (
-                            verify2 is None
-                            or any(r.get("compiled_script_failed") for r in (verify2 or []))
-                            or not (verify2 and all(r.get("success") for r in verify2))
-                        )
-                        if dry_fail and verify2:
-                            err2 = next(
-                                (r.get("error") for r in verify2 if r.get("error")),
-                                "",
-                            )
-                            if err2:
-                                dry_error_last = " ".join(str(err2).split())[:180]
-                    except Exception:
-                        logger.warning("script repair failed", exc_info=True)
-                        dry_fail = True
-
-                if not dry_fail and script:
-                    h = steps_content_hash(steps)
-                    self._last_synthesized_script = {
-                        "case_id": case_id,
-                        "script": script,
-                        "steps_hash": h,
-                    }
-                    script_ok = True
-                    logger.info(
-                        "nl_goal synthesized script ok case=%s bytes=%s "
-                        "(headless verify passed — persisting)",
-                        case_id,
-                        len(script),
-                    )
-                else:
-                    logger.warning(
-                        "nl_goal goal passed but script verify failed — not persisting"
-                    )
             except Exception:
                 logger.warning("nl_goal synthesize/verify failed", exc_info=True)
                 script_ok = False
@@ -1400,28 +1444,40 @@ class AgentManager:
         base_url: Optional[str],
         case_id: Optional[int],
         steps_hash: str,
+        headless: Optional[bool] = None,
+        keep_browser: bool = False,
     ) -> Optional[list]:
-        """Ask agent to run solidified Playwright script. None = fall back."""
+        """Ask agent to run solidified Playwright script. None = fall back.
+
+        ``headless``:
+          - ``None``: agent uses its own GUI/CLI setting (user-facing runs → usually headed)
+          - ``True``/``False``: force mode (e.g. dry-run verify after nl_goal)
+        ``keep_browser``: batch/init→main — run on shared CDP and do not close Chromium.
+        """
         session = await self.get_session(agent_id)
         if not session:
             return None
         try:
             session.agent.status = AgentStatus.BUSY
             logger.info(
-                "Trying compiled_script case=%s agent=%s hash=%s",
-                case_id, agent_id, (steps_hash or "")[:12],
+                "Trying compiled_script case=%s agent=%s hash=%s headless=%s keep_browser=%s",
+                case_id, agent_id, (steps_hash or "")[:12], headless, keep_browser,
             )
+            payload = {
+                "script": script,
+                "base_url": base_url or "",
+                "case_id": case_id or 0,
+                "steps_hash": steps_hash,
+                "case_name": case_name,
+                "keep_browser": bool(keep_browser),
+            }
+            if headless is not None:
+                payload["headless"] = bool(headless)
             resp = await session.request(WSMessage(
                 type=WSMessageType.RUN_COMPILED_SCRIPT,
                 agent_id=agent_id,
                 run_id=run_id,
-                payload={
-                    "script": script,
-                    "base_url": base_url or "",
-                    "case_id": case_id or 0,
-                    "steps_hash": steps_hash,
-                    "case_name": case_name,
-                },
+                payload=payload,
             ), timeout=600)
         except Exception as exc:
             logger.warning("compiled_script request failed: %s", exc)
@@ -2959,12 +3015,14 @@ class AgentManager:
 
                 # Batch follow-ups keep browser session: only seq=0 (or no seq) navigates
                 navigate = True
+                reuse_session = False
                 if isinstance(goal, dict) and goal.get("batch_id") is not None:
                     _seq = goal.get("seq")
                     try:
                         navigate = _seq is None or int(_seq) == 0
                     except (TypeError, ValueError):
                         navigate = True
+                    reuse_session = bool(goal.get("reuse_browser_session")) or not navigate
 
                 async def _run_with_fallback(
                     _base_url=base_url,
@@ -2975,6 +3033,7 @@ class AgentManager:
                     _steps=steps,
                     _run_row_id=run_row_id,
                     _navigate=navigate,
+                    _reuse_session=reuse_session,
                     _compiled_script=getattr(tc, "compiled_script", None),
                     _compiled_script_hash=getattr(tc, "compiled_script_hash", None),
                 ):
@@ -2992,12 +3051,14 @@ class AgentManager:
                             compiled_script=_compiled_script,
                             compiled_script_hash=_compiled_script_hash,
                             case_description=getattr(_tc, "description", None),
+                            reuse_browser_session=_reuse_session,
                         )
                         try:
                             from core.locator_memory import persist_learned_locators_from_results
                             from core.compiled_script import (
                                 clear_compiled_script,
                                 persist_compiled_script,
+                                should_clear_compiled_script_after_error,
                             )
                             async with AsyncSessionLocal() as _ldb:
                                 from app import crud as _crud
@@ -3015,11 +3076,20 @@ class AgentManager:
                                     and _tc_fresh
                                     and failed_meta.get("case_id") == int(_case_id)
                                 ):
-                                    if clear_compiled_script(_tc_fresh):
-                                        await _ldb.commit()
+                                    if should_clear_compiled_script_after_error(
+                                        failed_meta.get("error")
+                                    ):
+                                        if clear_compiled_script(_tc_fresh):
+                                            await _ldb.commit()
+                                            logger.info(
+                                                "cleared compiled_script after failed replay case=%s",
+                                                _case_id,
+                                            )
+                                    else:
                                         logger.info(
-                                            "cleared compiled_script after failed replay case=%s",
+                                            "keep compiled_script after infra fail case=%s: %s",
                                             _case_id,
+                                            str(failed_meta.get("error") or "")[:120],
                                         )
                                     self._last_compiled_script_failed = None
                                 synth = getattr(self, "_last_synthesized_script", None)

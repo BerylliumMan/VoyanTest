@@ -297,6 +297,24 @@ def clear_compiled_script(case) -> bool:
     return changed
 
 
+def should_clear_compiled_script_after_error(error: str | None) -> bool:
+    """False for infra / environment failures — keep a previously good script."""
+    err = " ".join(str(error or "").split()).lower()
+    if not err:
+        return True
+    infra_markers = (
+        "chrome binary not found",
+        "executable doesn't exist",
+        "playwright install",
+        "browser has been closed",
+        "target page, context or browser has been closed",
+        "connection refused",
+        "shared cdp",
+        "not available",
+    )
+    return not any(m in err for m in infra_markers)
+
+
 def persist_compiled_script_after_run(
     case,
     *,

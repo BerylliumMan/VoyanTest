@@ -45,8 +45,25 @@ echo.
 
 echo [3/4] Building Agent GUI...
 if exist VoyanTest-Agent.spec del VoyanTest-Agent.spec
-REM windowed GUI build; must collect-all browser_use for system_prompts/*.md
-python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
+REM CRITICAL: never pack agent\dist (old exe) into the new build — size balloons to 600MB+.
+if exist "%~dp0agent\dist" (
+    echo Removing agent\dist so old exe is not nested into the bundle...
+    rmdir /s /q "%~dp0agent\dist"
+)
+if exist "%~dp0dist\VoyanTest-Agent" rmdir /s /q "%~dp0dist\VoyanTest-Agent"
+if exist "%~dp0dist\VoyanTest-Agent.exe" del /f /q "%~dp0dist\VoyanTest-Agent.exe"
+
+REM onedir: fast startup (onefile extracts 100MB+ to %%TEMP%% every launch).
+REM chromium / node.exe stay beside the folder — do not bundle them.
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name VoyanTest-Agent ^
+  --exclude-module pymupdf ^
+  --exclude-module fitz ^
+  --exclude-module pandas ^
+  --exclude-module matplotlib ^
+  --exclude-module scipy ^
+  --exclude-module MySQLdb ^
+  --exclude-module mysql ^
+  --exclude-module tkinter.test ^
   --hidden-import agent.models ^
   --hidden-import agent.client_core ^
   --hidden-import agent.cli_entry ^
@@ -58,6 +75,7 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --hidden-import core.mcp_tabs ^
   --hidden-import core.locator_memory ^
   --hidden-import core.step_intent ^
+  --hidden-import core.script_templates ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
   --hidden-import browser_use.agent.system_prompts ^
@@ -83,11 +101,16 @@ python -m PyInstaller --onefile --windowed --name VoyanTest-Agent ^
   --copy-metadata browser-use ^
   --copy-metadata jaraco.text ^
   --copy-metadata setuptools ^
-  --add-data "agent;agent" ^
+  --add-data "agent\gui;agent\gui" ^
+  --add-data "agent\__init__.py;agent" ^
+  --add-data "agent\models.py;agent" ^
+  --add-data "agent\client_core.py;agent" ^
+  --add-data "agent\cli_entry.py;agent" ^
   --add-data "core\browser_use_exec.py;core" ^
   --add-data "core\mcp_tabs.py;core" ^
   --add-data "core\locator_memory.py;core" ^
   --add-data "core\step_intent.py;core" ^
+  --add-data "core\script_templates.py;core" ^
   --add-data "core\browser_use_prompts;core\browser_use_prompts" ^
   --add-data "core\__init__.py;core" ^
   agent\gui\app.py
@@ -106,8 +129,9 @@ if exist build rmdir /s /q build
 echo.
 echo ========================================
 echo  Build successful!
-echo  Output: dist\VoyanTest-Agent.exe [GUI]
-echo  Also keep node.exe / node_modules / chromium next to the exe.
+echo  Output: dist\VoyanTest-Agent\VoyanTest-Agent.exe  [onedir, fast start]
+echo  Copy chromium / node.exe / node_modules next to that folder
+echo    (same layout as release\VoyanTest-Agent\).
 echo  Extensions cache: %%USERPROFILE%%\.config\browseruse\extensions
 echo ========================================
 pause

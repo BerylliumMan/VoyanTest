@@ -1410,7 +1410,12 @@ class AgentClient:
             self._log_warning(f"browser-use session stop: {exc}")
 
     async def _handle_run_compiled_script(self, msg: WSMessage):
-        """Run a solidified whole-case Playwright Python script on a fresh browser."""
+        """Run a solidified whole-case Playwright Python script.
+
+        - Dry-run (forced headless): ephemeral Chromium, always closed after.
+        - User / batch runs: shared hybrid CDP Chromium. When ``keep_browser``
+          (multi-case batch / follow-up), do not close Chrome so login survives.
+        """
         import tempfile
         import time as _time
         from pathlib import Path
@@ -1419,6 +1424,7 @@ class AgentClient:
         script = payload.get("script") or ""
         base_url = (payload.get("base_url") or "").strip()
         case_id = payload.get("case_id") or 0
+        keep_browser = bool(payload.get("keep_browser"))
         t0 = _time.monotonic()
         if not script.strip():
             await self._send(
@@ -1428,20 +1434,21 @@ class AgentClient:
             )
             return
 
-        self._log_info(f"Running compiled Playwright script for case={case_id}")
+        self._log_info(
+            f"Running compiled Playwright script for case={case_id} "
+            f"keep_browser={keep_browser}"
+        )
         tmp_path = None
         try:
             fd, tmp_path = tempfile.mkstemp(prefix=f"vt_case_{case_id}_", suffix=".py")
             os.close(fd)
             Path(tmp_path).write_text(script, encoding="utf-8")
 
-            # Prefer executing the embedded test_case_N(page) against a local Chromium
             ns: dict = {"__name__": "__vt_compiled__"}
             code = compile(script, tmp_path, "exec")
             exec(code, ns, ns)
             fn = ns.get(f"test_case_{int(case_id)}")
             if not callable(fn):
-                # fallback: any test_case_* 
                 for k, v in ns.items():
                     if k.startswith("test_case_") and callable(v):
                         fn = v
@@ -1451,29 +1458,90 @@ class AgentClient:
 
             from playwright.async_api import async_playwright
 
-            # Dry-run / solidify verify must not pop a visible window — that looks
-            # like "starting over" next to the live nl_goal browser. Always headless.
-            launch_kwargs: dict = {"headless": True}
-            chrome_exe = self._resolve_chrome_exe()
-            if chrome_exe and os.path.isfile(chrome_exe):
-                launch_kwargs["executable_path"] = chrome_exe
-                self._log_info(f"compiled_script Using Chromium: {chrome_exe}")
+            if "headless" in payload:
+                headless = bool(payload.get("headless"))
+            else:
+                headless = bool(self._headless)
+
+            # Forced headless = post-nl_goal dry-run: never touch shared session.
+            ephemeral = ("headless" in payload and headless) and not keep_browser
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(**launch_kwargs)
-                context = await browser.new_context()
-                page = await context.new_page()
-                # Scripts from templates already page.goto(...). Pre-navigating to
-                # env base_url (often /xtmh) lands on the wrong page for login
-                # and can leave an empty unit tree — skip when script navigates.
+                browser = None
+                owned_launch = False
+                if ephemeral:
+                    launch_kwargs: dict = {"headless": True}
+                    chrome_exe = self._resolve_chrome_exe()
+                    if chrome_exe and os.path.isfile(chrome_exe):
+                        launch_kwargs["executable_path"] = chrome_exe
+                        self._log_info(
+                            f"compiled_script dry-run Chromium: {chrome_exe}"
+                        )
+                    browser = await p.chromium.launch(**launch_kwargs)
+                    owned_launch = True
+                    context = await browser.new_context()
+                    page = await context.new_page()
+                else:
+                    # Detach MCP first so Playwright can own the CDP session briefly.
+                    try:
+                        await self._stop_mcp(close_exec_chrome=False)
+                    except Exception:
+                        pass
+                    if not await self._is_exec_cdp_alive():
+                        await self._start_exec_chrome_cdp()
+                    cdp = self._exec_cdp_http
+                    if not cdp:
+                        raise RuntimeError("shared CDP Chromium not available")
+                    self._log_info(
+                        f"compiled_script connect_over_cdp {cdp} "
+                        f"headless={headless} keep_browser={keep_browser}"
+                    )
+                    browser = await p.chromium.connect_over_cdp(cdp)
+                    if browser.contexts:
+                        context = browser.contexts[0]
+                    else:
+                        ctx_kwargs: dict = {}
+                        if not headless:
+                            ctx_kwargs["no_viewport"] = True
+                        context = await browser.new_context(**ctx_kwargs)
+                    page = context.pages[0] if context.pages else await context.new_page()
+
                 script_nav = bool(
                     re.search(r"page\s*\.\s*goto\s*\(", script or "", re.I)
                 )
+                # Global action/nav timeouts (Playwright equivalent of implicit wait).
+                try:
+                    from core.script_templates import (
+                        DEFAULT_ACTION_TIMEOUT_MS,
+                        DEFAULT_NAVIGATION_TIMEOUT_MS,
+                    )
+                    page.set_default_timeout(DEFAULT_ACTION_TIMEOUT_MS)
+                    page.set_default_navigation_timeout(DEFAULT_NAVIGATION_TIMEOUT_MS)
+                except Exception:
+                    page.set_default_timeout(30_000)
+                    page.set_default_navigation_timeout(60_000)
                 if base_url and not script_nav:
-                    await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
+                    await page.goto(
+                        base_url, wait_until="domcontentloaded", timeout=60000
+                    )
                     await page.wait_for_timeout(800)
                 await fn(page)
-                await browser.close()
+
+                if owned_launch:
+                    await browser.close()
+                elif not keep_browser:
+                    # Single-case run: close shared Chromium (SHUTDOWN may also fire).
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                    await self._stop_exec_chrome()
+                else:
+                    # Disconnect Playwright client only — leave Chromium for next case.
+                    # connect_over_cdp: avoid browser.close() (that would kill Chrome).
+                    self._log_info(
+                        "compiled_script done — shared Chromium kept for next case"
+                    )
 
             await self._send(
                 WSMessageType.COMPILED_SCRIPT_RESULT,
@@ -1486,7 +1554,6 @@ class AgentClient:
             )
         except Exception as exc:
             err_s = str(exc)
-            # Infra / missing-browser: warning only — manager may fall back to NL
             if "Executable doesn't exist" in err_s or "playwright install" in err_s.lower():
                 self._log_info(f"compiled_script dry-run infra fail: {err_s[:180]}")
             else:
