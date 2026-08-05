@@ -727,3 +727,266 @@ def test_pick_nl_script_fallback_step_unlocated_is_none():
     )
     assert order3 == 1
     assert s3 is steps[0]
+
+
+# ---------------------------------------------------------------------------
+# DOM probe（失败恢复）相关
+# ---------------------------------------------------------------------------
+
+def test_extract_probe_keywords_mixed():
+    from core.dom_probe import extract_probe_keywords
+
+    # 中英混合：实体词保留、动词壳去除
+    kws = extract_probe_keywords("点击【京州市院】输入用户名", None)
+    assert "京州市院" in kws
+    assert "用户名" in kws
+    assert "点击" not in kws
+
+    # placeholder= 值保留
+    kws2 = extract_probe_keywords("选择单位", "placeholder=请选择单位")
+    assert "请选择单位" in kws2
+
+    # role=button name=登录 解析
+    kws3 = extract_probe_keywords("登录", "role=button name=登录")
+    assert "button" in kws3
+    assert "登录" in kws3
+
+    # text= 解析
+    kws4 = extract_probe_keywords("点确认", "text=确定")
+    assert "确定" in kws4
+
+    # 关闭/确定 是实体词，必须保留
+    kws5 = extract_probe_keywords("点击（页面所有出现的消息的关闭按钮）", None)
+    assert any("关闭" in k for k in kws5)
+
+    # 纯动词壳 → 无关键词
+    assert extract_probe_keywords("点击", None) == []
+
+
+def test_build_probe_js_serializes_keywords():
+    from core.dom_probe import GENERIC_DOM_PROBE_JS, build_probe_js
+
+    js = build_probe_js(["确定", "京州市院"])
+    assert js.startswith("() =>")
+    assert "确定" in js
+    assert "京州市院" in js
+    assert "__PROBE_KEYWORDS__" not in js
+    # 常量本身保留占位符，可重复注入
+    assert "__PROBE_KEYWORDS__" in GENERIC_DOM_PROBE_JS
+
+
+def test_build_probe_summary_compact():
+    from core.dom_probe import build_probe_summary
+
+    result = {
+        "ok": True,
+        "keywords": ["确定"],
+        "candidates": [
+            {
+                "tag": "button", "role": "", "name": "", "text": "确定",
+                "placeholder": "", "visible": True, "candidate_index": 0,
+                "dom_index": 3, "locator": "probe_idx_3",
+            },
+            {
+                "tag": "input", "role": "", "name": "", "text": "",
+                "placeholder": "请选择单位", "visible": True,
+                "candidate_index": 1, "dom_index": 7, "locator": "probe_idx_7",
+            },
+        ],
+    }
+    text = build_probe_summary(result)
+    assert "DOM PROBE found 2 visible clickable candidate(s)" in text
+    assert "probe_idx_3" in text
+    assert "确定" in text
+    assert "请选择单位" in text
+    assert "SUGGESTED evaluate" in text
+
+    empty = build_probe_summary({"ok": True, "keywords": ["确定"], "candidates": []})
+    assert "DOM PROBE found 0" in empty
+    assert "No visible clickable candidate" in empty
+    assert build_probe_summary(None)
+
+
+def test_decide_next_goal_action_probe_injected():
+    import asyncio
+
+    from core.goal_agent_loop import decide_next_goal_action
+
+    seen = {}
+
+    def _fake_response(*args, **kwargs):
+        seen["messages"] = kwargs.get("messages")
+        return type(
+            "Resp", (),
+            {
+                "choices": [
+                    type(
+                        "C", (),
+                        {
+                            "message": type(
+                                "M", (),
+                                {
+                                    "content": (
+                                        '{"status":"continue","action":"click",'
+                                        '"selector":"probe_idx_3","checklist_index":1}'
+                                    )
+                                },
+                            )()
+                        },
+                    )()
+                ]
+            },
+        )()
+
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=_fake_response)
+
+    async def _run():
+        await decide_next_goal_action(
+            client=client,
+            model="fake-model",
+            goal_text="GOAL",
+            snapshot="SNAP",
+            journal_tail=[],
+            probe_result=(
+                "DOM PROBE found 1 visible clickable candidate(s) for keywords=['确定']:\n"
+                "[1] <button> role=- locator=probe_idx_3 label=确定"
+            ),
+            last_action_error="click missed",
+        )
+
+    asyncio.run(_run())
+    user = seen["messages"][1]["content"]
+    assert "DOM PROBE RESULT" in user
+    assert "不要重复刚才失败的动作" in user
+    assert "click missed" in user
+    assert "probe_idx_3" in user
+    sys_prompt = seen["messages"][0]["content"]
+    assert "DOM PROBE RESULT" in sys_prompt
+    assert "only status=\"fail\"" in sys_prompt or "status=\"fail\"" in sys_prompt
+
+
+def test_nl_goal_fail_triggers_probe_then_decide_receives():
+    """click 失败 → 自动 DOM probe → 下一轮 decide 收到 probe_result → 用定位符成功。"""
+    from agent.manager import AgentManager
+    from app.runtime_config import execution_backend_config
+    from core.goal_agent_loop import (
+        GoalAction,
+        uncovered_checklist_orders,
+    )
+
+    mgr = AgentManager()
+    steps = [{"step_order": 1, "description": "点击【确定】"}]
+    prev = execution_backend_config.dry_run_mode
+    execution_backend_config.dry_run_mode = "skip"
+
+    PROBE_TEXT = (
+        '{"ok": true, "keywords": ["确定"], "candidates": [{"tag": "button", '
+        '"role": "", "name": "", "text": "确定", "placeholder": "", "visible": true, '
+        '"candidate_index": 0, "dom_index": 3, "locator": "probe_idx_3"}]}'
+    )
+
+    decide_calls = []
+
+    async def _decide(**kwargs):
+        decide_calls.append(kwargs)
+        journal_tail = kwargs.get("journal_tail") or []
+        uncovered = uncovered_checklist_orders(steps, journal_tail)
+        if not uncovered:
+            return GoalAction(status="done", thinking="all good")
+        idx = uncovered[0]
+        probe = kwargs.get("probe_result")
+        if probe and "DOM PROBE found" in probe:
+            return GoalAction(
+                status="continue",
+                action="click",
+                selector="probe_idx_3",
+                checklist_index=idx,
+                checklist_note=f"checklist item {idx}",
+                thinking="use probe locator",
+            )
+        return GoalAction(
+            status="continue",
+            action="click",
+            selector="e1",
+            checklist_index=idx,
+            checklist_note=f"checklist item {idx}",
+            thinking="cover",
+        )
+
+    async def _execute_step_side(session, agent_id, run_id, step_order,
+                                 description, tool_call):
+        action = tool_call.get("action")
+        sel = tool_call.get("selector") or ""
+        thinking = str(tool_call.get("thinking") or "")
+        if action == "evaluate" and "DOM probe" in thinking:
+            return {"success": True, "text": PROBE_TEXT, "action": "evaluate"}
+        if action == "click" and sel.startswith("probe_idx"):
+            return {"success": True, "text": "ok", "action": f"click({sel})"}
+        return {
+            "success": False,
+            "error": "click missed",
+            "text": "no",
+            "action": f"click({sel})",
+        }
+
+    async def _run():
+        session = MagicMock()
+        session.agent = MagicMock()
+        session.agent.status = MagicMock()
+        session.agent.capabilities = ["browser_use", "playwright_mcp"]
+        session.request = AsyncMock(return_value={"ready": True})
+        session.send = AsyncMock()
+        with (
+            patch.object(mgr, "get_session", new=AsyncMock(return_value=session)),
+            patch.object(mgr, "_get_snapshot", new=AsyncMock(return_value="SNAP")),
+            patch.object(
+                mgr, "_snapshot_indicates_browser_closed", return_value=False
+            ),
+            patch(
+                "agent.manager.create_openai_client",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "agent.manager._llm_resolve_config",
+                new=AsyncMock(return_value=(None, None, "fake-model")),
+            ),
+            patch(
+                "core.goal_agent_loop.decide_next_goal_action",
+                new=AsyncMock(side_effect=_decide),
+            ),
+            patch.object(mgr, "_execute_step", new=AsyncMock(side_effect=_execute_step_side)),
+            patch(
+                "core.script_synthesize.synthesize_playwright_script",
+                new=AsyncMock(return_value="async def test_case_42(page):\n    pass\n"),
+            ),
+        ):
+            out = await mgr._execute_on_agent_nl_goal(
+                "agent-1", "run-probe", "case", steps,
+                case_id=42, navigate_base_url=False,
+            )
+
+            # probe 注入到下一轮 decide（第 2 次 decide 调用）
+            assert len(decide_calls) >= 2
+            probed = next(
+                (k for k in decide_calls[1:] if k.get("probe_result")), None
+            )
+            assert probed is not None
+            assert "DOM PROBE found" in probed["probe_result"]
+            assert "probe_idx_3" in probed["probe_result"]
+            assert probed["last_action_error"] == "click missed"
+
+            # probe 不写 journal：journal 只含 click 失败 / probe 点击成功 / done
+            journal_actions = [
+                e.get("action")
+                for e in (out[0].get("action_journal") or [])
+                if e.get("action")
+            ]
+            assert "evaluate" not in journal_actions
+            assert all(r.get("success") for r in out)
+            assert all(r.get("backend") == "nl_goal" for r in out)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        execution_backend_config.dry_run_mode = prev

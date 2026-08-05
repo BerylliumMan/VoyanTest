@@ -86,6 +86,7 @@ class StepResultPayload(BaseModel):
     action: str = ""
     next_goal: str = ""
     error: Optional[str] = None
+    text: Optional[str] = None  # MCP tool output (e.g. evaluate JSON) for DOM probe recovery
     duration_ms: float = 0
     screenshot_base64: Optional[str] = None
 

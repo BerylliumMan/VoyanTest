@@ -29,6 +29,10 @@ from core.locator_failure import (
 
 logger = logging.getLogger("agent.manager")
 
+# 失败恢复：动作 miss 后是否自动跑一次通用 DOM probe，把候选喂给下一轮 decide。
+NL_GOAL_PROBE_ON_FAIL = True
+NL_GOAL_PROBEABLE_ACTIONS = {"click", "fill", "select", "hover", "press_key"}
+
 
 def _locate_script_verify_failed_step_orders(
     verify: Optional[list],
@@ -505,6 +509,7 @@ class AgentManager:
 
         from app.runtime_config import execution_backend_config
         from core.compiled_script import steps_content_hash
+        from core.dom_probe import build_probe_summary
         from core.goal_agent_loop import (
             CLOSE_ALL_PAGE_PROMPTS_JS,
             DEFAULT_MAX_TURNS,
@@ -547,6 +552,12 @@ class AgentManager:
         goal_error: Optional[str] = None
         goal_ok = False
         run_started = False
+        # 失败恢复 probe 状态：probe_summary 只在本 turn 失败后、下一轮
+        # decide 前注入一次；probe 不写 journal，避免影响 checklist 覆盖判定。
+        probe_summary: Optional[str] = None
+        last_action_error: Optional[str] = None
+        last_probe_had_candidates = False
+        probed_indices: set = set()
 
         session.agent.status = AgentStatus.BUSY
         logger.info(
@@ -676,11 +687,17 @@ class AgentManager:
                             snapshot=snap,
                             journal_tail=journal,
                             steps=steps,
+                            probe_result=probe_summary,
+                            last_action_error=last_action_error,
                         )
                     except Exception as exc:
                         goal_error = f"goal LLM failed: {exc}"
                         logger.exception("nl_goal decide failed turn=%s", turn)
                         break
+                # probe 是一次性注入：本轮已消费，下一轮前若再失败才重新 probe
+                injected_probe = probe_summary
+                probe_summary = None
+                last_action_error = None
 
                 if decision.status == "done":
                     uncovered = uncovered_checklist_orders(steps, journal)
@@ -763,6 +780,41 @@ class AgentManager:
                         logger.debug("nl_goal fail screenshot skipped", exc_info=True)
 
                 if decision.status == "fail":
+                    # 限制草率 fail：本 turn 注入过 probe 且 probe 有候选时，
+                    # LLM 不应直接 fail —— 拒绝一次并继续（下轮用候选行动）。
+                    if injected_probe is not None and last_probe_had_candidates:
+                        logger.info(
+                            "nl_goal rejecting hasty fail turn=%s — DOM probe "
+                            "returned candidates; continue with probe locator",
+                            turn,
+                        )
+                        journal.append(
+                            {
+                                "turn": turn,
+                                "status": "fail_rejected",
+                                "thinking": decision.thinking,
+                                "action": decision.action,
+                                "selector": decision.selector,
+                                "value": decision.value,
+                                "stable_hint": decision.stable_hint,
+                                "checklist_index": decision.checklist_index,
+                                "checklist_note": (
+                                    f"hasty fail rejected (probe had candidates): "
+                                    f"{(decision.checklist_note or '')[:80]}"
+                                ),
+                                "success": False,
+                                "error": (
+                                    "hasty fail rejected — DOM probe found "
+                                    "candidates; retry via probe locator"
+                                ),
+                                "duration_ms": 0,
+                                "result_snippet": None,
+                                "screenshot_on_fail": False,
+                                "screenshot_path": None,
+                            }
+                        )
+                        last_probe_had_candidates = False
+                        continue
                     goal_error = decision.reason or decision.thinking or "nl_goal fail"
                     entry = journal_entry(
                         turn=turn,
@@ -878,6 +930,40 @@ class AgentManager:
                     (decision.selector or "")[:80],
                     ok,
                 )
+
+                # 失败恢复闭环：动作 miss → 自动 DOM probe → 下一轮 decide 注入。
+                # 同一 checklist 项只 probe 一次；probe 本身失败或无可探上下文时
+                # 不注入，走原失败路径（LLM 处理 / stagnation / max_turns 兜底）。
+                if (
+                    not ok
+                    and NL_GOAL_PROBE_ON_FAIL
+                    and action in NL_GOAL_PROBEABLE_ACTIONS
+                ):
+                    idx = entry.get("checklist_index")
+                    if idx is not None and idx not in probed_indices:
+                        probed_indices.add(idx)
+                        probe_result = await self._run_nl_goal_dom_probe(
+                            session,
+                            agent_id,
+                            run_id,
+                            turn=turn,
+                            description=self._step_description_for_idx(steps, idx),
+                            stable_hint=decision.stable_hint,
+                        )
+                        if probe_result is not None:
+                            last_probe_had_candidates = bool(
+                                probe_result.get("candidates")
+                            )
+                            probe_summary = build_probe_summary(probe_result)
+                            last_action_error = err or "action failed"
+                            logger.info(
+                                "nl_goal DOM probe done case=%s turn=%s "
+                                "idx=%s candidates=%s",
+                                case_id,
+                                turn,
+                                idx,
+                                len(probe_result.get("candidates") or []),
+                            )
 
                 if detect_stagnation(journal):
                     goal_error = "nl_goal stagnation — repeated failing/identical actions"
@@ -2459,6 +2545,76 @@ class AgentManager:
                 "action": "",
                 "duration_ms": 0,
             }
+
+    @staticmethod
+    def _step_description_for_idx(
+        steps: Optional[List[dict]],
+        idx: Optional[int],
+    ) -> Optional[str]:
+        """1-based checklist order → step description (for probe keywords)."""
+        if idx is None:
+            return None
+        for i, s in enumerate(steps or []):
+            o = int(s.get("step_order") or s.get("step_number") or i + 1)
+            if o == idx:
+                return str(
+                    s.get("description") or s.get("original_description") or ""
+                )
+        return None
+
+    async def _run_nl_goal_dom_probe(
+        self,
+        session: AgentSession,
+        agent_id: str,
+        run_id: str,
+        *,
+        turn: int,
+        description: Optional[str],
+        stable_hint: Optional[str],
+    ) -> Optional[dict]:
+        """Run the generic DOM probe (read-only) after a failed click/fill step.
+
+        Returns the parsed probe result dict on success (candidates list), or
+        None when the probe itself failed / produced no usable JSON. Results are
+        injected into the next decide round only — never appended to journal.
+        """
+        try:
+            from core.dom_probe import (
+                build_probe_js,
+                extract_probe_keywords,
+                parse_probe_result_text,
+            )
+
+            keywords = extract_probe_keywords(description, stable_hint)
+            if not keywords:
+                return None
+            tc = {
+                "action": "evaluate",
+                "selector": "",
+                "value": build_probe_js(keywords),
+                "selector_type": "css",
+                "thinking": "DOM probe (failure recovery)",
+                "timeout_ms": 30000,
+            }
+            result = await self._execute_step(
+                session, agent_id, run_id, turn,
+                "DOM probe recovery", tc,
+            )
+            if not result.get("success"):
+                logger.info(
+                    "nl_goal DOM probe evaluate failed: %s", result.get("error")
+                )
+                return None
+            data = parse_probe_result_text(result.get("text") or "")
+            if data is None:
+                logger.info(
+                    "nl_goal DOM probe unparseable result: %r",
+                    (result.get("text") or "")[:200],
+                )
+            return data
+        except Exception as exc:
+            logger.debug("nl_goal DOM probe error: %s", exc)
+            return None
 
     async def _execute_step_browser_use_fallback(
         self,
