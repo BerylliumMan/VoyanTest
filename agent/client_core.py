@@ -139,6 +139,9 @@ class AgentClient:
     BROWSER_CLOSED_SNAPSHOT_MARK = "(browser closed by user)"
     # Playwright MCP snapshots after login can exceed asyncio's default 64KiB line limit.
     MCP_STDOUT_LIMIT = 16 * 1024 * 1024
+    # Snapshot text truncation for LLM prompts: 8000 chars loses dialog/tree
+    # nodes on large pages; 24000 keeps overlays while bounding token cost.
+    SNAPSHOT_TEXT_LIMIT = 24000
 
     # ---- callback helpers ----
 
@@ -1814,9 +1817,12 @@ class AgentClient:
                             text = result.get("text") or result.get("error") or "(empty page)"
                     if (
                         text != self.BROWSER_CLOSED_SNAPSHOT_MARK
-                        and len(text) > 8000
+                        and len(text) > self.SNAPSHOT_TEXT_LIMIT
                     ):
-                        text = text[:8000] + "\n\n[... TRUNCATED]"
+                        text = (
+                            text[: self.SNAPSHOT_TEXT_LIMIT]
+                            + "\n\n[... TRUNCATED]"
+                        )
                 except asyncio.TimeoutError:
                     text = "(snapshot timeout)"
                     await self._invalidate_mcp_session("snapshot timeout")
@@ -1943,6 +1949,12 @@ class AgentClient:
                             "text", "MCP execution failed"
                         )
                         result.screenshot_base64 = await self._mcp_screenshot_base64()
+                    else:
+                        # Successful evaluate (DOM probe) must carry the JS result
+                        # back so the server can feed candidates to the next decide.
+                        out_text = mcp_result.get("text")
+                        if out_text:
+                            result.text = str(out_text)[:24000]
 
         except Exception as e:
             err = str(e)

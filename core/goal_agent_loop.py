@@ -30,7 +30,7 @@ Rules:
 2. For fill/type use action "fill" with selector=ref and value=text. Prefer slow typing for filter/search boxes when the UI filters on input events (set value and mention in thinking).
 3. One primary action per turn. After dropdowns open, take another turn to type/filter then click the exact option.
 4. Prefer exact text match for tree/list options (avoid clicking a longer similar label).
-5. Closing dialogs/notifications/messages: MUST actually click Close/关闭/header X (or dismiss) for EACH visible message/dialog. Loop until none remain. Never assume they are gone. Never status="done" while any close/dismiss checklist item is still uncovered. action "evaluate" / "wait" NEVER counts as completing a close-message checklist item — only successful click does.
+5. Closing dialogs/notifications/messages: MUST actually click Close/关闭/header X (or dismiss) for EACH visible overlay. Loop until none remain. Never assume they are gone. Never status="done" while any close/dismiss checklist item is still uncovered. action "evaluate" / "wait" NEVER counts as completing a close-message checklist item — only successful click does. When an overlay is not visible in the snapshot, use a short evaluate that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), or rely on a DOM PROBE RESULT.
 6. Use action "evaluate" only when refs fail for Element UI / Ant overlays — value must be a short JS function body returning a boolean success, e.g. click exact tree label. Do NOT use evaluate to "verify" or mark close/open checklist items done.
 7. Use action "wait" with numeric seconds or text to wait for.
 8. Use action "goto" only when navigation is still needed (value=url).
@@ -38,6 +38,8 @@ Rules:
 10. If stuck after retries, status="fail" with reason.
 11. structured hints in the goal are optional tips, NOT mandatory one-shot bindings.
 12. Output ONLY one JSON object matching the schema — no markdown fences.
+13. If the user message contains "DOM PROBE RESULT", the previous action FAILED and the system already probed the DOM. Act on the probe candidates first: use their locator/dom_index (probe_idx_N) in a short evaluate click, or their exact text/aria-label, or pick a fresh snapshot ref. Only status="fail" when the probe returned no candidates AND the page looks stable.
+14. HINT: never status="fail" before a DOM probe has run — or when a probe still returned candidates — unless stagnation/max_turns demands it. One failed action alone is NOT a reason to fail.
 
 Schema:
 {
@@ -155,13 +157,13 @@ def build_goal_text(
             line += f"\n   EXPECT: {exp}"
         lines.append(line)
     lines.append(
-        "STRATEGY (from successful Cursor sessions on Element UI):\n"
+        "STRATEGY:\n"
         "- Prefer snapshot refs for click/fill; use slow type for filter inputs.\n"
         "- For tree select: open → filter → click exact .el-tree-node__label "
         "(evaluate JS click is OK when refs fail).\n"
-        "- After login home: close ALL prompts via evaluate that clicks "
-        ".el-dialog__wrapper footer 关闭 / .el-dialog__headerbtn and "
-        ".el-notification__closeBtn in a loop — do NOT click 消息铃铛/去查看.\n"
+        "- When an overlay is not visible in the snapshot, use a short evaluate "
+        "that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), "
+        "or rely on a DOM PROBE RESULT when the system already probed.\n"
         "- Do not status=done until overlays are gone. "
         "evaluate that only 'verifies' without .click() does not count."
     )
@@ -527,8 +529,15 @@ async def decide_next_goal_action(
     journal_tail: list[dict[str, Any]],
     temperature: float = 0.15,
     steps: list[dict[str, Any]] | None = None,
+    probe_result: str | None = None,
+    last_action_error: str | None = None,
 ) -> GoalAction:
-    """Ask LLM for the next GoalAction given goal + snapshot + recent journal."""
+    """Ask LLM for the next GoalAction given goal + snapshot + recent journal.
+
+    ``probe_result`` (from :func:`build_probe_summary`) is injected into the
+    user message when the previous action failed and the system auto-probed.
+    ``last_action_error`` carries the raw error text of that failed action.
+    """
     recent = journal_tail[-8:] if journal_tail else []
     last_fail = ""
     if recent and not recent[-1].get("success"):
@@ -536,6 +545,17 @@ async def decide_next_goal_action(
             f"\nLAST ACTION FAILED — recover with a different approach "
             f"(other ref, evaluate for exact tree label, or close overlay first):\n"
             f"{json.dumps(recent[-1], ensure_ascii=False)}\n"
+        )
+    error_block = ""
+    if last_action_error:
+        error_block = f"\nLAST ACTION ERROR: {last_action_error}\n"
+    probe_block = ""
+    if probe_result:
+        probe_block = (
+            "\nDOM PROBE RESULT（上一动作失败后自动探查）:\n"
+            f"{probe_result}\n"
+            "优先使用 probe 给的可复用定位符/候选文本写 evaluate 或改用新 ref；"
+            "不要重复刚才失败的动作。\n"
         )
     uncovered = uncovered_checklist_orders(steps, journal_tail) if steps is not None else []
     uncovered_block = ""
@@ -556,6 +576,8 @@ async def decide_next_goal_action(
         f"RECENT ACTIONS (oldest→newest):\n"
         f"{json.dumps(recent, ensure_ascii=False, indent=2)}\n"
         f"{last_fail}"
+        f"{error_block}"
+        f"{probe_block}"
         f"{uncovered_block}\n"
         f"CURRENT ACCESSIBILITY SNAPSHOT:\n"
         f"{(snapshot or '(empty)')[:120000]}\n\n"
@@ -709,6 +731,7 @@ def steps_results_from_goal(
     fail_order: int | None = None
     fail_error: str | None = None
     fail_shot: str | None = None
+    fail_candidates: list[tuple[int, str | None, str | None]] = []
 
     for e in journal or []:
         idx = parse_checklist_index(
@@ -725,18 +748,18 @@ def steps_results_from_goal(
         )
         if journal_entry_covers_checklist(e, step_description=desc):
             covered.add(idx)
-            if fail_order == idx:
-                fail_order = None
-                fail_error = None
-                fail_shot = None
-        elif e.get("success"):
-            # successful but not cover-eligible (e.g. evaluate on close step)
-            continue
-        else:
-            if fail_order is None or idx < fail_order:
-                fail_order = idx
-                fail_error = e.get("error") or error
-                fail_shot = e.get("screenshot_path")
+        elif not e.get("success"):
+            fail_candidates.append(
+                (idx, e.get("error") or error, e.get("screenshot_path"))
+            )
+
+    # Earliest failure that was NOT later recovered by a successful cover.
+    # A failure whose checklist item got covered afterwards is not a real fail.
+    unrecovered = [f for f in fail_candidates if f[0] not in covered]
+    if unrecovered:
+        fail_order, fail_error, fail_shot = min(unrecovered, key=lambda f: f[0])
+    else:
+        fail_order = None
 
     max_progress = max(covered) if covered else 0
 
