@@ -156,8 +156,11 @@ async def get_all_test_cases_for_project_paginated(
 async def get_all_test_cases_for_module(
     db: AsyncSession, module_id: int, case_kind: str | None = None,
 ) -> list[db_models.TestCase]:
-    """获取模块的所有测试用例"""
-    conditions = [db_models.TestCase.module_id == module_id, *_case_kind_filter(case_kind)]
+    """获取模块及其下级模块的所有测试用例"""
+    from app.crud.module import get_module_descendants
+
+    module_ids = await get_module_descendants(db, module_id)
+    conditions = [db_models.TestCase.module_id.in_(module_ids), *_case_kind_filter(case_kind)]
     result = await db.execute(
         select(db_models.TestCase)
         .options(selectinload(db_models.TestCase.steps))
@@ -170,8 +173,11 @@ async def get_all_test_cases_for_module_paginated(
     db: AsyncSession, module_id: int, page: int = 1, size: int = 20,
     case_kind: str | None = None,
 ) -> dict[str, any]:
-    """获取模块的所有测试用例（分页）"""
-    conditions = [db_models.TestCase.module_id == module_id, *_case_kind_filter(case_kind)]
+    """获取模块及其下级模块的所有测试用例（分页）"""
+    from app.crud.module import get_module_descendants
+
+    module_ids = await get_module_descendants(db, module_id)
+    conditions = [db_models.TestCase.module_id.in_(module_ids), *_case_kind_filter(case_kind)]
     count_result = await db.execute(
         select(func.count(db_models.TestCase.id))
         .where(*conditions)

@@ -68,42 +68,92 @@ def _resolve_database_url() -> str | None:
 _engine_init_lock = asyncio.Lock()
 
 
-async def init_db_engine(db_url: str | None = None) -> bool:
-    """初始化数据库引擎。成功返回 True。会测试连接是否可用。"""
+async def init_db_engine(
+    db_url: str | None = None,
+    *,
+    retries: int = 1,
+    retry_delay_sec: float = 2.0,
+) -> bool:
+    """初始化数据库引擎。成功返回 True。会测试连接是否可用。
+
+    宿主机重启时 app 常比 postgres 先起来；若已配置 DATABASE_URL / .db_config，
+    默认可多试几次，避免误进「配置模式」后一直 503。
+    """
     async with _engine_init_lock:
         global engine
         url = db_url or _resolve_database_url()
         if not url:
             engine = None
             return False
-        try:
-            new_engine = create_async_engine(url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10)
-            new_maker = async_sessionmaker(new_engine, expire_on_commit=False, class_=AsyncSession)
-            # 测试连接是否可用
+        # Env / saved config → tolerate boot race; pure setup wizard stays single-shot.
+        if db_url is None and retries <= 1 and (
+            os.getenv("DATABASE_URL") or os.path.exists(SETUP_CONFIG_FILE)
+        ):
+            retries = max(retries, 15)
+        attempts = max(1, int(retries))
+        last_err: Exception | None = None
+        for attempt in range(1, attempts + 1):
             try:
-                async with new_maker() as sess:
-                    await sess.execute(__import__("sqlalchemy").text("SELECT 1"))
-            except Exception as conn_err:
-                logger.warning("数据库连接测试失败，进入配置模式: %s", conn_err)
-                await new_engine.dispose()
+                new_engine = create_async_engine(
+                    url, echo=False, pool_pre_ping=True, pool_size=5, max_overflow=10
+                )
+                new_maker = async_sessionmaker(
+                    new_engine, expire_on_commit=False, class_=AsyncSession
+                )
+                try:
+                    async with new_maker() as sess:
+                        await sess.execute(__import__("sqlalchemy").text("SELECT 1"))
+                except Exception as conn_err:
+                    last_err = conn_err
+                    await new_engine.dispose()
+                    if attempt < attempts:
+                        logger.warning(
+                            "数据库连接测试失败 (%s/%s)，%.1fs 后重试: %s",
+                            attempt,
+                            attempts,
+                            retry_delay_sec,
+                            conn_err,
+                        )
+                        await asyncio.sleep(retry_delay_sec)
+                        continue
+                    logger.warning("数据库连接测试失败，进入配置模式: %s", conn_err)
+                    engine = None
+                    return False
+                old_engine = engine
+                engine = new_engine
+                # Configure session maker (handles both _LazySessionMaker and test's async_sessionmaker)
+                if hasattr(AsyncSessionLocal, "_maker"):
+                    AsyncSessionLocal._maker = new_maker
+                else:
+                    AsyncSessionLocal.configure(bind=new_engine)
+                if old_engine:
+                    await old_engine.dispose()
+                masked = (
+                    url.split("://")[0] + "://***@" + url.split("@")[-1]
+                    if "@" in url
+                    else url
+                )
+                logger.info("数据库引擎已初始化: %s", masked)
+                return True
+            except Exception as e:
+                last_err = e
+                if attempt < attempts:
+                    logger.warning(
+                        "数据库引擎初始化失败 (%s/%s)，%.1fs 后重试: %s",
+                        attempt,
+                        attempts,
+                        retry_delay_sec,
+                        e,
+                    )
+                    await asyncio.sleep(retry_delay_sec)
+                    continue
+                logger.error("数据库引擎初始化失败: %s", e)
                 engine = None
                 return False
-            old_engine = engine
-            engine = new_engine
-            # Configure session maker (handles both _LazySessionMaker and test's async_sessionmaker)
-            if hasattr(AsyncSessionLocal, '_maker'):
-                AsyncSessionLocal._maker = new_maker
-            else:
-                AsyncSessionLocal.configure(bind=new_engine)
-            if old_engine:
-                await old_engine.dispose()
-            masked = url.split("://")[0] + "://***@" + url.split("@")[-1] if "@" in url else url
-            logger.info("数据库引擎已初始化: %s", masked)
-            return True
-        except Exception as e:
-            logger.error("数据库引擎初始化失败: %s", e)
-            engine = None
-            return False
+        if last_err:
+            logger.error("数据库引擎初始化失败: %s", last_err)
+        engine = None
+        return False
 
 
 async def get_async_db() -> AsyncIterator[AsyncSession]:
