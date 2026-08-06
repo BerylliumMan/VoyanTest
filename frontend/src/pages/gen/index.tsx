@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useHistory } from 'react-router-dom';
 import {
   Card, Upload, Button, Message, Typography, Space, Select,
-  Table, Tag, Progress, Divider, Collapse, Input, Spin, List, Modal,
+  Table, Tag, Progress, Divider, Collapse, Input, Spin, List, Modal, Checkbox,
 } from '@arco-design/web-react';
 import type { UploadItem } from '@arco-design/web-react/es/Upload/interface';
 import {
@@ -36,6 +36,13 @@ const NumberedList: React.FC<{ text: string }> = ({ text }) => {
 interface Project {
   id: number;
   name: string;
+}
+
+interface Environment {
+  id: number;
+  name: string;
+  base_url: string;
+  is_default?: boolean;
 }
 
 interface FunctionalPoint {
@@ -84,6 +91,9 @@ const GenPage: React.FC = () => {
   const history = useHistory();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | undefined>(undefined);
+  const [environments, setEnvironments] = useState<Environment[]>([]);
+  const [selectedEnvironment, setSelectedEnvironment] = useState<number | undefined>(undefined);
+  const [capturePageTruth, setCapturePageTruth] = useState(false);
   const [genAgents, setGenAgents] = useState<GenAgent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<number | undefined>(undefined);
   const [description, setDescription] = useState('');
@@ -124,6 +134,26 @@ const GenPage: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (!selectedProject) {
+      setEnvironments([]);
+      setSelectedEnvironment(undefined);
+      return;
+    }
+    axios
+      .get(`/api/projects/${selectedProject}/environments`)
+      .then((res) => {
+        const envs: Environment[] = res.data || [];
+        setEnvironments(envs);
+        const def = envs.find((e) => e.is_default) || envs[0];
+        setSelectedEnvironment(def ? def.id : undefined);
+      })
+      .catch(() => {
+        setEnvironments([]);
+        setSelectedEnvironment(undefined);
+      });
+  }, [selectedProject]);
+
   const handleUpload = async () => {
     if (!selectedProject) {
       Message.warning('请先选择项目');
@@ -131,6 +161,10 @@ const GenPage: React.FC = () => {
     }
     if (fileList.length === 0) {
       Message.warning('请上传文件');
+      return;
+    }
+    if (capturePageTruth && selectedEnvironment == null) {
+      Message.warning('采集页面真值需要选择环境');
       return;
     }
 
@@ -148,6 +182,12 @@ const GenPage: React.FC = () => {
     }
     if (selectedAgentId != null) {
       formData.append('agent_id', String(selectedAgentId));
+    }
+    if (capturePageTruth) {
+      formData.append('capture_page_truth', 'true');
+      if (selectedEnvironment != null) {
+        formData.append('environment_id', String(selectedEnvironment));
+      }
     }
     fileList.forEach((file) => {
       if (file.originFile) {
@@ -341,6 +381,35 @@ const GenPage: React.FC = () => {
                   }
                   options={projects.map((p) => ({ label: p.name, value: p.id }))}
                 />
+              </div>
+              <div className={styles.flexCenter}>
+                <Text className={styles.formLabel}>选择环境：</Text>
+                <Select
+                  className={styles.selectNarrow}
+                  placeholder="请选择环境"
+                  value={selectedEnvironment}
+                  onChange={(v) =>
+                    setSelectedEnvironment(typeof v === 'number' ? v : undefined)
+                  }
+                  options={environments.map((e) => ({
+                    label: e.name,
+                    value: e.id,
+                  }))}
+                  disabled={!selectedProject || environments.length === 0}
+                  allowClear
+                />
+              </div>
+              <div>
+                <Checkbox
+                  checked={capturePageTruth}
+                  onChange={(checked) => setCapturePageTruth(checked)}
+                  disabled={!selectedProject}
+                >
+                  采集页面真值（锚定生成）
+                </Checkbox>
+                <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+                  建议环境配置 Cookies，或先固化登录 Init 用例；未配置时仅抓打开后的页面。
+                </Text>
               </div>
               {genAgents.length > 0 && (
                 <div className={styles.flexCenter}>

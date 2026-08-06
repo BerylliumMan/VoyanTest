@@ -25,6 +25,8 @@ class AnalysisSession:
     functional_points: list["FunctionalPoint"] = field(default_factory=list)
     test_cases: list["TestCase"] = field(default_factory=list)
     case_kind: str = "ui"
+    page_inventory: str = ""
+    page_inventory_warnings: list = field(default_factory=list)
 
 
 @dataclass

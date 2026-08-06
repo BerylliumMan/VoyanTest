@@ -92,6 +92,15 @@ class ExecutionBackendConfig(BaseModel):
     max_steps_per_nl: int = Field(default=40, ge=3, le=80)
     headless: bool = True
     dry_run_mode: DryRunMode = "skip"
+    # compiled_script runtime enhance (Agent payload)
+    compiled_trace_on_fail: bool = True
+    compiled_native_dialog: bool = True
+    compiled_dialog_policy: Literal["accept", "dismiss"] = "accept"
+    # Whole-case retries excluding the first attempt; keep_browser batch forces 0.
+    compiled_settle_retry: int = Field(default=1, ge=0, le=2)
+    compiled_settle_ms: int = Field(default=800, ge=0, le=5000)
+    # nl_goal: verify precondition; if unmet, execute up to N turns before main steps
+    precondition_max_turns: int = Field(default=12, ge=0, le=40)
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -108,6 +117,14 @@ class ExecutionBackendConfig(BaseModel):
         if m in ("skip", "attach", "isolated"):
             return m
         return "skip"
+
+    @field_validator("compiled_dialog_policy", mode="before")
+    @classmethod
+    def _coerce_dialog_policy(cls, v):
+        p = (v or "accept").strip().lower() if isinstance(v, str) else "accept"
+        if p in ("accept", "dismiss"):
+            return p
+        return "accept"
 
 
 execution_backend_config = ExecutionBackendConfig()
