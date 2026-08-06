@@ -44,6 +44,10 @@ async def two_phase_analyze(
     min_tcs_per_item: int | None = None,
     content_parts: list | None = None,
     cancel_checker=None,
+    capture_page_truth: bool = False,
+    project_id: int | None = None,
+    environment_id: int | None = None,
+    case_kind: str | None = "ui",
 ) -> dict:
     """Two-phase analysis using Pipeline (generation AgentDefinition).
 
@@ -74,6 +78,10 @@ async def two_phase_analyze(
         "min_tcs_per_item": min_tcs,
         "progress_callback": progress_callback,
         "cancel_checker": cancel_checker,
+        "capture_page_truth": bool(capture_page_truth),
+        "project_id": project_id,
+        "environment_id": environment_id,
+        "case_kind": case_kind or "ui",
     }
     if prompts:
         config["prompts"] = prompts

@@ -1525,7 +1525,71 @@ class AgentClient:
                         base_url, wait_until="domcontentloaded", timeout=60000
                     )
                     await page.wait_for_timeout(800)
-                await fn(page)
+
+                enhance = payload.get("enhance") or {}
+                if not isinstance(enhance, dict):
+                    enhance = {}
+                try:
+                    from core.runtime_enhance import (
+                        install_native_dialog_handler,
+                        run_with_settle_retry,
+                        tracing_on_failure,
+                    )
+                except Exception as enh_imp_exc:
+                    self._log_info(
+                        f"runtime_enhance unavailable: {enh_imp_exc}"
+                    )
+                    install_native_dialog_handler = None  # type: ignore
+                    run_with_settle_retry = None  # type: ignore
+                    tracing_on_failure = None  # type: ignore
+
+                if install_native_dialog_handler and enhance.get(
+                    "native_dialog", True
+                ):
+                    install_native_dialog_handler(
+                        page,
+                        policy=str(enhance.get("dialog_policy") or "accept"),
+                    )
+
+                traces_dir = os.path.join(
+                    getattr(self, "_report_dir", None) or "reports",
+                    "traces",
+                )
+
+                async def _once():
+                    await fn(page)
+
+                async def _run_enhanced():
+                    retries = int(enhance.get("settle_retry", 1) or 0)
+                    settle_ms = int(enhance.get("settle_ms", 800) or 800)
+                    if run_with_settle_retry:
+                        await run_with_settle_retry(
+                            _once,
+                            page=page,
+                            retries=retries,
+                            settle_ms=settle_ms,
+                        )
+                    else:
+                        await _once()
+
+                tr = None
+                try:
+                    if tracing_on_failure and enhance.get("trace_on_fail", True):
+                        async with tracing_on_failure(
+                            context,
+                            out_dir=traces_dir,
+                            case_id=int(case_id or 0),
+                            enabled=True,
+                        ) as tr:
+                            await _run_enhanced()
+                    else:
+                        await _run_enhanced()
+                    self._last_compiled_trace_path = None
+                except Exception:
+                    self._last_compiled_trace_path = (
+                        getattr(tr, "trace_path", None) if tr is not None else None
+                    )
+                    raise
 
                 if owned_launch:
                     await browser.close()
@@ -1565,9 +1629,11 @@ class AgentClient:
                     "success": False,
                     "error": err_s,
                     "duration_ms": int((_time.monotonic() - t0) * 1000),
+                    "trace_path": getattr(self, "_last_compiled_trace_path", None),
                 },
             )
         finally:
+            self._last_compiled_trace_path = None
             if tmp_path:
                 try:
                     os.unlink(tmp_path)

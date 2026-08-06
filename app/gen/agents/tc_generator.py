@@ -57,6 +57,11 @@ class TCGenerator(BaseAgent[dict, list[dict]]):
             min_tcs_per_item=int(min_tcs),
             flow_mode=int(min_tcs) <= 1,
             content_parts=input_data.get("content_parts"),
+            page_inventory=(
+                input_data.get("page_inventory")
+                or self.config.get("page_inventory")
+                or ""
+            ),
         )
         self.last_warnings = result.get("warnings", [])
         return result.get("test_cases", [])

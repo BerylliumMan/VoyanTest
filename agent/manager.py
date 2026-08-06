@@ -512,13 +512,12 @@ class AgentManager:
         After goal DONE, report is always based on the journal (passed). Script
         solidify follows ``execution_backend_config.dry_run_mode``:
 
-        - ``skip`` (default): user-facing session is not re-run from step 1 in a
-          second *visible* browser. After synthesize we still run one **headless**
-          compiled_script verify before persist (fail → repair once → else no persist).
-        - ``attach``: reserved; currently same as skip (no whole-case relaunch).
-        - ``isolated``: same headless verify(+repair); on verify fail may also
-          remediate one located checklist step via hybrid on the *same* browser;
-          never re-RUN_START the whole case.
+        - ``skip`` (default): synthesize only; no headless compiled_script replay
+          (avoids 30s+ locator timeouts that do not affect the goal verdict).
+        - ``attach``: reserved; currently same as skip.
+        - ``isolated``: headless compiled_script verify (+ one repair); on fail may
+          remediate one located checklist step on the same browser — never
+          re-RUN_START the whole case in a second visible window.
         """
         import time as _time
 
@@ -539,6 +538,17 @@ class AgentManager:
             steps_results_from_goal,
             tool_call_from_decision,
             uncovered_checklist_orders,
+        )
+        from core.precondition import (
+            DEFAULT_PRECOND_MAX_TURNS,
+            CLICK_DIALOG_UNIT_SELECT_JS,
+            decide_precondition_action,
+            decision_undoes_precondition_dialog,
+            is_unit_dropdown_checklist_step,
+            overlay_intercept_hint,
+            snapshot_still_has_precondition_dialog,
+            split_case_description,
+            verify_precondition_met,
         )
         from core.codegen_locator import (
             build_codegen_inject_js,
@@ -567,9 +577,10 @@ class AgentManager:
         )
         # Whole-case NL needs more turns than per-step hybrid rescue
         max_turns = max(DEFAULT_MAX_TURNS, max_turns)
+        precondition_text, rest_description = split_case_description(case_description)
         goal_text = build_goal_text(
             case_name=case_name,
-            description=case_description,
+            description=rest_description,
             steps=steps,
         )
         journal: list = []
@@ -582,14 +593,23 @@ class AgentManager:
         last_action_error: Optional[str] = None
         last_probe_had_candidates = False
         probed_indices: set = set()
+        precond_max_turns = int(
+            getattr(
+                execution_backend_config,
+                "precondition_max_turns",
+                DEFAULT_PRECOND_MAX_TURNS,
+            )
+            or 0
+        )
 
         session.agent.status = AgentStatus.BUSY
         logger.info(
-            "nl_goal start case=%s agent=%s max_turns=%s backend=%s",
+            "nl_goal start case=%s agent=%s max_turns=%s backend=%s precondition=%s",
             case_id or case_name,
             agent_id,
             max_turns,
             nl_backend,
+            bool(precondition_text),
         )
 
         try:
@@ -655,8 +675,44 @@ class AgentManager:
             except Exception:
                 logger.debug("codegen IIFE inject skipped", exc_info=True)
 
+            # Precondition: verify on snapshot; if unmet, execute until met (or fail).
+            precondition_ok = False
+            if precondition_text and precond_max_turns > 0:
+                pc_ok, pc_err = await self._ensure_precondition(
+                    session=session,
+                    agent_id=agent_id,
+                    run_id=run_id,
+                    case_id=case_id,
+                    precondition=precondition_text,
+                    llm_client=llm_client,
+                    model=model,
+                    journal=journal,
+                    max_turns=precond_max_turns,
+                    batch_id=batch_id,
+                )
+                if not pc_ok:
+                    goal_error = pc_err or "前置条件未满足"
+                    logger.warning(
+                        "nl_goal precondition failed case=%s: %s",
+                        case_id,
+                        goal_error,
+                    )
+                else:
+                    precondition_ok = True
+                    # Rebuild goal so main loop preserves the established state
+                    # (e.g. keep 新建检查任务 dialog open; act inside it).
+                    goal_text = build_goal_text(
+                        case_name=case_name,
+                        description=rest_description,
+                        steps=steps,
+                        precondition_satisfied=precondition_text,
+                    )
+
             close_helper_runs = 0
+            unit_dropdown_helper_runs = 0
             for turn in range(1, max_turns + 1):
+                if goal_error:
+                    break
                 if batch_id is not None:
                     from app import execution_control
 
@@ -669,6 +725,117 @@ class AgentManager:
                 if self._snapshot_indicates_browser_closed(snap):
                     goal_error = "浏览器已关闭"
                     break
+
+                # After precondition dialog is open: if checklist asks to open
+                # 请选择检查单位, try a deterministic in-dialog click once.
+                # AX snapshots often truncate dialog body so LLM falls back to
+                # evaluate-false / wrong list-filter refs.
+                uncovered_now = uncovered_checklist_orders(steps, journal)
+                unit_orders = [
+                    o
+                    for o in uncovered_now
+                    if is_unit_dropdown_checklist_step(
+                        self._step_description_for_idx(steps, o)
+                    )
+                ]
+                if (
+                    precondition_ok
+                    and unit_orders
+                    and unit_dropdown_helper_runs < 2
+                ):
+                    unit_dropdown_helper_runs += 1
+                    unit_idx = min(unit_orders)
+                    logger.info(
+                        "nl_goal dialog unit-select helper case=%s turn=%s "
+                        "step=%s run=%s",
+                        case_id,
+                        turn,
+                        unit_idx,
+                        unit_dropdown_helper_runs,
+                    )
+                    tc = {
+                        "action": "evaluate",
+                        "selector": "",
+                        "value": CLICK_DIALOG_UNIT_SELECT_JS,
+                        "selector_type": "css",
+                        "thinking": "dialog unit-select helper",
+                        "timeout_ms": 30000,
+                    }
+                    t0 = _time.monotonic()
+                    result = await self._execute_step(
+                        session,
+                        agent_id,
+                        run_id,
+                        turn,
+                        "dialog unit-select helper",
+                        tc,
+                    )
+                    dur = (_time.monotonic() - t0) * 1000
+                    ok = bool(result.get("success"))
+                    snippet = str(
+                        result.get("text")
+                        or result.get("result")
+                        or ""
+                    )
+                    from core.goal_agent_loop import _evaluate_result_looks_falsy
+
+                    if ok and _evaluate_result_looks_falsy(
+                        {"result_snippet": snippet, "value": CLICK_DIALOG_UNIT_SELECT_JS}
+                    ):
+                        ok = False
+                    decision = GoalAction(
+                        status="continue",
+                        thinking=(
+                            "Deterministic helper: click 检查单位/请选择 "
+                            "control inside open dialog"
+                        ),
+                        action="evaluate",
+                        selector="",
+                        value=CLICK_DIALOG_UNIT_SELECT_JS,
+                        checklist_index=unit_idx,
+                        checklist_note=(
+                            f"dialog unit-select helper for checklist #{unit_idx}"
+                        ),
+                    )
+                    entry = journal_entry(
+                        turn=turn,
+                        decision=decision,
+                        success=ok,
+                        error=None
+                        if ok
+                        else (
+                            result.get("error")
+                            or "dialog unit-select helper miss"
+                        ),
+                        duration_ms=dur,
+                        result_snippet=snippet[:2000],
+                    )
+                    journal.append(entry)
+                    logger.info(
+                        "nl_goal unit-select helper case=%s turn=%s ok=%s",
+                        case_id,
+                        turn,
+                        ok,
+                    )
+                    if ok:
+                        # Helper click succeeded — if checklist now covered, finish.
+                        if not uncovered_checklist_orders(steps, journal):
+                            goal_ok = True
+                            logger.info(
+                                "nl_goal DONE via unit-select helper case=%s "
+                                "turns=%s",
+                                case_id,
+                                turn,
+                            )
+                            break
+                        continue
+                    last_action_error = (
+                        "SYSTEM: dialog unit-select helper missed. "
+                        "Click a combobox/input INSIDE the open dialog "
+                        "matching 请选择检查单位 / 检查单位 — not the "
+                        "list-page filter behind the dialog."
+                    )
+                    # Fall through to LLM decide with that hint
 
                 # Cursor pattern: AFTER earlier checklist is done, when
                 # close-messages is the next uncovered item, run proven
@@ -771,6 +938,46 @@ class AgentManager:
                                 "screenshot_on_fail": False,
                                 "screenshot_path": None,
                             }
+                        )
+                        continue
+
+                    # False-pass guard: precondition required an open dialog,
+                    # but agent closed it then clicked a background control.
+                    if precondition_ok and not snapshot_still_has_precondition_dialog(
+                        snap, precondition_text
+                    ):
+                        logger.warning(
+                            "nl_goal rejecting DONE — precondition dialog gone "
+                            "case=%s turn=%s",
+                            case_id,
+                            turn,
+                        )
+                        journal.append(
+                            {
+                                "turn": turn,
+                                "status": "done_rejected_precondition",
+                                "thinking": decision.thinking,
+                                "action": None,
+                                "selector": None,
+                                "value": None,
+                                "stable_hint": None,
+                                "checklist_index": None,
+                                "checklist_note": "PRECONDITION_DIALOG_GONE",
+                                "success": False,
+                                "error": (
+                                    "DONE rejected: precondition dialog is no "
+                                    "longer open; checklist must run inside it"
+                                ),
+                                "duration_ms": 0,
+                                "result_snippet": None,
+                                "screenshot_on_fail": False,
+                                "screenshot_path": None,
+                            }
+                        )
+                        last_action_error = (
+                            "SYSTEM: DONE rejected because the precondition "
+                            "dialog was closed. Re-open it if needed, then "
+                            "complete the checklist INSIDE the dialog."
                         )
                         continue
 
@@ -905,11 +1112,88 @@ class AgentManager:
                             }
                         )
                         continue
+                    if precondition_ok and not snapshot_still_has_precondition_dialog(
+                        snap, precondition_text
+                    ):
+                        logger.warning(
+                            "nl_goal rejecting empty/done — precondition dialog "
+                            "gone case=%s turn=%s",
+                            case_id,
+                            turn,
+                        )
+                        journal.append(
+                            {
+                                "turn": turn,
+                                "status": "done_rejected_precondition",
+                                "thinking": decision.thinking,
+                                "action": action or None,
+                                "selector": None,
+                                "value": None,
+                                "stable_hint": None,
+                                "checklist_index": None,
+                                "checklist_note": "PRECONDITION_DIALOG_GONE",
+                                "success": False,
+                                "error": (
+                                    "DONE rejected: precondition dialog is no "
+                                    "longer open"
+                                ),
+                                "duration_ms": 0,
+                                "result_snippet": None,
+                                "screenshot_on_fail": False,
+                                "screenshot_path": None,
+                            }
+                        )
+                        last_action_error = (
+                            "SYSTEM: DONE rejected because the precondition "
+                            "dialog was closed. Complete checklist inside it."
+                        )
+                        continue
                     journal.append(
                         journal_entry(turn=turn, decision=decision, success=True)
                     )
                     goal_ok = True
                     break
+
+                # Soft guard: do not dismiss a dialog that precondition just established
+                if precondition_ok and decision_undoes_precondition_dialog(
+                    decision,
+                    precondition=precondition_text,
+                    steps=steps,
+                ):
+                    logger.info(
+                        "nl_goal rejecting dialog-close that undoes precondition "
+                        "case=%s turn=%s",
+                        case_id,
+                        turn,
+                    )
+                    journal.append(
+                        {
+                            "turn": turn,
+                            "status": "precondition_preserve_reject",
+                            "thinking": decision.thinking,
+                            "action": decision.action,
+                            "selector": decision.selector,
+                            "value": decision.value,
+                            "stable_hint": decision.stable_hint,
+                            "checklist_index": None,
+                            "checklist_note": "PRECONDITION_PRESERVE",
+                            "success": False,
+                            "error": (
+                                "rejected: would close dialog required by "
+                                "precondition; act inside the dialog instead"
+                            ),
+                            "duration_ms": 0,
+                            "result_snippet": None,
+                            "screenshot_on_fail": False,
+                            "screenshot_path": None,
+                        }
+                    )
+                    last_action_error = (
+                        "SYSTEM: Closing the precondition dialog is forbidden. "
+                        "Click the checklist control INSIDE the open dialog "
+                        "(match 请选择检查单位 / label inside 新建检查任务)."
+                    )
+                    continue
 
                 tc = tool_call_from_decision(decision)
                 t0 = _time.monotonic()
@@ -924,6 +1208,30 @@ class AgentManager:
                 dur = (_time.monotonic() - t0) * 1000
                 ok = bool(result.get("success"))
                 err = result.get("error")
+                # MCP marks evaluate "success" when JS ran — even if it returned false.
+                if ok and action in ("evaluate", "browser_evaluate", "js", "eval"):
+                    from core.goal_agent_loop import _evaluate_result_looks_falsy
+
+                    probe_entry = {
+                        "result_snippet": str(
+                            result.get("text")
+                            or result.get("result")
+                            or result.get("thinking")
+                            or ""
+                        ),
+                        "value": decision.value,
+                    }
+                    if _evaluate_result_looks_falsy(probe_entry):
+                        ok = False
+                        err = (
+                            err
+                            or "evaluate returned false — click/target not found"
+                        )
+                        logger.info(
+                            "nl_goal evaluate falsy→fail case=%s turn=%s",
+                            case_id,
+                            turn,
+                        )
                 if self._error_indicates_browser_closed(err):
                     goal_error = err or "浏览器已关闭"
                     journal.append(
@@ -1054,7 +1362,12 @@ class AgentManager:
                                 probe_result.get("candidates")
                             )
                             probe_summary = build_probe_summary(probe_result)
-                            last_action_error = err or "action failed"
+                            hint = (
+                                overlay_intercept_hint(err)
+                                if precondition_ok
+                                else None
+                            )
+                            last_action_error = hint or (err or "action failed")
                             logger.info(
                                 "nl_goal DOM probe done case=%s turn=%s "
                                 "idx=%s candidates=%s",
@@ -1063,6 +1376,11 @@ class AgentManager:
                                 idx,
                                 len(probe_result.get("candidates") or []),
                             )
+
+                if not ok and precondition_ok and not last_action_error:
+                    hint = overlay_intercept_hint(err)
+                    if hint:
+                        last_action_error = hint
 
                 if detect_stagnation(journal):
                     goal_error = "nl_goal stagnation — repeated failing/identical actions"
@@ -1150,9 +1468,17 @@ class AgentManager:
                     base_url=base_url_override,
                 )
 
-                # Batch init→main: skip headless dry-run so the next case starts
-                # immediately (failed dry-run + repair can burn 1–2 minutes).
-                if reuse_browser_session:
+                # Skip headless dry-run when configured (default) or batch reuse.
+                # Isolated mode still verifies before persist; skip avoids the
+                # 30s+ locator timeouts the user sees after goal already passed.
+                if dry_mode == "skip" and not reuse_browser_session:
+                    logger.info(
+                        "nl_goal skip dry-run verify case=%s (dry_run_mode=skip) "
+                        "— goal passed; not persisting unverified script",
+                        case_id,
+                    )
+                    script_ok = False
+                elif reuse_browser_session:
                     logger.info(
                         "nl_goal skip dry-run verify case=%s "
                         "(reuse_browser_session — continue batch promptly)",
@@ -1172,8 +1498,7 @@ class AgentManager:
                             len(script),
                         )
                 else:
-                    # Headless verify before persist — avoid a second visible window
-                    # beside the live nl_goal browser. Goal DONE remains the verdict.
+                    # dry_mode == "isolated": headless verify before persist
                     verify = await self._try_run_compiled_script(
                         agent_id,
                         f"{run_id}_dry",
@@ -1463,6 +1788,9 @@ class AgentManager:
                 "Trying compiled_script case=%s agent=%s hash=%s headless=%s keep_browser=%s",
                 case_id, agent_id, (steps_hash or "")[:12], headless, keep_browser,
             )
+            from app.runtime_config import execution_backend_config
+
+            cfg = execution_backend_config
             payload = {
                 "script": script,
                 "base_url": base_url or "",
@@ -1470,6 +1798,27 @@ class AgentManager:
                 "steps_hash": steps_hash,
                 "case_name": case_name,
                 "keep_browser": bool(keep_browser),
+                "enhance": {
+                    "trace_on_fail": bool(
+                        getattr(cfg, "compiled_trace_on_fail", True)
+                    ),
+                    "native_dialog": bool(
+                        getattr(cfg, "compiled_native_dialog", True)
+                    ),
+                    "dialog_policy": getattr(
+                        cfg, "compiled_dialog_policy", "accept"
+                    )
+                    or "accept",
+                    # Batch / shared session: never whole-case retry (side effects).
+                    "settle_retry": (
+                        0
+                        if keep_browser
+                        else int(getattr(cfg, "compiled_settle_retry", 1) or 0)
+                    ),
+                    "settle_ms": int(
+                        getattr(cfg, "compiled_settle_ms", 800) or 800
+                    ),
+                },
             }
             if headless is not None:
                 payload["headless"] = bool(headless)
@@ -1490,9 +1839,11 @@ class AgentManager:
         if resp.get("unsupported"):
             return None
         if not resp.get("success"):
+            trace_path = resp.get("trace_path")
             logger.warning(
-                "compiled_script run failed: %s",
+                "compiled_script run failed: %s%s",
                 " ".join(str(resp.get("error") or "").split())[:180],
+                f" trace={trace_path}" if trace_path else "",
             )
             return [
                 {
@@ -1507,6 +1858,7 @@ class AgentManager:
                     "duration_ms": float(resp.get("duration_ms") or 0),
                     "backend": "compiled_script",
                     "compiled_script_failed": True,
+                    "trace_path": trace_path,
                 }
             ]
 
@@ -2586,6 +2938,217 @@ class AgentManager:
             except Exception:
                 logger.debug("RUN_END after browser-use failed", exc_info=True)
             session.agent.status = AgentStatus.ONLINE
+
+    async def _ensure_precondition(
+        self,
+        *,
+        session: "AgentSession",
+        agent_id: str,
+        run_id: str,
+        case_id: Optional[int],
+        precondition: str,
+        llm_client,
+        model: str,
+        journal: list,
+        max_turns: int,
+        batch_id: Optional[int] = None,
+    ) -> tuple[bool, Optional[str]]:
+        """Verify precondition on live page; execute actions until met.
+
+        Returns ``(ok, error_message)``. Journal entries use null checklist_index
+        so they do not count as covering main checklist steps.
+        """
+        import time as _time
+
+        from core.goal_agent_loop import journal_entry, tool_call_from_decision
+        from core.precondition import (
+            decide_precondition_action,
+            verify_precondition_met,
+        )
+
+        pre = (precondition or "").strip()
+        if not pre:
+            return True, None
+
+        logger.info(
+            "nl_goal precondition phase case=%s max_turns=%s text=%s",
+            case_id,
+            max_turns,
+            pre[:120],
+        )
+
+        for turn in range(1, max_turns + 1):
+            if batch_id is not None:
+                from app import execution_control
+
+                await execution_control.wait_if_paused(batch_id)
+                if execution_control.is_stopped(batch_id):
+                    return False, "用户停止执行"
+
+            snap = await self._get_snapshot(session, agent_id, run_id)
+            if self._snapshot_indicates_browser_closed(snap):
+                return False, "浏览器已关闭"
+
+            try:
+                met, reason = await verify_precondition_met(
+                    client=llm_client,
+                    model=model,
+                    snapshot=snap,
+                    precondition=pre,
+                )
+            except Exception as exc:
+                logger.warning("precondition verify error: %s", exc)
+                met, reason = False, str(exc)
+
+            logger.info(
+                "nl_goal precondition check case=%s turn=%s met=%s reason=%s",
+                case_id,
+                turn,
+                met,
+                (reason or "")[:160],
+            )
+            journal.append(
+                {
+                    "turn": f"pre-{turn}",
+                    "status": "precondition_check",
+                    "thinking": reason,
+                    "action": None,
+                    "selector": None,
+                    "value": None,
+                    "stable_hint": None,
+                    "checklist_index": None,
+                    "checklist_note": "PRECONDITION_CHECK",
+                    "success": bool(met),
+                    "error": None if met else reason,
+                    "duration_ms": 0,
+                    "result_snippet": None,
+                    "screenshot_on_fail": False,
+                    "screenshot_path": None,
+                }
+            )
+            if met:
+                return True, None
+
+            try:
+                decision = await decide_precondition_action(
+                    client=llm_client,
+                    model=model,
+                    precondition=pre,
+                    snapshot=snap,
+                    journal_tail=journal,
+                )
+            except Exception as exc:
+                return False, f"前置条件执行决策失败: {exc}"
+
+            if (decision.status or "").lower() == "fail":
+                err = decision.reason or decision.thinking or "前置条件无法达成"
+                journal.append(
+                    journal_entry(
+                        turn=turn,
+                        decision=decision,
+                        success=False,
+                        error=err,
+                    )
+                )
+                journal[-1]["checklist_note"] = "PRECONDITION"
+                journal[-1]["checklist_index"] = None
+                return False, f"前置条件失败: {err}"
+
+            # Verifier already said unmet — ignore premature done; require a real act.
+            if (decision.status or "").lower() == "done":
+                logger.info(
+                    "nl_goal precondition ignoring premature done case=%s turn=%s",
+                    case_id,
+                    turn,
+                )
+                journal.append(
+                    {
+                        "turn": f"pre-{turn}",
+                        "status": "precondition_done_rejected",
+                        "thinking": decision.thinking,
+                        "action": None,
+                        "selector": None,
+                        "value": None,
+                        "stable_hint": None,
+                        "checklist_index": None,
+                        "checklist_note": "PRECONDITION",
+                        "success": False,
+                        "error": "done rejected — verifier unmet; need UI action",
+                        "duration_ms": 0,
+                        "result_snippet": None,
+                        "screenshot_on_fail": False,
+                        "screenshot_path": None,
+                    }
+                )
+                try:
+                    decision = await decide_precondition_action(
+                        client=llm_client,
+                        model=model,
+                        precondition=(
+                            pre
+                            + "\n\nSYSTEM: Verifier says NOT met. "
+                            "You must click into the required page/dialog NOW."
+                        ),
+                        snapshot=snap,
+                        journal_tail=journal,
+                    )
+                except Exception as exc:
+                    return False, f"前置条件执行决策失败: {exc}"
+                if (decision.status or "").lower() == "fail":
+                    err = decision.reason or decision.thinking or "前置条件无法达成"
+                    return False, f"前置条件失败: {err}"
+
+            action = (decision.action or "").strip().lower()
+            if not action or action in ("done", "screenshot"):
+                logger.info(
+                    "nl_goal precondition empty action case=%s turn=%s status=%s",
+                    case_id,
+                    turn,
+                    decision.status,
+                )
+                continue
+
+            decision.checklist_index = None
+            decision.checklist_note = "PRECONDITION"
+            tc = tool_call_from_decision(decision)
+            t0 = _time.monotonic()
+            result = await self._execute_step(
+                session,
+                agent_id,
+                run_id,
+                turn,
+                decision.thinking or action,
+                tc,
+            )
+            dur = (_time.monotonic() - t0) * 1000
+            ok = bool(result.get("success"))
+            err = result.get("error")
+            entry = journal_entry(
+                turn=turn,
+                decision=decision,
+                success=ok,
+                error=None if ok else (err or "precondition action failed"),
+                duration_ms=dur,
+            )
+            entry["checklist_index"] = None
+            entry["checklist_note"] = "PRECONDITION"
+            entry["turn"] = f"pre-{turn}"
+            journal.append(entry)
+            logger.info(
+                "nl_goal precondition act case=%s turn=%s action=%s ok=%s selector=%s err=%s",
+                case_id,
+                turn,
+                action,
+                ok,
+                (decision.selector or "")[:80],
+                (str(err) if err else "")[:160],
+            )
+            if self._error_indicates_browser_closed(err):
+                return False, err or "浏览器已关闭"
+
+        return False, (
+            f"前置条件未在 {max_turns} 轮内满足: {pre[:160]}"
+        )
 
     async def _get_snapshot(self, session: AgentSession, agent_id: str, run_id: str) -> str:
         text = ""

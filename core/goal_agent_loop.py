@@ -31,7 +31,7 @@ Rules:
 3. One primary action per turn. After dropdowns open, take another turn to type/filter then click the exact option.
 4. Prefer exact text match for tree/list options (avoid clicking a longer similar label).
 5. Closing dialogs/notifications/messages: MUST actually click Close/关闭/header X (or dismiss) for EACH visible overlay. Loop until none remain. Never assume they are gone. Never status="done" while any close/dismiss checklist item is still uncovered. action "evaluate" / "wait" NEVER counts as completing a close-message checklist item — only successful click does. When an overlay is not visible in the snapshot, use a short evaluate that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), or rely on a DOM PROBE RESULT.
-6. Use action "evaluate" only when refs fail for Element UI / Ant overlays — value must be a short JS function body returning a boolean success, e.g. click exact tree label. Do NOT use evaluate to "verify" or mark close/open checklist items done.
+6. Use action "evaluate" only when refs fail for Element UI / Ant overlays — value must be a short JS function body returning a boolean success, e.g. click exact tree label. Do NOT use evaluate to "verify" or mark close/open checklist items done. If evaluate returns false, the step is NOT done — retry with a snapshot ref click. For dropdowns like 请选择检查单位 prefer click on combobox/textbox/placeholder refs inside the open dialog; if the snapshot is truncated, action=wait then re-snapshot — do not guess with evaluate.
 7. Use action "wait" with numeric seconds or text to wait for.
 8. Use action "goto" only when navigation is still needed (value=url).
 9. status="done" ONLY when EVERY checklist item has been advanced by a successful action (see UNCOVERED CHECKLIST in the user message). If any checklist item is still uncovered — especially close-message / close-dialog steps — you MUST status="continue" and perform the action. Premature done is forbidden.
@@ -40,6 +40,7 @@ Rules:
 12. Output ONLY one JSON object matching the schema — no markdown fences.
 13. If the user message contains "DOM PROBE RESULT", the previous action FAILED and the system already probed the DOM. Act on the probe candidates first: use their locator/dom_index (probe_idx_N) in a short evaluate click, or their exact text/aria-label, or pick a fresh snapshot ref. Only status="fail" when the probe returned no candidates AND the page looks stable.
 14. HINT: never status="fail" before a DOM probe has run — or when a probe still returned candidates — unless stagnation/max_turns demands it. One failed action alone is NOT a reason to fail.
+15. If the goal contains "PRECONDITION ALREADY SATISFIED": keep that page/dialog OPEN. Prefer controls INSIDE the open dialog/modal for checklist clicks. NEVER close that dialog (关闭/Close/X/headerbtn) just because a click was blocked by the overlay — find the matching control inside the dialog instead. Background list/filter controls behind the dialog are usually WRONG targets when a dialog was opened as precondition.
 
 Schema:
 {
@@ -114,6 +115,7 @@ def build_goal_text(
     case_name: str,
     description: str | None,
     steps: list[dict[str, Any]],
+    precondition_satisfied: str | None = None,
 ) -> str:
     """Assemble whole-case NL goal; steps are soft checklist.
 
@@ -136,6 +138,22 @@ def build_goal_text(
             or "Complete the UI workflow on the current site."
         ),
     ]
+    pre = (precondition_satisfied or "").strip()
+    if pre:
+        lines.extend(
+            [
+                "PRECONDITION ALREADY SATISFIED (do NOT undo):",
+                pre,
+                "- Keep the required page/dialog OPEN for the checklist steps.",
+                "- Prefer controls INSIDE the open dialog/modal "
+                "(match checklist labels/placeholders there).",
+                "- Do NOT click 关闭/Close/X/关闭此对话框 on that dialog unless "
+                "the checklist explicitly asks to close it.",
+                "- If a click is blocked by the dialog overlay, click the matching "
+                "control inside the dialog — NEVER close the dialog to reach a "
+                "background list/filter control.",
+            ]
+        )
     if description and nl_bits:
         lines.append(f"STEP HINTS (merged): {nl_bits}")
     lines.append(
@@ -164,18 +182,51 @@ def build_goal_text(
         if exp:
             line += f"\n   EXPECT: {exp}"
         lines.append(line)
-    lines.append(
-        "STRATEGY:\n"
-        "- Prefer snapshot refs for click/fill; use slow type for filter inputs.\n"
-        "- For tree select: open → filter → click exact .el-tree-node__label "
-        "(evaluate JS click is OK when refs fail).\n"
-        "- When an overlay is not visible in the snapshot, use a short evaluate "
-        "that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), "
-        "or rely on a DOM PROBE RESULT when the system already probed.\n"
-        "- Do not status=done until overlays are gone. "
-        "evaluate that only 'verifies' without .click() does not count."
-    )
+    if pre:
+        lines.append(
+            "STRATEGY:\n"
+            "- Prefer snapshot refs for click/fill; use slow type for filter inputs.\n"
+            "- For tree select: open → filter → click exact .el-tree-node__label "
+            "(evaluate JS click is OK when refs fail).\n"
+            "- Work inside the precondition dialog/page; do not dismiss it.\n"
+            "- When a click is intercepted by the dialog, re-pick a ref that is "
+            "clearly inside the dialog (dialog/alertdialog subtree), not the page behind."
+        )
+    else:
+        lines.append(
+            "STRATEGY:\n"
+            "- Prefer snapshot refs for click/fill; use slow type for filter inputs.\n"
+            "- For tree select: open → filter → click exact .el-tree-node__label "
+            "(evaluate JS click is OK when refs fail).\n"
+            "- When an overlay is not visible in the snapshot, use a short evaluate "
+            "that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), "
+            "or rely on a DOM PROBE RESULT when the system already probed.\n"
+            "- Do not status=done until overlays are gone. "
+            "evaluate that only 'verifies' without .click() does not count."
+        )
     return "\n".join(lines)
+
+_REF_WRAPPER_RE = re.compile(
+    r"^\s*(?:\[ref=|ref=)([a-zA-Z]*\d*e\d+)\]?\s*$",
+    re.I,
+)
+
+
+def normalize_goal_selector(selector: str | None) -> Optional[str]:
+    """Normalize LLM selectors for MCP: ``[ref=e12]`` / ``ref=e12`` → ``e12``."""
+    if selector is None:
+        return None
+    s = str(selector).strip()
+    if not s:
+        return ""
+    m = _REF_WRAPPER_RE.fullmatch(s)
+    if m:
+        return m.group(1)
+    # Also accept accidental quotes: "e12" / 'f4e135'
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("\"", "'"):
+        return normalize_goal_selector(s[1:-1])
+    return s
+
 
 def _parse_goal_action(raw: str) -> GoalAction:
     text = (raw or "").strip()
@@ -198,11 +249,14 @@ def _parse_goal_action(raw: str) -> GoalAction:
             status = "done"
         else:
             status = "continue"
+    sel = None
+    if data.get("selector") is not None:
+        sel = normalize_goal_selector(str(data["selector"]))
     return GoalAction(
         status=status,
         thinking=str(data.get("thinking") or data.get("reason") or ""),
         action=str(data.get("action") or "").strip(),
-        selector=(str(data["selector"]) if data.get("selector") is not None else None),
+        selector=sel,
         value=(str(data["value"]) if data.get("value") is not None else None),
         stable_hint=(str(data["stable_hint"]) if data.get("stable_hint") else None),
         checklist_index=parse_checklist_index(
@@ -338,16 +392,30 @@ def _evaluate_is_real_close_action(entry: dict[str, Any]) -> bool:
 
 
 def _evaluate_result_looks_falsy(entry: dict[str, Any]) -> bool:
-    """True when evaluate result_snippet clearly indicates a falsy JS return."""
-    snippet = str(entry.get("result_snippet") or "").strip().lower()
+    """True when evaluate result_snippet clearly indicates a falsy JS return.
+
+    Snippets often embed the JS source (which may contain ``return true``);
+    only the ``### Result`` payload (or a bare return) counts.
+    """
+    snippet = str(entry.get("result_snippet") or "").strip()
     if not snippet:
+        # No result text — cannot prove the click happened
         return False
-    # Ignore generic agent chatter like "Executing: evaluate"
-    if "executing:" in snippet and "false" not in snippet and "null" not in snippet:
-        return False
-    if snippet in ("false", "null", "undefined", "0", "none"):
+    # Prefer explicit Result block from Playwright MCP
+    m = re.search(
+        r"###\s*Result\s*\n([^\n#]+)",
+        snippet,
+        re.I,
+    )
+    result_text = (m.group(1) if m else snippet).strip().lower()
+    # Strip code fences / quotes
+    result_text = result_text.strip("`\"' ")
+    if result_text in ("false", "null", "undefined", "0", "none", ""):
         return True
-    if re.search(r"(?:^|[\s:=])false(?:[\s,}\]]|$)", snippet) and "true" not in snippet:
+    if result_text.startswith("false"):
+        return True
+    # Bare false token at start of result (avoid matching source ``return true``)
+    if re.match(r"false\b", result_text):
         return True
     return False
 
@@ -356,16 +424,29 @@ def _evaluate_is_real_click_action(entry: dict[str, Any]) -> bool:
     """True when evaluate actually performs a DOM click (not a no-op / verify)."""
     if _evaluate_result_looks_falsy(entry):
         return False
+    # Prefer JS source in value; do not trust thinking alone
     blob = " ".join(
         str(x or "")
         for x in (
             entry.get("value"),
             entry.get("checklist_note"),
-            entry.get("thinking"),
             entry.get("stable_hint"),
         )
     )
-    return bool(re.search(r"\.click\s*\(", blob))
+    if not re.search(r"\.click\s*\(|dispatchEvent\s*\(", blob, re.I):
+        return False
+    # Must have a truthy result when a Result block exists
+    snippet = str(entry.get("result_snippet") or "")
+    if re.search(r"###\s*Result\s*\n", snippet, re.I):
+        m = re.search(r"###\s*Result\s*\n([^\n#]+)", snippet, re.I)
+        result_text = (m.group(1) if m else "").strip().lower().strip("`\"' ")
+        if result_text in ("true", "1"):
+            return True
+        # Non-boolean object/string returns are ok if click ran and not falsy
+        if result_text and result_text not in ("false", "null", "undefined", "0", "none"):
+            return True
+        return False
+    return True
 
 
 def journal_entry_covers_checklist(
@@ -697,9 +778,10 @@ def tool_call_from_decision(decision: GoalAction) -> dict[str, Any]:
         action = "hover"
     elif action in ("browser_select_option",):
         action = "select"
+    selector = normalize_goal_selector(decision.selector) or ""
     return {
         "action": action,
-        "selector": decision.selector or "",
+        "selector": selector,
         "value": decision.value,
         "selector_type": "css",
         "thinking": decision.thinking,

@@ -68,10 +68,14 @@ GENERIC_DOM_PROBE_JS = r"""() => {
     if (n) kwSet.push(n);
   }
   const CLICKABLE_SEL = '""" + CLICKABLE_SELECTOR + r"""';
-  const clickables = Array.from(document.querySelectorAll(CLICKABLE_SEL));
-  const visible = (el) => {
+  const MAX = 20;
+  const MAX_SHADOW_DEPTH = 3;
+  const candidates = [];
+  let crossOriginIframes = 0;
+
+  const visible = (rootWin, el) => {
     try {
-      const st = window.getComputedStyle(el);
+      const st = (rootWin || window).getComputedStyle(el);
       if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0;
@@ -102,30 +106,90 @@ GENERIC_DOM_PROBE_JS = r"""() => {
     if (/close|confirm|primary/i.test(cls)) return true;
     return false;
   };
-  const candidates = [];
-  const seen = new Set();
-  const all = Array.from(document.querySelectorAll('body *'));
-  for (const el of all) {
-    if (!visible(el)) continue;
-    if (!clickable(el)) continue;
-    if (seen.has(el)) continue;
-    if (!matches(el)) continue;
-    seen.add(el);
-    const idx = clickables.indexOf(el);
-    candidates.push({
-      tag: el.tagName.toLowerCase(),
-      role: el.getAttribute('role') || '',
-      name: (el.getAttribute('aria-label') || el.getAttribute('title') || ''),
-      text: textOf(el).slice(0, 150),
-      placeholder: el.getAttribute('placeholder') || '',
-      visible: true,
-      candidate_index: candidates.length,
-      dom_index: idx,
-      locator: idx >= 0 ? ('probe_idx_' + idx) : '',
-    });
-    if (candidates.length >= 20) break;
+
+  const collectFrom = (root, source, frameNote, rootWin) => {
+    if (!root || candidates.length >= MAX) return;
+    const win = rootWin || window;
+    let clickables = [];
+    try {
+      clickables = Array.from(root.querySelectorAll(CLICKABLE_SEL));
+    } catch (e) { clickables = []; }
+    let nodes = [];
+    try {
+      const body = root.body || root;
+      nodes = Array.from((body.querySelectorAll ? body : root).querySelectorAll('*'));
+    } catch (e) { return; }
+    const seen = new Set();
+    for (const el of nodes) {
+      if (candidates.length >= MAX) break;
+      if (!visible(win, el)) continue;
+      if (!clickable(el)) continue;
+      if (seen.has(el)) continue;
+      if (!matches(el)) continue;
+      seen.add(el);
+      const idx = clickables.indexOf(el);
+      candidates.push({
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute('role') || '',
+        name: (el.getAttribute('aria-label') || el.getAttribute('title') || ''),
+        text: textOf(el).slice(0, 150),
+        placeholder: el.getAttribute('placeholder') || '',
+        visible: true,
+        candidate_index: candidates.length,
+        dom_index: source === 'top' ? idx : -1,
+        locator: (source === 'top' && idx >= 0) ? ('probe_idx_' + idx) : '',
+        source: source,
+        frame_note: (frameNote || '').slice(0, 80),
+      });
+    }
+  };
+
+  const walkShadow = (root, depth, rootWin) => {
+    if (!root || depth > MAX_SHADOW_DEPTH || candidates.length >= MAX) return;
+    let nodes = [];
+    try {
+      const scope = root.body || root;
+      nodes = Array.from((scope.querySelectorAll ? scope : root).querySelectorAll('*'));
+    } catch (e) { return; }
+    for (const el of nodes) {
+      if (candidates.length >= MAX) break;
+      const sr = el.shadowRoot;
+      if (!sr) continue;
+      const hostNote = (el.tagName || 'host').toLowerCase()
+        + (el.id ? ('#' + el.id) : '')
+        + (typeof el.className === 'string' && el.className
+            ? ('.' + el.className.trim().split(/\s+/).slice(0, 2).join('.'))
+            : '');
+      collectFrom(sr, 'shadow', hostNote, rootWin);
+      walkShadow(sr, depth + 1, rootWin);
+    }
+  };
+
+  collectFrom(document, 'top', '', window);
+  walkShadow(document, 0, window);
+
+  const frames = Array.from(document.querySelectorAll('iframe, frame'));
+  for (const fr of frames) {
+    if (candidates.length >= MAX) break;
+    let doc = null;
+    try { doc = fr.contentDocument; } catch (e) { doc = null; }
+    if (!doc) {
+      crossOriginIframes += 1;
+      continue;
+    }
+    const note = ((fr.getAttribute('name') || '') + ' ' + (fr.getAttribute('src') || '')).trim();
+    let fwin = window;
+    try { fwin = fr.contentWindow || window; } catch (e) { fwin = window; }
+    collectFrom(doc, 'iframe', note, fwin);
+    walkShadow(doc, 0, fwin);
   }
-  return { ok: true, keywords: kws, candidates: candidates };
+
+  return {
+    ok: true,
+    keywords: kws,
+    candidates: candidates,
+    cross_origin_iframes: crossOriginIframes,
+  };
 }"""
 
 
@@ -223,6 +287,7 @@ def build_probe_summary(result: dict | None) -> str:
         return "DOM PROBE found no candidates (probe returned nothing)."
     candidates = result.get("candidates") or []
     kws = result.get("keywords") or []
+    xo = int(result.get("cross_origin_iframes") or 0)
     lines = [
         f"DOM PROBE found {len(candidates)} visible clickable candidate(s) "
         f"for keywords={kws or []}:",
@@ -234,18 +299,29 @@ def build_probe_summary(result: dict | None) -> str:
         text = (c.get("text") or "").strip().replace("\n", " ")
         ph = (c.get("placeholder") or "").strip()
         loc = c.get("locator") or c.get("dom_index")
+        source = c.get("source") or "top"
+        frame = (c.get("frame_note") or "").strip()
         label = text or name or ph
+        extra = f" source={source}"
+        if frame:
+            extra += f" frame={frame[:60]}"
         lines.append(
-            f"[{i + 1}] <{tag}> role={role} locator={loc} label={label[:80]}"
+            f"[{i + 1}] <{tag}> role={role} locator={loc} label={label[:80]}{extra}"
         )
     lines.append(
         "SUGGESTED evaluate click: "
         f"document.querySelectorAll('{CLICKABLE_SELECTOR}')[N].click() "
-        "with N = dom_index (locator=probe_idx_N), or find by exact text/aria-label."
+        "with N = dom_index (locator=probe_idx_N) when source=top; "
+        "for source=iframe/shadow prefer exact text/aria-label inside that frame/root."
     )
+    if xo > 0:
+        lines.append(
+            f"{xo} cross-origin iframe(s) skipped — cannot probe their DOM."
+        )
     if not candidates:
         lines.append(
-            "No visible clickable candidate matched — target may be hidden, in an "
-            "iframe, or not loaded yet; wait or status=fail only if the page is stable."
+            "No visible clickable candidate matched in top/same-origin iframe/open "
+            "shadow — target may be hidden, cross-origin, or not loaded yet; wait or "
+            "status=fail only if the page is stable."
         )
     return "\n".join(lines)

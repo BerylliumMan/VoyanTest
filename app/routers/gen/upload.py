@@ -117,12 +117,22 @@ async def upload_and_analyze(
     project_description: str = Form(""),
     project_id: Optional[int] = Form(None),
     agent_id: Optional[int] = Form(None),
+    capture_page_truth: str = Form("false"),
+    environment_id: Optional[int] = Form(None),
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     """Upload document(s) and start AI analysis to generate test cases."""
     if not files:
         raise HTTPException(400, "请上传至少一个文件")
+
+    capture = str(capture_page_truth or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if capture and not project_id:
+        raise HTTPException(400, "采集页面真值需要选择项目")
+    if capture and not environment_id:
+        raise HTTPException(400, "采集页面真值需要选择环境")
 
     # Resolve generation agent early (validate before starting background work)
     from app.crud.agent_definition import get_active_by_type, get_agent_definition
@@ -201,6 +211,10 @@ async def upload_and_analyze(
         fp_prompt_key=fp_prompt_key,
         tc_prompt_key=tc_prompt_key,
         min_tcs=min_tcs,
+        capture_page_truth=capture,
+        project_id=project_id,
+        environment_id=environment_id,
+        case_kind=case_kind,
     )
 
     return {
@@ -224,6 +238,10 @@ async def launch_gen_analysis(
     fp_prompt_key: str,
     tc_prompt_key: str,
     min_tcs: int,
+    capture_page_truth: bool = False,
+    project_id: int | None = None,
+    environment_id: int | None = None,
+    case_kind: str | None = "ui",
 ) -> None:
     """Start background analysis for an in-memory ``AnalysisSession``."""
     _last_db_progress = {"t": 0.0, "p": -1}
@@ -340,6 +358,10 @@ async def launch_gen_analysis(
                 min_tcs_per_item=min_tcs,
                 content_parts=content_parts,
                 cancel_checker=cancel_checker,
+                capture_page_truth=capture_page_truth,
+                project_id=project_id,
+                environment_id=environment_id,
+                case_kind=case_kind or "ui",
             )
             _raise_if_cancelled()
             if agent_name and not result.get("error"):
@@ -363,6 +385,14 @@ async def launch_gen_analysis(
                 else:
                     session.functional_points = result["functional_points"]
                     session.test_cases = result["test_cases"]
+                    session.page_inventory = (
+                        (result.get("page_inventory") or "")
+                        if isinstance(result, dict)
+                        else ""
+                    )
+                    session.page_inventory_warnings = list(
+                        result.get("page_inventory_warnings") or []
+                    ) if isinstance(result, dict) else []
                     session.status = "completed"
                     combined_warnings = (result.get("warnings") or []) + warnings
                     session.error_message = "; ".join(combined_warnings)

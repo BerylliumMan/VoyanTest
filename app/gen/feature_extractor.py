@@ -428,6 +428,7 @@ async def _generate_batch_once(
     user_hint: str,
     content_parts: list[dict[str, Any]] | None = None,
     flow_mode: bool = False,
+    page_inventory: str | None = None,
 ) -> list[TestCase]:
     fp_descriptions = _fp_descriptions(batch)
     csv_header = " | ".join(CSV_HEADER)
@@ -440,6 +441,10 @@ async def _generate_batch_once(
     desc_prefix = ""
     if project_description:
         desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
+
+    inv = (page_inventory or "").strip()
+    if inv:
+        user_hint = f"{user_hint}\n\n{inv}\n"
 
     # Attach screenshots for UI + flow so steps/modules stay grounded to visible UI.
     user_payload: Any = user_hint
@@ -524,6 +529,7 @@ async def generate_test_cases_for_fps(
     min_tcs_per_item: int = MIN_TCS_PER_ITEM,
     flow_mode: bool = False,
     content_parts: list[dict[str, Any]] | None = None,
+    page_inventory: str | None = None,
 ) -> dict:
     """Generate test cases for test items in batches of ``FP_BATCH_SIZE``.
 
@@ -588,6 +594,7 @@ async def generate_test_cases_for_fps(
             user_hint=user_hint,
             content_parts=content_parts,
             flow_mode=flow_mode,
+            page_inventory=page_inventory,
         )
 
         if flow_mode and tcs and len(tcs) < min_needed:
@@ -614,6 +621,7 @@ async def generate_test_cases_for_fps(
                 user_hint=extra_hint,
                 content_parts=content_parts,
                 flow_mode=flow_mode,
+                page_inventory=page_inventory,
             )
             if extra:
                 tcs = _merge_tcs_by_title(tcs, extra)

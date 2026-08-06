@@ -76,6 +76,8 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed --name VoyanTest-A
   --hidden-import core.locator_memory ^
   --hidden-import core.step_intent ^
   --hidden-import core.script_templates ^
+  --hidden-import core.runtime_enhance ^
+  --hidden-import core.dom_probe ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
   --hidden-import browser_use.agent.system_prompts ^
@@ -111,6 +113,8 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed --name VoyanTest-A
   --add-data "core\locator_memory.py;core" ^
   --add-data "core\step_intent.py;core" ^
   --add-data "core\script_templates.py;core" ^
+  --add-data "core\runtime_enhance.py;core" ^
+  --add-data "core\dom_probe.py;core" ^
   --add-data "core\browser_use_prompts;core\browser_use_prompts" ^
   --add-data "core\__init__.py;core" ^
   agent\gui\app.py
