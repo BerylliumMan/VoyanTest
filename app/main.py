@@ -732,7 +732,7 @@ async def auth_middleware(request: Request, call_next):
         session_id = request.cookies.get("session_id")
         if not session_id:
             return JSONResponse(status_code=401, content={"detail": "未登录"})
-        if db_mod.AsyncSessionLocal is None:
+        if not getattr(db_mod.AsyncSessionLocal, "is_ready", False):
             return JSONResponse(status_code=503, content={"detail": "数据库未配置"})
         from app.auth import get_session
         async with db_mod.AsyncSessionLocal() as db:
@@ -768,12 +768,14 @@ async def enforce_password_changed(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/"):
         return await call_next(request)
-    if path in PASSWORD_CHANGE_WHITELIST:
+    if path in PASSWORD_CHANGE_WHITELIST or path in SETUP_PATHS:
         return await call_next(request)
     if any(path.startswith(skip) for skip in WS_AUTH_SKIP_PREFIXES):
         return await call_next(request)
     session_id = request.cookies.get("session_id")
     if not session_id:
+        return await call_next(request)
+    if not getattr(db_mod.AsyncSessionLocal, "is_ready", False):
         return await call_next(request)
     from app.auth import get_session
     async with db_mod.AsyncSessionLocal() as db:

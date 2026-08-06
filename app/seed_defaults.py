@@ -49,10 +49,11 @@ wait：等待指定条件（参数：selector | ms | url_contains）。
 assert：验证断言（子类型：url_contains | element_visible | text_present | element_count | input_value）。
 
 【下拉选择 — 必须遵守】
-- 「单位下拉框选择【汉东省院】」= 字段「单位」+ 选项「汉东省院」。禁止用 getByText/text 定位「下拉框」「单位下拉框」等控件类型词。
+- 「状态下拉框选择【启用】」= 字段「状态」+ 选项「启用」。禁止用 getByText/text 定位「下拉框」「状态下拉框」等控件类型词。
 - 原生 select：action=select，selector 指向 select，value=选项文案。
-- 自定义下拉（Ant Design 等）：先 click 展开组合框（按字段标签「单位」匹配），再 click/select 选项「汉东省院」。
+- 自定义下拉（Ant Design 等）：先 click 展开组合框（按字段标签「状态」匹配），再 click/select 选项「启用」。
 - wait 只能等选项文案或字段标签，不能等「xxx下拉框」。
+- 步骤里的字段名与选项必须来自用例步骤明文；禁止套用本提示词示例中的假数据。
 
 【输出格式 — 严格JSON】
 {
@@ -88,10 +89,10 @@ URL：https://shop.example.com
 ]
 
 【示例 — 下拉选择】
-步骤："单位下拉框选择【汉东省院】"
+步骤："状态下拉框选择【启用】"
 输出：[
-  {"action":"click","selector":"label:has-text('单位') ~ .ant-select, [aria-label*='单位'], .ant-select:near(:text('单位'))","value":null,"options":null,"confidence":0.8,"fallback_actions":[{"action":"click","selector":".ant-select-selector","value":null,"reason":"按字段邻近的组合框展开"}]},
-  {"action":"click","selector":".ant-select-item-option:has-text('汉东省院'), [role='option']:has-text('汉东省院')","value":"汉东省院","options":null,"confidence":0.9,"fallback_actions":[]}
+  {"action":"click","selector":"label:has-text('状态') ~ .ant-select, [aria-label*='状态'], .ant-select:near(:text('状态'))","value":null,"options":null,"confidence":0.8,"fallback_actions":[{"action":"click","selector":".ant-select-selector","value":null,"reason":"按字段邻近的组合框展开"}]},
+  {"action":"click","selector":".ant-select-item-option:has-text('启用'), [role='option']:has-text('启用')","value":"启用","options":null,"confidence":0.9,"fallback_actions":[]}
 ]
 
 【示例 — 失败处理（元素定位失败）】

@@ -18,6 +18,7 @@ from markupsafe import escape
 from app.gen.cancel import GenAnalysisCancelled
 from app.gen.chunking import (
     CHARS_PER_TOKEN_INV,
+    apply_canonical_modules,
     build_phase1_chunks_from_parts,
     build_phase1_chunks_from_text,
     chunk_token_budget,
@@ -440,19 +441,28 @@ async def _generate_batch_once(
     if project_description:
         desc_prefix = f"[项目背景]: {escape(project_description)}\n\n---\n\n"
 
-    # Flow mode: attach handbook text+screenshots so steps can read boxed UI labels.
+    # Attach screenshots for UI + flow so steps/modules stay grounded to visible UI.
     user_payload: Any = user_hint
     multimodal = False
-    if flow_mode and _has_images(content_parts):
+    if _has_images(content_parts):
         max_ctx = await get_context_budget(agent_type=agent_type, agent_id=agent_id)
         budget = chunk_token_budget(max_ctx)
-        # Leave headroom for system prompt + hint already counted loosely in budget.
         parts = compact_parts_keep_images(list(content_parts or []), budget)
-        intro = (
-            f"{user_hint}\n\n"
-            "以下为操作手册原文与截图（按文档顺序）。"
-            "请结合红框/色框/高亮区域与相邻文字生成本批 UI 步骤。"
-        )
+        if flow_mode:
+            intro = (
+                f"{user_hint}\n\n"
+                "以下为操作手册原文与截图（按文档顺序）。"
+                "请结合红框/色框/高亮区域与相邻文字生成本批 UI 步骤；"
+                "module 必须与测试项详情中的模块逐字一致，并以侧栏高亮为准。"
+            )
+        else:
+            intro = (
+                f"{user_hint}\n\n"
+                "以下为需求截图（按上传顺序）。"
+                "步骤里的控件文案必须在图中可见；"
+                "module 必须与测试项详情中的模块逐字一致，并以图中左侧导航高亮为准；"
+                "禁止用页眉产品名当模块，禁止发明筛选控件。"
+            )
         user_payload = content_parts_to_openai_user_content(parts, intro=intro)
         multimodal = True
 
@@ -489,7 +499,7 @@ async def _generate_batch_once(
         ) as e:
             hint = _vision_hint(e) if multimodal else None
             if hint:
-                logger.warning("Flow TC multimodal failed, falling back to text-only: %s", e)
+                logger.warning("TC multimodal failed, falling back to text-only: %s", e)
                 user_payload = user_hint
                 multimodal = False
                 if attempt < MAX_RETRIES - 1:
@@ -550,25 +560,23 @@ async def generate_test_cases_for_fps(
         min_needed = len(batch) * per_item
         if flow_mode:
             user_hint = (
-                f"本批操作流程共 {len(batch)} 个，名称："
-                + "、".join(fp.name for fp in batch)
-                + f"。\n请为以上每个流程各生成 {per_item} 条文档主路径 UI 用例，"
-                f"JSON 数组合计至少 {min_needed} 条；"
+                f"本批操作流程共 {len(batch)} 个：\n"
+                + _fp_descriptions(batch)
+                + f"\n请为以上每个流程各生成约 {per_item} 条文档主路径 UI 用例；"
                 f"scenario_type 填「文档流程」；禁止扩异常/边界。"
+                f"每条 module 必须与对应流程的「模块」字段逐字一致。"
                 f"expected 只能摘录文档/截图中已写明的断言；"
-                f"文档未写明则该步 expected 用空字符串，禁止自编预期，禁止写「文档未写明预期」。"
+                f"文档未写明则该步 expected 用空字符串。"
             )
         else:
             user_hint = (
-                f"本批测试项共 {len(batch)} 个，名称："
-                + "、".join(fp.name for fp in batch)
-                + f"。\n请为以上每个测试项生成高价值用例（合计至少 {min_needed} 条，"
-                f"每项通常 {per_item}～4 条）：按测试项类型选型"
-                f"（主路径/校验失败/空结果/组合查询等），"
-                f"**禁止**机械凑「正常/异常/边界」三类；"
-                f"文档未写明的场景不要编造。"
-                f"每条必须带 fp_name 与具体 scenario_type。"
-                f"组合查询项须输出两两组合（非笛卡尔积），scenario_type=组合查询。"
+                f"本批测试项共 {len(batch)} 个：\n"
+                + _fp_descriptions(batch)
+                + f"\n请为以上测试项生成可执行 UI 用例（每项通常 0～{max(2, per_item)} 条，"
+                f"截图不足以支撑则跳过该项）；"
+                f"**禁止**机械凑「正常/异常/边界」；文档/截图未写明的场景不要编造。"
+                f"每条必须带 fp_name，且 module 与测试项「模块」字段逐字一致。"
+                f"控件文案必须在附图中可见。"
             )
         tcs = await _generate_batch_once(
             batch=batch,
@@ -582,29 +590,20 @@ async def generate_test_cases_for_fps(
             flow_mode=flow_mode,
         )
 
-        if tcs and len(tcs) < min_needed:
+        if flow_mode and tcs and len(tcs) < min_needed:
             logger.info(
                 "Batch %d got %d TCs < required %d; supplemental generation",
                 idx + 1,
                 len(tcs),
                 min_needed,
             )
-            if flow_mode:
-                extra_hint = (
-                    f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
-                    f"请继续为以下流程各补 1 条文档主路径用例："
-                    + "、".join(fp.name for fp in batch)
-                    + "。不要扩异常/边界；不要重复已有标题；scenario_type=文档流程。"
-                )
-            else:
-                extra_hint = (
-                    f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
-                    f"请继续为以下测试项补齐高价值用例："
-                    + "、".join(fp.name for fp in batch)
-                    + f"。每项至少 {per_item} 条；按类型选型，禁止机械凑正常/异常/边界；"
-                    f"不要重复已有标题；每条必须带 fp_name 与具体 scenario_type。"
-                    f"组合查询相关项补两两组合（scenario_type=组合查询）。"
-                )
+            extra_hint = (
+                f"上一轮仅生成 {len(tcs)} 条，不足 {min_needed} 条。"
+                f"请继续为以下流程各补 1 条文档主路径用例："
+                + "、".join(fp.name for fp in batch)
+                + "。不要扩异常/边界；不要重复已有标题；scenario_type=文档流程；"
+                "module 与流程模块字段逐字一致。"
+            )
             extra = await _generate_batch_once(
                 batch=batch,
                 tc_prompt=tc_prompt,
@@ -624,19 +623,28 @@ async def generate_test_cases_for_fps(
                 f"Batch {idx + 1} ({fp_names}) returned no test cases after {MAX_RETRIES} retries"
             )
         else:
-            # Re-number sequentially after merge; scrub filename-like modules
+            # Re-number; force module from matched FP; canonicalize spellings
+            by_name = {
+                (fp.name or "").strip(): normalize_module_path(fp.module or "")
+                for fp in batch
+                if (fp.name or "").strip()
+            }
             for i, tc in enumerate(tcs):
                 tc.test_case_id = f"TC-{tc_counter + i + 1:03d}"
-                tc.module = normalize_module_path(tc.module or "")
-                if (not tc.module or tc.module == "通用") and len(batch) == 1:
-                    tc.module = normalize_module_path(batch[0].module or "")
+                fp_name = (getattr(tc, "fp_name", None) or "").strip()
+                if fp_name and fp_name in by_name:
+                    tc.module = by_name[fp_name]
+                else:
+                    tc.module = normalize_module_path(tc.module or "")
+                    if (not tc.module or tc.module == "通用") and len(batch) == 1:
+                        tc.module = normalize_module_path(batch[0].module or "")
+            apply_canonical_modules(tcs)
             tc_counter += len(tcs)
             all_tcs.extend(tcs)
-            if len(tcs) < min_needed:
-                unit = "流程" if flow_mode else "测试项"
+            if flow_mode and len(tcs) < min_needed:
                 warnings.append(
                     f"Batch {idx + 1} ({fp_names}) 仅生成 {len(tcs)} 条用例，"
-                    f"低于期望 {min_needed} 条（每{unit}至少 {per_item} 条）"
+                    f"低于期望 {min_needed} 条（每流程至少 {per_item} 条）"
                 )
             logger.info("Batch %d generated %d test cases for: %s", idx + 1, len(tcs), fp_names)
 

@@ -26,9 +26,29 @@ from app.gen.cancel import GenAnalysisCancelled
 logger = logging.getLogger(__name__)
 
 
+def _screen_topic_from_filename(filename: str) -> str:
+    """Derive a short UI topic hint from an upload name (not used as module verbatim)."""
+    stem = os.path.splitext(os.path.basename(filename or ""))[0].strip()
+    if not stem:
+        return ""
+    # 每日预警-告警 / 合规检查_待确认 / 合规检查（设置）
+    for sep in ("-", "_", "—", "–", "(", "（", " "):
+        if sep in stem:
+            stem = stem.split(sep, 1)[0].strip()
+            break
+    return stem[:40]
+
+
 def _file_header(idx: int, filename: str) -> dict[str, Any]:
-    # Do NOT embed the real filename — models often copy it into module.
-    return {"type": "text", "text": f"===== 文件{idx + 1} ====="}
+    # Do NOT put the raw filename into module; give a read-image hint instead.
+    topic = _screen_topic_from_filename(filename)
+    lines = [f"===== 截图{idx + 1} ====="]
+    if topic:
+        lines.append(
+            f"【读图】请先读左侧导航确定 module（父菜单——当前高亮子菜单）；"
+            f"页眉产品名不是模块。本图主题对照（非 module 原文）：{topic}"
+        )
+    return {"type": "text", "text": "\n".join(lines)}
 
 
 async def extract_multi_file_content(

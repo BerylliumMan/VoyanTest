@@ -162,10 +162,11 @@ PROGRESSIVE SELECTOR MATCHING (try in this order):
 5. If still ambiguous after the above → wait or error (see SEMANTIC FIDELITY #5).
 
 DROPDOWN / SELECT (critical):
-- Steps like "单位下拉框选择【汉东省院】" / "点击单位下拉框，点击【汉东省院】单位" mean:
-  label = 单位 (field name), option = 汉东省院 (choice to pick). Runtime may split into open→pick.
+- Steps like "状态下拉框选择【启用】" / "点击状态下拉框，点击【启用】" mean:
+  label = 状态 (field name from the step), option = 启用 (choice from the step). Runtime may split into open→pick.
 - NEVER locate by the literal strings "下拉框" / "下拉" / "输入框" / "选择框" / "按钮" — these are control-type words from the step text, NOT page UI text.
-- Prefer: combobox/listbox/select near accessible name or label text 「单位」; or option/menuitem/treeitem/listitem named 「汉东省院」 if the list is already open.
+- Prefer: combobox/listbox/select near the step's field label; or option/menuitem/treeitem/listitem named as the step's option if the list is already open.
+- Do NOT substitute example labels from this prompt; use only names written in the user step.
 - Options often appear inside role=tooltip / listbox / menu after the trigger is clicked — match the OPTION name, not the tooltip container.
 - Native <select>: action="select", selector=ref of the select, value=option label/value.
 - Custom dropdown (Ant Design etc.): click the combobox/selector to expand; if the option is already visible in the snapshot, click the option ref instead.

@@ -238,8 +238,8 @@ Rules:
 - 提交≠确定≠保存; 查询≠搜索; 取消≠关闭.
 - One primary action only. If the step is wait/assert, action=wait or assert_text and value=text.
 - Dropdown open-only steps (展开/打开某某下拉): target_role=combobox (or button), target_name=字段名如「单位」.
-- Dropdown option steps (选择/点击【汉东省院】): target_role=option|menuitem|treeitem|listitem,
-  target_name=选项文案「汉东省院」。Options may appear under role=tooltip / listbox / menu — still match by option name.
+- Dropdown option steps (选择/点击【启用】): target_role=option|menuitem|treeitem|listitem,
+  target_name=选项文案（取自步骤明文，勿套用提示词示例）。Options may appear under role=tooltip / listbox / menu — still match by option name.
 - Icon-only steps (…图标 / 书本形状 / 齿轮形状 / 无文字按钮, often with 位置+用途):
   target_role=button (or img/link), target_name=null unless 【】 contains a real accessible name
   (not 图标/图片). Put shape+position+purpose into thinking. Do NOT set target_name to 图标.

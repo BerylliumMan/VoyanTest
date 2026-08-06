@@ -37,7 +37,7 @@ _HEADING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^【([^】]{1,40})】\s*(.*)$"),
 ]
 
-_FILE_HEADER_RE = re.compile(r"^=====\s*文件\d+(?:\s*[:：].*?)?\s*=====\s*$")
+_FILE_HEADER_RE = re.compile(r"^=====\s*(?:文件|截图)\d+(?:\s*[:：].*?)?\s*=====\s*$")
 _PAGE_HEADER_RE = re.compile(r"^=====\s*(?:.+?\s*)?第\d+页\s*=====\s*$")
 _FILENAME_MODULE_RE = re.compile(
     r"(?i)(?:^文件\d+\b|\.(?:docx?|pdf|md|markdown|png|jpe?g|gif|webp|xlsx?|csv|txt)\s*$)"
@@ -62,7 +62,8 @@ class Phase1Chunk:
             if self.multimodal:
                 return (
                     "请分析以下需求文档内容（文字与图片按文档顺序排列）；"
-                    "module 请根据界面/业务功能命名，禁止使用文件名："
+                    "module 必须取自截图左侧导航（父菜单——当前高亮子菜单），"
+                    "禁止用页眉产品名、禁止用文件名："
                 )
             return "请分析以下需求文档，提取测试项："
         mod = self.module or "通用"
@@ -112,9 +113,11 @@ def _clean_heading_title(raw: str) -> str:
 def is_file_separator_line(line: str) -> bool:
     """True for multi-file / PDF page separator banners (not business modules)."""
     s = (line or "").strip()
-    if not s or "\n" in s:
+    if not s:
         return False
-    return bool(_FILE_HEADER_RE.match(s) or _PAGE_HEADER_RE.match(s))
+    # Multi-line headers from image uploads: first line is the banner.
+    first = s.splitlines()[0].strip()
+    return bool(_FILE_HEADER_RE.match(first) or _PAGE_HEADER_RE.match(first))
 
 
 def looks_like_filename_module(module: str) -> bool:
@@ -188,6 +191,60 @@ def split_module_path(module: str) -> tuple[str, str | None]:
 
 def primary_module_name(module: str) -> str:
     return split_module_path(module)[0]
+
+
+def canonicalize_module_paths(paths: list[str]) -> dict[str, str]:
+    """Build old→canonical map so the same screen does not fan out into many trees.
+
+    Rules (generic, no product hardcode):
+    - Prefer two-level ``一级——二级`` over flat ``二级``.
+    - For the same secondary, prefer the primary that appears most often;
+      if tied, prefer the longer primary (e.g. 合规检查助手 over 检查助手).
+    - Flat names that equal some secondary are upgraded to that winner path.
+    """
+    normalized = [normalize_module_path(p or "") for p in paths]
+    # secondary -> Counter of full two-level paths
+    by_secondary: dict[str, dict[str, int]] = {}
+    for path in normalized:
+        if not path or path == "通用":
+            continue
+        if MODULE_PATH_SEP in path:
+            _l1, l2 = path.split(MODULE_PATH_SEP, 1)
+            sec = l2.strip()
+            if not sec:
+                continue
+            by_secondary.setdefault(sec, {})
+            by_secondary[sec][path] = by_secondary[sec].get(path, 0) + 1
+
+    winner_for_secondary: dict[str, str] = {}
+    for sec, counts in by_secondary.items():
+        best = sorted(
+            counts.items(),
+            key=lambda kv: (-kv[1], -len(kv[0].split(MODULE_PATH_SEP, 1)[0]), kv[0]),
+        )[0][0]
+        winner_for_secondary[sec] = best
+
+    mapping: dict[str, str] = {}
+    for path in normalized:
+        if not path:
+            mapping[path] = "通用"
+            continue
+        if MODULE_PATH_SEP in path:
+            _l1, l2 = path.split(MODULE_PATH_SEP, 1)
+            sec = l2.strip()
+            mapping[path] = winner_for_secondary.get(sec, path)
+        else:
+            mapping[path] = winner_for_secondary.get(path, path)
+    return mapping
+
+
+def apply_canonical_modules(items: list, *, attr: str = "module") -> None:
+    """In-place rewrite ``item.module`` using :func:`canonicalize_module_paths`."""
+    raw = [getattr(it, attr, "") or "" for it in items]
+    mapping = canonicalize_module_paths(raw)
+    for it, old in zip(items, raw):
+        path = normalize_module_path(old)
+        setattr(it, attr, mapping.get(path, path))
 
 
 def detect_heading(line: str) -> str | None:
@@ -581,6 +638,17 @@ def merge_functional_points(batches: list[list]) -> list:
                 continue
             seen.add(key)
             merged.append(fp)
+    apply_canonical_modules(merged)
+    # Re-key after canonicalize (may merge formerly-distinct module spellings)
+    seen2: set[tuple[str, str]] = set()
+    deduped: list = []
+    for fp in merged:
+        key = ((fp.module or "").strip(), (fp.name or "").strip())
+        if key in seen2:
+            continue
+        seen2.add(key)
+        deduped.append(fp)
+    merged = deduped
     for i, fp in enumerate(merged, start=1):
         fp.id = i
     return merged
@@ -592,8 +660,10 @@ __all__ = [
     "IMAGE_TOKEN_COST",
     "MODULE_PATH_SEP",
     "Phase1Chunk",
+    "apply_canonical_modules",
     "build_phase1_chunks_from_parts",
     "build_phase1_chunks_from_text",
+    "canonicalize_module_paths",
     "chunk_token_budget",
     "detect_heading",
     "estimate_part_tokens",

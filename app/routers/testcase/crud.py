@@ -263,7 +263,7 @@ async def get_module_test_cases(
     user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
 ) -> dict:
     """
-    检索特定模块的所有测试用例，并分页。
+    检索特定模块及其下级模块的所有测试用例，并分页。
     """
     db_module = await crud.get_module(db, module_id)
     if db_module is None:
