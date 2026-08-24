@@ -47,7 +47,13 @@ class PlaywrightMCPToolCall(BaseModel):
     )
     selector: Optional[str] = Field(
         None,
-        description="CSS/text/XPath selector for the target element",
+        description="Element ref from the accessibility snapshot (e.g. 'e15' / 'f1e2'), "
+        "or a CSS/text/XPath selector as fallback",
+    )
+    element_desc: Optional[str] = Field(
+        None,
+        description="Human-readable description of the target element (e.g. '提交按钮'). "
+        "Used by Playwright MCP for permission context alongside the ref target.",
     )
     selector_type: str = Field(
         default='css',
@@ -186,6 +192,7 @@ EDGE CASE HANDLING:
 
 RULES:
 - Use element refs from the snapshot (e.g., "e12") as selectors — do NOT invent CSS selectors or raw Chinese phrases as selectors.
+- Always set element_desc to the snapshot's human-readable name of the chosen element (e.g. "提交按钮"); it is passed to Playwright MCP as permission context.
 - NEVER set selector/value to control-type words alone (下拉框/输入框/按钮). That causes Playwright getByText timeouts.
 - Output ONLY the JSON object. No markdown fences, no explanation text.
 - Always include "thinking" referencing the thinking chain stages and the exact labels matched.
@@ -199,6 +206,7 @@ OUTPUT SCHEMA (exact JSON):
 {
   "action": "click",
   "selector": "e15",
+  "element_desc": "提交按钮",
   "value": null,
   "timeout_ms": 30000,
   "thinking": "Step wants to click 【提交】. Unique button ref=e15 name=提交. Not 确定/保存.",
@@ -383,7 +391,13 @@ async def generate_tool_call(
                 "(agent_type=%s), falling back to hardcoded SYSTEM_PROMPT",
                 agent_type, exc_info=True,
             )
-    if resolved_system_prompt is None:
+    # 025-ref-click: SYSTEM_PROMPT 是输出契约（ref 用法 + JSON schema），
+    # 必须始终在场；DB/Agent 解析结果仅作为角色前缀补充，不能整体替换。
+    if resolved_system_prompt is None or SYSTEM_PROMPT.strip() in (resolved_system_prompt or ""):
+        resolved_system_prompt = SYSTEM_PROMPT
+    elif resolved_system_prompt.strip():
+        resolved_system_prompt = f"{SYSTEM_PROMPT}\n\n--- AGENT ROLE CONTEXT ---\n{resolved_system_prompt}"
+    else:
         resolved_system_prompt = SYSTEM_PROMPT
 
     messages: list[dict] = [

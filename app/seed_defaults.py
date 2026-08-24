@@ -446,10 +446,11 @@ async def _ensure_named_agent_system_prompt(db: AsyncSession, name: str) -> bool
     agent = row.scalar_one_or_none()
     if agent is None:
         return False
-    if (agent.system_prompt or "").strip() == desired:
+    # 只为空白 system_prompt 补种子值；用户自定义内容一律尊重，不回写
+    if (agent.system_prompt or "").strip():
         return False
     agent.system_prompt = desired
-    logger.info("已更新 Agent「%s」system_prompt", name)
+    logger.info("已为 Agent「%s」补种 system_prompt", name)
     return True
 
 

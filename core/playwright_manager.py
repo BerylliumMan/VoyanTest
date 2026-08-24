@@ -360,6 +360,7 @@ class PlaywrightMCPManager:
         action = tool_call.get('action', '')
         selector = tool_call.get('selector')
         value = tool_call.get('value')
+        element_desc = tool_call.get('element_desc') or tool_call.get('element')
         step_description = tool_call.get('step_description') or tool_call.get('description')
 
         if action == 'error':
@@ -397,7 +398,19 @@ class PlaywrightMCPManager:
                     logger.warning("Pre-click tab list failed: %s", exc)
 
             args = self._build_mcp_args(action, selector, value)
+            if element_desc and isinstance(args.get('element'), str) and not args['element']:
+                args['element'] = element_desc
+            # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本跨 frame 兜底
+            from core.mcp_args import verify_text_cross_frame
+            if mcp_tool == 'browser_wait_for' and (args.get('text') or '').strip():
+                hit = await verify_text_cross_frame(self.call_tool, args['text'])
+                if hit:
+                    return {'success': True, 'error': None}
             result = await self.call_tool(mcp_tool, args)
+            if not result['success'] and mcp_tool == 'browser_wait_for':
+                hit = await verify_text_cross_frame(self.call_tool, args.get('text') or '')
+                if hit:
+                    return {'success': True, 'error': None}
 
             if not result['success']:
                 return {
@@ -425,30 +438,9 @@ class PlaywrightMCPManager:
 
     @staticmethod
     def _build_mcp_args(action: str, selector: str | None, value: str | None) -> dict:
-        """Build MCP tool arguments from LLM action."""
-        if action == 'goto':
-            return {'url': value or 'about:blank'}
-        elif action == 'click':
-            return {'element': selector or '', 'target': selector or ''}
-        elif action == 'fill':
-            return {'element': selector or '', 'target': selector or '', 'text': value or ''}
-        elif action == 'select':
-            return {'element': selector or '', 'target': selector or '', 'values': [value] if value else []}
-        elif action == 'wait':
-            if value and value.isdigit():
-                return {'time': int(value)}
-            return {'text': value or ''}
-        elif action == 'screenshot':
-            return {'filename': value or f'screenshot_{int(time.time())}.png', 'fullPage': True, 'type': 'png'}
-        elif action == 'snapshot':
-            return {}
-        elif action == 'assert_text':
-            return {'text': value or ''}
-        elif action == 'press_key':
-            return {'key': value or 'Escape'}
-        elif action == 'hover':
-            return {'element': selector or '', 'target': selector or ''}
-        return {}
+        """兼容包装——实际映射见 core.mcp_args.build_mcp_args（契约 C2）。"""
+        from core.mcp_args import legacy_build_mcp_args
+        return legacy_build_mcp_args(action, selector, value)
 
     # ------------------------------------------------------------------
     # DOM snapshot for LLM context
@@ -459,9 +451,8 @@ class PlaywrightMCPManager:
         try:
             result = await self.call_tool('browser_snapshot', {})
             text = result.get('text', '')
-            if len(text) > 8000:
-                text = text[:8000] + "\n\n[... TRUNCATED]"
-            return text or '(empty page)'
+            from core.snapshot_compress import compress_snapshot
+            return compress_snapshot(text) or '(empty page)'
         except (RuntimeError, ConnectionError, OSError) as exc:
             logger.warning("DOM snapshot failed: %s", exc, exc_info=True)
             return '(page snapshot unavailable)'
