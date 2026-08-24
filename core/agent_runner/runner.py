@@ -284,6 +284,9 @@ class AgentRunner:
             f"Based on the CURRENT PAGE snapshot below, decide the SINGLE NEXT ACTION "
             f"to move towards the GOAL. If the goal is already achieved, use action='done'."
         )
+        if self._pending_hint:
+            step_description += f"\n\nRETRY CONTEXT: {self._pending_hint}"
+            self._pending_hint = None
 
         try:
             tool_call = await asyncio.wait_for(
@@ -356,6 +359,11 @@ class AgentRunner:
         """
         start_time = time.monotonic()
 
+        # 025-ref-click US3: 每轮运行重置恢复额度（stale 刷新 1 次 + heal 候选）
+        self._retries_this_run = 0
+        self._heal_exhausted = False
+        self._pending_hint: str | None = None
+
         # 将目标写入上下文
         self.context.add_turn("user", f"目标: {self.goal}")
 
@@ -406,6 +414,63 @@ class AgentRunner:
             except Exception as exc:
                 logger.exception("act() 异常 (turn %d)", turn)
                 result = {"success": False, "error": str(exc)}
+
+            # ── Act 失败恢复（025-ref-click US3）──
+            if not result.get("success"):
+                error = result.get("error", "") or ""
+                from core.self_healing import (
+                    build_failure_hint,
+                    is_stale_ref_error,
+                    recover_candidates,
+                )
+
+                if is_stale_ref_error(error) and self._retries_this_run < 1:
+                    self._retries_this_run += 1
+                    try:
+                        fresh_obs = await self.observe()
+                        self._pending_hint = build_failure_hint(error)
+                        retry_action = await self.think(fresh_obs)
+                        if isinstance(retry_action, dict) and retry_action.get("action") not in (
+                            "error",
+                            "done",
+                        ):
+                            action = retry_action
+                            thinking_text = action.get("thinking", "") or thinking_text
+                            result = await self.act(action)
+                            logger.info(
+                                "Stale-ref recovery %s (turn %d): success=%s",
+                                self._retries_this_run, turn, result.get("success"),
+                            )
+                    except Exception as exc:
+                        logger.warning("Stale-ref recovery failed (turn %d): %s", turn, exc)
+                elif not self._heal_exhausted and not is_stale_ref_error(error):
+                    heal_candidates = await recover_candidates(
+                        self._mcp_manager,
+                        step_description=self.goal,
+                        error=error,
+                    )
+                    if heal_candidates:
+                        try:
+                            fresh_obs = await self.observe()
+                            self._pending_hint = build_failure_hint(error, heal_candidates)
+                            retry_action = await self.think(fresh_obs)
+                            if isinstance(retry_action, dict) and retry_action.get("action") not in (
+                                "error",
+                                "done",
+                            ):
+                                action = retry_action
+                                thinking_text = action.get("thinking", "") or thinking_text
+                                result = await self.act(action)
+                                logger.info(
+                                    "Heal recovery (turn %d): success=%s",
+                                    turn, result.get("success"),
+                                )
+                            else:
+                                self._heal_exhausted = True
+                        except Exception as exc:
+                            logger.warning("Heal recovery failed (turn %d): %s", turn, exc)
+                    else:
+                        self._heal_exhausted = True
 
             # 记录到上下文
             action_summary = (

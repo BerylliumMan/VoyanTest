@@ -64,15 +64,29 @@ def validate_goto_action(action: dict[str, Any]) -> tuple[bool, str]:
 
 # ── Token 截断 ──────────────────────────────────────────────────────────────
 
-MAX_SNAPSHOT_TOKENS = 8000  # 单个 snapshot 最大 token 数（近似）
+def _env_max_tokens() -> int:
+    """025-ref-click: 上限从 SNAPSHOT_MAX_CHARS 对齐（chars≈tokens/4 反推），默认 30000 chars。"""
+    import os
+    try:
+        return max(1000, int(os.getenv("SNAPSHOT_MAX_CHARS", "30000")) // 4)
+    except (TypeError, ValueError):
+        return 7500
+
+
+MAX_SNAPSHOT_TOKENS = _env_max_tokens()  # 单个 snapshot 最大 token 数（近似，env 可调）
 APPROX_CHARS_PER_TOKEN = 4  # 中英混合估算
 
 
 def truncate_snapshot(snapshot: str, max_tokens: int = MAX_SNAPSHOT_TOKENS) -> str:
     """截断 DOM/AX Tree snapshot 到指定 token 预算内。
 
-    使用简单的字符长度估算（~4 chars/token），保留开头和结尾关键信息。
+    025-ref-click: 优先使用 compress_snapshot 保交互 ref 行；
+    此函数保留用于非快照文本的 head+tail 截断。
     """
+    from core.snapshot_compress import compress_snapshot
+    compressed = compress_snapshot(snapshot, max_chars=max_tokens * APPROX_CHARS_PER_TOKEN)
+    if len(compressed) < len(snapshot):
+        return compressed
     max_chars = max_tokens * APPROX_CHARS_PER_TOKEN
     if len(snapshot) <= max_chars:
         return snapshot

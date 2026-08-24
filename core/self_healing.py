@@ -105,6 +105,69 @@ def _parse_llm_json_list(content: str) -> list:
     return data if isinstance(data, list) else []
 
 
+
+def _compress(text: str) -> str:
+    """025-ref-click: 智能压缩替代固定 8000 截断，保交互元素 ref 行。"""
+    from core.snapshot_compress import compress_snapshot
+    return compress_snapshot(text)
+
+
+# MCP 在 ref 失效/幻觉时的错误特征（tab.ts: "Ref ... not found in the current page snapshot"）
+_STALE_REF_MARKERS = (
+    "not found in the current page snapshot",
+    "ref not found",
+)
+
+
+def is_stale_ref_error(error: str | None) -> bool:
+    """判定 act 失败是否为 ref 失效或幻觉 ref——两者共用刷新重试路径。"""
+    if not error:
+        return False
+    e = str(error).lower()
+    return any(marker in e for marker in _STALE_REF_MARKERS)
+
+
+def build_failure_hint(error: str, candidates: list[dict] | None = None) -> str:
+    """构造重试时附加给 LLM 的提示（含 heal 候选元素名）。"""
+    hint = f"上一次操作失败: {error}。请基于最新快照重新选择目标元素，不要重复同一选择。"
+    if candidates:
+        names = " / ".join(
+            f"{c.get('name')}({c.get('role') or 'element'})"
+            for c in candidates[:3]
+            if c.get("name")
+        )
+        if names:
+            hint += f" 目标元素的可访问名称可能是: {names}。"
+    return hint
+
+
+async def recover_candidates(
+    mcp_manager,
+    step_description: str,
+    error: str,
+    structured_step: dict | None = None,
+) -> list[dict]:
+    """server-local 路径的 heal 候选获取；异常安全返回空列表。
+
+    远程 Bridge 路径无 mcp_manager，调用方应跳过本函数仅用 hint 重试。
+    """
+    if mcp_manager is None:
+        return []
+    try:
+        return await asyncio.wait_for(
+            heal_ax_name_role(
+                mcp_manager,
+                step_description=step_description,
+                error=error,
+                structured_step=structured_step,
+            ),
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("recover_candidates failed: %s", exc)
+        return []
+
+
 async def heal_ax_name_role(
     mcp_manager,
     step_description: str,
@@ -120,7 +183,7 @@ async def heal_ax_name_role(
         step_description=step_description,
         structured_json=_json.dumps(structured_step or {}, ensure_ascii=False)[:800],
         error=error,
-        dom_snapshot=dom_snapshot[:8000],
+        dom_snapshot=_compress(dom_snapshot),
     )
     try:
         client = await _get_cached_client()
@@ -268,7 +331,7 @@ async def heal_selector(
         step_description=step_description,
         original_selector=original_selector,
         error=error,
-        dom_snapshot=dom_snapshot[:8000],
+        dom_snapshot=_compress(dom_snapshot),
     )
 
     try:

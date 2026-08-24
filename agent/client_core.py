@@ -422,22 +422,53 @@ class AgentClient:
             chrome_args.append("--start-maximized")
 
         self._exec_chrome_user_data = user_data_dir
+        # 025-ref-click 前置修复: 新版 Chromium 可能不写 DevToolsActivePort 文件，
+        # 改为并行监听 stderr 的 "DevTools listening on ws://host:PORT" 行。
+        stderr_reader = asyncio.subprocess.PIPE
+        proc_kwargs["stderr"] = stderr_reader
+
         self._exec_chrome_process = await asyncio.create_subprocess_exec(
             *chrome_args, **proc_kwargs
         )
 
+        async def _read_devtools_port(proc) -> int | None:
+            try:
+                while True:
+                    raw = await proc.stderr.readline()
+                    if not raw:
+                        return None
+                    line = raw.decode("utf-8", "ignore")
+                    m = re.search(r"DevTools listening on ws://[\d.]+:(\d+)", line)
+                    if m:
+                        return int(m.group(1))
+            except Exception:
+                return None
+
         active_port_file = os.path.join(user_data_dir, "DevToolsActivePort")
         actual_port = None
-        for _ in range(40):
+        stderr_task = asyncio.ensure_future(_read_devtools_port(self._exec_chrome_process))
+        for _ in range(120):
             await asyncio.sleep(0.25)
+            if stderr_task.done() and stderr_task.result() is not None:
+                actual_port = stderr_task.result()
+                break
             try:
                 with open(active_port_file) as f:
                     actual_port = int(f.readline().strip())
                 break
             except (OSError, ValueError):
                 continue
+        if actual_port is None and not stderr_task.done():
+            # 最后再等一拍 stderr 结果
+            try:
+                actual_port = await asyncio.wait_for(
+                    asyncio.shield(stderr_task), timeout=5
+                )
+            except (asyncio.TimeoutError, Exception):
+                actual_port = None
         if actual_port is None:
-            raise RuntimeError("Exec Chrome did not write DevToolsActivePort in time")
+            stderr_task.cancel()
+            raise RuntimeError("Exec Chrome did not expose a debugging port in time")
         if self._exec_chrome_process.returncode is not None:
             raise RuntimeError(
                 f"Exec Chrome exited early code={self._exec_chrome_process.returncode}"
@@ -941,6 +972,8 @@ class AgentClient:
         selector: str,
         value: str,
         step_description: str = "",
+        element_desc: str | None = None,
+        timeout_ms: int = 30000,
     ) -> dict:
         from core.blank_click import execute_blank_click, should_use_blank_click
         from core.mcp_tabs import (
@@ -968,8 +1001,22 @@ class AgentClient:
             except Exception as exc:
                 logger.warning("Pre-click tab list failed: %s", exc)
 
-        args = self._build_mcp_args(action, selector, value)
+        args = self._build_mcp_args(
+            action, selector, value, element_desc=element_desc, timeout_ms=timeout_ms,
+        )
+        # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本先跨 frame 即时检查
+        if mcp_tool == "browser_wait_for" and (args.get("text") or "").strip():
+            from core.mcp_args import verify_text_cross_frame
+            hit = await verify_text_cross_frame(self._mcp_tools_call, args["text"])
+            if hit:
+                logger.info("Cross-frame text hit at %s: %s", hit, args["text"][:40])
+                return {"success": True, "error": None, "text": f"text visible in {hit}"}
         result = await self._mcp_tools_call(mcp_tool, args)
+        if mcp_tool == "browser_wait_for" and not result.get("success") and (args.get("text") or "").strip():
+            from core.mcp_args import verify_text_cross_frame
+            hit = await verify_text_cross_frame(self._mcp_tools_call, args["text"])
+            if hit:
+                return {"success": True, "error": None, "text": f"text visible in {hit}"}
 
         if watch_tabs and result.get("success"):
             try:
@@ -1137,40 +1184,18 @@ class AgentClient:
         return None
 
     @staticmethod
-    def _build_mcp_args(action: str, selector: str, value: str) -> dict:
-        if action in ('goto', 'navigate', 'browser_navigate'):
-            return {'url': value or 'about:blank'}
-        elif action == 'click':
-            return {'element': selector or '', 'target': selector or ''}
-        elif action == 'fill':
-            return {'element': selector or '', 'target': selector or '', 'text': value or ''}
-        elif action == 'select':
-            return {'element': selector or '', 'target': selector or '', 'values': [value] if value else []}
-        elif action == 'wait':
-            if value and value.isdigit():
-                return {'time': int(value)}
-            return {'text': value or ''}
-        elif action == 'screenshot':
-            return {'filename': value or f'screenshot_{int(time.time())}.png', 'fullPage': True, 'type': 'png'}
-        elif action == 'snapshot':
-            return {}
-        elif action == 'assert_text':
-            return {'text': value or ''}
-        elif action in ('press_key', 'browser_press_key'):
-            return {'key': value or 'Escape'}
-        elif action in ('hover', 'browser_hover'):
-            return {'element': selector or '', 'target': selector or ''}
-        elif action in ('evaluate', 'browser_evaluate'):
-            # Playwright MCP: function is a JS function body or expression
-            fn = (value or selector or "").strip()
-            if fn and not fn.lstrip().startswith(("(", "function", "async")):
-                # wrap statement list / expression as function
-                if "return" not in fn:
-                    fn = f"() => {{ return Boolean(({fn})); }}"
-                else:
-                    fn = f"() => {{ {fn} }}"
-            return {"function": fn or "() => true"}
-        return {}
+    def _build_mcp_args(
+        action: str,
+        selector: str,
+        value: str,
+        element_desc: str | None = None,
+        timeout_ms: int = 30000,
+    ) -> dict:
+        from core.mcp_args import build_mcp_args
+        return build_mcp_args(
+            action, selector=selector, element_desc=element_desc,
+            value=value, timeout_ms=timeout_ms,
+        )
 
     # ---- messaging ----
 
@@ -1958,10 +1983,8 @@ class AgentClient:
                         text != self.BROWSER_CLOSED_SNAPSHOT_MARK
                         and len(text) > self.SNAPSHOT_TEXT_LIMIT
                     ):
-                        text = (
-                            text[: self.SNAPSHOT_TEXT_LIMIT]
-                            + "\n\n[... TRUNCATED]"
-                        )
+                        from core.snapshot_compress import compress_snapshot
+                        text = compress_snapshot(text, max_chars=self.SNAPSHOT_TEXT_LIMIT)
                 except asyncio.TimeoutError:
                     text = "(snapshot timeout)"
                     await self._invalidate_mcp_session("snapshot timeout")
@@ -2175,7 +2198,14 @@ class AgentClient:
         tc = p.get("tool_call", {}) or p
         action = tc.get("action") or p.get("action") or ""
         selector = tc.get("selector") if "selector" in tc else (p.get("selector") or "")
+        # 025-ref-click: element_desc 为人类可读描述（MCP 权限确认用）
+        element_desc = (
+            tc.get("element_desc")
+            if "element_desc" in tc
+            else (p.get("element_desc") or "")
+        )
         value = tc.get("value") if "value" in tc else p.get("value")
+        timeout_ms = tc.get("timeout_ms") or p.get("timeout_ms") or 30000
         # send_act 可能把 URL 放在 url 字段
         if not value:
             value = tc.get("url") or p.get("url")
@@ -2206,6 +2236,7 @@ class AgentClient:
 
             mcp_result = await self._mcp_call_tool(
                 action, selector, value, step_description=step_description,
+                element_desc=element_desc, timeout_ms=timeout_ms,
             )
             result["success"] = mcp_result.get("success", False)
             if not result["success"]:

@@ -302,6 +302,7 @@ class AgentBridge:
         context_messages: list[dict[str, str]] = []
         llm_client = await create_openai_client()
         consecutive_failures = 0
+        retries_used = 0
 
         # 加载测试用例步骤 + 环境 base_url，作为 LLM 上下文
         case_steps: list[str] = []
@@ -456,6 +457,48 @@ class AgentBridge:
                 logger.exception("Act error at turn %d", turn)
                 result = {"success": False, "error": str(exc)}
 
+            # ── 3b. Act 失败恢复（025-ref-click US3：stale/hallucinated ref 刷新重试）──
+            if not result.get("success") and retries_used < 1:
+                error = result.get("error", "") or ""
+                from core.self_healing import build_failure_hint, is_stale_ref_error
+
+                if is_stale_ref_error(error):
+                    retries_used += 1
+                    try:
+                        obs_retry = await asyncio.wait_for(
+                            self.agent_manager.send_observe(agent_id, run_id_str),
+                            timeout=60,
+                        )
+                        retry_action = await self._llm_decide(
+                            llm_client=llm_client,
+                            goal=goal_text,
+                            snapshot=obs_retry.get("snapshot", ""),
+                            page_url=obs_retry.get("page_url", ""),
+                            context_messages=context_messages,
+                            turn=turn,
+                            case_steps=case_steps,
+                            case_url=case_url,
+                            extra_hint=build_failure_hint(error),
+                        )
+                        if (
+                            isinstance(retry_action, dict)
+                            and not retry_action.get("_done")
+                            and not retry_action.get("_error")
+                        ):
+                            action = retry_action
+                            result = await asyncio.wait_for(
+                                self.agent_manager.send_act(agent_id, run_id_str, action),
+                                timeout=120,
+                            )
+                            logger.info(
+                                "Bridge stale-ref recovery (turn %d): success=%s",
+                                turn, result.get("success"),
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Bridge stale-ref recovery failed (turn %d): %s", turn, exc,
+                        )
+
             # 保存操作截图
             self._save_screenshot(result.get("screenshot_b64"), f"turn_{turn:02d}_act")
 
@@ -486,6 +529,7 @@ class AgentBridge:
         turn: int,
         case_steps: list[str] | None = None,
         case_url: str = "",
+        extra_hint: str = "",
     ) -> dict[str, Any] | None:
         """LLM 决策：根据当前页面状态和上下文决定下一步操作。
 
@@ -533,6 +577,8 @@ class AgentBridge:
             f"to move towards the GOAL. "
             f"If stuck or impossible, use action='error' with explanation in value."
         )
+        if extra_hint:
+            step_description += f"\n\nRETRY CONTEXT: {extra_hint}"
 
         try:
             tool_call = await generate_tool_call(
@@ -561,12 +607,15 @@ class AgentBridge:
             return {"_error": True, "_error_message": err_msg}
 
         # 普通操作：将 PlaywrightMCPToolCall 映射为 send_act 期望的格式
+        # （025-ref-click: element_desc 供 MCP 权限上下文，timeout_ms 全链路透传）
         return {
             "name": action_name,
             "tool": action_name,
             "args": {
                 "selector": tc_dict.get("selector"),
+                "element_desc": tc_dict.get("element_desc"),
                 "value": tc_dict.get("value"),
+                "timeout_ms": tc_dict.get("timeout_ms", 30000),
             },
         }
 

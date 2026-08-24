@@ -3419,14 +3419,18 @@ class AgentManager:
         }, timeout=60)
 
     async def send_act(self, agent_id: str, run_id: str, tool_call: dict) -> dict:
-        """通过 WS 向 Agent 发送操作指令"""
+        """通过 WS 向 Agent 发送操作指令（025-ref-click: 全字段透传）"""
+        args = tool_call.get("args", {})
         return await self._send_and_wait(agent_id, {
             "type": "step_execute",
             "run_id": run_id,
             "action": tool_call.get("name", tool_call.get("tool")),
-            "selector": tool_call.get("args", {}).get("selector"),
-            "value": tool_call.get("args", {}).get("value"),
-            "url": tool_call.get("args", {}).get("url"),
+            "selector": args.get("selector"),
+            "element_desc": args.get("element_desc") or args.get("element"),
+            "description": tool_call.get("description") or args.get("description"),
+            "value": args.get("value"),
+            "url": args.get("url"),
+            "timeout_ms": args.get("timeout_ms", 30000),
             "timeout": 120000
         }, timeout=120)
 
