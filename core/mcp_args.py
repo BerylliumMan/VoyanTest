@@ -148,3 +148,18 @@ async def verify_text_cross_frame(caller, text: str) -> Optional[str]:
     import re as _re
     m = _re.search(r"\b(main|frame\d+)\b", str(r.get("text") or ""))
     return m.group(1) if m else None
+
+
+def build_tool_status(result: dict) -> str:
+    """OTA 上下文中的工具结果行。
+
+    断言类成功必须携带跨 frame 确认证据——否则 LLM 因快照中
+    看不到非交互文本而拒绝宣告 done，陷入截图自证循环。
+    """
+    if not result.get("success"):
+        return f"失败: {result.get('error', '未知')}"
+    text = str(result.get("text") or "")
+    if "visible in" in text:
+        where = text.split("in")[-1].strip() or "?"
+        return f"成功（断言通过，跨frame确认于 {where}）"
+    return "成功"

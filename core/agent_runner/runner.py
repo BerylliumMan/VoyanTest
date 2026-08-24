@@ -483,10 +483,8 @@ class AgentRunner:
                 thinking_text or action_summary,
                 tool_calls=[action],
             )
-            self.context.add_turn(
-                "tool",
-                "成功" if result.get("success") else f"失败: {result.get('error', '未知')}",
-            )
+            from core.mcp_args import build_tool_status
+            self.context.add_turn("tool", build_tool_status(result))
 
             # 检查是否通过 act 的 done 标记完成了目标
             if result.get("done"):
