@@ -193,6 +193,7 @@ EDGE CASE HANDLING:
 RULES:
 - Use element refs from the snapshot (e.g., "e12") as selectors — do NOT invent CSS selectors or raw Chinese phrases as selectors.
 - Always set element_desc to the snapshot's human-readable name of the chosen element (e.g. "提交按钮"); it is passed to Playwright MCP as permission context.
+- When a wait/assert_text action returns success, the assertion IS passed — the engine verifies across all frames including iframes. Do NOT re-verify by taking extra snapshots or repeating asserts; declare done once ALL steps have succeeded.
 - NEVER set selector/value to control-type words alone (下拉框/输入框/按钮). That causes Playwright getByText timeouts.
 - Output ONLY the JSON object. No markdown fences, no explanation text.
 - Always include "thinking" referencing the thinking chain stages and the exact labels matched.

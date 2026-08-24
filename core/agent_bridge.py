@@ -303,6 +303,8 @@ class AgentBridge:
         llm_client = await create_openai_client()
         consecutive_failures = 0
         retries_used = 0
+        successful_acts = 0
+        assertion_passed = False
 
         # 加载测试用例步骤 + 环境 base_url，作为 LLM 上下文
         case_steps: list[str] = []
@@ -511,8 +513,34 @@ class AgentBridge:
                 "role": "assistant",
                 "content": f"{action_name}: {action.get('args', {})}",
             })
-            status_text = "成功" if result.get("success") else f"失败: {result.get('error', '?')}"
+            from core.mcp_args import build_tool_status
+            status_text = build_tool_status(result)
             context_messages.append({"role": "tool", "content": status_text})
+
+            if result.get("success") and action_name not in ("goto", "snapshot", "screenshot"):
+                successful_acts += 1
+            if "断言通过" in status_text:
+                assertion_passed = True
+
+            # ── 6. 引擎侧完成判定（025-ref-click：不依赖模型自觉）──
+            # 条件一：最后动作是断言且成功，且成功操作数 ≥ 步骤数
+            # 条件二：本轮已出现过断言成功，且成功操作数 ≥ 步骤数
+            #        （防模型无视证据重复执行步骤）
+            engine_done = case_steps and successful_acts >= len(case_steps) and (
+                (result.get("success") and action_name in ("assert_text", "wait"))
+                or assertion_passed
+            )
+            if engine_done:
+                done_msg = (
+                    f"目标已达成(引擎判定): {len(case_steps)} 个步骤的工具结果全部成功，"
+                    f"最终断言「{action.get('args', {}).get('value', '')}」已通过"
+                )
+                logger.info("Bridge: %s (run #%d)", done_msg, run.id)
+                await crud_agent_run.create_message(
+                    self.db, run.id, turn, "assistant", done_msg,
+                )
+                await self._complete(run.id, turn)
+                return
 
         # 达到最大轮次
         await self._fail(run.id, f"Max turns ({max_turns}) reached")
@@ -576,6 +604,14 @@ class AgentBridge:
             f"Based on the PAGE CONTENT below, decide the SINGLE NEXT ACTION "
             f"to move towards the GOAL. "
             f"If stuck or impossible, use action='error' with explanation in value."
+        )
+        # 025-ref-click: 防止模型不信任工具结果而重复执行/无限截图
+        step_description += (
+            f"\n\nHARD RULES: "
+            f"(a) NEVER repeat an action whose tool result was successful. "
+            f"(b) Screenshots do NOT verify anything — only wait/assert_text results count. "
+            f"(c) When HISTORY shows every test-case step has a successful tool result, "
+            f"you MUST immediately return done. No exceptions."
         )
         if extra_hint:
             step_description += f"\n\nRETRY CONTEXT: {extra_hint}"
