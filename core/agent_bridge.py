@@ -304,6 +304,8 @@ class AgentBridge:
         consecutive_failures = 0
         retries_used = 0
         successful_act_keys: set = set()
+        _last_error_fp: str | None = None
+        _consec_err_n = 0
         successful_acts = 0
         assertion_passed = False
 
@@ -440,10 +442,24 @@ class AgentBridge:
                 return
 
             if action.get("_error"):
-                # Agent 报告错误 — 记录并继续（可能只是临时错误）
+                # Agent reported error — 同因熔断（027-e2e-fixes）
+                _err_msg = str(action.get("_error_message", ""))
+                from core.mcp_args import error_fingerprint
+                _fp = error_fingerprint(_err_msg)
+                if _fp and _fp == _last_error_fp:
+                    _consec_err_n += 1
+                else:
+                    _last_error_fp = _fp
+                    _consec_err_n = 1
+                if _consec_err_n >= 3:
+                    await self._fail(
+                        run.id,
+                        f"连续同因错误(×{_consec_err_n}): {_err_msg[:120]}",
+                    )
+                    return
                 logger.warning(
-                    "Agent reported error at turn %d: %s",
-                    turn, action.get("_error_message", ""),
+                    "Agent reported error at turn %d (%d/%d): %s",
+                    turn, _consec_err_n, 3, _err_msg[:100],
                 )
                 continue
 
