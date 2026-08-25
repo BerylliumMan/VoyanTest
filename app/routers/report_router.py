@@ -233,6 +233,25 @@ async def get_run_detail(run_id: int, user=Depends(get_current_user), db: AsyncS
             # 文件 I/O / JSON 损坏 / 编码错误都降级为空 steps
             logger.warning("无法加载报告 JSON 文件: %s", run.report_path, exc_info=True)
 
+    # fallback: 从 run_logs 加载步骤（AI Agent 执行路径不写 report.json）
+    if not response["steps"]:
+        try:
+            from sqlalchemy import select as _sl
+            from app.db_models import RunLog
+            r = await db.execute(
+                _sl(RunLog).where(RunLog.run_id == run.id).order_by(RunLog.id)
+            )
+            for lg in r.scalars().all():
+                response["steps"].append({
+                    "step_number": lg.step_id or len(response["steps"]) + 1,
+                    "success": lg.level in ("info", "success", "passed"),
+                    "level": lg.level,
+                    "description": lg.message,
+                    "screenshot_path": lg.screenshot_path,
+                })
+        except Exception:
+            logger.warning("无法从 run_logs 加载步骤: run=%d", run.id, exc_info=True)
+
     return response
 
 
