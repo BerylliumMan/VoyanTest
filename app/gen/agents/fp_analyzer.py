@@ -11,6 +11,46 @@ from app.gen.feature_extractor import extract_functional_points
 logger = logging.getLogger(__name__)
 
 
+def _strip_ignorable(s: str) -> str:
+    import re as _re
+    return _re.sub(r"[\s\u3000、，。；：:；·!！?？【】\[\]()（）\"'`~～—\-_/]", "", s or "")
+
+
+def bigrams(s: str) -> set:
+    clean = _strip_ignorable(s)
+    return {clean[i:i + 2] for i in range(len(clean) - 1)} if len(clean) >= 2 else (
+        {clean} if clean else set())
+
+
+def grounded(name: str, source_text: str) -> bool:
+    """name 的 2-gram 在原文中的命中率 ≥50% 视为有锚定（防通用尾词误命中）。"""
+    if not name or not source_text:
+        return False
+    grams = bigrams(name)
+    if not grams:
+        return False
+    hits = sum(1 for g in grams if g in source_text)
+    return hits * 2 >= len(grams)
+
+
+def grounding_filter(fps: list, source_text: str) -> tuple:
+    """026→027 反幻觉：name 无原文锚定的 FP 丢弃。空 source 全保留（多模态场景）。"""
+    if not (source_text or "").strip():
+        return list(fps or []), []
+    kept, dropped = [], []
+    for fp in fps or []:
+        if grounded(str(fp.get("name") or ""), source_text):
+            kept.append(fp)
+        else:
+            dropped.append(fp)
+    if dropped:
+        logger.warning(
+            "grounding_filter 丢弃 %d 个无锚定 FP: %s",
+            len(dropped), [f.get("name") for f in dropped],
+        )
+    return kept, dropped
+
+
 class FPAnalyzer(BaseAgent[Any, list]):
     name = "fp_analyzer"
 
@@ -52,7 +92,7 @@ class FPAnalyzer(BaseAgent[Any, list]):
         else:
             text = input_data
 
-        return await extract_functional_points(
+        result = await extract_functional_points(
             text=text,
             content_parts=content_parts,
             project_description=self.config.get("project_description", ""),
@@ -62,3 +102,28 @@ class FPAnalyzer(BaseAgent[Any, list]):
             agent_id=agent_id,
             cancel_checker=self.config.get("cancel_checker"),
         )
+
+        # 027-e2e-fixes: FP 反幻觉 grounding 过滤（纯文本文档才可锚定）
+        try:
+            source_text = text or "".join(
+                str(p.get("text") or "") for p in (content_parts or []) if isinstance(p, dict)
+            )
+            if isinstance(result, list) and result:
+                kept, dropped = [], []
+                for _fp in result:
+                    _name = (_fp.get("name") if isinstance(_fp, dict)
+                             else getattr(_fp, "name", "")) or ""
+                    if grounded(str(_name), source_text or ""):
+                        kept.append(_fp)
+                    else:
+                        dropped.append({"name": str(_name)})
+                if dropped:
+                    logger.warning(
+                        "FP 反幻觉过滤: 保留 %d / 丢弃 %d %s",
+                        len(kept), len(dropped), [d["name"] for d in dropped],
+                    )
+                result = kept
+        except Exception:
+            logger.warning("grounding_filter 执行失败（跳过过滤）", exc_info=True)
+
+        return result

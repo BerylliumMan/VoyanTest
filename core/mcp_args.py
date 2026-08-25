@@ -163,3 +163,32 @@ def build_tool_status(result: dict) -> str:
         where = text.split("in")[-1].strip() or "?"
         return f"成功（断言通过，跨frame确认于 {where}）"
     return "成功"
+
+
+# 导航/观察类动作不计入「有效操作数」（026-gen-exec-fixes C3）
+NON_COUNTING_ACTIONS = frozenset({
+    "goto", "navigate", "snapshot", "screenshot",
+    "browser_navigate", "browser_snapshot", "browser_take_screenshot",
+})
+
+
+def act_count_key(action: dict) -> Optional[tuple]:
+    """成功操作的去重键 (action_name, selector, value)；导航/观察类返回 None 不计。"""
+    if not isinstance(action, dict):
+        return None
+    name = str(action.get("name") or action.get("action") or "?")
+    if name in NON_COUNTING_ACTIONS:
+        return None
+    args = action.get("args") or {}
+    return (
+        name,
+        str(args.get("selector") or ""),
+        str(args.get("value") or ""),
+    )
+
+
+def error_fingerprint(msg: str | None) -> str:
+    """error 归一化指纹：strip 后前 40 字符（027-e2e-fixes 同因熔断用）。"""
+    if not msg:
+        return ""
+    return str(msg).strip()[:40]

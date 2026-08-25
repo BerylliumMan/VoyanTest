@@ -537,6 +537,31 @@ def _sanitize_tc_title(title: str) -> str:
     return t or (title or "").strip()
 
 
+_DESC_VALUE_PAT = re.compile(r"^(输入|点击|选择|在|填写|勾选)|一个|某个|任意")
+
+
+_QUOTED_VALUE = re.compile(r"[「『\u300c]([^」』\u300d]+)[」』\u300d]")
+
+
+def sanitize_structured_value(step: dict) -> dict:
+    """027-e2e-fixes: value 错位净化。
+
+    1) value 含「」引号 → 提取引号内具体值（LLM 常写成 `框输入「X」`）
+    2) 否则超长(>40)或描述句式 → 清空
+    """
+    v = step.get("value")
+    if isinstance(v, str) and v.strip():
+        m = _QUOTED_VALUE.search(v)
+        if m:
+            step = dict(step)
+            step["value"] = m.group(1).strip()
+            return step
+        if len(v) > 40 or _DESC_VALUE_PAT.search(v):
+            step = dict(step)
+            step["value"] = ""
+    return step
+
+
 def _normalize_tc_item(item: dict) -> dict:
     """Normalize TC field names (handle Chinese, camelCase, snake_case)."""
     from app.gen.adapter import align_expected_to_steps
@@ -634,6 +659,8 @@ def _normalize_tc_item(item: dict) -> dict:
 
     # Prefer structured path when we have objects; else Instant strings
     if structured_in:
+        # 027-e2e-fixes: value 错位净化（LLM 把描述句当值输出）
+        structured_in = [sanitize_structured_value(s) for s in structured_in]
         while structured_in and not (
             structured_in[-1].get("action")
             or structured_in[-1].get("target_name")
