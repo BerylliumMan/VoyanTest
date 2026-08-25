@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.tz import now as tz_now
 from typing import Dict, List, Optional, Callable, Awaitable
 from sqlalchemy import select, text
@@ -3456,6 +3456,58 @@ class AgentManager:
         from app.database import AsyncSessionLocal
         from app.db_models import AgentRun
         async with AsyncSessionLocal() as db:
+            # ── 026-gen-exec-fixes: 过期 pending run TTL 清理 ──
+            try:
+                stale = (await db.execute(
+                    text(
+                        "SELECT id, goal FROM agent_runs "
+                        "WHERE status='pending' AND created_at < :cutoff "
+                        "ORDER BY id ASC LIMIT 50"
+                    ),
+                    {
+                        "cutoff": datetime.now(timezone.utc)
+                        - timedelta(minutes=pending_ttl_minutes())
+                    },
+                )).fetchall()
+                for _row in stale:
+                    if isinstance(_row.goal, dict):
+                        _goal = _row.goal
+                    else:
+                        try:
+                            _goal = json.loads(_row.goal or "{}")
+                        except Exception:
+                            _goal = {}
+                            logger.warning("TTL 清理: run=%s goal 解析失败", _row.id)
+                    await db.execute(
+                        text(
+                            "UPDATE agent_runs SET status='failed', "
+                            "error=:err WHERE id=:rid AND status='pending'"
+                        ),
+                        {
+                            "rid": _row.id,
+                            "err": f"等待客户端接单超时(TTL {pending_ttl_minutes()}min)",
+                        },
+                    )
+                    _bid = _goal.get("batch_id")
+                    logger.info("TTL 清理 run=%s goal_type=%s batch_id=%s", _row.id, type(_goal).__name__, _bid)
+                    if _bid:
+                        _bres = await db.execute(
+                            text("UPDATE run_batches SET failed=COALESCE(failed,0)+1, status="
+                                 "CASE WHEN status='running' THEN 'failed' ELSE status END "
+                                 "WHERE id=:bid"),
+                            {"bid": _bid},
+                        )
+                        logger.warning("batch %s 修正 rowcount=%s", _bid, _bres.rowcount)
+                    logger.warning(
+                        "Pending run #%s 超过 TTL %smin，已置 failed",
+                        _row.id, pending_ttl_minutes(),
+                    )
+                if stale:
+                    await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.warning("Pending TTL 清理失败（继续正常轮询）", exc_info=True)
+
             for agent_id in list(self.sessions.keys()):
                 # Do not claim another job while this agent still has a run in flight
                 if agent_id in self._agent_busy or self._run_lock_for(agent_id).locked():
@@ -3710,3 +3762,25 @@ class AgentManager:
 
 # Global singleton
 agent_manager = AgentManager()
+
+
+# ── 026-gen-exec-fixes: pending run TTL ─────────────────────────────────────
+
+def pending_ttl_minutes() -> int:
+    import os
+    try:
+        return max(1, int(os.getenv("PENDING_RUN_TTL_MIN", "30")))
+    except (TypeError, ValueError):
+        return 30
+
+
+def is_pending_expired(created_at, now=None) -> bool:
+    """pending run 是否超过 TTL；naive datetime 按 UTC 处理。"""
+    if created_at is None:
+        return False
+    from datetime import datetime, timezone
+    now = now or datetime.now(timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    ttl = timedelta(minutes=pending_ttl_minutes())
+    return (now - created_at) > ttl

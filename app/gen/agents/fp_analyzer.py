@@ -2,10 +2,13 @@
 # FP Analyzer agent — extracts test items from text or multimodal parts.
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.gen.agents.base import BaseAgent
 from app.gen.feature_extractor import extract_functional_points
+
+logger = logging.getLogger(__name__)
 
 
 class FPAnalyzer(BaseAgent[Any, list]):
@@ -32,6 +35,14 @@ class FPAnalyzer(BaseAgent[Any, list]):
             fp_prompt = await resolve_prompt_for_agent(
                 db, agent_type, fp_key, agent_id=agent_id,
             )
+        # 026-gen-exec-fixes: 过短提示词回退硬编码常量（保证 LLM 拿到完整指令）
+        MIN_PROMPT_CHARS = 80
+        if fp_prompt is not None and len(fp_prompt.strip()) < MIN_PROMPT_CHARS:
+            logger.warning(
+                "fp_prompt 过短(%d chars, key=%s)，回退硬编码 FP_EXTRACT_PROMPT",
+                len(fp_prompt.strip()), fp_key,
+            )
+            fp_prompt = None
 
         text = None
         content_parts = None
