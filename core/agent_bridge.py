@@ -303,6 +303,7 @@ class AgentBridge:
         llm_client = await create_openai_client()
         consecutive_failures = 0
         retries_used = 0
+        successful_act_keys: set = set()
         successful_acts = 0
         assertion_passed = False
 
@@ -517,8 +518,11 @@ class AgentBridge:
             status_text = build_tool_status(result)
             context_messages.append({"role": "tool", "content": status_text})
 
-            if result.get("success") and action_name not in ("goto", "snapshot", "screenshot"):
-                successful_acts += 1
+            from core.mcp_args import act_count_key
+            _act_key = act_count_key(action)
+            if result.get("success") and _act_key is not None and _act_key not in successful_act_keys:
+                successful_act_keys.add(_act_key)
+            successful_acts = len(successful_act_keys)
             if "断言通过" in status_text:
                 assertion_passed = True
 

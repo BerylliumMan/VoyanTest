@@ -202,7 +202,7 @@ DEFAULT_AGENTS: list[dict] = [
             "tc_generate"
         ],
         "llm_config": {},
-        "is_active": 1,
+        "is_active": 0,
         "tools": [],
         "goal": "",
         "constraints": [],
@@ -219,7 +219,7 @@ DEFAULT_AGENTS: list[dict] = [
             "tc_generate_ui"
         ],
         "llm_config": {},
-        "is_active": 1,
+        "is_active": 0,
         "tools": [],
         "goal": "",
         "constraints": [],

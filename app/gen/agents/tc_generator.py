@@ -39,6 +39,14 @@ class TCGenerator(BaseAgent[dict, list[dict]]):
             tc_prompt = await resolve_prompt_for_agent(
                 db, agent_type, tc_key, agent_id=agent_id,
             )
+        # 026-gen-exec-fixes: 过短提示词回退硬编码常量（保证 LLM 拿到完整指令）
+        MIN_PROMPT_CHARS = 80
+        if tc_prompt is not None and len(tc_prompt.strip()) < MIN_PROMPT_CHARS:
+            logger.warning(
+                "tc_prompt 过短(%d chars, key=%s)，回退硬编码 TC_GENERATE_PROMPT",
+                len(tc_prompt.strip()), tc_key,
+            )
+            tc_prompt = None
         from app.gen.prompts import min_tcs_per_item as _min_tcs
         min_tcs = self.config.get("min_tcs_per_item")
         if min_tcs is None:

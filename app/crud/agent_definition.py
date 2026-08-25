@@ -67,7 +67,7 @@ async def create_agent_definition(
 
 
 # generation 允许多个同时启用（功能用例 / UI 自动化）；execution/recording 仍互斥
-_EXCLUSIVE_ACTIVE_TYPES = frozenset({"execution", "recording"})
+_EXCLUSIVE_ACTIVE_TYPES = frozenset({"execution", "recording", "generation"})
 
 
 async def update_agent_definition(

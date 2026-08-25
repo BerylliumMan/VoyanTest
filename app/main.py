@@ -529,6 +529,30 @@ async def _run_startup_init():
             # 补种缺失的提示词 / Agent（幂等；首次 setup 已种过则跳过）
             from app.seed_defaults import seed_defaults
             await seed_defaults(_init_db)
+
+            # 026-gen-exec-fixes: generation 多活跃幂等清理（保 min(id)）
+            from sqlalchemy import func as _func
+            _gen_rows = (await _init_db.execute(
+                select(db_models.AgentDefinition.id)
+                .where(db_models.AgentDefinition.agent_type == "generation",
+                       db_models.AgentDefinition.is_active == 1)
+                .order_by(db_models.AgentDefinition.id)
+            )).scalars().all()
+            if len(_gen_rows) > 1:
+                keep = _gen_rows[0]
+                from sqlalchemy import update as _sa_update
+                await _init_db.execute(
+                    _sa_update(db_models.AgentDefinition)
+                    .where(db_models.AgentDefinition.agent_type == "generation",
+                           db_models.AgentDefinition.is_active == 1,
+                           db_models.AgentDefinition.id != keep)
+                    .values(is_active=0)
+                )
+                logger.warning(
+                    "generation 多活跃已清理: 保留 #%s, 停用 %s",
+                    keep, [_gid for _gid in _gen_rows if _gid != keep],
+                )
+
             await _init_db.commit()
         except Exception:
             await _init_db.rollback()
