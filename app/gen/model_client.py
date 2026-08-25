@@ -101,6 +101,17 @@ async def _load_ai_config(
     return config
 
 
+_LLM_RETRY_ATTEMPTS = 3
+_LLM_RETRY_BASE_DELAY = 2.0
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """5xx / 网络传输错误 / 超时可重试；4xx 参数类错误不重试。"""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
 async def call_model(
     messages: list,
     temperature: float | None = None,
@@ -158,13 +169,29 @@ async def call_model(
                             continue
         return _strip_br(''.join(full_content))
     else:
-        async with httpx.AsyncClient(timeout=600) as client:
-            resp = await client.post(api_url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            choice = data["choices"][0]
-            finish_reason = choice.get("finish_reason", "unknown")
-            raw = choice["message"]["content"]
-            if finish_reason == "length":
-                logger.warning("Model output truncated (finish_reason=length), content length: %d chars", len(raw))
-            return _strip_br(raw)
+        # 027-e2e-fixes P5: 5xx/网络错误退避重试，4xx 直接抛
+        last_exc: Exception | None = None
+        for attempt in range(1, _LLM_RETRY_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=600) as client:
+                    resp = await client.post(api_url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    data = resp.json()
+                choice = data["choices"][0]
+                finish_reason = choice.get("finish_reason", "unknown")
+                raw = choice["message"]["content"]
+                if finish_reason == "length":
+                    logger.warning("Model output truncated (finish_reason=length), content length: %d chars", len(raw))
+                return _strip_br(raw)
+            except Exception as exc:
+                if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
+                    raise
+                last_exc = exc
+                delay = _LLM_RETRY_BASE_DELAY * attempt
+                logger.warning(
+                    "call_model 第 %d/%d 次失败(%s)，%.0fs 后重试",
+                    attempt, _LLM_RETRY_ATTEMPTS,
+                    type(exc).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # pragma: no cover
