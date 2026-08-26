@@ -22,33 +22,50 @@ def bigrams(s: str) -> set:
         {clean} if clean else set())
 
 
-def grounded(name: str, source_text: str) -> bool:
-    """name 的 2-gram 在原文中的命中率 ≥50% 视为有锚定（防通用尾词误命中）。"""
-    if not name or not source_text:
+def trigrams(s: str) -> set:
+    clean = _strip_ignorable(s)
+    if len(clean) < 3:
+        return bigrams(clean) or ({clean} if clean else set())
+    return {clean[i:i + 3] for i in range(len(clean) - 2)}
+
+
+def grounded(name: str, source_text: str, desc: str | None = None) -> bool:
+    """027 迭代：name+desc 联合锚定，任一 3-gram 命中原文即视为有依据。
+
+    v1 的「2-gram 命中率≥50%」会误杀语义改写的真实功能
+    （实测『使用正确账号登录』命中率仅 29% 被杀）；desc 通常更贴原文，
+    联合后既救回改写项，3-gram 又比 2-gram 更能拒绝纯通用词幻觉。
+    """
+    text = _strip_ignorable(f"{name or ''} {desc or ''}")
+    if not text or not source_text:
         return False
-    grams = bigrams(name)
-    if not grams:
-        return False
-    hits = sum(1 for g in grams if g in source_text)
-    return hits * 2 >= len(grams)
+    grams = trigrams(text)
+    return any(g in source_text for g in grams)
 
 
 def grounding_filter(fps: list, source_text: str) -> tuple:
-    """026→027 反幻觉：name 无原文锚定的 FP 丢弃。空 source 全保留（多模态场景）。"""
+    """027 反幻觉：name+desc 无任何 3-gram 锚定的 FP 丢弃。空 source 全保留。"""
     if not (source_text or "").strip():
         return list(fps or []), []
     kept, dropped = [], []
     for fp in fps or []:
-        if grounded(str(fp.get("name") or ""), source_text):
+        if isinstance(fp, dict):
+            name = str(fp.get("name") or "")
+            desc = str(fp.get("desc") or "")
+        else:
+            name = str(getattr(fp, "name", "") or "")
+            desc = str(getattr(fp, "desc", "") or "")
+        if grounded(name, source_text, desc):
             kept.append(fp)
         else:
-            dropped.append(fp)
+            dropped.append({"name": name})
     if dropped:
         logger.warning(
             "grounding_filter 丢弃 %d 个无锚定 FP: %s",
-            len(dropped), [f.get("name") for f in dropped],
+            len(dropped), [f["name"] for f in dropped],
         )
     return kept, dropped
+
 
 
 class FPAnalyzer(BaseAgent[Any, list]):
