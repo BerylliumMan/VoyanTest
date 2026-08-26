@@ -697,14 +697,18 @@ def _normalize_tc_item(item: dict) -> dict:
             parts = _expand_compound_ui_step(step)
             if not parts:
                 continue
+            # 027-e2e-fixes: string 步骤解析结果同样过 value 净化
+            def _parsed_sanitized(txt):
+                ps = parse_instant_to_structured(txt)
+                return sanitize_structured_value(ps) if ps else None
             if len(parts) == 1:
                 steps.append(parts[0])
-                structured_out.append(parse_instant_to_structured(parts[0]))
+                structured_out.append(_parsed_sanitized(parts[0]))
                 aligned_expected.append(exp)
             else:
                 for i, part in enumerate(parts):
                     steps.append(part)
-                    structured_out.append(parse_instant_to_structured(part))
+                    structured_out.append(_parsed_sanitized(part))
                     aligned_expected.append(exp if i == len(parts) - 1 else "")
         normalized["test_steps"] = _to_numbered_text(steps)
         normalized["expected_result"] = _to_numbered_expected(aligned_expected)
