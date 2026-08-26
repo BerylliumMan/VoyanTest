@@ -281,10 +281,34 @@ class AgentBridge:
         logger.info("AgentRun #%d completed in %d turns", run_id, turns)
 
     async def _fail(self, run_id: int, error: str) -> None:
-        """标记 run 为 failed。"""
+        """标记 run 为 failed；并同步预创建的非终态 TestRun。"""
         await crud_agent_run.update_agent_run_status(
             self.db, run_id, "failed", error=error,
         )
+        # 027: 批量入口会预创建 TestRun(running/pending) 占位，
+        # 失败时若不同步置败，报告页将永远显示「运行中/待执行」。
+        try:
+            from sqlalchemy import text as _text
+            row = (await self.db.execute(
+                _text("SELECT case_id, (goal->>'batch_id')::int AS bid "
+                      "FROM agent_runs WHERE id=:r"),
+                {"r": run_id},
+            )).first()
+            if row and row.case_id and row.bid:
+                res = await self.db.execute(
+                    _text("UPDATE test_runs SET status='failed' "
+                          "WHERE case_id=:c AND batch_id=:b "
+                          "AND status IN ('running','pending')"),
+                    {"c": row.case_id, "b": row.bid},
+                )
+                if res.rowcount:
+                    logger.warning(
+                        "已同步置败预创建 TestRun (case=%s batch=%s ×%d)",
+                        row.case_id, row.bid, res.rowcount,
+                    )
+                await self.db.commit()
+        except Exception:
+            logger.warning("同步预创建 TestRun 失败", exc_info=True)
         logger.warning("AgentRun #%d failed: %s", run_id, error)
 
     # ── OTA 主循环 ─────────────────────────────────────────────────────────
