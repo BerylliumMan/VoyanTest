@@ -217,8 +217,11 @@ class AgentBridge:
                 msg = f"{lbl} {vals[0]}" if vals else lbl
                 if tc.error_message:
                     msg += f" | {tc.error_message}"
-                ss_path = self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_observe") \
-                    or self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_act")
+                # 027: 仅失败步骤保留截图证据，通过步骤不留图
+                ss_path = None
+                if tc.success != 1:
+                    ss_path = self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_observe") \
+                        or self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_act")
                 logs.append({
                     "step_id": None,
                     "level": level,
