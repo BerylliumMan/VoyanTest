@@ -303,11 +303,16 @@ class AgentBridge:
                     {"c": row.case_id, "b": row.bid},
                 )
                 tr_ids = [r[0] for r in res.fetchall()]
+                # 失败现场截图：取最后一张（最接近终止时刻）
+                last_shot = None
+                if self._screenshot_paths:
+                    last_key = sorted(self._screenshot_paths.keys())[-1]
+                    last_shot = self._screenshot_paths[last_key]
                 for tr_id in tr_ids:
                     await self.db.execute(
-                        _text("INSERT INTO run_logs (run_id, level, message, timestamp) "
-                              "VALUES (:rid, 'error', :msg, now())"),
-                        {"rid": tr_id, "msg": f"执行失败: {error[:180]}"},
+                        _text("INSERT INTO run_logs (run_id, level, message, screenshot_path, timestamp) "
+                              "VALUES (:rid, 'error', :msg, :shot, now())"),
+                        {"rid": tr_id, "msg": f"执行失败: {error[:180]}", "shot": last_shot},
                     )
                 if tr_ids:
                     logger.warning(
