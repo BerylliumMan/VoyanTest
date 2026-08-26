@@ -445,24 +445,25 @@ class AgentBridge:
                 return
 
             if action.get("_error"):
-                # Agent reported error — 同因熔断（027-e2e-fixes）
+                # Agent reported error — 双重熔断（027-e2e-fixes 迭代）：
+                #   同因(指纹相同)第 2 次 / 连续任意 error 第 3 次 → 终止
                 _err_msg = str(action.get("_error_message", ""))
                 from core.mcp_args import error_fingerprint
                 _fp = error_fingerprint(_err_msg)
-                if _fp and _fp == _last_error_fp:
-                    _consec_err_n += 1
-                else:
-                    _last_error_fp = _fp
-                    _consec_err_n = 1
-                if _consec_err_n >= 3:
+                same_as_last = bool(_fp) and _fp == _last_error_fp
+                _consec_err_n += 1
+                if (same_as_last and _consec_err_n >= 2) or _consec_err_n >= 3:
+                    reason = ("连续同因错误" if same_as_last else "连续错误")
                     await self._fail(
                         run.id,
-                        f"连续同因错误(×{_consec_err_n}): {_err_msg[:120]}",
+                        f"{reason}(×{_consec_err_n}): {_err_msg[:120]}",
                     )
                     return
+                _last_error_fp = _fp
                 logger.warning(
-                    "Agent reported error at turn %d (%d/%d): %s",
-                    turn, _consec_err_n, 3, _err_msg[:100],
+                    "Agent reported error at turn %d (%d/3%s): %s",
+                    turn, _consec_err_n,
+                    " 同因" if same_as_last else "", _err_msg[:100],
                 )
                 continue
 
@@ -542,6 +543,10 @@ class AgentBridge:
             if result.get("success") and _act_key is not None and _act_key not in successful_act_keys:
                 successful_act_keys.add(_act_key)
             successful_acts = len(successful_act_keys)
+            # 成功操作打断 error 连击（027 熔断重置点）
+            if result.get("success"):
+                _consec_err_n = 0
+                _last_error_fp = None
             if "断言通过" in status_text:
                 assertion_passed = True
 
