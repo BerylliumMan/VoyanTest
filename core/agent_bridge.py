@@ -298,13 +298,21 @@ class AgentBridge:
                 res = await self.db.execute(
                     _text("UPDATE test_runs SET status='failed' "
                           "WHERE case_id=:c AND batch_id=:b "
-                          "AND status IN ('running','pending')"),
+                          "AND status IN ('running','pending') "
+                          "RETURNING id"),
                     {"c": row.case_id, "b": row.bid},
                 )
-                if res.rowcount:
+                tr_ids = [r[0] for r in res.fetchall()]
+                for tr_id in tr_ids:
+                    await self.db.execute(
+                        _text("INSERT INTO run_logs (run_id, level, message, timestamp) "
+                              "VALUES (:rid, 'error', :msg, now())"),
+                        {"rid": tr_id, "msg": f"执行失败: {error[:180]}"},
+                    )
+                if tr_ids:
                     logger.warning(
-                        "已同步置败预创建 TestRun (case=%s batch=%s ×%d)",
-                        row.case_id, row.bid, res.rowcount,
+                        "已同步置败预创建 TestRun 并写入失败日志 (case=%s batch=%s ×%d)",
+                        row.case_id, row.bid, len(tr_ids),
                     )
                 await self.db.commit()
         except Exception:
