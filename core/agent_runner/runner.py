@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 
 from core.agent_runner.context import AgentContext
+from app.crud import agent_run as crud_agent_run
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,8 @@ class AgentRunner:
         tool_timeout_ms: int = 30000,
         system_prompt: str | None = None,
         base_url: str | None = None,
+        db=None,
+        run_id: int | None = None,
     ):
         """初始化 AgentRunner。
 
@@ -215,6 +218,8 @@ class AgentRunner:
             tool_timeout_ms: 单次工具调用超时（毫秒）
             system_prompt: 自定义系统提示词（默认使用 OTA_SYSTEM_PROMPT）
             base_url: 目标应用的基础 URL（用于导航步骤）
+            db: 可选的 AsyncSession，与 run_id 一起启用每轮 OTA 消息持久化
+            run_id: 关联的 agent_runs 记录 ID（见 db）
         """
         self._mcp_manager = mcp_manager
         self.goal = goal
@@ -223,6 +228,9 @@ class AgentRunner:
         self.max_turns = max_turns
         self.tool_timeout_ms = tool_timeout_ms
         self.base_url = base_url
+
+        self._db = db
+        self._run_id = run_id
 
         self.tool_registry = ToolRegistry(mcp_manager)
         self.context = AgentContext(max_turns=context_max_turns)
@@ -486,6 +494,9 @@ class AgentRunner:
             from core.mcp_args import build_tool_status
             self.context.add_turn("tool", build_tool_status(result))
 
+            # 消息持久化（db + run_id 就绪时写 agent_messages / agent_tool_calls）
+            await self._record_turn(turn, observation.get("snapshot", ""), action, result)
+
             # 检查是否通过 act 的 done 标记完成了目标
             if result.get("done"):
                 summary = result.get("summary", "")
@@ -530,6 +541,39 @@ class AgentRunner:
         )
 
     # ── 辅助方法 ───────────────────────────────────────────────────────────
+
+    async def _record_turn(
+        self,
+        turn: int,
+        snapshot: str,
+        action: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """将一轮 OTA 记录到 agent_messages / agent_tool_calls。
+
+        仅当构造时传入了 db + run_id 才落库（AgentRunner 被编排器调用时传入，
+        纯独立使用时静默跳过）。格式与 AgentBridge._record_turn 对齐：
+        user 快照预览 + assistant 决策 + tool_call 结果。
+        """
+        if self._db is None or self._run_id is None:
+            return
+        snapshot_str = str(snapshot)
+        snapshot_preview = snapshot_str[:2000] + ("..." if len(snapshot_str) > 2000 else "")
+        await crud_agent_run.create_message(
+            self._db, self._run_id, turn, "user",
+            f"[Snapshot] {snapshot_preview}",
+        )
+        await crud_agent_run.create_message(
+            self._db, self._run_id, turn, "assistant",
+            str(action),
+        )
+        await crud_agent_run.create_tool_call(
+            self._db, self._run_id, turn,
+            action.get("name", action.get("action", "unknown")),
+            action.get("args", {}),
+            result.get("success", False),
+            result.get("error", ""),
+        )
 
     def _make_result(
         self,
