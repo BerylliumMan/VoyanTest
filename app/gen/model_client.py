@@ -148,26 +148,38 @@ async def call_model(
 
     if stream_callback:
         payload["stream"] = True
-        full_content = []
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream("POST", api_url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    if line.startswith('data: '):
-                        data_str = line[6:]
-                        if data_str == '[DONE]':
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            chunk = data.get('choices', [{}])[0].get('delta', {}).get('content', '')
-                            if chunk:
-                                full_content.append(chunk)
-                                stream_callback(chunk)
-                        except json.JSONDecodeError:
-                            continue
-        return _strip_br(''.join(full_content))
+        # 027-e2e-fixes P5 扩展：stream 建连阶段 5xx/网络错误同样退避重试
+        for attempt in range(1, _LLM_RETRY_ATTEMPTS + 1):
+            full_content: list[str] = []
+            try:
+                async with httpx.AsyncClient(timeout=600) as client:
+                    async with client.stream("POST", api_url, json=payload, headers=headers) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            if line.startswith('data: '):
+                                data_str = line[6:]
+                                if data_str == '[DONE]':
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    chunk = data.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                                    if chunk:
+                                        full_content.append(chunk)
+                                        stream_callback(chunk)
+                                except json.JSONDecodeError:
+                                    continue
+                return _strip_br(''.join(full_content))
+            except Exception as exc:
+                if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "call_model[stream] 第 %d/%d 次失败(%s)，%ds 后重试",
+                    attempt, _LLM_RETRY_ATTEMPTS, type(exc).__name__, 2 * attempt,
+                )
+                await asyncio.sleep(2 * attempt)
+        raise RuntimeError("unreachable: stream retry loop exhausted")
     else:
         # 027-e2e-fixes P5: 5xx/网络错误退避重试，4xx 直接抛
         last_exc: Exception | None = None

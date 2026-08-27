@@ -115,14 +115,6 @@ async def run_test_case_via_agent(
     if isinstance(model, str) and not model.strip():
         model = None
 
-    runner = AgentRunner(
-        mcp_manager=mcp_manager,
-        goal=goal_text,
-        llm_client=llm_client,
-        model=model,
-        base_url=base_url,
-    )
-
     from app.crud.agent_run import create_agent_run, update_agent_run_status
     from app.models.schemas import AgentRunCreate
 
@@ -132,6 +124,16 @@ async def run_test_case_via_agent(
         goal={"goal": goal_text, "case_id": case_id},
     ))
     await update_agent_run_status(db, run.id, "running")
+
+    runner = AgentRunner(
+        mcp_manager=mcp_manager,
+        goal=goal_text,
+        llm_client=llm_client,
+        model=model,
+        base_url=base_url,
+        db=db,
+        run_id=run.id,
+    )
 
     try:
         ota_result = await runner.run()
