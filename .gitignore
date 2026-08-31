@@ -166,3 +166,9 @@ agent-build-windows*
 chromium/
 my-session.json
 data/gen_uploads/
+
+# 敏感文件——禁止提交（2026-08-31 安全事件后强制）
+voyantest.json
+data/
+.env
+config.json
