@@ -21,3 +21,5 @@ tests
 # 若 COPY app/ 带上旧 static，会盖掉镜像里正确的前端（设置/AI Agent 菜单消失）。
 app/static
 app/static/**
+voyantest.json
+data/
