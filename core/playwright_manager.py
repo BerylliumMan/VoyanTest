@@ -210,7 +210,7 @@ class PlaywrightMCPManager:
 
         args = [
             '-y',
-            '@playwright/mcp@latest',
+            '@playwright/mcp',
             browser_arg,
             '--isolated',
             *_executable_args,

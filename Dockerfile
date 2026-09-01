@@ -52,6 +52,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m playwright install chromium && \
     python -m playwright install-deps chromium
 
+# Install @playwright/mcp globally (server executes via npx; avoids runtime npm fetch on target machines)
+RUN npm install -g @playwright/mcp
+
 # Copy backend source code
 # NOTE: app/static is in .dockerignore — frontend must come from frontend-builder only.
 # Copying a stale repo app/static here would wipe menus like 执行后端 / AI Agent.
