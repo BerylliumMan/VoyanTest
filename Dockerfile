@@ -52,8 +52,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m playwright install chromium && \
     python -m playwright install-deps chromium
 
-# Install @playwright/mcp globally (server executes via npx; avoids runtime npm fetch on target machines)
-RUN npm install -g @playwright/mcp
+# Server executes @playwright/mcp via npx — final stage is python:3.11-slim with
+# no node, so install Node + the MCP package at build time (offline-capable on target).
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g @playwright/mcp
 
 # Copy backend source code
 # NOTE: app/static is in .dockerignore — frontend must come from frontend-builder only.
