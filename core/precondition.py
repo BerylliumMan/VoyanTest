@@ -69,6 +69,23 @@ Rules:
 """
 
 
+def _response_text(message: Any) -> str:
+    """读取兼容 Qwen3 思考模式的最终文本响应。
+
+    部分 OpenAI-compatible 服务在思考模式下将最终答案放在
+    ``reasoning_content``/``reasoning``/``thinking``，而 ``content`` 为空；正常情况下仍优先使用
+    ``content``，避免把内部推理误当作动作。
+    """
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        reasoning = getattr(message, field, None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+    return str(content or "").strip()
+
+
 def split_case_description(
     description: str | None,
 ) -> tuple[Optional[str], Optional[str]]:
@@ -162,7 +179,13 @@ async def verify_precondition_met(
                 temperature=temperature,
                 max_tokens=256,
             )
-            content = (resp.choices[0].message.content or "").strip()
+            message = resp.choices[0].message
+            content = _response_text(message)
+            logger.debug(
+                "前置条件验证 LLM 响应: content_len=%d reasoning_len=%d",
+                len(getattr(message, "content", "") or ""),
+                len(getattr(message, "reasoning_content", "") or ""),
+            )
             return _parse_met_json(content)
         except Exception as exc:
             last_err = str(exc)
@@ -216,7 +239,13 @@ async def decide_precondition_action(
                 temperature=temperature,
                 max_tokens=1024,
             )
-            content = (resp.choices[0].message.content or "").strip()
+            message = resp.choices[0].message
+            content = _response_text(message)
+            logger.debug(
+                "前置条件 LLM 响应: content_len=%d reasoning_len=%d",
+                len(getattr(message, "content", "") or ""),
+                len(getattr(message, "reasoning_content", "") or ""),
+            )
             return _parse_goal_action(content)
         except Exception as exc:
             last_err = str(exc)
