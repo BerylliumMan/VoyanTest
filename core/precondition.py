@@ -76,14 +76,31 @@ def _response_text(message: Any) -> str:
     ``reasoning_content``/``reasoning``/``thinking``，而 ``content`` 为空；正常情况下仍优先使用
     ``content``，避免把内部推理误当作动作。
     """
-    content = getattr(message, "content", None)
-    if isinstance(content, str) and content.strip():
-        return content.strip()
-    for field in ("reasoning_content", "reasoning", "thinking"):
-        reasoning = getattr(message, field, None)
-        if isinstance(reasoning, str) and reasoning.strip():
-            return reasoning.strip()
-    return str(content or "").strip()
+    def flatten(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return "\n".join(part for item in value if (part := flatten(item)))
+        if isinstance(value, dict):
+            for key in ("text", "content", "value"):
+                part = flatten(value.get(key))
+                if part:
+                    return part
+        return ""
+
+    fields = ("content", "reasoning_content", "reasoning", "thinking", "text")
+    for field in fields:
+        value = message.get(field) if isinstance(message, dict) else getattr(message, field, None)
+        text = flatten(value)
+        if text:
+            return text
+    extra = getattr(message, "model_extra", None)
+    if isinstance(extra, dict):
+        for field in fields:
+            text = flatten(extra.get(field))
+            if text:
+                return text
+    return ""
 
 
 def split_case_description(
@@ -130,7 +147,21 @@ def _parse_met_json(raw: str) -> tuple[bool, str]:
     text = (raw or "").strip()
     m = _JSON_RE.search(text)
     blob = m.group(0) if m else text
-    data = json.loads(blob)
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        met_match = re.search(r'["\']?met["\']?\s*:\s*(true|false)', text, re.I)
+        if not met_match:
+            raise
+        reason_match = re.search(
+            r'["\']?reason["\']?\s*:\s*["\']([^"\']*)',
+            text,
+        )
+        return (
+            met_match.group(1).lower() == "true",
+            (reason_match.group(1).strip() if reason_match else "").strip()
+            or ("met" if met_match.group(1).lower() == "true" else "not met"),
+        )
     if not isinstance(data, dict):
         raise ValueError("precondition check not a JSON object")
     met = bool(data.get("met"))
@@ -178,6 +209,7 @@ async def verify_precondition_met(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=256,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             message = resp.choices[0].message
             content = _response_text(message)
@@ -238,6 +270,11 @@ async def decide_precondition_action(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=1024,
+                extra_body={
+                    "chat_template_kwargs": {
+                        "enable_thinking": attempt > 0 and last_err == "LLM did not return JSON: "
+                    }
+                },
             )
             message = resp.choices[0].message
             content = _response_text(message)
