@@ -166,6 +166,7 @@ async def _extract_fps_once(
             ],
             agent_type=agent_type,
             agent_id=agent_id,
+            enable_thinking=True,
         )
 
     # When continuing, prepend instruction as text prefix for string payloads,
@@ -446,6 +447,12 @@ async def _generate_batch_once(
     if inv:
         user_hint = f"{user_hint}\n\n{inv}\n"
 
+    if not _has_images(content_parts):
+        user_hint = (
+            f"{user_hint}\n【证据说明】以上测试项详情是上一阶段从需求正文提取的权威素材；"
+            "当前批次没有截图时，必须基于这些详情生成业务主流程，不要因无截图返回空数组。"
+        )
+
     # Attach screenshots for UI + flow so steps/modules stay grounded to visible UI.
     user_payload: Any = user_hint
     multimodal = False
@@ -475,13 +482,21 @@ async def _generate_batch_once(
     content = ""
     for attempt in range(MAX_RETRIES):
         try:
+            system_prompt = desc_prefix + prompt
+            if attempt:
+                system_prompt += (
+                    "\n\nRETRY RULE: The previous response was an empty array. "
+                    "This is invalid. Generate at least one test case for every "
+                    "provided functional point; output a non-empty JSON array only."
+                )
             content = await call_model(
                 [
-                    {"role": "system", "content": desc_prefix + prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_payload},
                 ],
                 agent_type=agent_type,
                 agent_id=agent_id,
+                enable_thinking=True,
             )
             tcs = _parse_tcs_from_text(content, start_index=tc_counter)
             if tcs:
@@ -578,11 +593,11 @@ async def generate_test_cases_for_fps(
             user_hint = (
                 f"本批测试项共 {len(batch)} 个：\n"
                 + _fp_descriptions(batch)
-                + f"\n请为以上测试项生成可执行 UI 用例（每项通常 0～{max(2, per_item)} 条，"
-                f"截图不足以支撑则跳过该项）；"
+                + f"\n请为以上每个测试项至少生成 1 条可执行 UI 用例（每项最多 {max(2, per_item)} 条）；"
+                f"若没有明确控件文案，步骤使用自然语言目标，不要编造按钮/菜单名称；"
                 f"**禁止**机械凑「正常/异常/边界」；文档/截图未写明的场景不要编造。"
                 f"每条必须带 fp_name，且 module 与测试项「模块」字段逐字一致。"
-                f"控件文案必须在附图中可见。"
+                + ("控件文案必须在附图中可见。" if _has_images(content_parts) else "")
             )
         tcs = await _generate_batch_once(
             batch=batch,

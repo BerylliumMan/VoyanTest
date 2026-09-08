@@ -12,6 +12,26 @@ def _strip_br(value: str) -> str:
     return re.sub(r"<\s*br\s*/?\s*>", " ", value, flags=re.IGNORECASE)
 
 
+def _extract_message_text(message: dict) -> str:
+    """提取 Qwen3 思考响应中的最终文本，content 为空时回退推理字段。"""
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(content, list):
+        parts = [
+            item.get("text", "").strip()
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        if any(parts):
+            return "\n".join(part for part in parts if part)
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        value = message.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 # AI 配置缓存：避免每次调用都查询 DB（特别是不跨事件循环兼容的场景）
 _ai_config_cache: dict | None = None
 _ai_config_lock = asyncio.Lock()
@@ -118,6 +138,7 @@ async def call_model(
     stream_callback=None,
     agent_type: str | None = None,
     agent_id: int | None = None,
+    enable_thinking: bool | None = None,
 ) -> str:
     """Call the AI model using uitest-work's AI config / AgentDefinition overrides."""
     config = await _load_ai_config(agent_type=agent_type, agent_id=agent_id)
@@ -145,6 +166,8 @@ async def call_model(
         "temperature": temperature,
         "max_tokens": min(config.get('max_context_tokens', 131072) // 3, 16384),
     }
+    if enable_thinking is not None:
+        payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
     if stream_callback:
         payload["stream"] = True
@@ -191,7 +214,7 @@ async def call_model(
                     data = resp.json()
                 choice = data["choices"][0]
                 finish_reason = choice.get("finish_reason", "unknown")
-                raw = choice["message"]["content"]
+                raw = _extract_message_text(choice["message"])
                 if finish_reason == "length":
                     logger.warning("Model output truncated (finish_reason=length), content length: %d chars", len(raw))
                 return _strip_br(raw)
