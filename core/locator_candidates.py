@@ -132,8 +132,12 @@ def validate_candidate_ref(
     decision_version: str | None,
     candidates: tuple[LocatorCandidate, ...],
 ) -> LocatorValidation:
-    """Reject invented refs and decisions bound to an old snapshot."""
-    if decision_version != snapshot_version:
+    """Reject invented refs and decisions bound to an old snapshot.
+
+    A missing decision version carries no staleness evidence (the model
+    may drop the field), so only an explicit version mismatch is stale.
+    """
+    if decision_version is not None and decision_version != snapshot_version:
         return LocatorValidation(False, "stale_ref")
     if not ref:
         return LocatorValidation(False, "no_candidate")

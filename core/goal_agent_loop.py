@@ -16,10 +16,20 @@ from pydantic import BaseModel, Field
 
 from core.locator_candidates import (
     LocatorCandidate,
+    is_snapshot_ref,
     serialize_candidates,
     snapshot_has_visible_overlay,
     validate_candidate_ref,
 )
+
+
+def selector_needs_candidate_check(selector: str | None) -> bool:
+    """Only snapshot refs are checked against the candidate set.
+
+    CSS/XPath selectors cannot be verified against refs and pass through;
+    hallucinated refs are still rejected by validate_candidate_ref.
+    """
+    return is_snapshot_ref(selector)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +65,8 @@ Schema:
   "thinking": "brief reasoning",
   "action": "click|fill|goto|wait|select|press_key|hover|evaluate|screenshot",
   "selector": "ref or css or empty",
+  "candidate_ref": "copy the chosen ref from CANDIDATE ELEMENTS verbatim, or empty",
+  "snapshot_version": "copy CURRENT SNAPSHOT VERSION verbatim (required when selector is a ref)",
   "value": "text/url/js/key or empty",
   "stable_hint": "durable locator hint e.g. placeholder=请选择单位 or role=button name=登录",
   "checklist_index": 3,
@@ -689,7 +701,7 @@ async def decide_next_goal_action(
             )
             content = _extract_goal_message_text(resp.choices[0].message)
             decision = _parse_goal_action(content)
-            if candidates:
+            if candidates and selector_needs_candidate_check(decision.selector):
                 validation = validate_candidate_ref(
                     decision.selector,
                     snapshot_version=snapshot_version or "",
@@ -697,8 +709,10 @@ async def decide_next_goal_action(
                     candidates=tuple(candidates),
                 )
                 if not validation.valid:
+                    valid_refs = ",".join(c.ref for c in candidates[:20])
                     raise ValueError(
-                        f"invalid locator decision: {validation.failure_kind}"
+                        f"invalid locator decision: {validation.failure_kind}. "
+                        f"Valid refs: {valid_refs or '(none)'}"
                     )
             return decision
         except Exception as exc:
