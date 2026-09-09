@@ -455,6 +455,18 @@ class AgentBridge:
             # 保存观察截图
             self._save_screenshot(obs.get("screenshot_b64"), f"turn_{turn:02d}_observe")
 
+            # 关闭消息步骤：快照有可见关闭候选时，必须先真实点击
+            from core.goal_agent_loop import is_close_messages_checklist_step
+            from core.step_intent import close_control_candidates
+            _has_close_step = any(
+                is_close_messages_checklist_step(s) for s in (case_steps or [])
+            )
+            _close_refs = [
+                c.get("ref")
+                for c in close_control_candidates(snapshot or "")
+                if (c.get("ref") or "").strip()
+            ]
+
             # ── 2. Think: LLM 决策 ──
             action = await self._llm_decide(
                 llm_client=llm_client,
@@ -465,6 +477,7 @@ class AgentBridge:
                 turn=turn,
                 case_steps=case_steps,
                 case_url=case_url,
+                close_refs=_close_refs if _has_close_step else (),
             )
 
             if action is None:
@@ -474,6 +487,20 @@ class AgentBridge:
 
             # 检查停止信号
             if action.get("_done"):
+                if _has_close_step and _close_refs:
+                    logger.info(
+                        "Bridge refusing premature done: %d close controls "
+                        "still visible (run #%d turn %d)",
+                        len(_close_refs), run.id, turn,
+                    )
+                    context_messages.append({
+                        "role": "assistant",
+                        "content": (
+                            "SYSTEM: 页面仍有可见关闭控件，CLOSE_MESSAGES "
+                            "步骤未完成，不得 done，继续关闭。"
+                        ),
+                    })
+                    continue
                 await crud_agent_run.create_message(
                     self.db, run.id, turn, "assistant",
                     f"目标已达成: {action.get('_summary', '')}",
@@ -651,6 +678,7 @@ class AgentBridge:
         case_steps: list[str] | None = None,
         case_url: str = "",
         extra_hint: str = "",
+        close_refs: tuple = (),
     ) -> dict[str, Any] | None:
         """LLM 决策：根据当前页面状态和上下文决定下一步操作。
 
@@ -721,6 +749,12 @@ class AgentBridge:
         )
         if extra_hint:
             step_description += f"\n\nRETRY CONTEXT: {extra_hint}"
+        if close_refs:
+            step_description += (
+                f"\n\nCLOSE_MESSAGES: 快照中有 {len(close_refs)} 个可见关闭控件，"
+                f"下一动作必须是 click {close_refs[0]}（CLOSE_MESSAGES 步骤）。"
+                f"不得点击消息铃铛/去查看，不得返回 done。"
+            )
 
         try:
             tool_call = await generate_tool_call(
