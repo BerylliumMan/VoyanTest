@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, Button, Message, Spin, Space, Tabs, Tag } from '@arco-design/web-react';
+import { Card, Form, Input, Button, Message, Spin, Space, Tabs, Tag, Switch } from '@arco-design/web-react';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import PromptEditor from './PromptEditor';
@@ -46,6 +46,7 @@ function AiConfig() {
         form.setFieldsValue({
           ...res.data,
           max_context_tokens: res.data?.max_context_tokens ?? 131072,
+          enable_thinking: res.data?.enable_thinking ?? true,
         })
       )
       .catch((err) => Message.error(err?.response?.data?.detail || t['operate.failed']))
@@ -173,6 +174,13 @@ function AiConfig() {
               </Form.Item>
               <Form.Item field="max_context_tokens" label="上下文窗口 (tokens)">
                 <Input type="number" min={4096} max={1048576} placeholder="默认 131072" />
+              </Form.Item>
+              <Form.Item
+                field="enable_thinking"
+                label="思考模式 (Qwen3)"
+                triggerPropName="checked"
+              >
+                <Switch />
               </Form.Item>
               <Form.Item>
                 <Space>
