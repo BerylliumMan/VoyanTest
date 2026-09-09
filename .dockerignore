@@ -23,3 +23,4 @@ app/static
 app/static/**
 voyantest.json
 data/
+my-session.json

@@ -85,6 +85,7 @@ async def _load_ai_config(
                     'api_base': agent_cfg.get('api_base', ''),
                     'temperature': agent_cfg.get('temperature', 0.1),
                     'max_context_tokens': agent_cfg.get('max_context_tokens', 131072),
+                    'enable_thinking': agent_cfg.get('enable_thinking', True),
                 }
         except Exception:
             logger.debug(
@@ -116,6 +117,7 @@ async def _load_ai_config(
             'api_base': row.api_base,
             'temperature': row.temperature,
             'max_context_tokens': row.max_context_tokens or 131072,
+            'enable_thinking': getattr(row, 'enable_thinking', True),
         }
     _ai_config_cache = config
     return config
@@ -166,8 +168,12 @@ async def call_model(
         "temperature": temperature,
         "max_tokens": min(config.get('max_context_tokens', 131072) // 3, 16384),
     }
-    if enable_thinking is not None:
-        payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    from core.thinking_config import build_thinking_options
+    thinking = (
+        enable_thinking if enable_thinking is not None
+        else config.get('enable_thinking', True)
+    )
+    payload.update(build_thinking_options(thinking))
 
     if stream_callback:
         payload["stream"] = True

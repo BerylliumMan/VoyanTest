@@ -14,6 +14,13 @@ from typing import Any, Optional
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+from core.locator_candidates import (
+    LocatorCandidate,
+    serialize_candidates,
+    snapshot_has_visible_overlay,
+    validate_candidate_ref,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TURNS = 40
@@ -77,6 +84,8 @@ class GoalAction(BaseModel):
     thinking: str = ""
     action: str = ""
     selector: Optional[str] = None
+    snapshot_version: Optional[str] = None
+    confidence: Optional[float] = None
     value: Optional[str] = None
     stable_hint: Optional[str] = None
     checklist_index: Optional[int] = None
@@ -250,13 +259,24 @@ def _parse_goal_action(raw: str) -> GoalAction:
         else:
             status = "continue"
     sel = None
-    if data.get("selector") is not None:
-        sel = normalize_goal_selector(str(data["selector"]))
+    selected_ref = data.get("candidate_ref") or data.get("selector")
+    if selected_ref is not None:
+        sel = normalize_goal_selector(str(selected_ref))
     return GoalAction(
         status=status,
         thinking=str(data.get("thinking") or data.get("reason") or ""),
         action=str(data.get("action") or "").strip(),
         selector=sel,
+        snapshot_version=(
+            str(data["snapshot_version"])
+            if data.get("snapshot_version")
+            else None
+        ),
+        confidence=(
+            float(data["confidence"])
+            if data.get("confidence") is not None
+            else None
+        ),
         value=(str(data["value"]) if data.get("value") is not None else None),
         stable_hint=(str(data["stable_hint"]) if data.get("stable_hint") else None),
         checklist_index=parse_checklist_index(
@@ -266,6 +286,31 @@ def _parse_goal_action(raw: str) -> GoalAction:
         checklist_note=(str(data["checklist_note"]) if data.get("checklist_note") else None),
         reason=(str(data["reason"]) if data.get("reason") else None),
     )
+
+
+def is_locator_decision_error(error: str | None) -> bool:
+    """Identify a decision rejected by the current snapshot candidate set."""
+    return bool(error and "invalid locator decision" in error)
+
+
+def _extract_goal_message_text(message) -> str:
+    """提取执行决策的最终 JSON 文本，兼容 Qwen3 响应字段。"""
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(content, list):
+        parts = [
+            item.get("text", "").strip()
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        if any(parts):
+            return "\n".join(part for part in parts if part)
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(message, field, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 _CLOSE_MESSAGES_STEP_RE = re.compile(
@@ -620,6 +665,9 @@ async def decide_next_goal_action(
     steps: list[dict[str, Any]] | None = None,
     probe_result: str | None = None,
     last_action_error: str | None = None,
+    max_output_tokens: int | None = None,
+    candidates: tuple[LocatorCandidate, ...] = (),
+    snapshot_version: str | None = None,
 ) -> GoalAction:
     """Ask LLM for the next GoalAction given goal + snapshot + recent journal.
 
@@ -670,6 +718,10 @@ async def decide_next_goal_action(
         f"{uncovered_block}\n"
         f"CURRENT ACCESSIBILITY SNAPSHOT:\n"
         f"{(snapshot or '(empty)')[:120000]}\n\n"
+        f"CURRENT SNAPSHOT VERSION: {snapshot_version or '(unknown)'}\n"
+        f"VISIBLE OVERLAY PRESENT: {'yes' if snapshot_has_visible_overlay(snapshot) else 'no'}\n"
+        "CANDIDATE ELEMENTS (choose candidate_ref only from this list):\n"
+        f"{serialize_candidates(candidates) or '(none)'}\n\n"
         "Decide the next single action JSON now."
     )
     messages = [
@@ -690,10 +742,23 @@ async def decide_next_goal_action(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=2048,
+                max_tokens=max_output_tokens or 16384,
+                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
             )
-            content = (resp.choices[0].message.content or "").strip()
-            return _parse_goal_action(content)
+            content = _extract_goal_message_text(resp.choices[0].message)
+            decision = _parse_goal_action(content)
+            if candidates:
+                validation = validate_candidate_ref(
+                    decision.selector,
+                    snapshot_version=snapshot_version or "",
+                    decision_version=decision.snapshot_version,
+                    candidates=tuple(candidates),
+                )
+                if not validation.valid:
+                    raise ValueError(
+                        f"invalid locator decision: {validation.failure_kind}"
+                    )
+            return decision
         except Exception as exc:
             last_err = str(exc)
             logger.warning("decide_next_goal_action attempt %s failed: %s", attempt + 1, exc)

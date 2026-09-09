@@ -41,6 +41,7 @@ class AIConfigRequest(BaseModel):
     max_context_tokens: Optional[int] = Field(
         _DEFAULT_MAX_CONTEXT_TOKENS, ge=4096, le=1048576
     )
+    enable_thinking: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -67,6 +68,7 @@ class AIConfigResponse(BaseModel):
     api_base: str
     temperature: float
     max_context_tokens: int = _DEFAULT_MAX_CONTEXT_TOKENS
+    enable_thinking: bool = True
 
 
 # --- Routes ---
@@ -88,6 +90,7 @@ async def get_ai_config(db: AsyncSession = Depends(get_async_db), user = Depends
         api_base=row.api_base,
         temperature=row.temperature,
         max_context_tokens=row.max_context_tokens or _DEFAULT_MAX_CONTEXT_TOKENS,
+        enable_thinking=getattr(row, "enable_thinking", True),
     )
 
 
@@ -104,6 +107,7 @@ async def update_ai_config(
         row = await crud.upsert_ai_config(
             db, body.model, encrypted_key, body.api_base,
             body.temperature, max_tokens,
+            enable_thinking=body.enable_thinking,
         )
     except SQLAlchemyError as exc:
         await db.rollback()
@@ -123,6 +127,7 @@ async def update_ai_config(
         api_base=row.api_base,
         temperature=row.temperature,
         max_context_tokens=row.max_context_tokens or _DEFAULT_MAX_CONTEXT_TOKENS,
+        enable_thinking=getattr(row, "enable_thinking", True),
     )
 
 

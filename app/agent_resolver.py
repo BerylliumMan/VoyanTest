@@ -67,6 +67,7 @@ async def _load_global_ai_config() -> dict:
             'api_base': row.api_base or '',
             'temperature': row.temperature or 0.1,
             'max_context_tokens': row.max_context_tokens or 131072,
+            'enable_thinking': getattr(row, 'enable_thinking', True),
         }
     _global_config_cache = config
     _global_config_cached_at = now

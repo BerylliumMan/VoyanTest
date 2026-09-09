@@ -1452,6 +1452,11 @@ class AgentClient:
         keep_browser = bool(payload.get("keep_browser"))
         t0 = _time.monotonic()
         if not script.strip():
+            from core.locator_candidates import snapshot_has_visible_overlay
+            text = (
+                f"{text}\n[LOCATOR_STATE] visible_overlay="
+                f"{snapshot_has_visible_overlay(text)}"
+            )
             await self._send(
                 WSMessageType.COMPILED_SCRIPT_RESULT,
                 msg.run_id,

@@ -172,3 +172,6 @@ voyantest.json
 data/
 .env
 config.json
+uitest.db
+uitest-platform-windows.tar.gz
+voyantest-agent-build.tar.gz

@@ -559,6 +559,34 @@ class AgentBridge:
                             "Bridge stale-ref recovery failed (turn %d): %s", turn, exc,
                         )
 
+            # 动作后确定性验证（028：与 nl_goal 同一 verifier，MCP 成功不等于页面已变化）
+            _ver_name = str(action.get("name", action.get("action", "")) or "").lower().replace("browser_", "")
+            if result.get("success") and _ver_name in ("click", "press", "hover"):
+                try:
+                    from core.locator_verification import LocatorActionEvidence, verify_locator_action
+
+                    _after_obs = await asyncio.wait_for(
+                        self.agent_manager.send_observe(agent_id, run_id_str),
+                        timeout=60,
+                    )
+                    _after_snapshot = _after_obs.get("snapshot", "") if isinstance(_after_obs, dict) else ""
+                    _verification = verify_locator_action(
+                        LocatorActionEvidence(
+                            action=_ver_name,
+                            before_snapshot=snapshot or "",
+                            after_snapshot=_after_snapshot or "",
+                        )
+                    )
+                    result["verification"] = {
+                        "verified": _verification.verified,
+                        "failure_kind": _verification.failure_kind,
+                    }
+                    if not _verification.verified:
+                        result["success"] = False
+                        result["error"] = _verification.failure_kind
+                except Exception:
+                    logger.debug("Bridge post-act verification observe skipped", exc_info=True)
+
             # 保存操作截图
             self._save_screenshot(result.get("screenshot_b64"), f"turn_{turn:02d}_act")
 
@@ -644,6 +672,16 @@ class AgentBridge:
             context_text += f"[{msg['role']}] {msg['content']}\n"
 
         # 构建测试步骤文本
+        from core.locator_candidates import (
+            actionable_candidates,
+            extract_candidates,
+            is_snapshot_ref,
+            serialize_candidates,
+            snapshot_version,
+            validate_candidate_ref,
+        )
+        current_snapshot_version = snapshot_version(snapshot)
+        candidates = actionable_candidates(extract_candidates(snapshot))
         steps_text = ""
         if case_steps:
             steps_text = "\n".join(
@@ -669,6 +707,9 @@ class AgentBridge:
             f"Based on the PAGE CONTENT below, decide the SINGLE NEXT ACTION "
             f"to move towards the GOAL. "
             f"If stuck or impossible, use action='error' with explanation in value."
+            f"\n\nSNAPSHOT VERSION: {current_snapshot_version}"
+            f"\nCANDIDATE ELEMENTS (choose selector only from this list):\n"
+            f"{serialize_candidates(candidates) or '(none)'}"
         )
         # 025-ref-click: 防止模型不信任工具结果而重复执行/无限截图
         step_description += (
@@ -696,6 +737,24 @@ class AgentBridge:
 
         tc_dict = tool_call.model_dump()
         action_name = tc_dict.get("action", "")
+        selected_ref = tc_dict.get("selector")
+        if is_snapshot_ref(selected_ref):
+            validation = validate_candidate_ref(
+                selected_ref,
+                snapshot_version=current_snapshot_version,
+                decision_version=current_snapshot_version,
+                candidates=candidates,
+            )
+            if not validation.valid:
+                logger.warning(
+                    "AgentBridge rejected locator ref=%s kind=%s",
+                    selected_ref,
+                    validation.failure_kind,
+                )
+                return {
+                    "_error": True,
+                    "_error_message": f"locator rejected: {validation.failure_kind}",
+                }
 
         # 停止信号：done / error
         if action_name == "done":
@@ -717,6 +776,7 @@ class AgentBridge:
                 "element_desc": tc_dict.get("element_desc"),
                 "value": tc_dict.get("value"),
                 "timeout_ms": tc_dict.get("timeout_ms", 30000),
+                "snapshot_version": current_snapshot_version,
             },
         }
 

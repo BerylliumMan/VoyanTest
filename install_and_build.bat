@@ -78,6 +78,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed --name VoyanTest-A
   --hidden-import core.script_templates ^
   --hidden-import core.runtime_enhance ^
   --hidden-import core.dom_probe ^
+  --collect-submodules core ^
   --hidden-import pydantic ^
   --hidden-import browser_use ^
   --hidden-import browser_use.agent.system_prompts ^

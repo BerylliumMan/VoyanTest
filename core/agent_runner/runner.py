@@ -250,6 +250,11 @@ class AgentRunner:
         """
         # 获取 DOM 快照
         snapshot = await self._mcp_manager.get_dom_snapshot()
+        from core.locator_candidates import (
+            actionable_candidates,
+            extract_candidates,
+            snapshot_version,
+        )
 
         # 获取当前 URL
         url = ""
@@ -268,6 +273,8 @@ class AgentRunner:
             "snapshot": snapshot,
             "url": url,
             "screenshot_b64": None,  # 默认不截图，节省 token
+            "snapshot_version": snapshot_version(snapshot or ""),
+            "candidates": actionable_candidates(extract_candidates(snapshot or "")),
         }
 
     async def think(self, observation: dict[str, Any]) -> dict[str, Any]:
@@ -291,6 +298,11 @@ class AgentRunner:
             f"HISTORY:\n{history_text}\n\n"
             f"Based on the CURRENT PAGE snapshot below, decide the SINGLE NEXT ACTION "
             f"to move towards the GOAL. If the goal is already achieved, use action='done'."
+        )
+        from core.locator_candidates import serialize_candidates
+        step_description += (
+            f"\n\nCANDIDATE ELEMENTS (choose selector only from this list):\n"
+            f"{serialize_candidates(observation.get('candidates', ())) or '(none)'}"
         )
         if self._pending_hint:
             step_description += f"\n\nRETRY CONTEXT: {self._pending_hint}"
@@ -318,7 +330,25 @@ class AgentRunner:
                 "next_goal": None,
             }
 
-        return tool_call.model_dump()
+        action = tool_call.model_dump()
+        from core.locator_candidates import is_snapshot_ref, validate_candidate_ref
+        selector = action.get("selector")
+        if is_snapshot_ref(selector):
+            validation = validate_candidate_ref(
+                selector,
+                snapshot_version=observation.get("snapshot_version", ""),
+                decision_version=observation.get("snapshot_version", ""),
+                candidates=observation.get("candidates", ()),
+            )
+            if not validation.valid:
+                return {
+                    "action": "error",
+                    "selector": None,
+                    "value": f"locator rejected: {validation.failure_kind}",
+                    "thinking": "候选元素校验失败",
+                }
+        action["snapshot_version"] = observation.get("snapshot_version")
+        return action
 
     async def act(self, action: dict[str, Any]) -> dict[str, Any]:
         """执行 LLM 决定的动作。

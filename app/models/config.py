@@ -20,4 +20,5 @@ class AIConfig(Base):
     api_base = Column(String(500), nullable=False)
     temperature = Column(Float, nullable=False, default=0.1)
     max_context_tokens = Column(Integer, nullable=False, default=131072)
+    enable_thinking = Column(Boolean, nullable=False, default=True)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)

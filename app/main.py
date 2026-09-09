@@ -201,6 +201,10 @@ async def _run_startup_init():
             "ai_configs.max_context_tokens 迁移",
         )
         await _ddl(
+            "ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS enable_thinking BOOLEAN DEFAULT TRUE",
+            "ai_configs.enable_thinking 迁移",
+        )
+        await _ddl(
             "ALTER TABLE test_steps ADD COLUMN IF NOT EXISTS learned_locator JSONB",
             "test_steps.learned_locator 迁移",
         )

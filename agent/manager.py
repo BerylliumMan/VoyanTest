@@ -538,6 +538,12 @@ class AgentManager:
             steps_results_from_goal,
             tool_call_from_decision,
             uncovered_checklist_orders,
+            is_locator_decision_error,
+        )
+        from core.locator_candidates import (
+            actionable_candidates,
+            extract_candidates,
+            snapshot_version,
         )
         from core.precondition import (
             DEFAULT_PRECOND_MAX_TURNS,
@@ -593,6 +599,7 @@ class AgentManager:
         last_action_error: Optional[str] = None
         last_probe_had_candidates = False
         probed_indices: set = set()
+        locator_retry_used = False
         precond_max_turns = int(
             getattr(
                 execution_backend_config,
@@ -640,6 +647,12 @@ class AgentManager:
 
             llm_client = await create_openai_client()
             _, _, model = await _llm_resolve_config()
+            from app.gen.model_client import _load_ai_config
+            execution_config = await _load_ai_config(agent_type="execution")
+            max_context_tokens = int(
+                execution_config.get("max_context_tokens") or 131072
+            )
+            goal_output_tokens = min(max_context_tokens // 3, 16384)
 
             await self._get_snapshot(session, agent_id, run_id)
             if navigate_base_url and base_url_override:
@@ -885,6 +898,10 @@ class AgentManager:
                     )
                 else:
                     try:
+                        current_snapshot_version = snapshot_version(snap or "")
+                        current_candidates = actionable_candidates(
+                            extract_candidates(snap or "")
+                        )
                         decision = await decide_next_goal_action(
                             client=llm_client,
                             model=model,
@@ -894,10 +911,17 @@ class AgentManager:
                             steps=steps,
                             probe_result=probe_summary,
                             last_action_error=last_action_error,
+                            max_output_tokens=goal_output_tokens,
+                            candidates=current_candidates,
+                            snapshot_version=current_snapshot_version,
                         )
                     except Exception as exc:
                         goal_error = f"goal LLM failed: {exc}"
                         logger.exception("nl_goal decide failed turn=%s", turn)
+                        if is_locator_decision_error(str(exc)) and not locator_retry_used:
+                            locator_retry_used = True
+                            last_action_error = str(exc)
+                            continue
                         break
                 # probe 是一次性注入：本轮已消费，下一轮前若再失败才重新 probe
                 injected_probe = probe_summary
@@ -1208,6 +1232,29 @@ class AgentManager:
                 dur = (_time.monotonic() - t0) * 1000
                 ok = bool(result.get("success"))
                 err = result.get("error")
+                if ok and action in ("click", "browser_click", "press", "hover"):
+                    from core.locator_verification import (
+                        LocatorActionEvidence,
+                        verify_locator_action,
+                    )
+
+                    after_snapshot = await self._get_snapshot(
+                        session, agent_id, run_id
+                    )
+                    verification = verify_locator_action(
+                        LocatorActionEvidence(
+                            action=action,
+                            before_snapshot=snap or "",
+                            after_snapshot=after_snapshot or "",
+                        )
+                    )
+                    result["verification"] = {
+                        "verified": verification.verified,
+                        "failure_kind": verification.failure_kind,
+                    }
+                    if not verification.verified:
+                        ok = False
+                        err = verification.failure_kind
                 # MCP marks evaluate "success" when JS ran — even if it returned false.
                 if ok and action in ("evaluate", "browser_evaluate", "js", "eval"):
                     from core.goal_agent_loop import _evaluate_result_looks_falsy
@@ -1321,6 +1368,8 @@ class AgentManager:
                     screenshot_path=None,
                     replay=replay,
                 )
+                if result.get("verification"):
+                    entry["verification"] = result["verification"]
                 if not ok:
                     await _save_nl_goal_fail_shot(
                         entry,
@@ -3784,3 +3833,10 @@ def is_pending_expired(created_at, now=None) -> bool:
         created_at = created_at.replace(tzinfo=timezone.utc)
     ttl = timedelta(minutes=pending_ttl_minutes())
     return (now - created_at) > ttl
+
+
+def supports_compiled_script(capabilities) -> bool:
+    """客户端是否声明 compiled_script 能力；无能力列表一律视为不支持。"""
+    if not capabilities:
+        return False
+    return "compiled_script" in capabilities

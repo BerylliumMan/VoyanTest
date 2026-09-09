@@ -452,7 +452,12 @@ class PlaywrightMCPManager:
             result = await self.call_tool('browser_snapshot', {})
             text = result.get('text', '')
             from core.snapshot_compress import compress_snapshot
-            return compress_snapshot(text) or '(empty page)'
+            snapshot = compress_snapshot(text) or '(empty page)'
+            from core.locator_candidates import snapshot_has_visible_overlay
+            return (
+                f"{snapshot}\n[LOCATOR_STATE] visible_overlay="
+                f"{snapshot_has_visible_overlay(snapshot)}"
+            )
         except (RuntimeError, ConnectionError, OSError) as exc:
             logger.warning("DOM snapshot failed: %s", exc, exc_info=True)
             return '(page snapshot unavailable)'

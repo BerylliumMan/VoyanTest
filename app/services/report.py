@@ -176,7 +176,7 @@ class ReportService:
     ) -> dict[str, Any]:
         """返回趋势数据的纯数据字典，包含 ``period`` 与 ``data`` 列表。"""
         end_date = tz_now()
-        start_date = end_date - timedelta(days=days)
+        start_date = end_date - timedelta(days=max(days, 1) - 1)
 
         allowed_ids = _resolve_allowed_ids(user, project_id)
 

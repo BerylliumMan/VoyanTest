@@ -80,16 +80,18 @@ APPROX_CHARS_PER_TOKEN = 4  # 中英混合估算
 def truncate_snapshot(snapshot: str, max_tokens: int = MAX_SNAPSHOT_TOKENS) -> str:
     """截断 DOM/AX Tree snapshot 到指定 token 预算内。
 
-    025-ref-click: 优先使用 compress_snapshot 保交互 ref 行；
-    此函数保留用于非快照文本的 head+tail 截断。
+    含 ref 标记的无障碍快照优先使用 compress_snapshot 保交互行；
+    纯文本直接 head+tail 截断（compress_snapshot 会丢弃无 ref 文本）。
     """
-    from core.snapshot_compress import compress_snapshot
-    compressed = compress_snapshot(snapshot, max_chars=max_tokens * APPROX_CHARS_PER_TOKEN)
-    if len(compressed) < len(snapshot):
-        return compressed
+    import re
     max_chars = max_tokens * APPROX_CHARS_PER_TOKEN
     if len(snapshot) <= max_chars:
         return snapshot
+    if re.search(r"\[ref=|\be\d+\b|f\d+e\d+", snapshot):
+        from core.snapshot_compress import compress_snapshot
+        compressed = compress_snapshot(snapshot, max_chars=max_chars)
+        if len(compressed) < len(snapshot):
+            return compressed
 
     # 保留开头 70% + 结尾 30%，中间用省略标记连接
     head_chars = int(max_chars * 0.7)
