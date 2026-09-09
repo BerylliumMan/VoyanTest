@@ -355,62 +355,6 @@ def is_select_checklist_step(description: str | None) -> bool:
     return bool(_SELECT_STEP_RE.search(desc))
 
 
-# Proven against Element UI home overlays (from a successful Cursor browser session):
-# close visible .el-dialog__wrapper (footer 关闭 / header X) + .el-notification.
-CLOSE_ALL_PAGE_PROMPTS_JS = r"""() => {
-  const clicked = [];
-  for (const w of Array.from(document.querySelectorAll('.el-dialog__wrapper'))) {
-    if (getComputedStyle(w).display === 'none') continue;
-    const footerClose = Array.from(w.querySelectorAll('button')).find((b) =>
-      /关\s*闭/.test(b.innerText || '')
-    );
-    const headerClose = w.querySelector('.el-dialog__headerbtn');
-    const btn = footerClose || headerClose;
-    if (btn) {
-      btn.click();
-      clicked.push('dialog:' + (footerClose ? 'footer' : 'header'));
-    }
-  }
-  for (const n of Array.from(document.querySelectorAll('.el-notification'))) {
-    if (getComputedStyle(n).display === 'none') continue;
-    const btn = n.querySelector(
-      '.el-notification__closeBtn, .el-icon-close, [class*="close"]'
-    );
-    if (btn) {
-      btn.click();
-      clicked.push('notification');
-    } else {
-      try {
-        n.remove();
-        clicked.push('notification-remove');
-      } catch (e) {}
-    }
-  }
-  for (const w of Array.from(document.querySelectorAll('.el-message-box__wrapper'))) {
-    if (getComputedStyle(w).display === 'none') continue;
-    const btn = Array.from(w.querySelectorAll('button')).find((b) =>
-      /关\s*闭|取消|确定/.test(b.innerText || '')
-    );
-    if (btn) {
-      btn.click();
-      clicked.push('msgbox');
-    }
-  }
-  const remainingDialogs = Array.from(
-    document.querySelectorAll('.el-dialog__wrapper')
-  ).filter((w) => getComputedStyle(w).display !== 'none').length;
-  const remainingNotes = Array.from(
-    document.querySelectorAll('.el-notification')
-  ).filter((n) => getComputedStyle(n).display !== 'none').length;
-  return {
-    ok: true,
-    clicked,
-    remainingDialogs,
-    remainingNotes,
-  };
-}"""
-
-
 def _evaluate_is_real_close_action(entry: dict[str, Any]) -> bool:
     """True when evaluate actually dismisses overlays (Cursor-style), not a no-op verify."""
     blob = " ".join(
@@ -423,8 +367,6 @@ def _evaluate_is_real_close_action(entry: dict[str, Any]) -> bool:
             entry.get("stable_hint"),
         )
     )
-    if "CLOSE_ALL_PAGE_PROMPTS" in blob or "close_all_page_prompts" in blob.lower():
-        return True
     if re.search(
         r"el-dialog__headerbtn|el-notification__closeBtn|关\\s\*闭|关\s*闭",
         blob,

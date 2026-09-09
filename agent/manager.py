@@ -525,7 +525,6 @@ class AgentManager:
         from core.compiled_script import steps_content_hash
         from core.dom_probe import build_probe_summary
         from core.goal_agent_loop import (
-            CLOSE_ALL_PAGE_PROMPTS_JS,
             DEFAULT_MAX_TURNS,
             GoalAction,
             build_goal_text,
@@ -850,9 +849,9 @@ class AgentManager:
                     )
                     # Fall through to LLM decide with that hint
 
-                # Cursor pattern: AFTER earlier checklist is done, when
-                # close-messages is the next uncovered item, run proven
-                # Element UI dismiss JS (dialogs + notifications) — do not
+                # AFTER earlier checklist is done, when close-messages is
+                # the next uncovered item, click one snapshot close
+                # candidate per turn with post-act verification — do not
                 # let the LLM click the message bell / 去查看.
                 uncovered_now = uncovered_checklist_orders(steps, journal)
                 close_orders = [
@@ -869,33 +868,58 @@ class AgentManager:
                 use_close_helper = (
                     close_idx is not None
                     and not earlier_blocking
-                    and close_helper_runs < 3
+                    and close_helper_runs < 5
                 )
                 if use_close_helper:
                     close_helper_runs += 1
+                    from core.step_intent import close_control_candidates
+                    from core.locator_candidates import (
+                        snapshot_version as _close_snap_ver,
+                    )
+                    _close_refs = [
+                        c.get("ref")
+                        for c in close_control_candidates(snap or "")
+                        if (c.get("ref") or "").strip()
+                    ]
                     logger.info(
-                        "nl_goal Cursor-style close_all_prompts helper "
-                        "case=%s turn=%s step=%s run=%s",
+                        "nl_goal close-candidate helper "
+                        "case=%s turn=%s step=%s run=%s candidates=%s",
                         case_id,
                         turn,
                         close_idx,
                         close_helper_runs,
+                        len(_close_refs),
                     )
-                    decision = GoalAction(
-                        status="continue",
-                        thinking=(
-                            "Cursor-style: dismiss all visible Element UI "
-                            "dialogs/notifications via evaluate click loop"
-                        ),
-                        action="evaluate",
-                        selector="",
-                        value=CLOSE_ALL_PAGE_PROMPTS_JS,
-                        stable_hint="CLOSE_ALL_PAGE_PROMPTS",
-                        checklist_index=close_idx,
-                        checklist_note=(
-                            f"CLOSE_ALL_PAGE_PROMPTS checklist item {close_idx}"
-                        ),
-                    )
+                    if not _close_refs:
+                        decision = GoalAction(
+                            status="fail",
+                            thinking="关闭消息：当前快照无可见关闭控件",
+                            action="error",
+                            selector=None,
+                            value=(
+                                "no visible close control for "
+                                "close-messages step"
+                            ),
+                            checklist_index=close_idx,
+                            checklist_note=(
+                                f"CLOSE_MESSAGES checklist item {close_idx}"
+                            ),
+                        )
+                    else:
+                        decision = GoalAction(
+                            status="continue",
+                            thinking=(
+                                "关闭当前可见消息控件 "
+                                f"{_close_refs[0]}"
+                            ),
+                            action="click",
+                            selector=_close_refs[0],
+                            snapshot_version=_close_snap_ver(snap or ""),
+                            checklist_index=close_idx,
+                            checklist_note=(
+                                f"CLOSE_MESSAGES checklist item {close_idx}"
+                            ),
+                        )
                 else:
                     try:
                         current_snapshot_version = snapshot_version(snap or "")
