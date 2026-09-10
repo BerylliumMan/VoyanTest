@@ -125,6 +125,29 @@ def is_snapshot_ref(value: str | None) -> bool:
     return bool(value and re.fullmatch(r"(?:f\d+e\d+|e\d+)", value))
 
 
+_REF_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"(?:f\d+e\d+|e\d+)")
+
+
+def extract_ref_token(value: str | None) -> str | None:
+    """Pull the bare ref out of a pasted candidate line.
+
+    The model sometimes copies a whole serialized candidate
+    (``ref=f3e24 role=textbox name='X' frame=main``) instead of the
+    bare token. Only rewrite strings that look like such a paste
+    (``ref=`` marker); plain CSS selectors pass through untouched.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text or is_snapshot_ref(text):
+        return value
+    if "ref=" in text or ("role=" in text and "frame=" in text):
+        match = _REF_TOKEN_RE.search(text)
+        if match:
+            return match.group(0)
+    return value
+
+
 def validate_candidate_ref(
     ref: str | None,
     *,

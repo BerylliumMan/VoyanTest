@@ -64,9 +64,11 @@ def build_mcp_args(
     """按 contracts C2 构造 MCP 工具参数。
 
     element 为人类可读描述（权限确认用），缺失时回退空字符串；
-    target 原样传递 ref 或 CSS 选择器，不做转义改写。
+    target 原样传递 ref 或 CSS 选择器，不做转义改写；粘贴整行候选
+    时提取其中的裸 ref token。
     """
-    sel = selector or ""
+    from core.locator_candidates import extract_ref_token
+    sel = extract_ref_token(selector or "") or ""
     desc = (element_desc or "").strip()
 
     if action in ("goto", "navigate", "browser_navigate"):

@@ -246,7 +246,8 @@ def normalize_goal_selector(selector: str | None) -> Optional[str]:
     # Also accept accidental quotes: "e12" / 'f4e135'
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ("\"", "'"):
         return normalize_goal_selector(s[1:-1])
-    return s
+    from core.locator_candidates import extract_ref_token
+    return extract_ref_token(s)
 
 
 def _parse_goal_action(raw: str) -> GoalAction:
@@ -675,7 +676,9 @@ async def decide_next_goal_action(
         f"CURRENT SNAPSHOT VERSION: {snapshot_version or '(unknown)'}\n"
         f"VISIBLE OVERLAY PRESENT: {'yes' if snapshot_has_visible_overlay(snapshot) else 'no'}\n"
         "CANDIDATE ELEMENTS (choose candidate_ref only from this list):\n"
-        f"{serialize_candidates(candidates) or '(none)'}\n\n"
+        f"{serialize_candidates(candidates) or '(none)'}\n"
+        "candidate_ref MUST be the bare ref token after 'ref=' (e.g. f3e24); "
+        "never paste the whole candidate line.\n\n"
         "Decide the next single action JSON now."
     )
     messages = [
