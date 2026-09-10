@@ -2176,8 +2176,9 @@ class AgentClient:
             result["page_url"] = url_match.group(1).strip() if url_match else ""
             result["page_title"] = title_match.group(1).strip() if title_match else ""
 
-            # 获取页面截图 base64
-            screenshot_b64 = await self._mcp_screenshot_base64()
+            # 截图按需：默认不拍，失败举证走失败路径的独立截图
+            want_shot = bool((msg.payload or {}).get("want_screenshot", False))
+            screenshot_b64 = await self._mcp_screenshot_base64() if want_shot else ""
             result["screenshot_b64"] = screenshot_b64 or ""
 
             result["success"] = True
@@ -2246,10 +2247,9 @@ class AgentClient:
             result["success"] = mcp_result.get("success", False)
             if not result["success"]:
                 result["error"] = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
-
-            # 执行后始终截图
-            ss_b64 = await self._mcp_screenshot_base64()
-            result["screenshot_b64"] = ss_b64 or ""
+                # 仅失败截图：成功轮截图走 WS 又大又慢，且报告只保留失败图
+                ss_b64 = await self._mcp_screenshot_base64()
+                result["screenshot_b64"] = ss_b64 or ""
         except Exception as e:
             result["error"] = str(e)
             result["success"] = False

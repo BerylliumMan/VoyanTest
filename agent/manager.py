@@ -722,6 +722,9 @@ class AgentManager:
 
             close_helper_runs = 0
             unit_dropdown_helper_runs = 0
+            # 上轮动作后验证快照：轮次之间无其他页面操作，直接复用，
+            # 省一次全量抓取；失败/导航/无验证时置空重新抓取。
+            carried_snap: str | None = None
             for turn in range(1, max_turns + 1):
                 if goal_error:
                     break
@@ -733,7 +736,11 @@ class AgentManager:
                         goal_error = "用户停止执行"
                         break
 
-                snap = await self._get_snapshot(session, agent_id, run_id)
+                if carried_snap is not None:
+                    snap = carried_snap
+                    carried_snap = None
+                else:
+                    snap = await self._get_snapshot(session, agent_id, run_id)
                 if self._snapshot_indicates_browser_closed(snap):
                     goal_error = "浏览器已关闭"
                     break
@@ -1276,6 +1283,12 @@ class AgentManager:
                         "verified": verification.verified,
                         "failure_kind": verification.failure_kind,
                     }
+                    if verification.verified and after_snapshot and (
+                        "(snapshot unavailable)" not in after_snapshot
+                        and "(snapshot timeout)" not in after_snapshot
+                        and not self._snapshot_looks_blank(after_snapshot)
+                    ):
+                        carried_snap = after_snapshot
                     if not verification.verified:
                         ok = False
                         err = verification.failure_kind
@@ -3482,12 +3495,16 @@ class AgentManager:
         if fut and not fut.done():
             fut.set_result(result)
 
-    async def send_observe(self, agent_id: str, run_id: str) -> dict:
-        """通过 WS 向 Agent 发送 observe 指令，等待快照结果"""
+    async def send_observe(self, agent_id: str, run_id: str, want_screenshot: bool = False) -> dict:
+        """通过 WS 向 Agent 发送 observe 指令，等待快照结果。
+
+        截图默认关闭（成功轮截图又大又慢）；失败举证由独立截图路径负责。
+        """
         return await self._send_and_wait(agent_id, {
             "type": "step_execute",
             "run_id": run_id,
             "action": "observe",
+            "want_screenshot": want_screenshot,
             "timeout": 15000
         }, timeout=60)
 

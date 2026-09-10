@@ -421,23 +421,30 @@ class AgentBridge:
                 await self._fail(run.id, msg)
                 return
 
+        # 上轮动作后验证快照：轮次之间无其他页面操作，直接复用。
+        carried_obs: dict | None = None
         for turn in range(1, max_turns + 1):
             logger.info("━━━ Turn %d/%d (run #%d) ━━━", turn, max_turns, run.id)
 
             # ── 1. Observe: WS 取快照 ──
-            try:
-                obs = await asyncio.wait_for(
-                    self.agent_manager.send_observe(agent_id, run_id_str),
-                    timeout=60,
-                )
-            except asyncio.TimeoutError:
-                logger.error("Observe timeout at turn %d", turn)
-                await self._fail(run.id, f"Observe timeout at turn {turn}")
-                return
-            except Exception as exc:
-                logger.exception("Observe error at turn %d", turn)
-                await self._fail(run.id, f"Observe error at turn {turn}: {exc}")
-                return
+            if carried_obs is not None:
+                obs = carried_obs
+                carried_obs = None
+                logger.debug("Bridge reusing post-act snapshot (turn %d)", turn)
+            else:
+                try:
+                    obs = await asyncio.wait_for(
+                        self.agent_manager.send_observe(agent_id, run_id_str),
+                        timeout=60,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("Observe timeout at turn %d", turn)
+                    await self._fail(run.id, f"Observe timeout at turn {turn}")
+                    return
+                except Exception as exc:
+                    logger.exception("Observe error at turn %d", turn)
+                    await self._fail(run.id, f"Observe error at turn {turn}: {exc}")
+                    return
 
             if not obs.get("success"):
                 err = obs.get("error", "unknown observe failure")
@@ -608,6 +615,14 @@ class AgentBridge:
                         "verified": _verification.verified,
                         "failure_kind": _verification.failure_kind,
                     }
+                    if _verification.verified and isinstance(_after_obs, dict):
+                        _after_snap = _after_obs.get("snapshot", "") or ""
+                        if _after_snap and "(snapshot unavailable)" not in _after_snap:
+                            carried_obs = {
+                                "success": True,
+                                "snapshot": _after_snap,
+                                "page_url": _after_obs.get("page_url", page_url),
+                            }
                     if not _verification.verified:
                         result["success"] = False
                         result["error"] = _verification.failure_kind
