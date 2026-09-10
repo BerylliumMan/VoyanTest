@@ -319,9 +319,167 @@ def check_script_warnings(script: str) -> list[str]:
     return []
 
 
-def _accept_synthesized_script(script: str, *, case_id: int | None = None) -> str:
+_UNICODE_LOOKALIKES: tuple[tuple[str, str], ...] = (
+    ("→", "->"), ("⇒", "=>"), ("➜", "->"), ("⟶", "->"), ("←", "<-"),
+    ("：", ":"), ("，", ","), ("。", "."), ("、", ","),
+    ("（", "("), ("）", ")"), ("【", "["), ("】", "]"),
+    ("「", '"'), ("」", '"'), ("『", '"'), ("』", '"'),
+    ("“", '"'), ("”", '"'), ("‘", "'"), ("’", "'"),
+    ("…", "..."), ("——", "--"), ("～", "~"),
+    ("％", "%"), ("＋", "+"), ("－", "-"), ("＝", "="),
+    ("！", "!"), ("？", "?"), ("；", ";"),
+)
+
+
+def repair_unicode_lookalikes(script: str) -> str:
+    """Replace unicode punctuation/arrows with ASCII equivalents.
+
+    Qwen 常在代码里混入全角标点与 → 箭头，导致 ast 解析失败。
+    只改代码区：字符串字面值与注释原样保留（字面值可能是覆盖门要验的
+    目标，注释本就不影响解析）。修完后调用方仍重跑覆盖+sanity 双门。
+    """
+    lines: list[str] = []
+    for line in (script or "").splitlines():
+        lines.append(_repair_code_span(line))
+    return _strip_trailing_arrow_annotations("\n".join(lines))
+
+
+def _repair_code_span(line: str) -> str:
+    """Apply the lookalike map to the code part of one line only."""
+    code_end = _code_span_end(line)
+    head, tail = line[:code_end], line[code_end:]
+    for src, dst in _UNICODE_LOOKALIKES:
+        if src in head:
+            head = head.replace(src, dst)
+    return head + tail
+
+
+def _code_spans(line: str) -> list[tuple[int, int]]:
+    """Ranges of one line that are real code (not strings/comments)."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            spans.append((start, i))
+            q = line[i]
+            i += 3
+            while i < n and not line.startswith(q * 3, i):
+                i += 2 if line[i] == "\\" else 1
+            i += 3
+            start = i
+            continue
+        if ch in ("'", '"'):
+            spans.append((start, i))
+            q = ch
+            i += 1
+            while i < n and line[i] != q:
+                i += 2 if line[i] == "\\" else 1
+            i += 1
+            start = i
+            continue
+        if ch == "#":
+            spans.append((start, i))
+            return [(a, b) for a, b in spans if a < b]
+        i += 1
+    spans.append((start, n))
+    return [(a, b) for a, b in spans if a < b]
+
+
+def _repair_code_span(line: str) -> str:
+    """Apply the lookalike map to code spans of one line only."""
+    chars = list(line)
+    for a, b in _code_spans(line):
+        seg = "".join(chars[a:b])
+        for src, dst in _UNICODE_LOOKALIKES:
+            if src in seg:
+                seg = seg.replace(src, dst)
+        chars[a:b] = list(seg)
+    return "".join(chars)
+
+
+def _strip_trailing_arrow_annotations(body: str) -> str:
+    """Cut `-> comment` tails the model appends after real statements.
+
+    `->` 只在 def 行合法；其他行的 `->`（字符串内除外）必是伪代码批注，
+    截掉箭头及之后内容，保留前面真实语句。
+    """
+    out: list[str] = []
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith(("#", "def ", "async def ", "class ", "@"))
+            or "->" not in line
+        ):
+            out.append(line)
+            continue
+        cut = _arrow_outside_string(line)
+        out.append(line[:cut].rstrip() if cut is not None else line)
+    return "\n".join(out)
+
+
+def _arrow_outside_string(line: str) -> int | None:
+    """Return index of `->` outside string literals, else None."""
+    quote: str | None = None
+    triple = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote is None:
+            if line.startswith('"""', i) or line.startswith("'''", i):
+                quote = line[i]
+                triple = True
+                i += 3
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                triple = False
+                i += 1
+                continue
+            if line.startswith("->", i):
+                return i
+        else:
+            if ch == "\\":
+                i += 2
+                continue
+            if triple and line.startswith(quote * 3, i):
+                quote = None
+                triple = False
+                i += 3
+                continue
+            if not triple and ch == quote:
+                quote = None
+        i += 1
+    return None
+
+
+def _accept_synthesized_script(
+    script: str,
+    *,
+    case_id: int | None = None,
+    steps: list[dict[str, Any]] | None = None,
+) -> str:
     """Reject unrunnable scripts so a broken locator never gets persisted."""
     problems = check_script_sanity(script)
+    if problems and any("not valid Python" in p for p in problems):
+        repaired = repair_unicode_lookalikes(script)
+        if repaired != script:
+            logger.info(
+                "synth script repaired unicode lookalikes case=%s", case_id
+            )
+            problems = check_script_sanity(repaired)
+            if not problems and steps is not None:
+                missing = check_script_covers_intents(repaired, steps)
+                if missing:
+                    problems = [
+                        "repair broke required literals: " + ", ".join(missing)
+                    ]
+            if not problems:
+                script = repaired
     if problems:
         logger.warning(
             "synthesized script rejected case=%s problems=%s",
@@ -363,7 +521,7 @@ async def synthesize_playwright_script(
             script = harden_locators_with_first(
                 _ensure_entrypoint(templated, int(case_id))
             )
-            script = _accept_synthesized_script(script, case_id=case_id)
+            script = _accept_synthesized_script(script, case_id=case_id, steps=steps)
             logger.info(
                 "synthesized script from templates case=%s bytes=%s",
                 case_id,
@@ -395,6 +553,7 @@ async def synthesize_playwright_script(
         f"Function name MUST be: async def test_case_{int(case_id)}(page)\n"
         f"The CHECKLIST is the source of truth — every action must fulfill it.\n"
         f"Prefer journal_clean[].replay strategies; NEVER emit snapshot refs.\n"
+        f"Use ASCII punctuation only in code (no → ， ： （ ） 「 」).\n"
         f"{literal_rule}\n"
         f"CONTEXT JSON:\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
     )
@@ -429,7 +588,7 @@ async def synthesize_playwright_script(
         raise ValueError(
             "synthesized script missing required targets: " + ", ".join(missing)
         )
-    return _accept_synthesized_script(script, case_id=case_id)
+    return _accept_synthesized_script(script, case_id=case_id, steps=steps)
 
 
 async def repair_playwright_script(
@@ -464,7 +623,8 @@ async def repair_playwright_script(
         temperature=temperature,
         max_tokens=8192,
     )
-    fixed = _strip_fences(resp.choices[0].message.content or "")
+    from core.precondition import _response_text as _rt
+    fixed = _strip_fences(_rt(resp.choices[0].message))
     if not fixed or "async def" not in fixed:
         raise ValueError("LLM repair returned empty/invalid script")
     fixed = harden_locators_with_first(_ensure_entrypoint(fixed, int(case_id)))
@@ -473,4 +633,4 @@ async def repair_playwright_script(
         raise ValueError(
             "repaired script missing required targets: " + ", ".join(missing)
         )
-    return _accept_synthesized_script(fixed, case_id=case_id)
+    return _accept_synthesized_script(fixed, case_id=case_id, steps=steps)
