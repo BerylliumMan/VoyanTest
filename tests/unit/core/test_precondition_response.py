@@ -96,6 +96,55 @@ async def test_verify_precondition_met_accepts_reasoning_content_json():
         snapshot="登录页",
         precondition="进入登录页",
     ) == (True, "登录页已打开")
-    assert completions.kwargs["extra_body"] == {
+    assert completions.kwargs.get("extra_body", {}) != {
         "chat_template_kwargs": {"enable_thinking": False}
     }
+
+
+@pytest.mark.asyncio
+async def test_verify_precondition_met_accepts_plain_content_json():
+    class Completions:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"met":false,"reason":"还在首页"}',
+                        )
+                    )
+                ]
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    assert await verify_precondition_met(
+        client=client,
+        model="Qwen3.8-Flash-Next",
+        snapshot="首页",
+        precondition="进入登录页",
+    ) == (False, "还在首页")
+
+
+@pytest.mark.asyncio
+async def test_decide_precondition_action_accepts_plain_content_json():
+    class Completions:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"status":"continue","action":"click","selector":"e5"}',
+                        )
+                    )
+                ]
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    result = await decide_precondition_action(
+        client=client,
+        model="Qwen3.8-Flash-Next",
+        precondition="进入登录页",
+        snapshot="首页",
+        journal_tail=[],
+    )
+    assert result.action == "click"
+    assert result.selector == "e5"

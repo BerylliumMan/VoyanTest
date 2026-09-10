@@ -204,12 +204,13 @@ async def verify_precondition_met(
                         ),
                     }
                 )
+            # 思考模式保持开启（调用方需要推理能力）；token 预算给足避免
+            # 推理挤占输出，解析经共享提取器兼容思考字段。
             resp = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=256,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                max_tokens=2048,
             )
             message = resp.choices[0].message
             content = _response_text(message)
@@ -269,12 +270,7 @@ async def decide_precondition_action(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=1024,
-                extra_body={
-                    "chat_template_kwargs": {
-                        "enable_thinking": attempt > 0 and last_err == "LLM did not return JSON: "
-                    }
-                },
+                max_tokens=2048,
             )
             message = resp.choices[0].message
             content = _response_text(message)
