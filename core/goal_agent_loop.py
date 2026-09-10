@@ -374,6 +374,11 @@ _OPEN_NAV_STEP_RE = re.compile(r"^打开【|^打开\s|跳转到|导航到|访问
 _CLICK_STEP_RE = re.compile(r"^(?:点击|单击|click\b)", re.I)
 _FILL_STEP_RE = re.compile(r"输入|填写|填入|\bfill\b|\btype\b", re.I)
 _SELECT_STEP_RE = re.compile(r"选择|选中|\bselect\b", re.I)
+_PRESS_KEY_STEP_RE = re.compile(
+    r"按键|快捷键|\bESC\b|\bEnter\b|回车键?|空格键|按下.+键"
+    r"|按\s*(?:ESC|Enter|回车|空格|Tab|删除|退格|方向|上下|F\d+)",
+    re.I,
+)
 
 
 def is_close_messages_checklist_step(description: str | None) -> bool:
@@ -406,6 +411,13 @@ def is_select_checklist_step(description: str | None) -> bool:
     if is_click_checklist_step(desc) or is_fill_checklist_step(desc):
         return False
     return bool(_SELECT_STEP_RE.search(desc))
+
+
+def is_press_key_checklist_step(description: str | None) -> bool:
+    """True for checklist items whose primary intent is pressing a key."""
+    if not description:
+        return False
+    return bool(_PRESS_KEY_STEP_RE.search(description.strip()))
 
 
 def _evaluate_is_real_close_action(entry: dict[str, Any]) -> bool:
@@ -508,6 +520,14 @@ def journal_entry_covers_checklist(
     action = (entry.get("action") or "").strip().lower()
     desc = (step_description or "").strip()
 
+    # Explicit key-press intent is the most specific: a successful ESC/Enter
+    # press covers it even when the text also mentions a dialog/message.
+    if is_press_key_checklist_step(desc):
+        return action in ("press_key", "browser_press_key")
+    # A key press must not fake-cover click/fill/assert steps.
+    if action in ("press_key", "browser_press_key"):
+        return False
+
     if is_close_messages_checklist_step(desc):
         if action in ("click", "browser_click"):
             return True
@@ -524,7 +544,7 @@ def journal_entry_covers_checklist(
             "browser_click",
         )
 
-    if action in ("wait", "screenshot", "press_key", "browser_press_key"):
+    if action in ("wait", "screenshot"):
         return False
 
     if is_click_checklist_step(desc):

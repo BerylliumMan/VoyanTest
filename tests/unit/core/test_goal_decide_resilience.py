@@ -136,3 +136,31 @@ async def test_persistent_transport_failure_still_raises():
 
     assert "Connection error" in str(exc.value)
     assert len(client.calls) == gal.GOAL_DECIDE_ATTEMPTS
+
+
+def test_press_key_covers_esc_checklist_step():
+    from core.goal_agent_loop import (
+        is_press_key_checklist_step,
+        journal_entry_covers_checklist,
+    )
+
+    assert is_press_key_checklist_step("7 按键 ESC")
+    assert is_press_key_checklist_step("按 ESC 键关闭弹窗")
+    assert is_press_key_checklist_step("按下回车确认")
+    assert not is_press_key_checklist_step("点击【登录】按钮")
+    assert not is_press_key_checklist_step("在输入框输入用户名")
+
+    esc_entry = {"success": True, "action": "press_key", "checklist_index": 7}
+    assert journal_entry_covers_checklist(esc_entry, step_description="7 按键 ESC")
+    # 按键不能冒充覆盖点击/断言步骤
+    assert not journal_entry_covers_checklist(
+        esc_entry, step_description="点击【登录】按钮"
+    )
+    assert not journal_entry_covers_checklist(
+        esc_entry, step_description="验证页面标题为首页"
+    )
+    # 失败的按键不覆盖
+    assert not journal_entry_covers_checklist(
+        {"success": False, "action": "press_key", "checklist_index": 7},
+        step_description="7 按键 ESC",
+    )
