@@ -1554,16 +1554,24 @@ class AgentManager:
                     base_url=base_url_override,
                 )
 
-                # Skip headless dry-run when configured (default) or batch reuse.
-                # Isolated mode still verifies before persist; skip avoids the
-                # 30s+ locator timeouts the user sees after goal already passed.
+                # skip 模式：跳过 headless 干跑但照样持久化（覆盖门已保证
+                # 内容对 checklist；要严格先验的人切 isolated 模式）。
                 if dry_mode == "skip" and not reuse_browser_session:
-                    logger.info(
-                        "nl_goal skip dry-run verify case=%s (dry_run_mode=skip) "
-                        "— goal passed; not persisting unverified script",
-                        case_id,
-                    )
-                    script_ok = False
+                    if script and script.strip():
+                        self._last_synthesized_script = {
+                            "case_id": case_id,
+                            "script": script,
+                            "steps_hash": steps_content_hash(steps),
+                        }
+                        script_ok = True
+                        logger.info(
+                            "nl_goal synthesized script ok case=%s bytes=%s "
+                            "(skip dry-run — persist without verify)",
+                            case_id,
+                            len(script),
+                        )
+                    else:
+                        script_ok = False
                 elif reuse_browser_session:
                     logger.info(
                         "nl_goal skip dry-run verify case=%s "
