@@ -33,6 +33,12 @@ logger = logging.getLogger("agent.manager")
 NL_GOAL_PROBE_ON_FAIL = True
 NL_GOAL_PROBEABLE_ACTIONS = {"click", "fill", "select", "hover", "press_key"}
 
+# nl_goal 决策温度的历史默认值；执行 Agent 未配 llm_config.temperature 时使用。
+NL_GOAL_DEFAULT_TEMPERATURE = 0.15
+# ``app.runtime_config.get_prompt`` 在模板缺失时返回的占位文案。nl_goal 绝不能把
+# 它当角色上下文注入（参见 core/runner/_execution.py:256 记录过的同类回归）。
+_MISSING_PROMPT_MARKER = "请根据以下内容分析"
+
 
 def _locate_script_verify_failed_step_orders(
     verify: Optional[list],
@@ -493,6 +499,40 @@ class AgentManager:
             reuse_browser_session=reuse_browser_session,
         )
 
+    async def _resolve_goal_role_context(self) -> str:
+        """解析 nl_goal 决策可用的「AI Agent 定义」提示词。
+
+        优先级（``resolve_prompt_for_agent`` 内部实现）：执行 Agent 的
+        ``prompt_overrides["goal_decide"]`` → ``PromptTemplate(goal_decide)``；
+        Agent 有 ``system_prompt`` 时作为角色前缀一并返回。
+
+        返回空串表示未配置；调用方据此保持历史行为（仅用 GOAL_SYSTEM_PROMPT）。
+        模板缺失时 ``get_prompt`` 会返回占位文案，必须拦掉，否则会把
+        「请根据以下内容分析」注入决策提示词。
+        """
+        try:
+            from app.database import AsyncSessionLocal
+            from app.runtime_config import resolve_prompt_for_agent
+
+            async with AsyncSessionLocal() as db:
+                resolved = await resolve_prompt_for_agent(
+                    db, "execution", "goal_decide",
+                )
+        except Exception:
+            logger.debug("goal_decide prompt resolution failed", exc_info=True)
+            return ""
+
+        text = (resolved or "").strip()
+        if not text:
+            return ""
+        if _MISSING_PROMPT_MARKER in text:
+            logger.debug(
+                "goal_decide template missing (placeholder returned) — "
+                "keeping GOAL_SYSTEM_PROMPT only",
+            )
+            return ""
+        return text
+
     async def _execute_on_agent_nl_goal(
         self,
         agent_id: str,
@@ -644,14 +684,28 @@ class AgentManager:
             ):
                 raise RuntimeError(str(ready.get("message")))
 
-            llm_client = await create_openai_client()
-            _, _, model = await _llm_resolve_config()
+            llm_client = await create_openai_client(agent_type="execution")
+            _, _, model = await _llm_resolve_config(agent_type="execution")
             from app.gen.model_client import _load_ai_config
             execution_config = await _load_ai_config(agent_type="execution")
             max_context_tokens = int(
                 execution_config.get("max_context_tokens") or 131072
             )
             goal_output_tokens = min(max_context_tokens // 3, 16384)
+            # 执行 Agent 的 llm_config.temperature（未配置时回落到历史默认 0.15）
+            try:
+                goal_temperature = float(
+                    execution_config.get("temperature") or NL_GOAL_DEFAULT_TEMPERATURE
+                )
+            except (TypeError, ValueError):
+                goal_temperature = NL_GOAL_DEFAULT_TEMPERATURE
+            # 执行 Agent 配置的提示词（追加式注入，契约段永不被替换）
+            goal_role_context = await self._resolve_goal_role_context()
+            if goal_role_context:
+                logger.info(
+                    "nl_goal role context injected case=%s chars=%s",
+                    case_id or case_name, len(goal_role_context),
+                )
 
             await self._get_snapshot(session, agent_id, run_id)
             if navigate_base_url and base_url_override:
@@ -943,6 +997,8 @@ class AgentManager:
                             probe_result=probe_summary,
                             last_action_error=last_action_error,
                             max_output_tokens=goal_output_tokens,
+                            temperature=goal_temperature,
+                            system_prompt=goal_role_context or None,
                             candidates=current_candidates,
                             snapshot_version=current_snapshot_version,
                         )
@@ -1540,8 +1596,9 @@ class AgentManager:
                 dry_mode = "skip"
 
             try:
-                llm_client = await create_openai_client()
-                _, _, model = await _llm_resolve_config()
+                # 固化脚本合成/修复同属 nl_goal 链路，使用执行 Agent 的 llm_config
+                llm_client = await create_openai_client(agent_type="execution")
+                _, _, model = await _llm_resolve_config(agent_type="execution")
                 cid = int(case_id or 0)
                 script = await synthesize_playwright_script(
                     client=llm_client,

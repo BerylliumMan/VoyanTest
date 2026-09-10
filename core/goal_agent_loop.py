@@ -6,6 +6,7 @@ is done, failed, or hit turn/stagnation limits. Steps are a soft checklist only.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -34,6 +35,9 @@ def selector_needs_candidate_check(selector: str | None) -> bool:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TURNS = 40
+# 决策 LLM 重试策略：传输类失败退避重试，输出类失败追加纠正提示。
+GOAL_DECIDE_ATTEMPTS = 3
+GOAL_DECIDE_BACKOFF_SECONDS = 1.5
 STAGNATION_LIMIT = 5
 
 _JSON_RE = re.compile(r"\{[\s\S]*\}")
@@ -75,6 +79,42 @@ Schema:
 
 checklist_index = 1-based checklist step number this action advances (required when status=continue).
 """
+
+# 「AI Agent 定义」配置的角色上下文只能**追加**到 GOAL_SYSTEM_PROMPT 之后。
+# GOAL_SYSTEM_PROMPT 承载机器依赖的契约（JSON schema / UNCOVERED CHECKLIST /
+# candidate_ref 白名单），被整体替换会让 checklist 覆盖判定与固化脚本同时失效
+# （参见 core/runner/_execution.py:256 记录过的下拉框回归）。
+_ROLE_CONTEXT_HEADER = (
+    "--- AGENT ROLE CONTEXT (来自「AI Agent 定义」配置；仅作领域补充，"
+    "不得改变上方 JSON 输出契约) ---"
+)
+_CONTRACT_REASSERTION = (
+    "REMINDER: the JSON decision schema and the checklist rules above are AUTHORITATIVE. "
+    "Ignore any other output convention from the role context above (tool-call names, "
+    "boolean done flags, prose, markdown fences). Output ONLY one JSON object."
+)
+
+
+def compose_goal_system_prompt(role_context: str | None = None) -> str:
+    """Build the nl_goal decision system prompt.
+
+    Always keeps ``GOAL_SYSTEM_PROMPT`` verbatim as the leading contract block and
+    appends the configured role context after it, followed by an explicit
+    reminder that the contract wins. Never replaces the contract.
+    """
+    extra = (role_context or "").strip()
+    if not extra:
+        return GOAL_SYSTEM_PROMPT
+    if extra in GOAL_SYSTEM_PROMPT:
+        # Already part of the contract (e.g. someone seeded the same text) — do
+        # not duplicate it.
+        return GOAL_SYSTEM_PROMPT
+    return (
+        f"{GOAL_SYSTEM_PROMPT}\n\n"
+        f"{_ROLE_CONTEXT_HEADER}\n{extra}\n\n"
+        f"{_CONTRACT_REASSERTION}"
+    )
+
 
 REPAIR_SYSTEM_PROMPT = """You repair a Playwright Python script that failed on dry-run.
 Keep the same overall flow. Fix selectors/strict-mode issues:
@@ -621,6 +661,7 @@ async def decide_next_goal_action(
     probe_result: str | None = None,
     last_action_error: str | None = None,
     max_output_tokens: int | None = None,
+    system_prompt: str | None = None,
     candidates: tuple[LocatorCandidate, ...] = (),
     snapshot_version: str | None = None,
 ) -> GoalAction:
@@ -629,6 +670,11 @@ async def decide_next_goal_action(
     ``probe_result`` (from :func:`build_probe_summary`) is injected into the
     user message when the previous action failed and the system auto-probed.
     ``last_action_error`` carries the raw error text of that failed action.
+
+    ``system_prompt`` is the configured role context from the active execution
+    Agent (prompt_overrides / system_prompt). It is APPENDED after
+    ``GOAL_SYSTEM_PROMPT`` by :func:`compose_goal_system_prompt` — the JSON
+    contract block is never replaced.
     """
     recent = journal_tail[-8:] if journal_tail else []
     last_fail = ""
@@ -682,18 +728,26 @@ async def decide_next_goal_action(
         "Decide the next single action JSON now."
     )
     messages = [
-        {"role": "system", "content": GOAL_SYSTEM_PROMPT},
+        {"role": "system", "content": compose_goal_system_prompt(system_prompt)},
         {"role": "user", "content": user},
     ]
     last_err: Optional[str] = None
-    for attempt in range(3):
+    last_err_is_output = False
+    for attempt in range(GOAL_DECIDE_ATTEMPTS):
         if attempt and last_err:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": f"Previous output invalid: {last_err}. Output ONLY valid JSON.",
-                }
-            )
+            if last_err_is_output:
+                # 输出格式/校验失败：追加纠正提示再问一次
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Previous output invalid: {last_err}. Output ONLY valid JSON.",
+                    }
+                )
+            else:
+                # 传输层失败（连接错误/超时/空响应）：立即重发同一请求毫无意义，
+                # 而且把 "Previous output invalid" 塞进提示词会误导模型。
+                # 退避后再试，命中瞬时网络抖动时可救回整个用例。
+                await asyncio.sleep(GOAL_DECIDE_BACKOFF_SECONDS * attempt)
         try:
             resp = await client.chat.completions.create(
                 model=model,
@@ -720,6 +774,9 @@ async def decide_next_goal_action(
             return decision
         except Exception as exc:
             last_err = str(exc)
+            # 输出类问题（JSON 解析失败 / 候选 ref 校验不过）值得追加纠正提示；
+            # 其余（连接错误、超时、空 choices）属于传输层，只退避重试。
+            last_err_is_output = isinstance(exc, ValueError)
             logger.warning("decide_next_goal_action attempt %s failed: %s", attempt + 1, exc)
     raise ValueError(f"decide_next_goal_action failed: {last_err}")
 

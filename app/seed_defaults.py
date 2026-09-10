@@ -26,6 +26,37 @@ def _execution_system_prompt() -> str:
     return SYSTEM_PROMPT.strip()
 
 
+# nl_goal 整案决策的角色补充提示词。
+#
+# 只作为 core/goal_agent_loop.GOAL_SYSTEM_PROMPT 之后**追加**的角色上下文：
+# 契约段（JSON schema / UNCOVERED CHECKLIST / candidate_ref 白名单）不可被替换，
+# 否则 checklist 覆盖判定与固化脚本会同时失效。
+GOAL_DECIDE_PROMPT = """整案 nl_goal 决策的领域补充约定（仅作补充，不得改变上方 JSON 契约与 checklist 规则）。
+
+【语义保真 — 最高优先级】
+- 步骤文案是权威来源：提交≠确定≠保存≠下一步；查询≠搜索；取消≠关闭。禁止换成「看起来差不多」的控件。
+- 【】/「」内是页面真实可见文案，优先按原文精确匹配；不要点击更长的相似标签。
+- 「下拉框/输入框/按钮/菜单」等控件类型词不是页面文案，禁止用它们定位。
+- 输入/选择的值只能来自步骤明文；禁止臆造账号、密码或示例数据。
+- 一步只做一个主操作，不要提前做后续步骤或填未提及字段。
+
+【下拉与树选择】
+- 原生 select 用 action="select"，selector 指向该 select，value 用选项文案。
+- 自定义下拉（Element UI / Ant Design）：先 click 字段标签展开组合框；需要筛选时先在可见且可用的筛选输入框输入，再 click 选项明文。
+- 用 wait 时只能等选项文案或字段标签，不要等「xxx下拉框」这类控件类型词。
+- 树选择器点击最末级节点的完整文案，禁止点父级/前缀节点。
+
+【弹层处理】
+- 遮罩、弹窗、消息提示优先按步骤语义关闭或确认后再继续，不要带着遮罩层执行后续步骤。
+- 若目标文本包含 PRECONDITION ALREADY SATISFIED，保持该弹窗打开，只在弹窗内部寻找匹配控件；
+  控件被遮罩挡住时不要关弹窗，改点弹窗内的对应控件。
+
+【失败恢复】
+- 同一动作失败后不要原样重试：换 ref、改用 probe 候选，或先处理遮挡。
+- 重试用尽仍无法推进时按上方规则返回 status="fail"，禁止用 status="done" 掩盖失败。
+"""
+
+
 OPERATION_TRANSLATE_PROMPT = """你是一个浏览器自动化操作翻译器。用例步骤已经正确，你的职责是忠实翻译为精确操作，禁止擅自改写意图。
 
 【语义保真 — 最高优先级】
@@ -144,7 +175,8 @@ DEFAULT_AGENTS: list[dict] = [
             "verify_expected",
             "step_execute",
             "operation_translate",
-            "execution_system"
+            "execution_system",
+            "goal_decide"
         ],
         "llm_config": {"temperature": 0.1, "max_tokens": 4096},
         "is_active": 1,
@@ -301,6 +333,16 @@ def get_seed_prompts() -> dict[str, dict]:
             "variables": [],
             "description": "逐步执行：accessibility snapshot + ref 定位（禁止 getByText 控件类型词）",
         },
+        "goal_decide": {
+            "name": "整案决策角色补充",
+            "category": "execution",
+            "content": GOAL_DECIDE_PROMPT.strip(),
+            "variables": [],
+            "description": (
+                "nl_goal 整案决策的角色上下文；追加在 JSON 契约之后，"
+                "只作领域补充，不能替换契约段"
+            ),
+        },
         "cdp_convert": {
             "name": "录制事件转步骤",
             "category": "recording",
@@ -402,7 +444,7 @@ _FLOW_PROMPT_KEYS = frozenset({"fp_extract_flow", "tc_generate_flow"})
 _UI_GEN_PROMPT_KEYS = frozenset({"tc_generate_ui"})
 _FUNC_GEN_PROMPT_KEYS = frozenset({"fp_extract", "tc_generate"})
 # Execution prompts that fix dropdown getByText('…下拉框') regressions.
-_EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate"})
+_EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate", "goal_decide"})
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
 _UI_AGENT_NAME = "UI自动化用例生成助手"
 _FUNC_AGENT_NAME = "功能用例生成助手"
