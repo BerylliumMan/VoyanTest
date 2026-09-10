@@ -125,6 +125,32 @@ def is_snapshot_ref(value: str | None) -> bool:
     return bool(value and re.fullmatch(r"(?:f\d+e\d+|e\d+)", value))
 
 
+_EPHEMERAL_REF_RE: Final[re.Pattern[str]] = re.compile(r"(?:ref_|probe_idx_)\d+", re.I)
+# Playwright 侧的 ref 选择器语法（MCP 内部就是 page.locator('aria-ref=e3')）。
+# 它同样只在当次快照有效，一旦被固化，下次直跑必定指向不存在的元素。
+_ARIA_REF_SELECTOR_RE: Final[re.Pattern[str]] = re.compile(
+    r"aria-ref\s*=\s*(?:f\d+)?e\d+", re.I
+)
+
+
+def is_ephemeral_locator_ref(value: str | None) -> bool:
+    """快照 ref / probe 候选 id 都是临时的，绝不能当作可持久化定位符。
+
+    真实 ref 形态为 ``e12``（主 frame）或 ``f3e24``（第 3 个 frame 的第 24 个
+    元素）；等价写法 ``aria-ref=e12`` 也只在当次快照有效。判定必须与提取侧共用
+    :func:`is_snapshot_ref`，**不要**自带只认某个固定 frame 号的写法（历史 bug：
+    ``(?:e|f5e|ref_|probe_idx_)\\d+`` 只认 frame 5，于是 iframe 内的 ref 漏判，
+    被当成持久定位符写进 journal.replay.playwright_locator，合成进固化脚本后变成
+    ``page.locator("f3e24")`` —— 下次直跑必然「找不到元素」）。
+    """
+    s = (value or "").strip()
+    if not s:
+        return False
+    if is_snapshot_ref(s) or _EPHEMERAL_REF_RE.fullmatch(s):
+        return True
+    return bool(_ARIA_REF_SELECTOR_RE.search(s))
+
+
 _REF_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"(?:f\d+e\d+|e\d+)")
 
 

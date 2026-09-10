@@ -13,7 +13,6 @@ from core.goal_agent_loop import (
     is_select_checklist_step,
 )
 
-_REF_RE = re.compile(r"^(?:e|f5e|ref_|probe_idx_)\d+$", re.I)
 _BRACKET_RE = re.compile(r"【([^】]+)】")
 
 # Backward-compatible alias; prefer codegen resolve in manager.
@@ -39,8 +38,10 @@ RESOLVE_DOM_ATTRS_JS = r"""() => {
 
 
 def is_ephemeral_ref(selector: str | None) -> bool:
-    s = (selector or "").strip()
-    return bool(s and _REF_RE.match(s))
+    """快照 ref（``e12`` / ``f3e24``）等临时定位符判定，见 canonical 实现。"""
+    from core.locator_candidates import is_ephemeral_locator_ref
+
+    return is_ephemeral_locator_ref(selector)
 
 
 def _brackets(desc: str) -> list[str]:

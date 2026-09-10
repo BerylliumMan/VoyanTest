@@ -989,6 +989,18 @@ class AgentClient:
         ):
             return await execute_blank_click(self._mcp_tools_call)
 
+        # 控制信号优先于工具解析：LLM 主动报错时服务端（core/playwright_manager.py
+        # 的同名分支）会保留原因文本；客户端此前落入 "Unknown action: error"，
+        # 把 LLM 给出的失败原因整段丢掉，报告里只剩无意义的未知动作。
+        action_key = (action or "").strip().lower()
+        if action_key == "error":
+            return {"success": False, "error": f"LLM error: {value}"}
+        if action_key == "done":
+            return {
+                "success": False,
+                "error": "LLM signaled done before executing an action",
+            }
+
         mcp_tool = _resolve_mcp_tool(action)
         if not mcp_tool:
             return {"success": False, "error": f"Unknown action: {action}"}

@@ -2,6 +2,7 @@
 """LLM synthesis of Playwright Python from an NL-goal action journal."""
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ from core.goal_agent_loop import (
     journal_entry_covers_checklist,
     parse_checklist_index,
 )
+from core.locator_candidates import is_ephemeral_locator_ref
 from core.script_templates import try_build_templated_script
 
 logger = logging.getLogger(__name__)
@@ -248,6 +250,91 @@ def check_script_covers_intents(
     return [t for t in required if t not in body]
 
 
+# 选择器类 API：参数就是 Playwright selector，绝不能是快照 ref
+_SELECTOR_CALL_RE = re.compile(
+    r"""\.(?:locator|wait_for_selector|query_selector|frame_locator|
+          get_by_role|get_by_text|get_by_label|get_by_placeholder|get_by_title|
+          get_by_alt_text|get_by_test_id)\s*\(\s*(['"])(.*?)\1""",
+    re.X,
+)
+# 无参调用选择器 API：Frame.wait_for_selector() missing 1 required positional argument
+_EMPTY_SELECTOR_CALL_RE = re.compile(
+    r"""\.(?:locator|wait_for_selector|query_selector)\s*\(\s*\)"""
+)
+# 提示词明令禁止的固定等待（慢 + 抖动），仅告警不拒绝
+_FORBIDDEN_WAIT_RE = re.compile(r"""\.(?:wait_for_timeout)\s*\(|\.wait_for\s*\(""")
+
+
+def check_script_sanity(script: str) -> list[str]:
+    """Return hard problems that make the synthesized script unrunnable.
+
+    这些是「必然失败」而非「风格问题」，命中即拒绝入库：坏脚本一旦被固化，
+    下次执行会优先直跑它（compiled_script first），白白超时后才回退 nl_goal。
+
+    覆盖的真实线上失败：
+    - ``waiting for locator("e3")`` / ``locator("f3e24")``：快照 ref 被当成 CSS
+    - ``Frame.wait_for_selector() missing 1 required positional argument``
+    - ``frame`` 变量未定义（LLM 凭想象引入 iframe 对象）
+    """
+    body = script or ""
+    problems: list[str] = []
+
+    try:
+        tree = ast.parse(body)
+    except SyntaxError as exc:
+        return [f"script is not valid Python: {exc}"]
+
+    for m in _SELECTOR_CALL_RE.finditer(body):
+        raw = m.group(2).strip()
+        if is_ephemeral_locator_ref(raw):
+            problems.append(f"ephemeral snapshot ref used as a locator: {raw!r}")
+
+    if _EMPTY_SELECTOR_CALL_RE.search(body):
+        problems.append("selector API called without a selector")
+
+    # 未定义的 frame / self.frame 变量
+    assigned: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            assigned.add(node.id)
+        elif isinstance(node, ast.arg):
+            assigned.add(node.arg)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == "frame"
+            and "frame" not in assigned
+        ):
+            problems.append("undefined variable 'frame' referenced")
+            break
+
+    return problems
+
+
+def check_script_warnings(script: str) -> list[str]:
+    """Non-fatal smells worth logging (fixed sleeps defeat Playwright auto-wait)."""
+    if _FORBIDDEN_WAIT_RE.search(script or ""):
+        return ["script uses fixed waits (wait_for_timeout / locator.wait_for)"]
+    return []
+
+
+def _accept_synthesized_script(script: str, *, case_id: int | None = None) -> str:
+    """Reject unrunnable scripts so a broken locator never gets persisted."""
+    problems = check_script_sanity(script)
+    if problems:
+        logger.warning(
+            "synthesized script rejected case=%s problems=%s",
+            case_id, problems,
+        )
+        raise ValueError(
+            "synthesized script failed sanity check: " + "; ".join(problems)
+        )
+    for warning in check_script_warnings(script):
+        logger.warning("synthesized script smell case=%s: %s", case_id, warning)
+    return script
+
+
 async def synthesize_playwright_script(
     *,
     client: AsyncOpenAI,
@@ -276,6 +363,7 @@ async def synthesize_playwright_script(
             script = harden_locators_with_first(
                 _ensure_entrypoint(templated, int(case_id))
             )
+            script = _accept_synthesized_script(script, case_id=case_id)
             logger.info(
                 "synthesized script from templates case=%s bytes=%s",
                 case_id,
@@ -341,7 +429,7 @@ async def synthesize_playwright_script(
         raise ValueError(
             "synthesized script missing required targets: " + ", ".join(missing)
         )
-    return script
+    return _accept_synthesized_script(script, case_id=case_id)
 
 
 async def repair_playwright_script(
@@ -385,4 +473,4 @@ async def repair_playwright_script(
         raise ValueError(
             "repaired script missing required targets: " + ", ".join(missing)
         )
-    return fixed
+    return _accept_synthesized_script(fixed, case_id=case_id)

@@ -79,8 +79,12 @@ def normalize_playwright_locator(loc: str | None) -> str | None:
         s = s[5:].strip()
     if not s:
         return None
-    # reject bare ephemeral snapshot refs mistaken as locators
-    if re.fullmatch(r"(?:e|f5e|ref_|probe_idx_)\d+", s, re.I):
+    # reject bare ephemeral snapshot refs mistaken as locators.
+    # 必须覆盖 f<帧号>e<元素号>（iframe 内元素），否则 ref 会被当作持久定位符
+    # 写进 replay.playwright_locator 并固化进脚本 → 下次直跑必然找不到元素。
+    from core.locator_candidates import is_ephemeral_locator_ref
+
+    if is_ephemeral_locator_ref(s):
         return None
     return s
 
