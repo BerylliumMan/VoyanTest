@@ -297,13 +297,22 @@ async def synthesize_playwright_script(
         "journal_clean": journal_clean,
         "template_hint": (templated[:4000] if templated else None),
     }
+    required_literals = extract_required_targets(steps)
+    literal_rule = (
+        f"HARD RULE: 以下字面值必须原样出现在代码中（缺一不可）："
+        f"{required_literals}\n" if required_literals else ""
+    )
     user = (
         f"Synthesize async Playwright script for case_id={int(case_id)}.\n"
         f"Function name MUST be: async def test_case_{int(case_id)}(page)\n"
         f"The CHECKLIST is the source of truth — every action must fulfill it.\n"
-        f"Prefer journal_clean[].replay strategies; NEVER emit snapshot refs.\n\n"
+        f"Prefer journal_clean[].replay strategies; NEVER emit snapshot refs.\n"
+        f"{literal_rule}\n"
         f"CONTEXT JSON:\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
     )
+    # 思考模式保持开启（调用方显式需要推理能力）；解析经共享提取器
+    # 兼容思考字段（content 为空时回退 reasoning），只加鲁棒性不减能力。
+    from core.precondition import _response_text
     resp = await client.chat.completions.create(
         model=model,
         messages=[
@@ -313,7 +322,14 @@ async def synthesize_playwright_script(
         temperature=temperature,
         max_tokens=8192,
     )
-    script = _strip_fences(resp.choices[0].message.content or "")
+    raw_message = resp.choices[0].message
+    script = _strip_fences(_response_text(raw_message))
+    if not script or "async def" not in script:
+        logger.warning(
+            "synth response unparseable content_len=%s reasoning_len=%s",
+            len(getattr(raw_message, "content", None) or ""),
+            len(getattr(raw_message, "reasoning_content", None) or ""),
+        )
     if not script or "async def" not in script:
         raise ValueError("LLM returned empty/invalid Playwright script")
     script = harden_locators_with_first(_ensure_entrypoint(script, int(case_id)))
