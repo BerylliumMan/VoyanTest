@@ -769,12 +769,21 @@ async def decide_next_goal_action(
                 # 退避后再试，命中瞬时网络抖动时可救回整个用例。
                 await asyncio.sleep(GOAL_DECIDE_BACKOFF_SECONDS * attempt)
         try:
+            # chat_template_kwargs 是 vLLM 私有扩展：只发给认它的服务端，
+            # 按 api_base 判定（Google 等外部端点收到未知字段会 400）。
+            from core.thinking_config import _provider_ignores_thinking_options
+            _base = str(getattr(client, "base_url", "") or "")
+            think_body = (
+                None
+                if _provider_ignores_thinking_options(model, _base)
+                else {"chat_template_kwargs": {"enable_thinking": True}}
+            )
             resp = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_output_tokens or 16384,
-                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                **({"extra_body": think_body} if think_body else {}),
             )
             content = _extract_goal_message_text(resp.choices[0].message)
             decision = _parse_goal_action(content)
