@@ -325,7 +325,8 @@ _UNICODE_LOOKALIKES: tuple[tuple[str, str], ...] = (
     ("（", "("), ("）", ")"), ("【", "["), ("】", "]"),
     ("「", '"'), ("」", '"'), ("『", '"'), ("』", '"'),
     ("“", '"'), ("”", '"'), ("‘", "'"), ("’", "'"),
-    ("…", "..."), ("——", "--"), ("～", "~"),
+    ("…", "..."), ("——", "--"), ("—", "-"), ("–", "-"), ("−", "-"),
+    ("～", "~"),
     ("％", "%"), ("＋", "+"), ("－", "-"), ("＝", "="),
     ("！", "!"), ("？", "?"), ("；", ";"),
 )
@@ -341,7 +342,8 @@ def repair_unicode_lookalikes(script: str) -> str:
     lines: list[str] = []
     for line in (script or "").splitlines():
         lines.append(_repair_code_span(line))
-    return _strip_trailing_arrow_annotations("\n".join(lines))
+    repaired = _strip_trailing_arrow_annotations("\n".join(lines))
+    return _strip_leading_prose(repaired)
 
 
 def _repair_code_span(line: str) -> str:
@@ -398,6 +400,27 @@ def _repair_code_span(line: str) -> str:
                 seg = seg.replace(src, dst)
         chars[a:b] = list(seg)
     return "".join(chars)
+
+
+_CODE_START_PREFIXES = (
+    "import ", "from ", "async ", "def ", "#", "@", '"""', "'''",
+)
+
+
+def _strip_leading_prose(body: str) -> str:
+    """Drop LLM preamble lines before the first code/comment line.
+
+    模型偶尔在代码块首行写标题（如 `— 登录脚本`），字符替换救不了
+    非注释散文行，直接删到第一个代码行。
+    """
+    lines = (body or "").splitlines()
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s or s.startswith(_CODE_START_PREFIXES):
+            break
+        i += 1
+    return "\n".join(lines[i:]) if i else body
 
 
 def _strip_trailing_arrow_annotations(body: str) -> str:
