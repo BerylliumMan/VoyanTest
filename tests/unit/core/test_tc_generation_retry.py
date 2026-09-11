@@ -34,4 +34,4 @@ async def test_empty_tc_batch_retry_forbids_empty_array(monkeypatch):
     assert "previous response was an empty array" in prompts[1]
     assert "上一阶段从需求正文提取的权威素材" in user_messages[0]
     assert "附图" not in user_messages[0]
-    assert all(options["enable_thinking"] is True for options in call_options)
+    assert all(options["enable_thinking"] is False for options in call_options)

@@ -123,15 +123,42 @@ async def _load_ai_config(
     return config
 
 
-_LLM_RETRY_ATTEMPTS = 3
+_LLM_RETRY_ATTEMPTS = 5
 _LLM_RETRY_BASE_DELAY = 2.0
+# 生成链路连续调用时的最小间隔（s）：网关 key RPM 严格，错峰避免 429。
+_LLM_MIN_INTERVAL = 3.0
+_last_call_ts: float = 0.0
 
 
 def _is_retryable(exc: Exception) -> bool:
-    """5xx / 网络传输错误 / 超时可重试；4xx 参数类错误不重试。"""
+    """5xx / 429 限速 / 网络传输错误 / 超时可重试；其他 4xx 参数类错误不重试。"""
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
+        status = exc.response.status_code
+        return status >= 500 or status == 429
     return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    """退避时长：429 优先服从服务端的 Retry-After，其余指数退避。"""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        try:
+            header_wait = float(exc.response.headers.get("retry-after", 0) or 0)
+            if header_wait > 0:
+                return min(120.0, header_wait)
+        except (TypeError, ValueError):
+            pass
+        return _LLM_RETRY_BASE_DELAY * attempt * 3
+    return _LLM_RETRY_BASE_DELAY * attempt
+
+
+async def _pace_calls() -> None:
+    """连续调用错峰：距离上次调用不足间隔时补睡差值。"""
+    global _last_call_ts
+    now = asyncio.get_event_loop().time()
+    wait = _LLM_MIN_INTERVAL - (now - _last_call_ts)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _last_call_ts = asyncio.get_event_loop().time()
 
 
 async def call_model(
@@ -173,7 +200,8 @@ async def call_model(
         enable_thinking if enable_thinking is not None
         else config.get('enable_thinking', True)
     )
-    payload.update(build_thinking_options(thinking))
+    payload.update(build_thinking_options(thinking, model_name, api_url))
+    await _pace_calls()
 
     if stream_callback:
         payload["stream"] = True
@@ -203,11 +231,12 @@ async def call_model(
             except Exception as exc:
                 if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
                     raise
+                delay = _retry_delay(exc, attempt)
                 logger.warning(
-                    "call_model[stream] 第 %d/%d 次失败(%s)，%ds 后重试",
-                    attempt, _LLM_RETRY_ATTEMPTS, type(exc).__name__, 2 * attempt,
+                    "call_model[stream] 第 %d/%d 次失败(%s)，%.0fs 后重试",
+                    attempt, _LLM_RETRY_ATTEMPTS, type(exc).__name__, delay,
                 )
-                await asyncio.sleep(2 * attempt)
+                await asyncio.sleep(delay)
         raise RuntimeError("unreachable: stream retry loop exhausted")
     else:
         # 027-e2e-fixes P5: 5xx/网络错误退避重试，4xx 直接抛
@@ -228,7 +257,7 @@ async def call_model(
                 if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
                     raise
                 last_exc = exc
-                delay = _LLM_RETRY_BASE_DELAY * attempt
+                delay = _retry_delay(exc, attempt)
                 logger.warning(
                     "call_model 第 %d/%d 次失败(%s)，%.0fs 后重试",
                     attempt, _LLM_RETRY_ATTEMPTS,

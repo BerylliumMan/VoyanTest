@@ -159,6 +159,8 @@ async def _extract_fps_once(
     """Returns (fps, raw_content, truncated_flag)."""
 
     async def _call(payload) -> str:
+        # JSON 机器协议禁用思考：Qwen 思考模式在此输出 16k token 自言自语
+        # 却不给答案（content 空、reasoning 止于"I will output…"），属调用点级失败证据。
         return await call_model(
             [
                 {"role": "system", "content": prompt},
@@ -166,7 +168,7 @@ async def _extract_fps_once(
             ],
             agent_type=agent_type,
             agent_id=agent_id,
-            enable_thinking=True,
+            enable_thinking=False,
         )
 
     # When continuing, prepend instruction as text prefix for string payloads,
@@ -496,7 +498,7 @@ async def _generate_batch_once(
                 ],
                 agent_type=agent_type,
                 agent_id=agent_id,
-                enable_thinking=True,
+                enable_thinking=False,
             )
             tcs = _parse_tcs_from_text(content, start_index=tc_counter)
             if tcs:
