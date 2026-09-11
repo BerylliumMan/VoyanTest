@@ -97,6 +97,7 @@ async def _ensure_agent_def_id(db: AsyncSession) -> int:
 
 async def _create_pending_execution(
     db: AsyncSession, case_id: int, agent_name: str | None, db_case, batch_id: int | None = None,
+    user_id: int | None = None,
     environment_id: Optional[int] = None,
     is_init: bool = False,
     seq: int | None = None,
@@ -121,6 +122,8 @@ async def _create_pending_execution(
     goal = {"type": "client_exec", "case_id": case_id, "agent_name": agent_name_text}
     if batch_id:
         goal["batch_id"] = batch_id
+    if user_id:
+        goal["user_id"] = user_id
     if environment_id:
         goal["environment_id"] = environment_id
     if is_init:
@@ -193,7 +196,7 @@ async def run_test_case_on_client(
     if should_use_ota_agent(active_agent_def) and agent_name and (await _find_online_agent_in_db(db, agent_name)):
         # 在 DB 中创建 AgentRun（status=pending），poller 会在有 WS 连接的 worker 上调起 OTA
         from core.agent_bridge import create_pending_agent_run
-        arun = await create_pending_agent_run(db, active_agent_def, db_case.id, agent_name, environment_id)
+        arun = await create_pending_agent_run(db, active_agent_def, db_case.id, agent_name, environment_id, user_id=getattr(user, 'id', None))
         return {"message": f"Agent #{arun.id} queued via AI Agent", "agent_run_id": arun.id}
 
     agents = await agent_manager.get_online_agents()
@@ -201,7 +204,7 @@ async def run_test_case_on_client(
         db_agent = await _find_online_agent_in_db(db, agent_name)
         if not db_agent:
             raise HTTPException(status_code=400, detail="No client agents available")
-        return await _create_pending_execution(db, case_id, agent_name, db_case, environment_id=environment_id)
+        return await _create_pending_execution(db, case_id, agent_name, db_case, user_id=getattr(user, 'id', None), environment_id=environment_id)
     if agent_name:
         matched = [a for a in agents if a.name == agent_name]
         if not matched:
@@ -224,11 +227,17 @@ async def run_test_case_on_client(
     if should_use_ota_agent(active_agent_def_same) and agent_name:
         from core.agent_bridge import AgentBridge
         bridge = AgentBridge(agent_manager, db, active_agent_def_same)
+        _sw_batch = await crud.create_run_batch(
+            db, project_id=db_case.project_id, name=db_case.name or "",
+            total_cases=1, triggered_by=getattr(user, 'username', None),
+        )
         arun = await bridge.orchestrate(
             case_id=db_case.id,
             agent_id=agent_name,
             goal={"type": "client_exec", "case_id": db_case.id, "agent_name": agent_name},
             environment_id=environment_id,
+            existing_batch_id=_sw_batch.id,
+            notify_user_id=getattr(user, 'id', None),
         )
         return {"message": f"Agent #{arun.id} executing via AI Agent", "agent_run_id": arun.id}
 
@@ -265,7 +274,7 @@ async def run_test_case_on_client(
             case_id, environment_id,
         )
 
-    batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
+    batch = await crud.create_run_batch(db, project_id=db_case.project_id, name=db_case.name or "", total_cases=1, triggered_by=getattr(user, 'username', None))
 
     async def _run() -> None:
         start_time = tz_now()
@@ -439,6 +448,10 @@ async def run_test_case_on_client(
             if _batch:
                 await crud._compute_batch_status(_db, _batch)
                 await _db.commit()
+                _uid = getattr(user, "id", None)
+                if _uid:
+                    from app.services.notifications import notify_batch_completed
+                    _asyncio.create_task(notify_batch_completed(_batch.id, _uid))
 
         if _all_success:
             try:
@@ -524,7 +537,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             if tc:
                 await _create_pending_execution(
                     db, cid, body.agent_name, tc,
-                    batch_id=batch.id, environment_id=body.environment_id,
+                    batch_id=batch.id, user_id=getattr(user, 'id', None),
+                    environment_id=body.environment_id,
                     is_init=is_init, seq=seq,
                     reuse_browser_session=reuse_session,
                 )
@@ -643,7 +657,10 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             project_id, body.environment_id,
         )
 
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
+    _batch_name = case_infos[0].get("name") or ""
+    if len(case_infos) > 1:
+        _batch_name = f"{_batch_name} 等{len(case_infos)}个用例"
+    batch = await crud.create_run_batch(db, project_id=project_id, name=_batch_name, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
 
     # 预创建 pending TestRun，避免按序落库期间轮询把批次误判为 partial
     async with db_mod.AsyncSessionLocal() as _pr_db:
@@ -911,6 +928,10 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     _b.finished_at = tz_now()
                 await crud._compute_batch_status(_db, _b)
                 await _db.commit()
+                _uid2 = getattr(user, "id", None)
+                if _uid2:
+                    from app.services.notifications import notify_batch_completed
+                    _asyncio.create_task(notify_batch_completed(_b.id, _uid2))
 
         if _all_success and not _stopped_by_user:
             try:

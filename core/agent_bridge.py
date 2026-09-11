@@ -46,6 +46,7 @@ class AgentBridge:
         self.agent_manager = agent_manager
         self.db = db
         self.agent_def = agent_def
+        self._notify_user_id: int | None = None
 
     # ── 主入口 ─────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ class AgentBridge:
         existing_run_id: int | None = None,
         environment_id: int | None = None,
         existing_batch_id: int | None = None,
+        notify_user_id: int | None = None,
     ) -> AgentRun:
         """OTA 主循环入口。
 
@@ -68,10 +70,12 @@ class AgentBridge:
             existing_run_id: 复用已有 AgentRun（跨 worker poller 路径）
             environment_id: 环境 ID，用于获取 base_url
             existing_batch_id: 复用已有 RunBatch（批量执行路径）
+            notify_user_id: 完成后给该用户发批次通知（None 则不发）
 
         Returns:
             已 commit/refresh 的 AgentRun 实例，status 为 completed 或 failed
         """
+        self._notify_user_id = notify_user_id
         if existing_run_id:
             run = await self.db.get(AgentRun, existing_run_id)
             if not run:
@@ -155,7 +159,8 @@ class AgentBridge:
         from app.db_models import RunBatch
         tc = await get_test_case(self.db, case_id)
         batch = RunBatch(status="running", triggered_by=f"agent:{self.agent_def.name}",
-                         project_id=tc.project_id if tc else 0, total_cases=1)
+                         project_id=tc.project_id if tc else 0, total_cases=1,
+                         name=(tc.name if tc and tc.name else ""))
         self.db.add(batch)
         await self.db.commit()
         await self.db.refresh(batch)
@@ -189,11 +194,18 @@ class AgentBridge:
                 total_cases=1,
                 passed=1 if run_status_map == "passed" else 0,
                 failed=1 if run_status_map == "failed" else 0,
+                name=(tc.name if tc and tc.name else ""),
             )
             self.db.add(batch)
         await self.db.commit()
         await self.db.refresh(batch)
         self._batch_id = batch.id
+        if self._batch_id and self._notify_user_id:
+            try:
+                from app.services.notifications import notify_batch_completed
+                await notify_batch_completed(self._batch_id, self._notify_user_id)
+            except Exception:
+                logger.exception("Bridge batch notify failed batch=%s", self._batch_id)
 
         # 从 agent_tool_calls 构建步骤日志
         logs: list[dict] = []
@@ -866,6 +878,7 @@ class AgentBridge:
 
 async def create_pending_agent_run(
     db, agent_def, case_id: int, agent_name: str, environment_id: int | None = None,
+    user_id: int | None = None, batch_id: int | None = None,
 ) -> object:
     """创建 pending AgentRun 记录，由跨 worker poller 在正确 worker 上执行 OTA"""
     from app.db_models import AgentRun as AgentRunModel
@@ -874,6 +887,10 @@ async def create_pending_agent_run(
     goal = {"type": "client_exec", "case_id": case_id, "agent_name": agent_name}
     if environment_id:
         goal["environment_id"] = environment_id
+    if user_id:
+        goal["user_id"] = user_id
+    if batch_id:
+        goal["batch_id"] = batch_id
 
     ar = AgentRunModel(
         agent_definition_id=agent_def.id,

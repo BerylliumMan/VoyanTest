@@ -3736,6 +3736,10 @@ class AgentManager:
                                         _goal.get("environment_id")
                                         if isinstance(_goal, dict) else None
                                     ),
+                                    notify_user_id=(
+                                        _goal.get("user_id")
+                                        if isinstance(_goal, dict) else None
+                                    ),
                                 )
                             finally:
                                 await _finish_busy(_agent_id)

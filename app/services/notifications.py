@@ -33,11 +33,16 @@ async def notify_batch_completed(
                 if batch.finished_at is not None or (
                     batch.status and batch.status not in ("running", "pending")
                 ):
+                    # 类型按计数判定（status 字符串各路径写法不统一）：
+                    # 有失败→error；全过→success；否则 info。
+                    failed = batch.failed or 0
+                    passed = batch.passed or 0
                     notif_type = (
-                        "success" if batch.status == "passed"
-                        else ("error" if batch.status == "failed" else "info")
+                        "error" if failed > 0
+                        else ("success" if passed > 0 else "info")
                     )
-                    title = f"批次「{batch.name}」运行完成"
+                    name = batch.name or f"#{batch.id}"
+                    title = f"批次「{name}」运行完成"
                     message = f"通过 {batch.passed}/{batch.total_cases}，失败 {batch.failed}"
                     db.add(db_models.Notification(
                         user_id=user_id,
