@@ -30,6 +30,17 @@ _COMPOUND_STEP_RE = re.compile(
     r"(?:分别|依次|然后|并且).{0,8}(?:点击|输入|选择)|"
     r"(?:点击|输入).{0,20}(?:然后|并且|再).{0,8}(?:点击|输入|选择)"
 )
+# 观察体步骤：无法执行、无断言标准，必须改写成动作/断言
+_OBSERVE_STEP_RE = re.compile(
+    r"^(?:观察|查看|检查|注意|目测)|(?:观察|检查|确认|查看)(?:一下|结果|是否)"
+)
+_ASSERT_ACTIONS = frozenset(
+    {"assert_text", "assert_visible", "assert", "verify", "断言", "check_result"}
+)
+_SETUP_FIRST_RE = re.compile(
+    r"^(?:打开|登录|导航|访问|进入|goto|navigate|open\b)", re.I
+)
+_SETUP_FIRST_ACTIONS = frozenset({"goto", "navigate", "open"})
 
 
 class ValidationResult:
@@ -156,6 +167,12 @@ def _validate_test_case(
         desc = (step.get("description") or "").strip()
         action = (step.get("action") or "").strip().lower()
 
+        if _OBSERVE_STEP_RE.search(desc) and action not in _ASSERT_ACTIONS:
+            result.fail(
+                f"step_{i}_observe",
+                f"步骤 {i + 1} 是观察体（无法执行），须改写成动作或断言: {desc[:60]}",
+            )
+
         if require_structured:
             # Hard-check raw fields BEFORE coerce strips ellipsis / type suffixes
             raw_steps = tc.get("steps") or tc.get("structured_steps") or []
@@ -217,6 +234,27 @@ def _validate_test_case(
         result.warnings.append(
             f"用例「{(tc.get('title') or tc.get('name') or '')[:40]}」有 {len(steps)} 步但无任何可观察预期，手册可能缺断言"
         )
+
+    if steps:
+        first = steps[0]
+        first_desc = (first.get("description") or "").strip()
+        first_action = (first.get("action") or "").strip().lower()
+        if (
+            first_action not in _SETUP_FIRST_ACTIONS
+            and not _SETUP_FIRST_RE.search(first_desc)
+        ):
+            result.warnings.append(
+                f"用例「{(tc.get('title') or tc.get('name') or '')[:40]}」首步不是打开/登录/导航，"
+                f"可能无法独立执行: {first_desc[:40]}"
+            )
+        last = steps[-1]
+        last_desc = (last.get("description") or "").strip()
+        last_action = (last.get("action") or "").strip().lower()
+        if last_action not in _ASSERT_ACTIONS and "断言" not in last_desc:
+            result.warnings.append(
+                f"用例「{(tc.get('title') or tc.get('name') or '')[:40]}」末步不是断言，"
+                f"建议以断言收尾: {last_desc[:40]}"
+            )
 
     module = tc.get("module") or ""
     if not module:
