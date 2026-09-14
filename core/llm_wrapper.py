@@ -473,7 +473,10 @@ async def generate_tool_call(
             return tool_call
         except PydanticValidationError as exc:
             last_error = f"Validation error: {exc}"
-            logger.warning("LLM output failed Pydantic validation (attempt %s)", attempt + 1)
+            logger.warning(
+                "LLM output failed Pydantic validation (attempt %s): %s | output=%s",
+                attempt + 1, str(exc)[:200], content[:200],
+            )
             continue
 
     raise ValueError(f"Failed to generate valid tool call after 3 attempts. Last error: {last_error}")

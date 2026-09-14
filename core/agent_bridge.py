@@ -543,9 +543,10 @@ class AgentBridge:
                         ),
                     })
                     continue
+                _summary = action.get("_summary") or ""
                 await crud_agent_run.create_message(
                     self.db, run.id, turn, "assistant",
-                    f"目标已达成: {action.get('_summary', '')}",
+                    f"目标已达成: {_summary}" if _summary else "目标已达成",
                 )
                 await self._complete(run.id, turn)
                 return
@@ -842,8 +843,9 @@ class AgentBridge:
 
         # 停止信号：done / error
         if action_name == "done":
-            logger.info("Agent declared goal achieved: %s", tc_dict.get("value", ""))
-            return {"_done": True, "summary": tc_dict.get("value", "")}
+            summary = tc_dict.get("value") or ""
+            logger.info("Agent declared goal achieved: %s", summary)
+            return {"_done": True, "_summary": summary}
 
         if action_name == "error":
             err_msg = tc_dict.get("value", "unknown agent error")

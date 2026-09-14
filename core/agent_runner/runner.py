@@ -133,7 +133,7 @@ class ToolRegistry:
         # 特殊 action：done / error / snapshot 不需要 MCP 调用
         if action == "done":
             return {"success": True, "error": None, "done": True,
-                    "summary": tool_call.get("value", "")}
+                    "summary": tool_call.get("value") or ""}
         if action == "error":
             return {"success": False, "error": f"Agent 报告错误: {tool_call.get('value', '')}"}
         if action == "snapshot":
