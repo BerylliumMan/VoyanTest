@@ -408,6 +408,29 @@ class AgentBridge:
             case_url = env_base_url
             logger.info("Bridge: using base_url from environment: %s", env_base_url)
 
+        # 回退项目 base_url（与非 OTA 路径 _resolve_execution_base_url 语义一致）
+        if not case_url and run.case_id:
+            try:
+                from app.database import AsyncSessionLocal as _ASL2
+                from app import crud as _crud2
+                async with _ASL2() as _pdb:
+                    _tc2 = await _crud2.get_test_case(_pdb, run.case_id)
+                    _pid = getattr(_tc2, 'project_id', None) if _tc2 else None
+                    if _pid:
+                        _proj = await _crud2.get_project(_pdb, _pid)
+                        _purl = (getattr(_proj, 'base_url', None) or '').strip() if _proj else ''
+                        if _purl:
+                            case_url = _purl
+                            logger.info("Bridge: using base_url from project: %s", _purl)
+            except Exception:
+                logger.warning("Could not load project base_url for case %s", run.case_id, exc_info=True)
+
+        if not case_url:
+            logger.warning(
+                "Bridge: no base_url resolved (env=%s case=%s) — browser may stay on about:blank",
+                getattr(self, '_environment_id', None), run.case_id,
+            )
+
         # 先直接导航到目标 URL（不经过 LLM）
         if case_url:
             logger.info("Bridge: navigating to %s before OTA loop", case_url)

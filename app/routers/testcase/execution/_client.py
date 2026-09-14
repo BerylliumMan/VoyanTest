@@ -735,6 +735,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                                     goal={"type": "client_exec", "case_id": case_id, "agent_name": body.agent_name},
                                     environment_id=body.environment_id,
                                     existing_batch_id=batch.id,
+                                    notify_user_id=getattr(user, 'id', None),
                                 )
                             finally:
                                 agent_manager._agent_busy.discard(agent.id)
