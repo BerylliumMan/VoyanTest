@@ -1389,7 +1389,16 @@ class AgentClient:
             await self._handle_step_browser_use(msg)
 
         elif msg.type == WSMessageType.RUN_COMPILED_SCRIPT:
-            await self._handle_run_compiled_script(msg)
+            # 回放不带 RUN_START：显式绑定本次 run 上下文，结束后清空，
+            # 否则 RUN_LOG 前缀会沿用上一个 run 的 id（服务端巡检日志会误导）
+            _prev_active_run = self._active_run_id
+            self._active_run_id = msg.run_id or self._active_run_id
+            self._active_backend = "compiled_script"
+            try:
+                await self._handle_run_compiled_script(msg)
+            finally:
+                self._active_run_id = None
+                self._active_backend = None
 
         elif msg.type == WSMessageType.SHUTDOWN:
             self._log_info("Shutdown signal received — closing browser")
