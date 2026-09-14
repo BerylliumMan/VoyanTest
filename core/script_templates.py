@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from core.goal_agent_loop import is_close_messages_checklist_step
-from core.replay_resolve import build_replay_from_step
+from core.replay_resolve import build_replay_from_step, clean_target_name
 
 # Playwright auto-waits on actions; set_default_timeout is the global budget.
 # Do NOT emit wait_for / wait_for_timeout (explicit waits).
@@ -104,10 +104,17 @@ def _emit_filter_press(placeholder: str, value: str) -> list[str]:
     ]
 
 
-def _emit_click_text(text: str) -> list[str]:
-    # Tree options often expose accessible name via role=treeitem (title/label).
+def _emit_click_text(text: str, role: str = "") -> list[str]:
+    """文本点击发射器：有 target_role 用角色定位（treeitem/option 等列表项或 button/link），
+    无角色线索退回 get_by_text —— 不再把 treeitem 当万能默认（会点不中普通按钮）。"""
+    r = (role or "").strip().lower()
+    if r in ("button", "link", "menuitem", "option", "treeitem", "listitem", "tab"):
+        return [
+            f"    await page.get_by_role({_esc(r)}, name={_esc(text)}).filter(visible=True).first.click()",
+            "",
+        ]
     return [
-        f"    await page.get_by_role('treeitem', name={_esc(text)}).filter(visible=True).first.click()",
+        f"    await page.get_by_text({_esc(text)}, exact=True).first.click()",
         "",
     ]
 
@@ -300,7 +307,7 @@ def try_build_templated_script(
 
         # Fallback without codegen locator (generic get_by_*)
         if strategy in ("fill_placeholder", "fill_filter_press"):
-            ph = rp.get("placeholder") or st.get("target_name")
+            ph = clean_target_name(rp.get("placeholder") or st.get("target_name"))
             if not ph or val is None:
                 unknown = True
                 break
@@ -312,7 +319,7 @@ def try_build_templated_script(
             continue
 
         if strategy == "click_placeholder":
-            ph = rp.get("placeholder") or st.get("target_name")
+            ph = clean_target_name(rp.get("placeholder") or st.get("target_name"))
             if not ph:
                 unknown = True
                 break
@@ -336,26 +343,26 @@ def try_build_templated_script(
             continue
 
         if strategy == "click_text":
-            text = rp.get("exact_text") or rp.get("value")
+            text = clean_target_name(rp.get("exact_text") or rp.get("value"))
             if not text:
                 unknown = True
                 break
-            lines.extend(_emit_click_text(str(text)))
+            lines.extend(_emit_click_text(str(text), role=str(st.get("target_role") or "")))
             covered_orders.add(order)
             continue
 
         if st.get("action") == "fill" and st.get("target_name") and st.get("value") is not None:
             lines.extend(
-                _emit_fill_placeholder(str(st["target_name"]), str(st["value"]))
+                _emit_fill_placeholder(clean_target_name(st["target_name"]), str(st["value"]))
             )
             covered_orders.add(order)
             continue
         if st.get("action") == "click" and st.get("target_name"):
-            tn = str(st["target_name"])
+            tn = clean_target_name(st["target_name"])
             if re.search(r"登录|提交|确定", tn):
                 lines.extend(_emit_click_button(tn))
             else:
-                lines.extend(_emit_click_text(tn))
+                lines.extend(_emit_click_text(tn, role=str(st.get("target_role") or "")))
             covered_orders.add(order)
             continue
 

@@ -17,6 +17,7 @@ from core.goal_agent_loop import (
     parse_checklist_index,
 )
 from core.locator_candidates import is_ephemeral_locator_ref
+from core.replay_resolve import clean_target_name
 from core.script_templates import try_build_templated_script
 
 logger = logging.getLogger(__name__)
@@ -203,7 +204,7 @@ def extract_required_targets(steps: list[dict[str, Any]] | None) -> list[str]:
     seen: set[str] = set()
 
     def _add(v: str) -> None:
-        v = (v or "").strip()
+        v = clean_target_name(v)
         if not v or len(v) < 2 or v in seen:
             return
         if re.fullmatch(r"(?:点击|输入|选择|打开|关闭|提交|确认|确定|取消)", v):

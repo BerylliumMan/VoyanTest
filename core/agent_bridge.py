@@ -26,6 +26,29 @@ from core.llm_wrapper import create_openai_client, generate_tool_call
 logger = logging.getLogger(__name__)
 
 
+def pick_checklist_index(
+    steps: list[dict] | None,
+    covered_orders: set[int],
+    entry: dict,
+) -> int | None:
+    """为成功动作挑选未覆盖的 checklist 步骤序号；找不到类型匹配则返回 None。
+
+    与 nl_goal journal 同语义：只有 ``journal_entry_covers_checklist`` 认可的
+    动作才算覆盖（wait/截图 不得冒充 click 步骤），宁缺毋滥 —— 错配条目在
+    ``sanitize_journal_for_synth`` 里也会被丢弃。
+    """
+    from core.goal_agent_loop import journal_entry_covers_checklist
+
+    for i, s in enumerate(steps or []):
+        order = int(s.get("step_order") or s.get("step_number") or i + 1)
+        if order in covered_orders:
+            continue
+        desc = str(s.get("description") or s.get("original_description") or "")
+        if journal_entry_covers_checklist(entry, step_description=desc):
+            return order
+    return None
+
+
 class AgentBridge:
     """AI Agent 桥接: Server 端 OTA 循环, 客户端做 MCP 桥接。
 
@@ -89,6 +112,32 @@ class AgentBridge:
             run = await self._create_run(case_id, goal)
         run_id_str = str(run.id)
 
+        # 固化素材（run 结束成功后合成 compiled_script）：journal = OTA 成功动作轨迹
+        self._journal: list[dict] = []
+        self._journal_covered: set[int] = set()
+        self._run_steps: list[dict] = []
+        self._case_url: str = ""
+        self._replay_logs: list[dict] | None = None
+        self._environment_id = environment_id
+        self._screenshot_dir: str | None = None
+        self._screenshot_paths: dict[str, str] = {}
+        self._batch_id: int | None = existing_batch_id
+
+        # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
+        # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
+        try:
+            if await self._try_replay_compiled_script(run, agent_id, run_id_str):
+                try:
+                    await self._save_report(run, case_id)
+                except Exception:
+                    logger.exception("Bridge report save failed for run #%d", run.id)
+                return run
+        except Exception:
+            logger.warning(
+                "Bridge compiled_script replay attempt failed — fallback to OTA",
+                exc_info=True,
+            )
+
         # 发送 RUN_START 让 Agent 启动 MCP / 浏览器
         try:
             await self.agent_manager.send(agent_id, {
@@ -100,10 +149,6 @@ class AgentBridge:
         except Exception as e:
             logger.warning("Bridge RUN_START failed for run %s: %s", run_id_str, e)
 
-        self._environment_id = environment_id
-        self._screenshot_dir: str | None = None
-        self._screenshot_paths: dict[str, str] = {}
-        self._batch_id: int | None = existing_batch_id
         try:
             import os as _os
             _d = _os.path.join("reports", f"agent_{run.id}_{tz_now().strftime('%Y%m%d_%H%M%S')}", "screenshots")
@@ -131,6 +176,15 @@ class AgentBridge:
             await self._save_report(run, case_id)
         except Exception:
             logger.exception("Bridge report save failed for run #%d", run.id)
+
+        # 跑成功 → 固化脚本（下次执行优先回放）；合成失败不影响本次结果
+        if run.status in ("completed", "passed"):
+            try:
+                await self._synthesize_compiled_script(run, case_id)
+            except Exception:
+                logger.warning(
+                    "Bridge: compiled_script synthesis failed case=%s", case_id, exc_info=True,
+                )
 
         return run
 
@@ -243,6 +297,9 @@ class AgentBridge:
         except Exception as _tce:
             logger.warning("Could not load tool calls for run %d: %s", run.id, _tce)
 
+        if self._replay_logs:
+            logs = list(self._replay_logs)
+
         # 无工具调用但失败时，写一条错误日志
         if not logs and run.status in ("failed", "error"):
             err_msg = run.error or "执行失败，无详细步骤记录"
@@ -261,6 +318,204 @@ class AgentBridge:
             batch_id=batch.id,
         )
         logger.info("Bridge: report saved for run #%d (batch #%d, %d steps)", run.id, batch.id, len(logs))
+
+    async def _try_replay_compiled_script(
+        self, run: AgentRun, agent_id: str, run_id_str: str
+    ) -> bool:
+        """回放固化脚本；成功即完成 run（返回 True），失败/不支持返回 False 交给 OTA。"""
+        from app.crud import get_test_case
+        from core.compiled_script import steps_content_hash
+
+        tc = await get_test_case(self.db, run.case_id)
+        script = (getattr(tc, "compiled_script", None) or "").strip() if tc else ""
+        if not script:
+            return False
+        steps = await self._load_case_steps(run.case_id)
+        if not steps:
+            return False
+        current_hash = steps_content_hash(steps)
+        stored_hash = getattr(tc, "compiled_script_hash", None) or ""
+        if stored_hash and stored_hash != current_hash:
+            logger.info(
+                "Bridge: compiled_script hash mismatch case=%s stored=%s current=%s — ignore",
+                run.case_id, stored_hash[:12], current_hash[:12],
+            )
+            return False
+
+        base_url = await self._resolve_base_url(run.case_id)
+        res = await self.agent_manager._try_run_compiled_script(
+            agent_id,
+            run_id_str,
+            tc.name or f"Case #{run.case_id}",
+            steps,
+            script=script,
+            base_url=base_url,
+            case_id=run.case_id,
+            steps_hash=stored_hash or current_hash,
+            headless=None,
+            keep_browser=True,
+        )
+        ok = (
+            bool(res)
+            and not any(r.get("compiled_script_failed") for r in res)
+            and all(r.get("success") for r in res)
+        )
+        if not ok:
+            logger.info(
+                "Bridge: compiled_script replay failed/unsupported case=%s — fallback to OTA",
+                run.case_id,
+            )
+            return False
+
+        logger.info("Bridge: compiled_script replay SUCCESS case=%s steps=%s", run.case_id, len(res))
+        try:
+            await crud_agent_run.create_message(
+                self.db, run.id, 1, "assistant",
+                f"固化脚本回放成功（{len(res)} 步，无 LLM 参与）",
+            )
+        except Exception:
+            logger.debug("Bridge replay message write skipped", exc_info=True)
+        self._replay_logs = [
+            {
+                "step_id": None,
+                "level": "info",
+                "message": f"固化脚本回放：{r.get('original_description') or ''} — 通过",
+                "screenshot_path": None,
+            }
+            for r in res
+        ]
+        await self._complete(run.id, 1)
+        return True
+
+    async def _load_case_steps(self, case_id: int) -> list[dict]:
+        from app import crud as _crud
+
+        rows = await _crud.get_steps_for_case(self.db, case_id)
+        return self._steps_to_dicts(rows)
+
+    @staticmethod
+    def _steps_to_dicts(rows) -> list[dict]:
+        """步骤 dict 形状必须与 client exec / poller 一致，否则 compiled_script hash 对不上。"""
+        out: list[dict] = []
+        for s in sorted(rows or [], key=lambda x: getattr(x, "step_order", 0) or 0):
+            sl = getattr(s, "structured_step", None)
+            ll = getattr(s, "learned_locator", None)
+            out.append({
+                "id": s.id,
+                "step_order": s.step_order,
+                "description": s.description,
+                "expected_result": getattr(s, "parsed_result", ""),
+                "learned_locator": ll if isinstance(ll, dict) else None,
+                "structured_step": sl if isinstance(sl, dict) else None,
+                "cacheable": bool(getattr(s, "cacheable", True)),
+            })
+        return out
+
+    async def _resolve_base_url(self, case_id: int) -> str:
+        """环境 base_url 优先，回退项目 base_url（与非 OTA 路径语义一致）。"""
+        env_id = getattr(self, "_environment_id", None)
+        if env_id:
+            try:
+                from app.database import AsyncSessionLocal as _ASL
+                from app.crud.environment import get_environment as _ge
+
+                async with _ASL() as _edb:
+                    _env = await _ge(_edb, env_id)
+                    if _env and getattr(_env, "base_url", None):
+                        return _env.base_url
+            except Exception:
+                logger.warning("Bridge: environment %s load failed", env_id, exc_info=True)
+        try:
+            from app import crud as _crud
+
+            tc = await _crud.get_test_case(self.db, case_id)
+            pid = getattr(tc, "project_id", None) if tc else None
+            if pid:
+                proj = await _crud.get_project(self.db, pid)
+                return ((getattr(proj, "base_url", None) or "").strip()) if proj else ""
+        except Exception:
+            logger.warning("Bridge: project base_url load failed case=%s", case_id, exc_info=True)
+        return ""
+
+    def _collect_journal_entry(self, action: dict, turn: int) -> None:
+        """成功动作入 journal（含 checklist 映射 + replay 定位符），供 run 结束后合成固化脚本。"""
+        name = str(action.get("name") or action.get("action") or "")
+        args = action.get("args") or {}
+        entry: dict = {
+            "turn": turn,
+            "success": True,
+            "status": "ok",
+            "action": name,
+            "selector": args.get("selector"),
+            "value": args.get("value"),
+            "element_desc": args.get("element_desc"),
+        }
+        idx = pick_checklist_index(self._run_steps, self._journal_covered, entry)
+        if idx is None:
+            return
+        self._journal_covered.add(idx)
+        step_rec = next(
+            (s for s in self._run_steps if int(s.get("step_order") or 0) == idx), None
+        )
+        try:
+            from core.replay_resolve import build_replay_from_step
+
+            entry["replay"] = build_replay_from_step(
+                step_rec,
+                action=name,
+                selector=args.get("selector"),
+                value=args.get("value"),
+            )
+        except Exception:
+            logger.debug("Bridge replay record build skipped", exc_info=True)
+        entry["checklist_index"] = idx
+        entry["checklist_note"] = f"Step {idx}"
+        self._journal.append(entry)
+
+    async def _synthesize_compiled_script(self, run: AgentRun, case_id: int) -> None:
+        """成功跑完后把 OTA 轨迹固化为可回放脚本（复用 nl_goal 同一套合成+门禁）。"""
+        from app.crud import get_test_case
+        from core.compiled_script import persist_compiled_script, steps_content_hash
+        from core.llm_wrapper import _resolve_config as _llm_resolve_config
+        from core.script_synthesize import synthesize_playwright_script
+
+        steps = self._run_steps or await self._load_case_steps(case_id)
+        if not steps:
+            logger.info("Bridge: synthesis skipped case=%s (no steps loaded)", case_id)
+            return
+        tc = await get_test_case(self.db, case_id)
+        if tc is None:
+            return
+        case_name = tc.name or f"Case #{case_id}"
+        steps_text = "\n".join(
+            f"  {i + 1}. {s.get('description') or ''}" for i, s in enumerate(steps)
+        )
+        goal_text = f"执行测试用例「{case_name}」\n步骤：\n{steps_text}"
+        client = await create_openai_client(agent_type="execution")
+        _, _, model = await _llm_resolve_config(agent_type="execution")
+        try:
+            script = await synthesize_playwright_script(
+                client=client,
+                model=model,
+                case_id=case_id,
+                case_name=case_name,
+                goal_text=goal_text,
+                journal=self._journal,
+                steps=steps,
+                base_url=self._case_url or None,
+            )
+        except ValueError as exc:
+            logger.warning("Bridge: synthesized script rejected case=%s problems=%s", case_id, exc)
+            return
+        if not script or not script.strip():
+            logger.info("Bridge: synthesis produced empty script case=%s", case_id)
+            return
+        persist_compiled_script(tc, script=script, steps_hash=steps_content_hash(steps))
+        await self.db.commit()
+        logger.info(
+            "Bridge: synthesized compiled_script case=%s bytes=%s (journal=%s)",
+            case_id, len(script), len(self._journal),
+        )
 
     # ── 内部：AgentRun 生命周期 ────────────────────────────────────────────
 
@@ -380,6 +635,7 @@ class AgentBridge:
                             if _m:
                                 case_url = _m.group(0)
                     case_name = _tc.name or f"Case #{run.case_id}"
+                    self._run_steps = self._steps_to_dicts(_steps)
             except Exception:
                 logger.warning("Could not load steps for case %s", run.case_id, exc_info=True)
 
@@ -425,6 +681,7 @@ class AgentBridge:
             except Exception:
                 logger.warning("Could not load project base_url for case %s", run.case_id, exc_info=True)
 
+        self._case_url = case_url or ""
         if not case_url:
             logger.warning(
                 "Bridge: no base_url resolved (env=%s case=%s) — browser may stay on about:blank",
@@ -690,6 +947,7 @@ class AgentBridge:
             if result.get("success"):
                 _consec_err_n = 0
                 _last_error_fp = None
+                self._collect_journal_entry(action, turn)
             if "断言通过" in status_text:
                 assertion_passed = True
 

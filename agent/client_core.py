@@ -1223,7 +1223,7 @@ class AgentClient:
         await self._ws.send(msg.model_dump_json())
 
     async def _send_registration(self):
-        caps = ["mcp", "playwright", "ui_testing", "local_browser"]
+        caps = ["mcp", "playwright", "ui_testing", "local_browser", "compiled_script"]
         try:
             import browser_use  # noqa: F401
             caps.append("browser_use")

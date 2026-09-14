@@ -44,8 +44,28 @@ def is_ephemeral_ref(selector: str | None) -> bool:
     return is_ephemeral_locator_ref(selector)
 
 
+_QUOTE_PAIRS = {"「": "」", "【": "】", "『": "』", "[": "]", "（": "）", "(": ")"}
+
+
+def clean_target_name(name: str | None) -> str:
+    """剥离生成格式遗留的外层包裹符号（「Login」→ Login）；不动内含符号（删除【草稿】）。"""
+    s = str(name or "").strip()
+    changed = True
+    while changed and len(s) >= 2:
+        changed = False
+        for a, b in _QUOTE_PAIRS.items():
+            if s.startswith(a) and s.endswith(b):
+                s = s[1:-1].strip()
+                changed = True
+    return s
+
+
 def _brackets(desc: str) -> list[str]:
-    return [m.group(1).strip() for m in _BRACKET_RE.finditer(desc or "") if m.group(1).strip()]
+    return [
+        clean_target_name(m.group(1))
+        for m in _BRACKET_RE.finditer(desc or "")
+        if clean_target_name(m.group(1))
+    ]
 
 
 def _structured(step: dict[str, Any] | None) -> dict[str, Any]:
@@ -93,7 +113,7 @@ def build_replay_from_step(
     action_l = (action or "").strip().lower()
     brackets = _brackets(desc)
     st_value = st.get("value")
-    st_target = (st.get("target_name") or "").strip() or None
+    st_target = clean_target_name(st.get("target_name")) or None
     intent_value = (
         str(st_value).strip()
         if st_value is not None and str(st_value).strip()
