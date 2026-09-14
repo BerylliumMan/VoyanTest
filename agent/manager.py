@@ -3714,33 +3714,42 @@ class AgentManager:
                     _def = await _cad.get_active_by_type(db, "execution")
                     if should_use_ota_agent(_def):
                         from core.agent_bridge import AgentBridge
-                        bridge = AgentBridge(self, db, _def)
                         _batch_id = goal.get("batch_id") if isinstance(goal, dict) else None
+                        _def_id = _def.id
 
                         async def _run_ota(
-                            _bridge=bridge,
+                            _def_id=_def_id,
+                            _fallback_def=_def,
                             _case_id=int(case_id),
                             _agent_id=agent_id,
                             _goal=goal,
                             _run_row_id=run_row_id,
                             _batch_id=_batch_id,
                         ):
+                            from app.database import AsyncSessionLocal as _ota_session
                             try:
-                                await _bridge.orchestrate(
-                                    case_id=_case_id,
-                                    agent_id=_agent_id,
-                                    goal=_goal,
-                                    existing_run_id=_run_row_id,
-                                    existing_batch_id=_batch_id,
-                                    environment_id=(
-                                        _goal.get("environment_id")
-                                        if isinstance(_goal, dict) else None
-                                    ),
-                                    notify_user_id=(
-                                        _goal.get("user_id")
-                                        if isinstance(_goal, dict) else None
-                                    ),
-                                )
+                                async with _ota_session() as _ota_db:
+                                    _ota_def = await _cad.get_agent_definition(
+                                        _ota_db, _def_id
+                                    )
+                                    _bridge = AgentBridge(
+                                        self, _ota_db, _ota_def or _fallback_def
+                                    )
+                                    await _bridge.orchestrate(
+                                        case_id=_case_id,
+                                        agent_id=_agent_id,
+                                        goal=_goal,
+                                        existing_run_id=_run_row_id,
+                                        existing_batch_id=_batch_id,
+                                        environment_id=(
+                                            _goal.get("environment_id")
+                                            if isinstance(_goal, dict) else None
+                                        ),
+                                        notify_user_id=(
+                                            _goal.get("user_id")
+                                            if isinstance(_goal, dict) else None
+                                        ),
+                                    )
                             finally:
                                 await _finish_busy(_agent_id)
 
