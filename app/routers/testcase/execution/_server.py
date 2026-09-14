@@ -53,19 +53,20 @@ async def run_test_case_endpoint(
         raise HTTPException(status_code=404, detail="Test case not found")
 
     if backend is not None:
-        from app.runtime_config import normalize_execution_backend
+        from app.runtime_config import normalize_execution_backend, traditional_backend
         backend = normalize_execution_backend(backend)
         if backend not in (
-            "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp",
+            "ota", "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp",
             "browser_use",
         ):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "backend must be nl_goal, compiled_script, legacy_hybrid, "
+                    "backend must be ota, nl_goal, compiled_script, legacy_hybrid, "
                     "legacy_mcp, or browser_use"
                 ),
             )
+        backend = traditional_backend(backend)
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:

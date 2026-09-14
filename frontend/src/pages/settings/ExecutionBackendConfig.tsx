@@ -14,6 +14,7 @@ import {
 import { apiGet, apiPut } from '@/utils/apiRequest';
 
 type Backend =
+  | 'ota'
   | 'nl_goal'
   | 'compiled_script'
   | 'legacy_hybrid'
@@ -69,14 +70,17 @@ const ExecutionBackendConfigPage: React.FC = () => {
   if (loading) return <Spin loading className="spin-center" />;
 
   const turnsHint =
-    backend === 'nl_goal' || backend === 'browser_use' || backend === 'legacy_hybrid';
+    backend === 'ota' ||
+    backend === 'nl_goal' ||
+    backend === 'browser_use' ||
+    backend === 'legacy_hybrid';
 
   return (
     <Card title="执行后端">
       <Alert
         type="info"
         style={{ marginBottom: 16 }}
-        content="UI 客户端默认：自然语言目标（整案多轮观察→操作→成功后合成 Playwright 脚本）。已固化脚本会优先回放。旧版逐步 MCP/hybrid 仅作兼容。"
+        content="智能 OTA：AI 自主观察→决策→操作，成功后自动固化 Playwright 脚本，下次执行优先秒级回放、失败自动回退。旧版逐步 MCP/hybrid 仅作兼容。"
       />
       <Form layout="vertical" style={{ maxWidth: 640 }}>
         <Form.Item label="默认执行引擎" required>
@@ -85,7 +89,11 @@ const ExecutionBackendConfigPage: React.FC = () => {
             onChange={setBackend}
             options={[
               {
-                label: '自然语言目标（推荐，对齐 Cursor：整案 NL → 固化脚本）',
+                label: '智能 OTA（推荐：AI 自主决策 + 成功固化 + 秒级回放）',
+                value: 'ota',
+              },
+              {
+                label: '自然语言目标（整案 NL 循环 → 固化脚本）',
                 value: 'nl_goal',
               },
               {

@@ -27,6 +27,7 @@ _EXEC_BACKEND_PATH = Path(
 
 # Canonical backends after Cursor-session alignment
 BackendName = Literal[
+    "ota",
     "nl_goal",
     "compiled_script",
     "legacy_hybrid",
@@ -37,6 +38,14 @@ BackendName = Literal[
     "playwright_mcp",
 ]
 
+_OTA_BACKEND = "ota"
+
+
+def traditional_backend(raw: str | None) -> str:
+    """传统执行路径使用的后端名：``ota``（AI 自主引擎）落回 nl_goal。"""
+    b = normalize_execution_backend(raw)
+    return "nl_goal" if b == _OTA_BACKEND else b
+
 
 def normalize_execution_backend(raw: str | None) -> str:
     """Map aliases → canonical backend name."""
@@ -46,6 +55,7 @@ def normalize_execution_backend(raw: str | None) -> str:
     if b in ("playwright_mcp",):
         return "legacy_mcp"
     if b in (
+        "ota",
         "nl_goal",
         "compiled_script",
         "legacy_hybrid",
@@ -77,6 +87,7 @@ DryRunMode = Literal["skip", "attach", "isolated"]
 class ExecutionBackendConfig(BaseModel):
     """UI 执行后端。
 
+    - ota: AI 自主引擎（客户端 AgentBridge / 服务端 AgentRunner，含固化回放优先）
     - nl_goal: Cursor 式整案 NL 目标循环（默认）→ journal → 合成 Playwright
     - compiled_script: 仅跑已固化脚本，失败即败
     - legacy_hybrid / legacy_mcp: 旧逐步 snapshot 路径

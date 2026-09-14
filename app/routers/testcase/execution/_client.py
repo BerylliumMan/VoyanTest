@@ -165,7 +165,11 @@ async def run_test_case_on_client(
     Query ``backend``: ``nl_goal``（默认）| ``compiled_script`` | ``legacy_hybrid`` | ``legacy_mcp`` | ``browser_use``。
     """
     from agent.manager import agent_manager
-    from app.runtime_config import execution_backend_config, normalize_execution_backend
+    from app.runtime_config import (
+        execution_backend_config,
+        normalize_execution_backend,
+        traditional_backend,
+    )
 
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
@@ -176,15 +180,16 @@ async def run_test_case_on_client(
     backend = normalize_execution_backend(backend)
 
     if backend not in (
-        "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
+        "ota", "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
     ):
         raise HTTPException(
             status_code=400,
             detail=(
-                "backend must be nl_goal, compiled_script, legacy_hybrid, "
+                "backend must be ota, nl_goal, compiled_script, legacy_hybrid, "
                 "legacy_mcp, or browser_use"
             ),
         )
+    backend = traditional_backend(backend)
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
@@ -561,19 +566,19 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         agent = agents[0]
 
     if body.backend is not None:
-        from app.runtime_config import normalize_execution_backend
+        from app.runtime_config import normalize_execution_backend, traditional_backend
         nb = normalize_execution_backend(body.backend)
         if nb not in (
-            "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
+            "ota", "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
         ):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "backend must be nl_goal, compiled_script, legacy_hybrid, "
+                    "backend must be ota, nl_goal, compiled_script, legacy_hybrid, "
                     "legacy_mcp, or browser_use"
                 ),
             )
-        body.backend = nb
+        body.backend = traditional_backend(nb)
     if body.backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
         raise HTTPException(
             status_code=400,
