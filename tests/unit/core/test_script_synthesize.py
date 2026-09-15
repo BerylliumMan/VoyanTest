@@ -12,10 +12,10 @@ def _msg(content="", reasoning_content=""):
 
 def test_synth_reads_reasoning_when_content_empty():
     from core.script_synthesize import _strip_fences
-    from core.precondition import _response_text
+    from core.precondition import extract_response_text
 
     body = "```python\nasync def test_case_5(page):\n    pass\n```"
-    assert "async def" in _strip_fences(_response_text(_msg("", body)))
+    assert "async def" in _strip_fences(extract_response_text(_msg("", body)))
 
 
 def test_repair_unicode_lookalikes_fixes_arrow_and_fullwidth():

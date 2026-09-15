@@ -2,33 +2,33 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.precondition import _response_text
+from core.precondition import extract_response_text
 from core.precondition import _parse_met_json
 from core.precondition import decide_precondition_action
 from core.precondition import verify_precondition_met
 
 
-def test_response_text_falls_back_to_reasoning_content_when_content_empty():
+def testextract_response_text_falls_back_to_reasoning_content_when_content_empty():
     message = SimpleNamespace(
         content="",
         reasoning_content='分析页面后决定执行：{"status":"continue","action":"wait","value":"2"}',
     )
-    assert '"status":"continue"' in _response_text(message)
+    assert '"status":"continue"' in extract_response_text(message)
 
 
-def test_response_text_prefers_content_when_model_returns_final_json():
+def testextract_response_text_prefers_content_when_model_returns_final_json():
     message = SimpleNamespace(
         content='{"status":"continue","action":"click","selector":"e12"}',
         reasoning_content="内部推理，不应作为动作解析",
     )
-    assert _response_text(message) == message.content
+    assert extract_response_text(message) == message.content
 
 
-def test_response_text_flattens_structured_content_parts():
+def testextract_response_text_flattens_structured_content_parts():
     message = SimpleNamespace(
         content=[{"type": "text", "text": '{"met":true,"reason":"已打开"}'}]
     )
-    assert _response_text(message) == '{"met":true,"reason":"已打开"}'
+    assert extract_response_text(message) == '{"met":true,"reason":"已打开"}'
 
 
 def test_parse_met_json_recovers_explicit_boolean_from_malformed_json():
