@@ -426,6 +426,17 @@ class AgentManager:
                 script_ok_to_try = False
 
         if script_ok_to_try and script:
+            from core.script_synthesize import check_script_covers_intents
+            missing_cov = check_script_covers_intents(script, steps)
+            if missing_cov:
+                logger.info(
+                    "compiled_script fails coverage %s case=%s — ignore script",
+                    missing_cov, case_id,
+                )
+                script = ""
+                script_ok_to_try = False
+
+        if script_ok_to_try and script:
             # Visible browser for user runs (agent GUI headless=False).
             # Omit headless so the agent uses its own client setting.
             # Batch: keep_browser so login state survives for the next case.

@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 from core.goal_agent_loop import (
     REPAIR_SYSTEM_PROMPT,
     is_close_messages_checklist_step,
+    is_press_key_checklist_step,
     journal_entry_covers_checklist,
     parse_checklist_index,
 )
@@ -219,6 +220,9 @@ def extract_required_targets(steps: list[dict[str, Any]] | None) -> list[str]:
         if is_close_messages_checklist_step(desc):
             continue
         st = s.get("structured_step") if isinstance(s.get("structured_step"), dict) else {}
+        if is_press_key_checklist_step(desc) or str(st.get("action") or "").lower() == "press_key":
+            # 按键步骤由键覆盖检查负责：键名会归一化（ESC→Escape），不要求原始写法出现
+            continue
         # Prefer value (typed/selected content) as the must-appear string
         if st.get("value") is not None and str(st.get("value")).strip():
             val = str(st["value"]).strip()
@@ -239,16 +243,40 @@ def extract_required_targets(steps: list[dict[str, Any]] | None) -> list[str]:
     return out
 
 
+def extract_required_keys(steps: list[dict[str, Any]] | None) -> list[str]:
+    """按键步骤要求的键序列（N 个按键步骤 → N 次 press，用于覆盖检查）。"""
+    from core.replay_resolve import press_key_for_step
+
+    keys: list[str] = []
+    for s in steps or []:
+        key = press_key_for_step(s)
+        if key:
+            keys.append(key)
+    return keys
+
+
+def _missing_required_keys(script: str, steps: list[dict[str, Any]] | None) -> list[str]:
+    required = extract_required_keys(steps)
+    if not required:
+        return []
+    missing: list[str] = []
+    for key in dict.fromkeys(required):
+        need = required.count(key)
+        have = script.count(f'press("{key}")') + script.count(f"press('{key}')")
+        if have < need:
+            missing.append(f"key {key} x{need - have}")
+    return missing
+
+
 def check_script_covers_intents(
     script: str,
     steps: list[dict[str, Any]] | None,
 ) -> list[str]:
-    """Return required target strings missing from the script (empty = ok)."""
-    required = extract_required_targets(steps)
-    if not required:
-        return []
+    """Return required target strings / key presses missing from the script."""
     body = script or ""
-    return [t for t in required if t not in body]
+    missing = [t for t in extract_required_targets(steps) if t not in body]
+    missing.extend(_missing_required_keys(body, steps))
+    return missing
 
 
 # 选择器类 API：参数就是 Playwright selector，绝不能是快照 ref
@@ -264,6 +292,29 @@ _EMPTY_SELECTOR_CALL_RE = re.compile(
 )
 # 提示词明令禁止的固定等待（慢 + 抖动），仅告警不拒绝
 _FORBIDDEN_WAIT_RE = re.compile(r"""\.(?:wait_for_timeout)\s*\(|\.wait_for\s*\(""")
+_PRESS_CALL_RE = re.compile(r"""\.press\(\s*(['"])([^'"]+)\1\s*\)""")
+_NAMED_KEYS = {
+    "escape", "enter", "tab", "space", "backspace", "delete", "insert",
+    "home", "end", "pageup", "pagedown", "arrowup", "arrowdown",
+    "arrowleft", "arrowright", "capslock", "shift", "control", "alt",
+    "meta", "numlock", "scrolllock", "printscreen", "pause",
+}
+
+
+def is_valid_press_key(key: str) -> bool:
+    """Playwright 合法键名（含 修饰键+字母 组合）；文本被当键按是无效脚本。"""
+    parts = [p.strip() for p in (key or "").split("+")]
+    if not parts or any(not p for p in parts):
+        return False
+    for p in parts:
+        low = p.lower()
+        if low in _NAMED_KEYS or re.fullmatch(r"f\d{1,2}", low):
+            continue
+        if len(p) == 1 and p.isalnum():
+            continue
+        return False
+    return True
+
 
 
 def check_script_sanity(script: str) -> list[str]:
@@ -292,6 +343,11 @@ def check_script_sanity(script: str) -> list[str]:
 
     if _EMPTY_SELECTOR_CALL_RE.search(body):
         problems.append("selector API called without a selector")
+
+    for m in _PRESS_CALL_RE.finditer(body):
+        key = m.group(2)
+        if not is_valid_press_key(key):
+            problems.append(f"invalid key press: {key!r}")
 
     # 未定义的 frame / self.frame 变量
     assigned: set[str] = set()
@@ -545,13 +601,21 @@ async def synthesize_playwright_script(
             script = harden_locators_with_first(
                 _ensure_entrypoint(templated, int(case_id))
             )
-            script = _accept_synthesized_script(script, case_id=case_id, steps=steps)
-            logger.info(
-                "synthesized script from templates case=%s bytes=%s",
-                case_id,
-                len(script),
-            )
-            return script
+            try:
+                script = _accept_synthesized_script(script, case_id=case_id, steps=steps)
+            except ValueError as exc:
+                logger.warning(
+                    "templated script failed gates case=%s — falling back to LLM: %s",
+                    case_id,
+                    exc,
+                )
+            else:
+                logger.info(
+                    "synthesized script from templates case=%s bytes=%s",
+                    case_id,
+                    len(script),
+                )
+                return script
         logger.info(
             "templated script incomplete targets=%s — falling back to LLM case=%s",
             missing_t,
@@ -572,13 +636,27 @@ async def synthesize_playwright_script(
         f"HARD RULE: 以下字面值必须原样出现在代码中（缺一不可）："
         f"{required_literals}\n" if required_literals else ""
     )
+    required_keys = extract_required_keys(steps)
+    key_rule = (
+        f"HARD RULE: 按键步骤必须逐个表达，每个用 await page.keyboard.press(\"<键名>\") "
+        f"调用一次（共 {len(required_keys)} 次，顺序：{required_keys}）；"
+        f"键名用 Playwright 规范名（Escape/Enter/Tab/F5…），不得省略、不得合并。\n"
+        if required_keys else ""
+    )
     user = (
         f"Synthesize async Playwright script for case_id={int(case_id)}.\n"
         f"Function name MUST be: async def test_case_{int(case_id)}(page)\n"
         f"The CHECKLIST is the source of truth — every action must fulfill it.\n"
         f"Prefer journal_clean[].replay strategies; NEVER emit snapshot refs.\n"
         f"Use ASCII punctuation only in code (no → ， ： （ ） 「 」).\n"
-        f"{literal_rule}\n"
+        f"等待/观察类步骤用 await expect(...)/wait_for_selector 表达，"
+        f"禁止用 keyboard.press 输入文本。\n"
+        f"下拉选择步骤：优先 select_option(label=\"<选项可见文本>\")（文本取自 journal 该步 value），"
+        f"不确定内部 value 时禁止编造编码；定位用 page.get_by_role(\"combobox\") 或 journal 里的定位符。\n"
+        f"断言必须针对可见元素或控件状态：原生 select 的 option 文本不可见，"
+        f"下拉断言用 expect(<combobox>).to_have_value(...) 或 to_contain_text(...)，"
+        f"禁止对 option 文本使用 to_be_visible。\n"
+        f"{literal_rule}{key_rule}\n"
         f"CONTEXT JSON:\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
     )
     # 思考模式保持开启（调用方显式需要推理能力）；解析经共享提取器
@@ -604,6 +682,29 @@ async def synthesize_playwright_script(
     if not script or "async def" not in script:
         raise ValueError("LLM returned empty/invalid Playwright script")
     script = harden_locators_with_first(_ensure_entrypoint(script, int(case_id)))
+    try:
+        _require_coverage(script, steps, case_id)
+        return _accept_synthesized_script(script, case_id=case_id, steps=steps)
+    except ValueError as exc:
+        logger.warning(
+            "synthesis gates failed case=%s — one repair attempt: %s", case_id, exc
+        )
+        repaired = await repair_playwright_script(
+            client=client,
+            model=model,
+            case_id=int(case_id),
+            script=script,
+            error=str(exc),
+            journal=journal_clean,
+            steps=steps,
+        )
+        _require_coverage(repaired, steps, case_id)
+        return _accept_synthesized_script(repaired, case_id=case_id, steps=steps)
+
+
+def _require_coverage(
+    script: str, steps: list[dict[str, Any]] | None, case_id: int
+) -> None:
     missing = check_script_covers_intents(script, steps)
     if missing:
         logger.warning(
@@ -612,7 +713,6 @@ async def synthesize_playwright_script(
         raise ValueError(
             "synthesized script missing required targets: " + ", ".join(missing)
         )
-    return _accept_synthesized_script(script, case_id=case_id, steps=steps)
 
 
 async def repair_playwright_script(

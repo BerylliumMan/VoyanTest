@@ -341,6 +341,14 @@ class AgentBridge:
                 run.case_id, stored_hash[:12], current_hash[:12],
             )
             return False
+        from core.script_synthesize import check_script_covers_intents
+        missing_cov = check_script_covers_intents(script, steps)
+        if missing_cov:
+            logger.info(
+                "Bridge: compiled_script fails coverage %s case=%s — fallback to OTA",
+                missing_cov, run.case_id,
+            )
+            return False
 
         base_url = await self._resolve_base_url(run.case_id)
         res = await self.agent_manager._try_run_compiled_script(

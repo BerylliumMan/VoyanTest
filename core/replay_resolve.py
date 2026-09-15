@@ -10,6 +10,7 @@ from core.goal_agent_loop import (
     is_click_checklist_step,
     is_close_messages_checklist_step,
     is_fill_checklist_step,
+    is_press_key_checklist_step,
     is_select_checklist_step,
 )
 
@@ -45,6 +46,59 @@ def is_ephemeral_ref(selector: str | None) -> bool:
 
 
 _QUOTE_PAIRS = {"「": "」", "【": "】", "『": "』", "[": "]", "（": "）", "(": ")"}
+
+_KEY_ALIASES = {
+    "esc": "Escape", "escape": "Escape", "退出": "Escape", "退出键": "Escape",
+    "enter": "Enter", "return": "Enter", "回车": "Enter", "回车键": "Enter",
+    "space": "Space", "空格": "Space", "空格键": "Space",
+    "tab": "Tab", "制表": "Tab", "制表键": "Tab",
+    "delete": "Delete", "del": "Delete", "删除": "Delete", "删除键": "Delete",
+    "backspace": "Backspace", "退格": "Backspace", "退格键": "Backspace",
+    "上": "ArrowUp", "方向键上": "ArrowUp", "up": "ArrowUp", "arrowup": "ArrowUp",
+    "下": "ArrowDown", "方向键下": "ArrowDown", "down": "ArrowDown", "arrowdown": "ArrowDown",
+    "左": "ArrowLeft", "方向键左": "ArrowLeft", "left": "ArrowLeft", "arrowleft": "ArrowLeft",
+    "右": "ArrowRight", "方向键右": "ArrowRight", "right": "ArrowRight",
+    "arrowright": "ArrowRight",
+}
+
+_KEY_TOKEN_RE = re.compile(
+    r"(?:按键|按|按下|快捷键)\s*[「【\"']?"
+    r"([A-Za-z0-9+]+|回车键?|空格键?|制表键?|删除键?|退格键?|方向键[上下左右])"
+    r"\s*[」】\"']?"
+)
+
+
+def normalize_key_name(raw: str | None) -> str | None:
+    """按键名归一为 Playwright 规范名（ESC→Escape、回车→Enter、f5→F5）。"""
+    s = clean_target_name(raw)
+    if not s:
+        return None
+    low = s.lower()
+    if low in _KEY_ALIASES:
+        return _KEY_ALIASES[low]
+    if re.fullmatch(r"f\d{1,2}", low):
+        return low.upper()
+    if re.fullmatch(r"[a-z0-9]", low):
+        return low.upper()
+    if len(s) <= 20 and re.fullmatch(r"[A-Za-z0-9+\-]+", s):
+        return s
+    return None
+
+
+def press_key_for_step(step: dict[str, Any] | None) -> str | None:
+    """按键步骤 → 键名；非按键步骤一律返回 None（模板将回退 LLM 合成）。"""
+    st = _structured(step)
+    desc = _step_desc(step)
+    if str(st.get("action") or "").lower() != "press_key" and not is_press_key_checklist_step(desc):
+        return None
+    raw = st.get("value") or st.get("target_name")
+    key = normalize_key_name(str(raw) if raw is not None else None)
+    if key:
+        return key
+    m = _KEY_TOKEN_RE.search(desc)
+    if m:
+        return normalize_key_name(m.group(1))
+    return None
 
 
 def clean_target_name(name: str | None) -> str:
@@ -134,6 +188,17 @@ def build_replay_from_step(
         "js_click_text": None,
         "playwright_locator": None,
     }
+
+    if is_press_key_checklist_step(desc) or action_l in (
+        "press_key", "browser_press_key", "press",
+    ):
+        key = press_key_for_step(step) or normalize_key_name(
+            value if isinstance(value, str) else None
+        )
+        if key:
+            replay["strategy"] = "press_key"
+            replay["value"] = key
+            return {k: v for k, v in replay.items() if v is not None or k == "strategy"}
 
     if is_close_messages_checklist_step(desc):
         replay["strategy"] = "close_overlays"

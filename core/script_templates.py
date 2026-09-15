@@ -7,7 +7,11 @@ import re
 from typing import Any
 
 from core.goal_agent_loop import is_close_messages_checklist_step
-from core.replay_resolve import build_replay_from_step, clean_target_name
+from core.replay_resolve import (
+    build_replay_from_step,
+    clean_target_name,
+    press_key_for_step,
+)
 
 # Playwright auto-waits on actions; set_default_timeout is the global budget.
 # Do NOT emit wait_for / wait_for_timeout (explicit waits).
@@ -122,6 +126,13 @@ def _emit_click_text(text: str, role: str = "") -> list[str]:
 def _emit_click_button(name: str) -> list[str]:
     return [
         f"    await page.get_by_role('button', name={_esc(name)}).first.click()",
+        "",
+    ]
+
+
+def _emit_press_key(key: str) -> list[str]:
+    return [
+        f'    await page.keyboard.press("{key}")',
         "",
     ]
 
@@ -274,6 +285,15 @@ def try_build_templated_script(
                     continue
                 lines.extend(_emit_goto(str(url)))
                 emitted_goto = True
+            covered_orders.add(order)
+            continue
+
+        if strategy == "press_key":
+            key = rp.get("value") or press_key_for_step(step)
+            if not key:
+                unknown = True
+                break
+            lines.extend(_emit_press_key(str(key)))
             covered_orders.add(order)
             continue
 
