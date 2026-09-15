@@ -412,9 +412,7 @@ async def update_execution_backend(
         execution_backend_config as _rt,
         save_execution_backend_config,
     )
-    _rt.backend = cfg.backend
-    _rt.max_steps_per_nl = cfg.max_steps_per_nl
-    _rt.headless = cfg.headless
-    _rt.dry_run_mode = cfg.dry_run_mode
+    for _field in cfg.model_fields_set:
+        setattr(_rt, _field, getattr(cfg, _field))
     save_execution_backend_config(_rt)
     return _rt
