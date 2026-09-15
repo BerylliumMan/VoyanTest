@@ -19,10 +19,11 @@ from typing import Any, Optional
 import openai
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionContentPartTextParam
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from app.security.encryption import decrypt_value
+from core.precondition import extract_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,22 @@ class PlaywrightMCPToolCall(BaseModel):
         "设为 false 的场景：操作本身的效果就是预期结果（输入文字到输入框、勾选复选框、选择下拉项等），"
         "MCP 调用的返回就足以判断成功与否。",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _none_to_default(cls, data):
+        """模型常把可选字段写成 null（实测 timeout_ms/needs_verification/selector_type），
+        显式 null 应取默认值而不是整条输出作废重试。"""
+        if isinstance(data, dict):
+            data = dict(data)
+            for field, default in (
+                ("selector_type", "css"),
+                ("timeout_ms", 30000),
+                ("needs_verification", False),
+            ):
+                if field in data and data[field] is None:
+                    data[field] = default
+        return data
 
 
 class VerificationCondition(BaseModel):
@@ -432,8 +449,7 @@ async def generate_tool_call(
             last_error = f"API error: {exc}"
             continue
 
-        content = response.choices[0].message.content or ''
-        content = content.strip()
+        content = extract_response_text(response.choices[0].message)
 
         # Strip markdown fences if present
         content = re.sub(r'^```(?:json)?\s*', '', content)

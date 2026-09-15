@@ -583,7 +583,7 @@ async def synthesize_playwright_script(
     )
     # 思考模式保持开启（调用方显式需要推理能力）；解析经共享提取器
     # 兼容思考字段（content 为空时回退 reasoning），只加鲁棒性不减能力。
-    from core.precondition import _response_text
+    from core.precondition import extract_response_text
     resp = await client.chat.completions.create(
         model=model,
         messages=[
@@ -594,7 +594,7 @@ async def synthesize_playwright_script(
         max_tokens=8192,
     )
     raw_message = resp.choices[0].message
-    script = _strip_fences(_response_text(raw_message))
+    script = _strip_fences(extract_response_text(raw_message))
     if not script or "async def" not in script:
         logger.warning(
             "synth response unparseable content_len=%s reasoning_len=%s",
@@ -647,7 +647,7 @@ async def repair_playwright_script(
         temperature=temperature,
         max_tokens=8192,
     )
-    from core.precondition import _response_text as _rt
+    from core.precondition import extract_response_text as _rt
     fixed = _strip_fences(_rt(resp.choices[0].message))
     if not fixed or "async def" not in fixed:
         raise ValueError("LLM repair returned empty/invalid script")

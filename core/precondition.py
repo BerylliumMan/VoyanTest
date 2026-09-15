@@ -69,7 +69,7 @@ Rules:
 """
 
 
-def _response_text(message: Any) -> str:
+def extract_response_text(message: Any) -> str:
     """读取兼容 Qwen3 思考模式的最终文本响应。
 
     部分 OpenAI-compatible 服务在思考模式下将最终答案放在
@@ -213,7 +213,7 @@ async def verify_precondition_met(
                 max_tokens=2048,
             )
             message = resp.choices[0].message
-            content = _response_text(message)
+            content = extract_response_text(message)
             logger.debug(
                 "前置条件验证 LLM 响应: content_len=%d reasoning_len=%d",
                 len(getattr(message, "content", "") or ""),
@@ -273,7 +273,7 @@ async def decide_precondition_action(
                 max_tokens=2048,
             )
             message = resp.choices[0].message
-            content = _response_text(message)
+            content = extract_response_text(message)
             logger.debug(
                 "前置条件 LLM 响应: content_len=%d reasoning_len=%d",
                 len(getattr(message, "content", "") or ""),
