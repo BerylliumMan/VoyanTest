@@ -102,6 +102,7 @@ class ExecutionBackendConfig(BaseModel):
     backend: BackendName = "nl_goal"
     max_steps_per_nl: int = Field(default=40, ge=3, le=80)
     headless: bool = True
+    keep_browser_after_run: bool = True
     dry_run_mode: DryRunMode = "skip"
     # compiled_script runtime enhance (Agent payload)
     compiled_trace_on_fail: bool = True

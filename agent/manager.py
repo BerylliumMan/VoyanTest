@@ -447,7 +447,9 @@ class AgentManager:
                 case_id=case_id,
                 steps_hash=compiled_script_hash or steps_content_hash(steps),
                 headless=None,
-                keep_browser=bool(reuse_browser_session) or not navigate_base_url,
+                keep_browser=bool(reuse_browser_session)
+                or not navigate_base_url
+                or bool(getattr(execution_backend_config, "keep_browser_after_run", True)),
             )
             if py_results is not None:
                 failed = any(r.get("compiled_script_failed") for r in py_results)

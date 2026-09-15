@@ -458,7 +458,11 @@ async def run_test_case_on_client(
                     from app.services.notifications import notify_batch_completed
                     _asyncio.create_task(notify_batch_completed(_batch.id, _uid))
 
-        if _all_success:
+        from app.runtime_config import execution_backend_config as _ebc_single
+        _keep_open_single = bool(getattr(_ebc_single, "keep_browser_after_run", True))
+        if _all_success and _keep_open_single:
+            logger.info("All cases passed — browser left open (keep_browser_after_run)")
+        elif _all_success:
             try:
                 from agent.models import WSMessage, WSMessageType
                 session = await agent_manager.get_session(agent.id)
@@ -939,7 +943,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     from app.services.notifications import notify_batch_completed
                     _asyncio.create_task(notify_batch_completed(_b.id, _uid2))
 
-        if _all_success and not _stopped_by_user:
+        from app.runtime_config import execution_backend_config as _ebc_batch
+        _keep_open_batch = bool(getattr(_ebc_batch, "keep_browser_after_run", True))
+        if _all_success and not _stopped_by_user and _keep_open_batch:
+            logger.info("All cases passed — browser left open (keep_browser_after_run)")
+        elif _all_success and not _stopped_by_user:
             try:
                 from agent.models import WSMessage, WSMessageType
                 session = await agent_manager.get_session(agent.id)
