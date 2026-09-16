@@ -203,6 +203,7 @@ class PlaywrightMCPManager:
             browser_arg,
             '--isolated',
             '--allow-unrestricted-file-access',
+            '--caps=vision',
             *_executable_args,
         ]
         if cdp_endpoint:

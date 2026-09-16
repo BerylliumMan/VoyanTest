@@ -779,6 +779,7 @@ class AgentClient:
         args = [
             _node_exe, _cli_js, "--browser=chromium",
             "--allow-unrestricted-file-access",
+            "--caps=vision",
         ]
 
         if cdp_endpoint:

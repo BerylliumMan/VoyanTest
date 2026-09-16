@@ -100,13 +100,17 @@ _RUNNER_ACTIONS = (
     "check",
     "dialog",
     "upload",
+    "drop",
     "tabs",
     "navigate_back",
+    "click_xy",
+    "move_mouse",
+    "drag_xy",
 )
 
 _DEFAULT_TOOLS: list[ToolDefinition] = [
     ToolDefinition(
-        resolve_mcp_tool(action), ACTION_DESCRIPTIONS[action], action
+        resolve_mcp_tool(action), ACTION_DESCRIPTIONS.get(action, action), action
     )
     for action in _RUNNER_ACTIONS
 ]

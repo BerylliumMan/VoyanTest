@@ -181,8 +181,12 @@ ACTIONS available (maps to Playwright MCP tools):
 - "check": Toggle a checkbox by ref (checks or unchecks according to its current state). selector=ref, value=null.
 - "dialog": Accept or dismiss a native browser dialog (alert/confirm/prompt). selector=null, value="accept" | "dismiss" | "accept:<prompt文本>".
 - "upload": Upload local file(s) into a file input. selector=ref of the file input. value MUST be the absolute path exactly as written in the step text - never guess, never rewrite it.
+- "drop": Drag & drop local file(s) ONTO an element (use for steps like 拖入/拖放到某区域). selector=ref of the drop target, value=absolute path(s) of the file(s).
 - "tabs": Manage browser tabs. selector=null, value="list" | "new" | "select:<index>" | "close[:index]".
 - "navigate_back": Browser back. selector=null, value=null.
+- "click_xy": Click by page coordinates (canvas / no ref available). selector=null, value="x,y".
+- "move_mouse": Move the mouse to coordinates. selector=null, value="x,y".
+- "drag_xy": Drag between coordinates. selector=null, value="startX,startY,endX,endY".
 - "wait": Wait for text to appear. selector=null, value=text to wait for.
 - "screenshot": Take a full-page screenshot. selector=null, value=filename.
 - "assert_text": Wait for text to be visible. selector=null, value=text.

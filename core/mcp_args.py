@@ -39,8 +39,12 @@ TOOL_MAP = {
     "check": "browser_click",
     "dialog": "browser_handle_dialog",
     "upload": "browser_file_upload",
+    "drop": "browser_drop",
     "tabs": "browser_tabs",
     "navigate_back": "browser_navigate_back",
+    "click_xy": "browser_mouse_click_xy",
+    "move_mouse": "browser_mouse_move_xy",
+    "drag_xy": "browser_mouse_drag_xy",
 }
 
 ACTION_DESCRIPTIONS = {
@@ -61,8 +65,12 @@ ACTION_DESCRIPTIONS = {
     "check": "勾选/取消勾选复选框（点击切换）",
     "dialog": "处理浏览器对话框（value=accept/dismiss，prompt 可 accept:文本）",
     "upload": "上传文件（selector=文件输入框 ref，value=绝对路径，多个用逗号分隔）",
+    "drop": "把本地文件拖放到目标元素（selector=目标 ref，value=绝对路径）",
     "tabs": "管理标签页（value=list/new/select:N/close[:N]）",
     "navigate_back": "浏览器后退",
+    "click_xy": "按坐标点击（value=\"x,y\"，用于 canvas）",
+    "move_mouse": "移动鼠标到坐标（value=\"x,y\"）",
+    "drag_xy": "按坐标拖拽（value=\"startX,startY,endX,endY\"）",
 }
 
 
@@ -141,6 +149,9 @@ def build_mcp_args(
     if action in ("upload", "browser_file_upload"):
         paths = [p.strip() for p in (value or "").split(",") if p.strip()]
         return {"paths": paths}
+    if action in ("drop", "browser_drop"):
+        paths = [p.strip() for p in (value or "").split(",") if p.strip()]
+        return {"element": desc, "target": sel, "paths": paths}
     if action in ("tabs", "browser_tabs"):
         token = (value or "list").strip().lower()
         if token.startswith("new"):
@@ -153,6 +164,21 @@ def build_mcp_args(
             return {"action": "select", "index": int(idx)}
         return {"action": "list"}
     if action in ("navigate_back", "back", "browser_navigate_back"):
+        return {}
+    if action in ("click_xy", "browser_mouse_click_xy"):
+        nums = [int(n) for n in re.findall(r"-?\d+", value or "")]
+        if len(nums) >= 2:
+            return {"x": nums[0], "y": nums[1]}
+        return {}
+    if action in ("move_mouse", "browser_mouse_move_xy"):
+        nums = [int(n) for n in re.findall(r"-?\d+", value or "")]
+        if len(nums) >= 2:
+            return {"x": nums[0], "y": nums[1]}
+        return {}
+    if action in ("drag_xy", "browser_mouse_drag_xy"):
+        nums = [int(n) for n in re.findall(r"-?\d+", value or "")]
+        if len(nums) >= 4:
+            return {"startX": nums[0], "startY": nums[1], "endX": nums[2], "endY": nums[3]}
         return {}
     if action == "fill":
         return {"element": desc, "target": sel, "text": value or ""}
