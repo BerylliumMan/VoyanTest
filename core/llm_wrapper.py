@@ -62,7 +62,10 @@ class PlaywrightMCPToolCall(BaseModel):
     )
     value: Optional[str] = Field(
         None,
-        description="URL for goto, text for fill, option value for select",
+        description="Per-action payload: URL for goto; text for fill; option for select; "
+        "end ref for drag; key name for press_key; text for wait/assert_text; "
+        "absolute path(s) for upload (comma separated); accept/dismiss/accept:<text> for dialog; "
+        "list/new/select:N/close[:N] for tabs; px count or up/down for scroll.",
     )
     timeout_ms: int = Field(
         default=30000,
@@ -172,6 +175,14 @@ ACTIONS available (maps to Playwright MCP tools):
 - "hover": Mouse hover over an element. selector=ref, value=null.
 - "scroll": Scroll page by pixels or scroll element into view. selector=null (page), selector=ref (element), value=px count or "up"/"down".
 - "press_key": Send keyboard key or shortcut. selector=null, value=key name (e.g. "Enter", "Tab", "Escape", "Control+A").
+- "double_click": Double-click an element (inline edit / open detail). selector=ref, value=null.
+- "right_click": Right-click an element to open its context menu. selector=ref, value=null.
+- "drag": Drag one element onto another. selector=start ref, value=end ref.
+- "check": Toggle a checkbox by ref (checks or unchecks according to its current state). selector=ref, value=null.
+- "dialog": Accept or dismiss a native browser dialog (alert/confirm/prompt). selector=null, value="accept" | "dismiss" | "accept:<prompt文本>".
+- "upload": Upload local file(s) into a file input. selector=ref of the file input. value MUST be the absolute path exactly as written in the step text - never guess, never rewrite it.
+- "tabs": Manage browser tabs. selector=null, value="list" | "new" | "select:<index>" | "close[:index]".
+- "navigate_back": Browser back. selector=null, value=null.
 - "wait": Wait for text to appear. selector=null, value=text to wait for.
 - "screenshot": Take a full-page screenshot. selector=null, value=filename.
 - "assert_text": Wait for text to be visible. selector=null, value=text.

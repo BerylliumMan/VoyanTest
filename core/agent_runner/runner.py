@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 
 from core.agent_runner.context import AgentContext
+from core.mcp_args import ACTION_DESCRIPTIONS, resolve_mcp_tool
 from app.crud import agent_run as crud_agent_run
 
 logger = logging.getLogger(__name__)
@@ -81,16 +82,33 @@ class ToolDefinition:
     action: str  # LLM 输出的 action 名称（click / fill / goto 等）
 
 
-# 默认工具集（对应 LLM 可用的操作）
+_RUNNER_ACTIONS = (
+    "click",
+    "double_click",
+    "right_click",
+    "fill",
+    "select",
+    "goto",
+    "wait",
+    "screenshot",
+    "snapshot",
+    "evaluate",
+    "press_key",
+    "hover",
+    "drag",
+    "scroll",
+    "check",
+    "dialog",
+    "upload",
+    "tabs",
+    "navigate_back",
+)
+
 _DEFAULT_TOOLS: list[ToolDefinition] = [
-    ToolDefinition("browser_click", "点击页面元素", "click"),
-    ToolDefinition("browser_type", "在输入框中输入文本", "fill"),
-    ToolDefinition("browser_select_option", "选择下拉选项", "select"),
-    ToolDefinition("browser_navigate", "导航到指定 URL", "goto"),
-    ToolDefinition("browser_wait_for", "等待文本出现或指定时间", "wait"),
-    ToolDefinition("browser_take_screenshot", "截取页面截图", "screenshot"),
-    ToolDefinition("browser_snapshot", "刷新页面可访问性快照", "snapshot"),
-    ToolDefinition("browser_evaluate", "在浏览器中执行 JavaScript", "evaluate"),
+    ToolDefinition(
+        resolve_mcp_tool(action), ACTION_DESCRIPTIONS[action], action
+    )
+    for action in _RUNNER_ACTIONS
 ]
 
 

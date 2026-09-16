@@ -20,18 +20,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_BROWSERS = {'chromium', 'firefox', 'webkit'}
 
 # MCP 工具名映射（LLM 输出 action → MCP 工具名）
-ACTION_TOOL_MAP = {
-    'goto': 'browser_navigate',
-    'click': 'browser_click',
-    'fill': 'browser_type',
-    'select': 'browser_select_option',
-    'wait': 'browser_wait_for',
-    'screenshot': 'browser_take_screenshot',
-    'snapshot': 'browser_snapshot',
-    'assert_text': 'browser_wait_for',
-    'press_key': 'browser_press_key',
-    'hover': 'browser_hover',
-}
+from core.mcp_args import TOOL_MAP as ACTION_TOOL_MAP
 
 
 class PlaywrightMCPManager:
@@ -213,6 +202,7 @@ class PlaywrightMCPManager:
             '@playwright/mcp',
             browser_arg,
             '--isolated',
+            '--allow-unrestricted-file-access',
             *_executable_args,
         ]
         if cdp_endpoint:
@@ -383,6 +373,15 @@ class PlaywrightMCPManager:
                 return {'success': True, 'error': None}
             except (RuntimeError, ConnectionError, OSError, ValueError, TypeError, KeyError) as exc:
                 return {'success': False, 'error': str(exc)}
+
+        if action in ('upload', 'browser_file_upload') and selector:
+            open_res = await self.execute_tool_call({
+                'action': 'click',
+                'selector': selector,
+                'element_desc': element_desc,
+            })
+            if not open_res.get('success'):
+                return open_res
 
         mcp_tool = ACTION_TOOL_MAP.get(action)
         if not mcp_tool:

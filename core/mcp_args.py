@@ -17,11 +17,14 @@ from typing import Optional
 # 与 @playwright/mcp tab.ts targetLocator 一致的 ref 判定正则
 _REF_RE = re.compile(r"^(f\d+)?e\d+$")
 
-# LLM 简短 action 名 → MCP 工具名
+# LLM 简短 action 名 → MCP 工具名（服务端 AgentRunner 与客户端 AgentBridge 共用的
+# 单一来源；新增动作只改这里 + build_mcp_args，两个执行路径自动保持一致）
 TOOL_MAP = {
     "goto": "browser_navigate",
     "navigate": "browser_navigate",
     "click": "browser_click",
+    "double_click": "browser_click",
+    "right_click": "browser_click",
     "fill": "browser_type",
     "select": "browser_select_option",
     "wait": "browser_wait_for",
@@ -31,6 +34,35 @@ TOOL_MAP = {
     "press_key": "browser_press_key",
     "hover": "browser_hover",
     "evaluate": "browser_evaluate",
+    "drag": "browser_drag",
+    "scroll": "browser_mouse_wheel",
+    "check": "browser_click",
+    "dialog": "browser_handle_dialog",
+    "upload": "browser_file_upload",
+    "tabs": "browser_tabs",
+    "navigate_back": "browser_navigate_back",
+}
+
+ACTION_DESCRIPTIONS = {
+    "goto": "导航到指定 URL",
+    "click": "点击页面元素",
+    "double_click": "双击页面元素",
+    "right_click": "右键点击页面元素（打开上下文菜单）",
+    "fill": "在输入框中输入文本",
+    "select": "选择下拉选项",
+    "wait": "等待文本出现或指定时间",
+    "screenshot": "截取页面截图",
+    "snapshot": "刷新页面可访问性快照",
+    "evaluate": "在浏览器中执行 JavaScript",
+    "press_key": "发送按键或组合键（Enter/Escape/Control+A…）",
+    "hover": "鼠标悬停到元素上",
+    "drag": "把元素拖拽到另一个元素（selector=起点 ref，value=终点 ref）",
+    "scroll": "滚动页面（value=像素数或 up/down）",
+    "check": "勾选/取消勾选复选框（点击切换）",
+    "dialog": "处理浏览器对话框（value=accept/dismiss，prompt 可 accept:文本）",
+    "upload": "上传文件（selector=文件输入框 ref，value=绝对路径，多个用逗号分隔）",
+    "tabs": "管理标签页（value=list/new/select:N/close[:N]）",
+    "navigate_back": "浏览器后退",
 }
 
 
@@ -75,6 +107,53 @@ def build_mcp_args(
         return {"url": value or "about:blank"}
     if action == "click":
         return {"element": desc, "target": sel}
+    if action in ("double_click", "browser_click_double"):
+        return {"element": desc, "target": sel, "doubleClick": True}
+    if action in ("right_click", "context_click", "browser_click_right"):
+        return {"element": desc, "target": sel, "button": "right"}
+    if action in ("drag", "browser_drag"):
+        end = extract_ref_token((value or "").strip()) or (value or "").strip()
+        return {
+            "startElement": desc,
+            "startTarget": sel,
+            "endElement": "",
+            "endTarget": end,
+        }
+    if action in ("scroll", "browser_mouse_wheel"):
+        token = (value or "").strip().lower()
+        if token == "up":
+            dy = -600
+        elif token in ("", "down"):
+            dy = 600
+        else:
+            dy = int(token) if token.lstrip("-").isdigit() else 600
+        return {"deltaX": 0, "deltaY": dy}
+    if action in ("check", "uncheck", "browser_check"):
+        return {"element": desc, "target": sel}
+    if action in ("dialog", "handle_dialog", "browser_handle_dialog"):
+        token = (value or "").strip()
+        lowered = token.lower()
+        accept = lowered not in ("dismiss", "cancel", "false", "取消", "拒绝")
+        args: dict = {"accept": accept}
+        if accept and lowered.startswith("accept:") and len(token) > len("accept:"):
+            args["promptText"] = token[len("accept:"):].strip()
+        return args
+    if action in ("upload", "browser_file_upload"):
+        paths = [p.strip() for p in (value or "").split(",") if p.strip()]
+        return {"paths": paths}
+    if action in ("tabs", "browser_tabs"):
+        token = (value or "list").strip().lower()
+        if token.startswith("new"):
+            return {"action": "new"}
+        if token.startswith("close"):
+            idx = re.sub(r"\D", "", token)
+            return {"action": "close", **({"index": int(idx)} if idx else {})}
+        if token.startswith("select"):
+            idx = re.sub(r"\D", "", token) or "0"
+            return {"action": "select", "index": int(idx)}
+        return {"action": "list"}
+    if action in ("navigate_back", "back", "browser_navigate_back"):
+        return {}
     if action == "fill":
         return {"element": desc, "target": sel, "text": value or ""}
     if action == "select":

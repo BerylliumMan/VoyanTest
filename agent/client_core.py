@@ -29,31 +29,9 @@ from agent.models import (
 logger = logging.getLogger("agent.client")
 
 def _resolve_mcp_tool(action: str) -> str:
-    """将 action 名解析为 MCP 工具名。"""
-    if not action:
-        return ""
-    # LLM 控制信号，不是浏览器工具
-    if action.lower() in ("error", "done"):
-        return ""
-    if action.startswith('browser_') or action in ('navigate',):
-        # 已经是 MCP 工具名——直接使用
-        return action if not action.startswith('browser_') else action
-    # 通过映射表翻译简短名称
-    TOOL_MAP = {
-        'goto': 'browser_navigate',
-        'click': 'browser_click',
-        'fill': 'browser_type',
-        'select': 'browser_select_option',
-        'wait': 'browser_wait_for',
-        'screenshot': 'browser_take_screenshot',
-        'snapshot': 'browser_snapshot',
-        'assert_text': 'browser_wait_for',
-        'press_key': 'browser_press_key',
-        'hover': 'browser_hover',
-        'evaluate': 'browser_evaluate',
-        'browser_evaluate': 'browser_evaluate',
-    }
-    return TOOL_MAP.get(action, action)
+    """将 action 名解析为 MCP 工具名（共享 core.mcp_args.TOOL_MAP，避免两端漂移）。"""
+    from core.mcp_args import resolve_mcp_tool
+    return resolve_mcp_tool(action or "")
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, target_host: str, target_port: int) -> None:
@@ -798,7 +776,10 @@ class AgentClient:
                 f"Searched in: {[os.path.join(r, 'node_modules', '@playwright', 'mcp', 'cli.js') for r in _search_roots]}"
             )
 
-        args = [_node_exe, _cli_js, "--browser=chromium"]
+        args = [
+            _node_exe, _cli_js, "--browser=chromium",
+            "--allow-unrestricted-file-access",
+        ]
 
         if cdp_endpoint:
             args.extend(["--cdp-endpoint", cdp_endpoint])
@@ -2261,6 +2242,17 @@ class AgentClient:
                 await self.send_result(run_id, result)
                 return
 
+            if (action or "").lower() in ("upload", "browser_file_upload") and selector:
+                # @playwright/mcp 的 file_upload 只作用于已打开的 file chooser：
+                # 先点击文件输入框触发 chooser，再投喂路径。
+                open_res = await self._mcp_call_tool(
+                    "click", selector, "", step_description=step_description,
+                    element_desc=element_desc, timeout_ms=timeout_ms,
+                )
+                if not open_res.get("success"):
+                    raise RuntimeError(
+                        open_res.get("error") or "file input click failed"
+                    )
             mcp_result = await self._mcp_call_tool(
                 action, selector, value, step_description=step_description,
                 element_desc=element_desc, timeout_ms=timeout_ms,
