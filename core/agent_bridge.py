@@ -419,6 +419,12 @@ class AgentBridge:
             })
         return out
 
+    def _ordered_step_numbers(self) -> list[int]:
+        return [
+            int(s.get("step_order") or i + 1)
+            for i, s in enumerate(self._run_steps or [])
+        ]
+
     async def _resolve_base_url(self, case_id: int) -> str:
         """环境 base_url 优先，回退项目 base_url（与非 OTA 路径语义一致）。"""
         env_id = getattr(self, "_environment_id", None)
@@ -963,7 +969,10 @@ class AgentBridge:
             # 条件一：最后动作是断言且成功，且成功操作数 ≥ 步骤数
             # 条件二：本轮已出现过断言成功，且成功操作数 ≥ 步骤数
             #        （防模型无视证据重复执行步骤）
-            engine_done = case_steps and successful_acts >= len(case_steps) and (
+            _all_steps_covered = (
+                bool(case_steps) and len(self._journal_covered) >= len(case_steps)
+            )
+            engine_done = _all_steps_covered and successful_acts >= len(case_steps) and (
                 (result.get("success") and action_name in ("assert_text", "wait"))
                 or assertion_passed
             )
@@ -979,8 +988,13 @@ class AgentBridge:
                 await self._complete(run.id, turn)
                 return
 
-        # 达到最大轮次
-        await self._fail(run.id, f"Max turns ({max_turns}) reached")
+        _missed = [
+            o for o in self._ordered_step_numbers() if o not in self._journal_covered
+        ]
+        await self._fail(
+            run.id,
+            f"Max turns ({max_turns}) reached; uncovered steps: {_missed or 'none'}",
+        )
 
     # ── LLM 决策 ────────────────────────────────────────────────────────────
 
