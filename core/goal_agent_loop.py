@@ -849,26 +849,21 @@ def journal_entry(
 
 
 def detect_stagnation(journal: list[dict[str, Any]], limit: int = STAGNATION_LIMIT) -> bool:
-    """True when the last N actions are identical failures or identical no-ops."""
+    """True when the last ``limit`` turns are ALL failures with ≤2 distinct actions.
+
+    成功轮不计入停滞（成功动作即使重复也不算卡死：是否推进由清单覆盖度与
+    最大轮次兜底判定），只统计失败的 turn。
+    """
     if len(journal) < limit:
         return False
     tail = journal[-limit:]
-    if all(not e.get("success") for e in tail):
-        keys = [
-            (e.get("action"), e.get("selector"), e.get("value"))
-            for e in tail
-        ]
-        if len(set(keys)) <= 2:
-            return True
-    # same successful action repeated (stuck loop)
-    keys_ok = [
+    if not all(not e.get("success") for e in tail):
+        return False
+    keys = [
         (e.get("action"), e.get("selector"), e.get("value"))
         for e in tail
-        if e.get("success")
     ]
-    if len(keys_ok) >= limit and len(set(keys_ok)) == 1:
-        return True
-    return False
+    return len(set(keys)) <= 2
 
 
 def tool_call_from_decision(decision: GoalAction) -> dict[str, Any]:

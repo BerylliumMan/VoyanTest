@@ -1538,7 +1538,7 @@ class AgentManager:
                         last_action_error = hint
 
                 if detect_stagnation(journal):
-                    goal_error = "nl_goal stagnation — repeated failing/identical actions"
+                    goal_error = "nl_goal stagnation — 连续失败轮（repeated failing turns）"
                     logger.warning(goal_error)
                     break
 
