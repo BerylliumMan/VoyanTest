@@ -184,6 +184,7 @@ ACTIONS available (maps to Playwright MCP tools):
 - "drop": Drag & drop local file(s) ONTO an element (use for steps like 拖入/拖放到某区域). selector=ref of the drop target, value=absolute path(s) of the file(s).
 - "tabs": Manage browser tabs. selector=null, value="list" | "new" | "select:<index>" | "close[:index]".
 - "navigate_back": Browser back. selector=null, value=null.
+- Download steps: click the download trigger, then verify the file with "evaluate" (e.g. value="async () => { const r = await fetch('report.csv'); return await r.text(); }"). There is no native download tool, so the evaluate fetch IS the download verification.
 - "click_xy": Click by page coordinates (canvas / no ref available). selector=null, value="x,y".
 - "move_mouse": Move the mouse to coordinates. selector=null, value="x,y".
 - "drag_xy": Drag between coordinates. selector=null, value="startX,startY,endX,endY".
@@ -250,6 +251,49 @@ OUTPUT SCHEMA (exact JSON):
 # ------------------------------------------------------------------
 # Configuration resolution
 # ------------------------------------------------------------------
+
+
+def _escape_control_chars_in_strings(text: str) -> str:
+    """把 JSON 字符串字面量内部的裸控制字符转义（小模型常把换行直接写进字符串）。"""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                if ch == "\n":
+                    out.append("\\n")
+                elif ch == "\r":
+                    out.append("\\r")
+                elif ch == "\t":
+                    out.append("\\t")
+                else:
+                    out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                out.append(ch)
+                in_string = False
+                continue
+            if ch == "\n":
+                out.append("\\n")
+                continue
+            if ch == "\r":
+                out.append("\\r")
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                continue
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+    return "".join(out)
 
 
 async def _load_db_config() -> dict:
@@ -353,7 +397,9 @@ async def create_openai_client(
             "No API key found. Set DASHSCOPE_API_KEY env var or configure "
             "config.json → ai.api_key or ~/.claude/settings.json"
         )
-    return AsyncOpenAI(api_key=key, base_url=base)
+    return AsyncOpenAI(
+        api_key=key, base_url=base, timeout=180.0, max_retries=0
+    )
 
 
 async def generate_tool_call(
@@ -474,6 +520,7 @@ async def generate_tool_call(
         try:
             parsed = _json.loads(content)
         except _json.JSONDecodeError:
+            content = _escape_control_chars_in_strings(content)
             # Attempt repair: find first { and last }
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
@@ -663,6 +710,7 @@ async def verify_expected_result(
         try:
             parsed = _json.loads(content)
         except _json.JSONDecodeError:
+            content = _escape_control_chars_in_strings(content)
             # Attempt repair
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
@@ -806,6 +854,7 @@ async def generate_verification_conditions(
     try:
         parsed = _json.loads(content)
     except _json.JSONDecodeError:
+        content = _escape_control_chars_in_strings(content)
         # Attempt repair: find first [ and last ]
         match = re.search(r'\[.*]', content, re.DOTALL)
         if match:

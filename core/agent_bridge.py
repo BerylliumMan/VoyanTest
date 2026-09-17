@@ -627,6 +627,7 @@ class AgentBridge:
         successful_act_keys: set = set()
         _last_error_fp: str | None = None
         _consec_err_n = 0
+        _decision_fails = 0
         successful_acts = 0
         assertion_passed = False
 
@@ -794,9 +795,27 @@ class AgentBridge:
             )
 
             if action is None:
-                # LLM 调用失败 — 跳过本轮继续
-                logger.warning("LLM decision returned None at turn %d, continuing", turn)
+                _decision_fails += 1
+                logger.warning(
+                    "LLM decision returned None at turn %d (consecutive=%d)",
+                    turn, _decision_fails,
+                )
+                if _decision_fails >= 4:
+                    await self._fail(
+                        run.id,
+                        f"LLM 连续 {_decision_fails} 轮未返回合法工具调用 JSON",
+                    )
+                    return
+                context_messages.append({
+                    "role": "user",
+                    "content": (
+                        "SYSTEM: 你上一条回复不是合法 JSON，已被丢弃。"
+                        "只输出一个 JSON 对象（字段：thinking/action/selector/"
+                        "element_desc/value），不要输出任何解释性文字。"
+                    ),
+                })
                 continue
+            _decision_fails = 0
 
             # 检查停止信号
             if action.get("_done"):
