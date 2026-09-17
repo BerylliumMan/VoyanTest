@@ -77,14 +77,23 @@ def _strip_fences(text: str) -> str:
     return t.strip()
 
 
+def ensure_expect_import(script: str) -> str:
+    """Playwright 脚本用到 expect 时必须自带导入（回放 exec 的命名空间不含 expect）。"""
+    if "expect(" not in script:
+        return script
+    if re.search(r"from\s+playwright(\.async_api)?\s+import[^\n]*\bexpect\b", script):
+        return script
+    return "from playwright.async_api import expect\n" + script
+
+
 def _ensure_entrypoint(script: str, case_id: int) -> str:
     """Guarantee test_case_{id} exists; rename first test_case_* if needed."""
     name = f"test_case_{int(case_id)}"
     if re.search(rf"async\s+def\s+{re.escape(name)}\s*\(", script):
-        return script
+        return ensure_expect_import(script)
     m = re.search(r"async\s+def\s+(test_case_\w+)\s*\(", script)
     if m:
-        return script.replace(m.group(1), name, 1)
+        return ensure_expect_import(script.replace(m.group(1), name, 1))
     # wrap body — last resort
     return (
         "from playwright.async_api import expect\n\n"

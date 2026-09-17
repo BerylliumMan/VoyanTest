@@ -741,7 +741,15 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                                 await bridge.orchestrate(
                                     case_id=case_id,
                                     agent_id=body.agent_name,
-                                    goal={"type": "client_exec", "case_id": case_id, "agent_name": body.agent_name},
+                                    goal={
+                                        "type": "client_exec",
+                                        "case_id": case_id,
+                                        "agent_name": body.agent_name,
+                                        "batch_id": batch.id,
+                                        "seq": idx,
+                                        "is_init": info.get("is_init", False),
+                                        "reuse_browser_session": reuse_session,
+                                    },
                                     environment_id=body.environment_id,
                                     existing_batch_id=batch.id,
                                     notify_user_id=getattr(user, 'id', None),

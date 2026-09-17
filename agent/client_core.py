@@ -607,7 +607,9 @@ class AgentClient:
                     "reuse existing browser requested but session dead — "
                     "restarting MCP without new Hybrid CDP (page state lost)"
                 )
-            await self._start_mcp(shared_cdp=start_shared)
+            await self._start_mcp(
+                shared_cdp=start_shared, keep_existing_browsers=reuse_existing
+            )
             return
 
         self._log_info("Reusing existing MCP subprocess (browser stays open)")
@@ -714,18 +716,24 @@ class AgentClient:
             self._log_warning(f"MCP recover failed: {exc}")
             return False
 
-    async def _start_mcp(self, *, shared_cdp: bool = False):
-        # 清理可能残留的旧 MCP；hybrid 共用 Chromium 时不要 pkill chrome
-        try:
-            import subprocess as _sp
+    async def _start_mcp(
+        self, *, shared_cdp: bool = False, keep_existing_browsers: bool = False
+    ):
+        # 批量续跑（reuse）时不得 pkill chrome/chromium：那会杀掉上一用例
+        # 保留的共享浏览器，导致初始化用例的登录态丢失（实测 batch 复现）
+        if not keep_existing_browsers:
+            try:
+                import subprocess as _sp
 
-            patterns = ["playwright"] if shared_cdp else ["playwright", "chrome", "chromium"]
-            for _patt in patterns:
-                _out = _sp.run(["pkill", "-f", _patt], capture_output=True, timeout=3)
-                if _out.returncode == 0:
-                    self._log_info(f"Cleaned up stale {_patt} processes")
-        except Exception:
-            pass
+                patterns = (
+                    ["playwright"] if shared_cdp else ["playwright", "chrome", "chromium"]
+                )
+                for _patt in patterns:
+                    _out = _sp.run(["pkill", "-f", _patt], capture_output=True, timeout=3)
+                    if _out.returncode == 0:
+                        self._log_info(f"Cleaned up stale {_patt} processes")
+            except Exception:
+                pass
         if self._mcp_process:
             self._log_info("Stopping previous MCP before starting new one")
             # Keep hybrid Chromium across MCP restarts
@@ -1477,7 +1485,11 @@ class AgentClient:
             os.close(fd)
             Path(tmp_path).write_text(script, encoding="utf-8")
 
-            ns: dict = {"__name__": "__vt_compiled__"}
+            from playwright.async_api import expect as _playwright_expect
+            ns: dict = {
+                "__name__": "__vt_compiled__",
+                "expect": _playwright_expect,
+            }
             code = compile(script, tmp_path, "exec")
             exec(code, ns, ns)
             fn = ns.get(f"test_case_{int(case_id)}")

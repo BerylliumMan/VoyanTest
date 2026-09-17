@@ -119,6 +119,7 @@ class AgentBridge:
         self._case_url: str = ""
         self._replay_logs: list[dict] | None = None
         self._environment_id = environment_id
+        self._reuse_browser_session = bool((goal or {}).get("reuse_browser_session"))
         self._screenshot_dir: str | None = None
         self._screenshot_paths: dict[str, str] = {}
         self._batch_id: int | None = existing_batch_id
@@ -144,6 +145,11 @@ class AgentBridge:
                 "type": "run_start", "run_id": run_id_str,
                 "description": "AI Agent execution",
                 "num_steps": 0,
+                "backend": "playwright_mcp",
+                "reuse_existing_browser": bool(
+                    getattr(self, "_reuse_browser_session", False)
+                ),
+                "navigate_base_url": False,
             })
             await asyncio.sleep(1)  # 等 MCP 初始化
         except Exception as e:
