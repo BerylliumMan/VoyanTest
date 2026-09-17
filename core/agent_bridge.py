@@ -730,8 +730,23 @@ class AgentBridge:
 
         # 上轮动作后验证快照：轮次之间无其他页面操作，直接复用。
         carried_obs: dict | None = None
-        for turn in range(1, max_turns + 1):
-            logger.info("━━━ Turn %d/%d (run #%d) ━━━", turn, max_turns, run.id)
+        max_failed_turns = max_turns
+        max_total_turns = max(200, max_turns * 4)
+        turn = 0
+        failed_turns = 0
+        while turn < max_total_turns:
+            if failed_turns >= max_failed_turns:
+                await self._fail(
+                    run.id,
+                    f"失败轮达到上限 ({failed_turns}/{max_failed_turns})；"
+                    f"总轮次 {turn}",
+                )
+                return
+            turn += 1
+            logger.info(
+                "━━━ Turn %d/%d (总 %d/%d) (run #%d) ━━━",
+                failed_turns + 1, max_failed_turns, turn, max_total_turns, run.id,
+            )
 
             # ── 1. Observe: WS 取快照 ──
             if carried_obs is not None:
@@ -757,6 +772,7 @@ class AgentBridge:
                 err = obs.get("error", "unknown observe failure")
                 logger.error("Observe failed at turn %d: %s", turn, err)
                 consecutive_failures += 1
+                failed_turns += 1
                 if consecutive_failures >= 3:
                     await self._fail(run.id, f"Observe failed {consecutive_failures} times: {err}")
                     return
@@ -796,6 +812,7 @@ class AgentBridge:
 
             if action is None:
                 _decision_fails += 1
+                failed_turns += 1
                 logger.warning(
                     "LLM decision returned None at turn %d (consecutive=%d)",
                     turn, _decision_fails,
@@ -845,6 +862,7 @@ class AgentBridge:
                 # Agent reported error — 双重熔断（027-e2e-fixes 迭代）：
                 #   同因(指纹相同)第 2 次 / 连续任意 error 第 3 次 → 终止
                 _err_msg = str(action.get("_error_message", ""))
+                failed_turns += 1
                 from core.mcp_args import error_fingerprint
                 _fp = error_fingerprint(_err_msg)
                 same_as_last = bool(_fp) and _fp == _last_error_fp
@@ -975,6 +993,8 @@ class AgentBridge:
             _act_key = act_count_key(action)
             if result.get("success") and _act_key is not None and _act_key not in successful_act_keys:
                 successful_act_keys.add(_act_key)
+            if not result.get("success"):
+                failed_turns += 1
             successful_acts = len(successful_act_keys)
             # 成功操作打断 error 连击（027 熔断重置点）
             if result.get("success"):
@@ -1012,7 +1032,8 @@ class AgentBridge:
         ]
         await self._fail(
             run.id,
-            f"Max turns ({max_turns}) reached; uncovered steps: {_missed or 'none'}",
+            f"总轮次达到上限 ({max_total_turns})；失败轮 {failed_turns}/{max_failed_turns}；"
+            f"未覆盖步骤: {_missed or 'none'}",
         )
 
     # ── LLM 决策 ────────────────────────────────────────────────────────────
