@@ -38,7 +38,6 @@ class WSMessageType(str, Enum):
     # Server → Agent
     RUN_START = "run_start"
     STEP_EXECUTE = "step_execute"
-    STEP_BROWSER_USE = "step_browser_use"  # hybrid: one NL step via browser-use on shared CDP
     RUN_COMPILED_SCRIPT = "run_compiled_script"  # whole-case solidified Playwright .py
     API_REQUEST = "api_request"  # 029: one HTTP request for client-side API testing
     GET_SNAPSHOT = "get_snapshot"

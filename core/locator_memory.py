@@ -1,7 +1,7 @@
 """Learned locator memory: cache successful element fingerprints for faster replay.
 
-MCP refs (e15) and browser-use indices are ephemeral. We store stable fingerprints
-(role/name/text/xpath) and re-bind to the current snapshot on later runs.
+MCP refs (e15) are ephemeral. We store stable fingerprints (role/name/text/xpath)
+and re-bind to the current snapshot on later runs (OTA / MCP path).
 
 Safety: unique match only; optional URL hint; expected-result failure invalidates cache.
 """
@@ -344,22 +344,6 @@ def bump_hit_count(fp: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def format_hint_for_agent(fp: dict[str, Any] | None) -> str:
-    """NL hint injected into browser-use step task when direct replay is unavailable."""
-    if not fp:
-        return ""
-    role = fp.get("role") or ""
-    name = fp.get("name") or ""
-    action = fp.get("action") or "click"
-    parts = [f"优先操作记忆元素：action={action}"]
-    if role:
-        parts.append(f"role={role}")
-    if name:
-        parts.append(f"文案「{name}」")
-    parts.append("不要探索无关控件")
-    return "；".join(parts)
-
-
 async def persist_learned_locators_from_results(
     db,
     step_results: list[dict],
@@ -440,77 +424,6 @@ async def try_replay_mcp(
         "ref": ref,
         "exec_result": exec_result,
     }
-
-
-async def try_replay_browser_use(
-    session,
-    fingerprint: dict[str, Any],
-    *,
-    step_description: str = "",
-) -> dict[str, Any]:
-    """Best-effort CDP text/role click for browser-use sessions.
-
-    Returns skipped=True when unsafe / unsupported so caller falls back to Agent.
-    """
-    if not session or not fingerprint:
-        return {"success": False, "skipped": True, "error": "no session"}
-    name = (fingerprint.get("name") or "").strip()
-    if not name:
-        return {"success": False, "skipped": True, "error": "no name for CDP replay"}
-    if step_description and not fingerprint_matches_step_description(fingerprint, step_description):
-        return {"success": False, "skipped": True, "error": "name not in step"}
-
-    action = (fingerprint.get("action") or "click").strip().lower()
-    if action not in ("click", "browser_click"):
-        # fill/select need more context; fall back to Agent with hint
-        return {"success": False, "skipped": True, "error": "only click supported for BU direct replay"}
-
-    # Escape for JS string
-    safe = name.replace("\\", "\\\\").replace("'", "\\'")
-    js = f"""(() => {{
-      const name = '{safe}';
-      const nodes = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'));
-      const hits = nodes.filter(el => {{
-        const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
-        return t === name || t.includes(name);
-      }}).filter(el => {{
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-      }});
-      if (hits.length !== 1) return {{ ok: false, count: hits.length }};
-      hits[0].click();
-      return {{ ok: true, count: 1 }};
-    }})()"""
-
-    try:
-        focus = getattr(session, "agent_focus", None)
-        if focus is None:
-            get_sess = getattr(session, "get_or_create_cdp_session", None)
-            if callable(get_sess):
-                focus = await get_sess(focus=True)
-        if focus is None:
-            return {"success": False, "skipped": True, "error": "no CDP focus"}
-
-        cdp = getattr(focus, "cdp_client", None)
-        sid = getattr(focus, "session_id", None)
-        if cdp is None:
-            return {"success": False, "skipped": True, "error": "no cdp client"}
-
-        result = await cdp.send.Runtime.evaluate(
-            params={"expression": js, "returnByValue": True},
-            session_id=sid,
-        )
-        value = (result or {}).get("result", {}).get("value") or {}
-        if value.get("ok"):
-            return {"success": True, "skipped": False, "error": None}
-        return {
-            "success": False,
-            "skipped": True,
-            "error": f"CDP unique click failed count={value.get('count')}",
-        }
-    except Exception as exc:
-        logger.warning("locator_memory browser-use replay failed: %s", exc, exc_info=True)
-        return {"success": False, "skipped": True, "error": str(exc)}
 
 
 def normalize_learned_blob(blob: dict[str, Any] | None) -> dict[str, Any] | None:

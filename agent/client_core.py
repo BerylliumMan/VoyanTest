@@ -179,7 +179,6 @@ class AgentClient:
         self._mcp_stdin = None
         self._mcp_stdout = None
         self._mcp_req_id = 0
-        self._bu_browser = None  # shared browser-use session across batch cases
 
         # Hybrid / shared-CDP execution Chromium (separate from recording)
         self._exec_chrome_process = None
@@ -254,7 +253,7 @@ class AgentClient:
         payload = {
             "level": level,
             "message": message,
-            "backend": self._active_backend or "browser_use",
+            "backend": self._active_backend or "playwright_mcp",
         }
         if self._active_step_order is not None:
             payload["step_order"] = self._active_step_order
@@ -450,7 +449,7 @@ class AgentClient:
         return None
 
     async def _start_exec_chrome_cdp(self) -> str:
-        """Launch Chromium with remote debugging for hybrid MCP+browser-use.
+        """Launch Chromium with remote debugging for shared-CDP MCP sessions.
 
         Returns HTTP CDP endpoint ``http://127.0.0.1:PORT``.
         """
@@ -629,7 +628,35 @@ class AgentClient:
 
     @staticmethod
     def _looks_like_dead_browser(err_text: str) -> bool:
+        """True when MCP/browser session itself is dead — not ordinary page navigation errors.
+
+        ``net::ERR_NAME_NOT_RESOLVED`` / SSL / timeout 等是页面打不开，浏览器与 MCP
+        仍可用，必须保留会话以便失败截图与后续 observe。
+        """
         low = (err_text or "").lower()
+        # 页面导航网络错误 ≠ 浏览器挂了（否则失败截图前 MCP 已被杀掉）
+        if "net::err_" in low:
+            nav_noise = (
+                "err_name_not_resolved",
+                "err_connection_timed_out",
+                "err_connection_refused",  # 目标站拒绝，非 CDP
+                "err_address_unreachable",
+                "err_internet_disconnected",
+                "err_connection_reset",
+                "err_connection_closed",
+                "err_ssl_",
+                "err_cert_",
+                "err_timed_out",
+                "err_aborted",
+                "err_blocked_by",
+                "err_empty_response",
+                "err_http_response",
+                "err_too_many_redirects",
+                "err_invalid_url",
+                "err_failed",
+            )
+            if any(k in low for k in nav_noise) or "navigating to" in low:
+                return False
         keys = (
             "econnrefused",
             "websocket url",
@@ -639,7 +666,6 @@ class AgentClient:
             "browser closed",
             "connect failed",
             "connection refused",
-            "net::err_",
             "cdp",
             "chromium has crashed",
             "mcp tool call timed out",
@@ -678,7 +704,7 @@ class AgentClient:
     ) -> None:
         """Start MCP or restart if the reused browser/CDP session is dead.
 
-        ``reuse_existing``: nl_goal step fallback — keep the current browser/page.
+        ``reuse_existing``: keep the current browser/page (OTA / Bridge run_start).
         Do not treat "no hybrid CDP yet" as a reason to launch a blank Chromium
         when the plain MCP session is still healthy.
         """
@@ -712,7 +738,7 @@ class AgentClient:
                 if reuse_existing:
                     # Keep current MCP page — do NOT launch a new Hybrid CDP Chromium
                     self._log_info(
-                        "reuse existing browser for nl_goal step fallback "
+                        "reuse existing browser "
                         "(skip new Hybrid CDP Chromium)"
                     )
                 else:
@@ -1310,11 +1336,6 @@ class AgentClient:
             "mcp", "playwright", "ui_testing", "local_browser",
             "compiled_script", CAP_API_TEST,
         ]
-        try:
-            import browser_use  # noqa: F401
-            caps.append("browser_use")
-        except ImportError:
-            pass
         reg = AgentRegistration(
             name=self.agent_name,
             hostname=self.hostname,
@@ -1343,17 +1364,13 @@ class AgentClient:
         if msg.type == WSMessageType.RUN_START:
             payload = msg.payload or {}
             backend = (payload.get("backend") or "playwright_mcp").strip()
-            if backend == "browser_use":
-                await self._handle_run_start_browser_use(msg)
-                return
-
             shared_cdp = backend == "hybrid"
             reuse_existing = bool(payload.get("reuse_existing_browser"))
             navigate = payload.get("navigate_base_url", True)
             if reuse_existing:
                 self._log_info(
-                    f"Run {msg.run_id} — reuse existing browser for nl_goal step "
-                    f"fallback backend={backend} shared_cdp={shared_cdp}"
+                    f"Run {msg.run_id} — reuse existing browser "
+                    f"backend={backend} shared_cdp={shared_cdp}"
                 )
             else:
                 self._log_info(
@@ -1471,9 +1488,6 @@ class AgentClient:
                 # AgentBridge act：action/selector/value 在 payload 顶层
                 await self._handle_act(msg)
 
-        elif msg.type == WSMessageType.STEP_BROWSER_USE:
-            await self._handle_step_browser_use(msg)
-
         elif msg.type == WSMessageType.RUN_COMPILED_SCRIPT:
             # 回放不带 RUN_START：显式绑定本次 run 上下文，结束后清空，
             # 否则 RUN_LOG 前缀会沿用上一个 run 的 id（服务端巡检日志会误导）
@@ -1497,10 +1511,6 @@ class AgentClient:
                 await self._stop_mcp()
             except Exception as e:
                 self._log_error(f"Error shutting down MCP: {e}")
-            try:
-                await self._stop_bu_browser()
-            except Exception as e:
-                self._log_error(f"Error shutting down browser-use: {e}")
 
         elif msg.type == WSMessageType.CANCEL_RUN:
             self._log_info(f"Cancel run signal received for {msg.run_id}")
@@ -1532,19 +1542,6 @@ class AgentClient:
 
         elif msg.type == WSMessageType.RECORDING_STOP:
             await self._handle_recording_stop(msg)
-
-    async def _stop_bu_browser(self) -> None:
-        browser = self._bu_browser
-        self._bu_browser = None
-        if browser is None:
-            return
-        try:
-            if hasattr(browser, "stop"):
-                await browser.stop()
-            elif hasattr(browser, "close"):
-                await browser.close()
-        except Exception as exc:
-            self._log_warning(f"browser-use session stop: {exc}")
 
     async def _handle_run_compiled_script(self, msg: WSMessage):
         """Run a solidified whole-case Playwright Python script.
@@ -1609,7 +1606,7 @@ class AgentClient:
             else:
                 headless = bool(self._headless)
 
-            # Forced headless = post-nl_goal dry-run: never touch shared session.
+            # Forced headless = dry-run verify: never touch shared session.
             ephemeral = ("headless" in payload and headless) and not keep_browser
 
             async with async_playwright() as p:
@@ -1842,241 +1839,6 @@ class AgentClient:
             + (f" error={error}" if error else "")
         )
         await self._send(WSMessageType.API_RESPONSE, run_id, result)
-
-    async def _handle_step_browser_use(self, msg: WSMessage):
-        """Hybrid fallback: run one NL step via browser-use on the shared CDP browser."""
-        payload = msg.payload or {}
-        step_order = payload.get("step_order") or 0
-        desc = payload.get("description") or ""
-        expected = payload.get("expected_result")
-        max_steps = int(payload.get("max_steps_per_nl") or 20)
-        t0 = time.monotonic()
-        prev_run = self._active_run_id
-        prev_step = self._active_step_order
-        prev_backend = self._active_backend
-        self._active_run_id = msg.run_id
-        self._active_step_order = int(step_order) if step_order else None
-        self._active_backend = "browser_use_fallback"
-        self._log_info(
-            f"Hybrid fallback step {step_order} via browser-use on CDP={self._exec_cdp_http}"
-        )
-        try:
-            if not self._exec_cdp_http:
-                raise RuntimeError("无共享 CDP（请用 hybrid 后端启动 MCP）")
-
-            from core.browser_use_exec import (
-                create_browser_use_llm_from_config,
-                execute_nl_steps_browser_use,
-            )
-
-            llm_cfg = payload.get("llm") or {}
-            api_key = (llm_cfg.get("api_key") or "").strip()
-            if not api_key:
-                raise RuntimeError("服务端未下发 LLM api_key，无法 browser-use 救场")
-
-            llm = create_browser_use_llm_from_config(
-                api_key=api_key,
-                api_base=llm_cfg.get("api_base"),
-                model=llm_cfg.get("model"),
-            )
-
-            def _progress(line: str) -> None:
-                self._emit_log("info", line)
-
-            # Attach to existing Chromium; never stop it
-            results = await execute_nl_steps_browser_use(
-                [
-                    {
-                        "step_order": step_order,
-                        "description": desc,
-                        "expected_result": expected,
-                    }
-                ],
-                llm=llm,
-                base_url=None,
-                headless=self._headless,
-                max_steps_per_nl=max_steps,
-                stop_browser=False,
-                cdp_url=self._exec_cdp_http,
-                on_progress=_progress,
-            )
-            r = results[0] if results else {"success": False, "error": "empty result"}
-            result_payload = {
-                "step_order": step_order,
-                "success": bool(r.get("success")),
-                "thinking": r.get("thinking") or "",
-                "action": r.get("action") or "browser_use_fallback",
-                "next_goal": "",
-                "error": r.get("error"),
-                "duration_ms": r.get("duration_ms")
-                or (time.monotonic() - t0) * 1000,
-                "screenshot_base64": r.get("screenshot_base64"),
-                "backend": "browser_use_fallback",
-            }
-            learned = r.get("learned_locator")
-            if isinstance(learned, dict):
-                result_payload["learned_locator"] = learned
-            await self._send(
-                WSMessageType.STEP_RESULT,
-                msg.run_id,
-                result_payload,
-            )
-            self._log_info(
-                f"Hybrid fallback step {step_order} "
-                f"{'passed' if r.get('success') else 'failed'}"
-            )
-        except Exception as e:
-            self._log_error(f"Hybrid fallback failed: {e}")
-            ss_b64 = None
-            try:
-                ss_b64 = await self._mcp_screenshot_base64()
-            except Exception:
-                pass
-            await self._send(
-                WSMessageType.STEP_RESULT,
-                msg.run_id,
-                {
-                    "step_order": step_order,
-                    "success": False,
-                    "thinking": "",
-                    "action": "browser_use_fallback",
-                    "error": str(e),
-                    "duration_ms": (time.monotonic() - t0) * 1000,
-                    "screenshot_base64": ss_b64,
-                    "backend": "browser_use_fallback",
-                },
-            )
-        finally:
-            # browser-use may have focused a new tab; MCP often still points at
-            # the opener — next snapshot would activate the old tab in Chrome.
-            try:
-                from core.mcp_tabs import ensure_on_newest_tab
-
-                if self._mcp_process_alive() and await ensure_on_newest_tab(
-                    self._mcp_tools_call
-                ):
-                    self._log_info(
-                        "Synced MCP to newest browser tab after hybrid fallback"
-                    )
-            except Exception as sync_exc:
-                logger.warning(
-                    "MCP tab sync after hybrid fallback failed: %s", sync_exc,
-                )
-            self._active_run_id = prev_run
-            self._active_step_order = prev_step
-            self._active_backend = prev_backend
-
-    async def _handle_run_start_browser_use(self, msg: WSMessage):
-        """Client-local browser-use: run all NL steps, reply RUN_COMPLETE."""
-        payload = msg.payload or {}
-        prev_run = self._active_run_id
-        prev_step = self._active_step_order
-        prev_backend = self._active_backend
-        self._active_run_id = msg.run_id
-        self._active_step_order = None
-        self._active_backend = "browser_use"
-        self._log_info(f"Run {msg.run_id} started — backend=browser_use")
-        self._emit_status('busy')
-        try:
-            try:
-                from core.browser_use_exec import (
-                    create_browser_session,
-                    create_browser_use_llm_from_config,
-                    execute_nl_steps_browser_use,
-                )
-            except ImportError as exc:
-                raise RuntimeError(
-                    f"browser-use 执行模块不可用: {exc}. 请在 Agent 环境安装 browser-use"
-                ) from exc
-
-            llm_cfg = payload.get("llm") or {}
-            api_key = (llm_cfg.get("api_key") or "").strip()
-            if not api_key:
-                raise RuntimeError("服务端未下发 LLM api_key，无法启动 browser-use")
-
-            llm = create_browser_use_llm_from_config(
-                api_key=api_key,
-                api_base=llm_cfg.get("api_base"),
-                model=llm_cfg.get("model"),
-            )
-            steps = payload.get("steps") or []
-            navigate = payload.get("navigate_base_url", True)
-            base_url = (payload.get("base_url") or "").strip() or None
-            if not navigate:
-                base_url = None
-            max_steps = int(payload.get("max_steps_per_nl") or 20)
-            # Client GUI/CLI headless wins. Server execution-backend.headless is for
-            # server-side runs only; it used to force headless=True and skip maximize.
-            server_headless = payload.get("headless")
-            headless = bool(self._headless)
-            if server_headless is not None and bool(server_headless) != headless:
-                self._log_info(
-                    f"browser-use: ignore server headless={server_headless}, "
-                    f"use client headless={headless}"
-                )
-
-            if navigate or self._bu_browser is None:
-                await self._stop_bu_browser()
-                self._bu_browser = create_browser_session(
-                    headless=headless,
-                    keep_alive=True,
-                    enable_default_extensions=False,
-                )
-                self._log_info(
-                    f"browser-use: new browser session headless={headless} maximized={not headless}"
-                )
-            else:
-                self._log_info("browser-use: reuse browser session (batch follow-up)")
-
-            def _progress(line: str) -> None:
-                # Parse "--- Step N " to update step_order for RUN_LOG payload
-                m = re.match(r"--- Step (\d+)", line or "")
-                if m:
-                    try:
-                        self._active_step_order = int(m.group(1))
-                    except ValueError:
-                        pass
-                self._emit_log("info", line)
-
-            step_results = await execute_nl_steps_browser_use(
-                steps,
-                llm=llm,
-                base_url=base_url,
-                headless=headless,
-                max_steps_per_nl=max_steps,
-                browser_session=self._bu_browser,
-                stop_browser=False,
-                on_progress=_progress,
-            )
-            status = (
-                "passed"
-                if step_results and all(r.get("success") for r in step_results)
-                else "failed"
-            )
-            await self._send(
-                WSMessageType.RUN_COMPLETE,
-                msg.run_id,
-                {"status": status, "steps": step_results, "backend": "browser_use"},
-            )
-            self._log_info(f"browser-use run {msg.run_id} complete: {status}")
-        except Exception as e:
-            self._log_error(f"browser-use run failed: {e}")
-            self._emit_status('error')
-            await self._send(
-                WSMessageType.RUN_COMPLETE,
-                msg.run_id,
-                {
-                    "status": "failed",
-                    "error": str(e),
-                    "steps": [],
-                    "backend": "browser_use",
-                },
-            )
-        finally:
-            self._active_run_id = prev_run
-            self._active_step_order = prev_step
-            self._active_backend = prev_backend
-            self._emit_status('idle')
 
     async def _handle_get_screenshot(self, run_id: str):
         try:

@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import {
   Card,
   Form,
-  Select,
   Switch,
   InputNumber,
   Button,
@@ -13,16 +12,8 @@ import {
 } from '@arco-design/web-react';
 import { apiGet, apiPut } from '@/utils/apiRequest';
 
-type Backend =
-  | 'ota'
-  | 'nl_goal'
-  | 'compiled_script'
-  | 'legacy_hybrid'
-  | 'legacy_mcp'
-  | 'browser_use';
-
 interface ExecutionBackendConfig {
-  backend: Backend;
+  backend: 'ota';
   max_steps_per_nl: number;
   headless: boolean;
   keep_browser_after_run: boolean;
@@ -31,7 +22,6 @@ interface ExecutionBackendConfig {
 const ExecutionBackendConfigPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [backend, setBackend] = useState<Backend>('nl_goal');
   const [maxSteps, setMaxSteps] = useState(40);
   const [headless, setHeadless] = useState(true);
   const [keepBrowser, setKeepBrowser] = useState(true);
@@ -39,13 +29,6 @@ const ExecutionBackendConfigPage: React.FC = () => {
   useEffect(() => {
     apiGet<ExecutionBackendConfig>('/api/config/execution-backend')
       .then((data) => {
-        const b = (data.backend as string) || 'nl_goal';
-        // migrate old names shown in UI
-        if (b === 'hybrid' || b === 'playwright_mcp') {
-          setBackend('nl_goal');
-        } else {
-          setBackend(b as Backend);
-        }
         setMaxSteps(data.max_steps_per_nl ?? 40);
         setHeadless(data.headless ?? true);
         setKeepBrowser(data.keep_browser_after_run ?? true);
@@ -58,7 +41,7 @@ const ExecutionBackendConfigPage: React.FC = () => {
     setSaving(true);
     try {
       await apiPut('/api/config/execution-backend', {
-        backend,
+        backend: 'ota',
         max_steps_per_nl: maxSteps,
         headless,
         keep_browser_after_run: keepBrowser,
@@ -73,53 +56,18 @@ const ExecutionBackendConfigPage: React.FC = () => {
 
   if (loading) return <Spin loading className="spin-center" />;
 
-  const turnsHint =
-    backend === 'ota' ||
-    backend === 'nl_goal' ||
-    backend === 'browser_use' ||
-    backend === 'legacy_hybrid';
-
   return (
     <Card title="执行后端">
       <Alert
         type="info"
         style={{ marginBottom: 16 }}
-        content="智能 OTA：AI 自主观察→决策→操作，成功后自动固化 Playwright 脚本，下次执行优先秒级回放、失败自动回退。旧版逐步 MCP/hybrid 仅作兼容。"
+        content="仅支持智能 OTA：AI 自主观察→决策→操作；成功后自动固化 Playwright 脚本，下次优先秒级回放，失败自动回退 OTA。"
       />
       <Form layout="vertical" style={{ maxWidth: 640 }}>
-        <Form.Item label="默认执行引擎" required>
-          <Select
-            value={backend}
-            onChange={setBackend}
-            options={[
-              {
-                label: '智能 OTA（推荐：AI 自主决策 + 成功固化 + 秒级回放）',
-                value: 'ota',
-              },
-              {
-                label: '自然语言目标（整案 NL 循环 → 固化脚本）',
-                value: 'nl_goal',
-              },
-              {
-                label: '仅固化脚本（失败即败，不回退 NL）',
-                value: 'compiled_script',
-              },
-              {
-                label: '旧版混合（逐步 MCP + 单步 browser-use 救场）',
-                value: 'legacy_hybrid',
-              },
-              {
-                label: '旧版 Playwright MCP（逐步快照绑定）',
-                value: 'legacy_mcp',
-              },
-              {
-                label: 'browser-use 整案 NL（过渡）',
-                value: 'browser_use',
-              },
-            ]}
-          />
+        <Form.Item label="执行引擎">
+          <Typography.Text>智能 OTA（唯一）</Typography.Text>
         </Form.Item>
-        <Form.Item label="NL / 目标循环最大轮数" disabled={!turnsHint}>
+        <Form.Item label="OTA 最大轮数">
           <InputNumber
             value={maxSteps}
             min={3}
@@ -127,7 +75,7 @@ const ExecutionBackendConfigPage: React.FC = () => {
             onChange={(v) => setMaxSteps(Number(v) || 40)}
           />
           <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
-            nl_goal 整案轮数；browser-use / 旧版 hybrid 救场步也使用
+            观察→决策→操作 的最大循环次数
           </Typography.Text>
         </Form.Item>
         <Form.Item label="无头模式（仅服务端执行）">

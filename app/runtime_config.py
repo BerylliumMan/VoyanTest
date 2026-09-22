@@ -6,6 +6,8 @@
 
 ``execution_backend`` 会持久化到 ``data/execution_backend.json``（Docker 数据卷），
 避免换镜像/重启后静默回到旧引擎。
+
+UI 执行引擎仅保留 **OTA**（AgentRunner / AgentBridge；含固化脚本回放优先）。
 """
 
 from __future__ import annotations
@@ -25,45 +27,26 @@ _EXEC_BACKEND_PATH = Path(
     os.environ.get("VOYANTEST_EXEC_BACKEND_FILE", "data/execution_backend.json")
 )
 
-# Canonical backends after Cursor-session alignment
-BackendName = Literal[
-    "ota",
+BackendName = Literal["ota"]
+
+# Historical backend names → migrate to ota on load / normalize
+_LEGACY_BACKENDS = frozenset({
     "nl_goal",
     "compiled_script",
     "legacy_hybrid",
     "legacy_mcp",
     "browser_use",
-    # legacy aliases accepted on disk / API
     "hybrid",
     "playwright_mcp",
-]
-
-_OTA_BACKEND = "ota"
-
-
-def traditional_backend(raw: str | None) -> str:
-    """传统执行路径使用的后端名：``ota``（AI 自主引擎）落回 nl_goal。"""
-    b = normalize_execution_backend(raw)
-    return "nl_goal" if b == _OTA_BACKEND else b
+})
 
 
 def normalize_execution_backend(raw: str | None) -> str:
-    """Map aliases → canonical backend name."""
-    b = (raw or "nl_goal").strip()
-    if b in ("hybrid",):
-        return "legacy_hybrid"
-    if b in ("playwright_mcp",):
-        return "legacy_mcp"
-    if b in (
-        "ota",
-        "nl_goal",
-        "compiled_script",
-        "legacy_hybrid",
-        "legacy_mcp",
-        "browser_use",
-    ):
-        return b
-    return "nl_goal"
+    """Normalize any historical backend name to ``ota``."""
+    b = (raw or "ota").strip()
+    if b == "ota" or b in _LEGACY_BACKENDS or not b:
+        return "ota"
+    return "ota"
 
 
 class HealingConfig(BaseModel):
@@ -81,54 +64,32 @@ class HealingConfig(BaseModel):
 healing_config = HealingConfig()
 
 
-DryRunMode = Literal["skip", "attach", "isolated"]
-
-
 class ExecutionBackendConfig(BaseModel):
-    """UI 执行后端。
+    """UI 执行后端 —— 仅 OTA。
 
-    - ota: AI 自主引擎（客户端 AgentBridge / 服务端 AgentRunner，含固化回放优先）
-    - nl_goal: Cursor 式整案 NL 目标循环（默认）→ journal → 合成 Playwright
-    - compiled_script: 仅跑已固化脚本，失败即败
-    - legacy_hybrid / legacy_mcp: 旧逐步 snapshot 路径
-    - browser_use: 整案 NL（browser-use）过渡
+    - ota: AI 自主引擎（客户端 AgentBridge / 服务端 AgentRunner）
+      成功后自动固化 Playwright；下次优先秒级回放，失败回退 OTA。
 
-    dry_run_mode（仅 nl_goal 成功后脚本校验）:
-    - skip（默认）: 合成脚本后不整案重放；不新开 Chromium；报告以 goal journal 为准
-    - attach: 附着 nl_goal 同一浏览器校验（未实现时等同 skip）
-    - isolated: 新开 headless Chromium 整案 dry-run（用户可见「从头重放」日志）
+    ``max_steps_per_nl``：OTA 最大观察→决策→操作轮次。
+    固化回放增强字段仍由 AgentBridge 回放路径读取。
     """
 
-    backend: BackendName = "nl_goal"
+    backend: BackendName = "ota"
     max_steps_per_nl: int = Field(default=40, ge=3, le=80)
     headless: bool = True
     keep_browser_after_run: bool = True
-    dry_run_mode: DryRunMode = "skip"
-    # compiled_script runtime enhance (Agent payload)
+    # compiled_script runtime enhance (OTA replay payload)
     compiled_trace_on_fail: bool = True
     compiled_native_dialog: bool = True
     compiled_dialog_policy: Literal["accept", "dismiss"] = "accept"
     # Whole-case retries excluding the first attempt; keep_browser batch forces 0.
     compiled_settle_retry: int = Field(default=1, ge=0, le=2)
     compiled_settle_ms: int = Field(default=800, ge=0, le=5000)
-    # nl_goal: verify precondition; if unmet, execute up to N turns before main steps
-    precondition_max_turns: int = Field(default=12, ge=0, le=40)
 
     @field_validator("backend", mode="before")
     @classmethod
     def _coerce_backend(cls, v):
-        if v in ("hybrid", "playwright_mcp"):
-            # Migrate old defaults to nl_goal once (product cutover)
-            return "nl_goal"
-        return v or "nl_goal"
-
-    @field_validator("dry_run_mode", mode="before")
-    @classmethod
-    def _coerce_dry_run_mode(cls, v):
-        m = (v or "skip").strip().lower() if isinstance(v, str) else "skip"
-        if m in ("skip", "attach", "isolated"):
-            return m
-        return "skip"
+        return normalize_execution_backend(v if isinstance(v, str) else None)
 
     @field_validator("compiled_dialog_policy", mode="before")
     @classmethod
@@ -150,13 +111,20 @@ def load_execution_backend_config() -> ExecutionBackendConfig:
         if not path.is_file():
             return execution_backend_config
         raw = json.loads(path.read_text(encoding="utf-8-sig"))
-        # Cut over old defaults stored as hybrid / playwright_mcp → nl_goal
-        if isinstance(raw, dict) and raw.get("backend") in ("hybrid", "playwright_mcp"):
-            logger.info(
-                "Migrating execution backend %s → nl_goal",
-                raw.get("backend"),
+        if isinstance(raw, dict):
+            old = raw.get("backend")
+            normalized = normalize_execution_backend(
+                old if isinstance(old, str) else None
             )
-            raw["backend"] = "nl_goal"
+            if old != normalized:
+                logger.info(
+                    "Migrating execution backend %s → ota",
+                    old,
+                )
+            raw["backend"] = normalized
+            # Drop obsolete fields from older configs
+            for dead in ("dry_run_mode", "precondition_max_turns"):
+                raw.pop(dead, None)
         execution_backend_config = ExecutionBackendConfig.model_validate(raw)
         logger.info(
             "Loaded execution backend from %s: backend=%s",

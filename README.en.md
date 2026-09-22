@@ -12,22 +12,22 @@
 
 ---
 
-VoyanTest is an **AI-powered Web UI testing platform**. Describe cases in **natural language**; the default **nl_goal** loop observes and acts. On success, Playwright codegen–compatible locators are solidified into a `compiled_script` for the next zero-LLM run.
+VoyanTest is an **AI-powered Web UI testing platform**. Describe cases in **natural language**; the **OTA** engine observes, decides, and acts. On success, Playwright codegen–compatible locators are solidified into a `compiled_script` for the next zero-LLM run.
 
 ```
 Natural-language case / checklist
-  ↓ nl_goal (LLM + snapshot / MCP / hybrid)
-journal + codegen locators
+  ↓ OTA (LLM + a11y snapshot / Playwright MCP)
+trajectory + codegen locators
   ↓ synthesize Playwright async script
-Next run: compiled_script first → fall back to nl_goal on failure
+Next run: compiled_script first → fall back to OTA on failure
 ```
 
 ## ✨ Features
 
 ### Execution
-- **nl_goal (default)**: whole-case goal loop with checklist steps; hybrid MCP + browser-use
+- **OTA (only execution engine)**: Observe → Think → Act with checklist steps
 - **Playwright solidify**: persist `compiled_script` with codegen `get_by_*` locators (no ephemeral refs)
-- **Script-first / AI fallback**: run script when valid; clear/re-solidify per policy on failure
+- **Script-first / OTA fallback**: run script when valid; clear/re-solidify per policy on failure
 - **Init cases**: batch can run a login (or similar) init case and reuse the browser session
 - **Batch controls**: pause / resume / stop
 - **Real browser**: Playwright MCP / shared CDP Chromium; headed GUI client
@@ -74,10 +74,10 @@ Default admin: `admin / Admin@2024`.
 
 1. Log in → create project / module → write or AI-generate cases  
 2. Start GUI/CLI Agent → batch run (optional **init case** for shared login)  
-3. First run often **nl_goal**; success writes **compiled_script**  
+3. First run uses **OTA**; success writes **compiled_script**  
 4. Later runs prefer the script; failures fall back to AI  
 
-Configure LLM under Settings. Execution backend defaults to **nl_goal** (`data/execution_backend.json`).
+Configure LLM under Settings. Execution engine is **OTA** (`data/execution_backend.json`).
 
 ### Windows Agent package
 
@@ -97,7 +97,7 @@ flowchart LR
         PY[compiled_script]
     end
     subgraph Backend["FastAPI"]
-        NL[nl_goal]
+        NL[OTA]
         SYN[synth / codegen]
         RUN[orchestration]
         REP[reports]
@@ -125,7 +125,7 @@ flowchart LR
 ```
 VoyanTest/
 ├── app/          # FastAPI
-├── core/         # nl_goal, codegen, synth, compiled_script
+├── core/         # OTA, codegen, synth, compiled_script
 ├── agent/        # GUI / CLI client
 ├── frontend/
 ├── scripts/      # build_codegen_iife.mjs

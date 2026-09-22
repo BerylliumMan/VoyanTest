@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, get_user_project_filter
 from app.crud import api_definition as crud_api_def
+from app.crud.module import get_module
 from app.database import get_async_db
 
 logger = logging.getLogger(__name__)
@@ -117,10 +118,23 @@ async def create_definition(
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"同项目已存在 {method} {path}（可在右侧直接编辑它）")
 
+    module_id = payload.get("module_id")
+    if module_id in ("", "null"):
+        module_id = None
+    if module_id is not None:
+        try:
+            module_id = int(module_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="module_id 必须是整数") from None
+        module = await get_module(db, module_id)
+        if module is None or module.project_id != project_id:
+            raise HTTPException(status_code=400, detail="分组不存在或不属于该项目")
+
     created = await crud_api_def.create_api_definition(
         db,
         {
             "project_id": project_id,
+            "module_id": module_id,
             "name": name,
             "method": method,
             "path": path,

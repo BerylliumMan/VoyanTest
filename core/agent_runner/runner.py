@@ -2,15 +2,14 @@
 """True Agent OTA 循环引擎 — Observe → Think → Act。
 
 AgentRunner 驱动基于 LLM 的自主浏览器代理，通过 OTA 循环：
-1. Observe  — 采集当前页面状态（DOM 快照、URL、截图）
+1. Observe  — 采集当前页面状态（DOM 快照、URL、按需截图）
 2. Think    — LLM 根据目标 + 上下文 + 观察决定下一步动作
 3. Act      — 通过 Playwright MCP 执行动作并验证结果
 
 循环直到目标达成或达到最大轮次。
 
-与现有 step-by-step 循环的区别：
-- step-by-step（_execution.py）：按预定义步骤逐条执行，LLM 只翻译单步
-- OTA（本文件）：LLM 自主规划并执行，直到目标满足，适合开放性任务
+与 Cursor IDE 浏览器工具对齐：快照 ref 优先；困难页/失败轮带截图；
+ref 点击失败时 bbox→click_xy 兜底。
 """
 
 from __future__ import annotations
@@ -18,57 +17,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
 from core.agent_runner.context import AgentContext
 from core.mcp_args import ACTION_DESCRIPTIONS, resolve_mcp_tool
+from core.ota_cursor import (
+    OTA_CURSOR_SYSTEM_PROMPT,
+    capture_screenshot_b64,
+    click_xy_fallback_after_ref_fail,
+    maybe_rewrite_click_xy_from_ref,
+    should_capture_screenshot,
+)
 from app.crud import agent_run as crud_agent_run
 
 logger = logging.getLogger(__name__)
 
-# ── OTA Agent 系统提示词 ─────────────────────────────────────────────────────
-
-OTA_SYSTEM_PROMPT = """You are a goal-driven browser automation agent using Playwright MCP.
-Your task is to accomplish a user goal by observing the page and taking actions iteratively.
-
-LOOP: Observe → Think → Act → Repeat until goal is met OR you declare done.
-
-INPUT you will receive:
-1. GOAL: The user's goal to accomplish
-2. HISTORY: Previous actions and their results (from AgentContext)
-3. CURRENT PAGE: Accessibility snapshot of the current browser page
-
-ACTIONS available (maps to Playwright MCP tools):
-- "click": Click an element by its ref. selector=ref, value=null.
-- "fill": Type text into an input field by ref. selector=ref, value=text.
-- "select": Select dropdown option by ref. selector=ref, value=option value/text.
-- "goto": Navigate to a URL. selector=null, value=URL.
-- "wait": Wait for text or time. selector=null, value=text or milliseconds.
-- "screenshot": Take screenshot. selector=null, value=filename.
-- "snapshot": Refresh page snapshot. selector=null, value=null.
-- "done": Declare the goal is accomplished. selector=null, value=summary of what was achieved.
-- "error": Report that the goal cannot be accomplished. selector=null, value=reason.
-
-RULES:
-- Use element refs from the snapshot (e.g., "e12") as selectors — do NOT invent CSS selectors.
-- Think step by step about what needs to happen to achieve the goal.
-- After each action, check if the goal is met. If yes, use action="done".
-- If stuck after multiple attempts, use action="error" with explanation.
-- Output ONLY the JSON object. No markdown fences, no explanation text.
-- Always include "thinking" explaining your reasoning.
-- For text input fields, match by role="textbox" and accessible name.
-- For buttons, match by role="button" and accessible name.
-
-OUTPUT SCHEMA (exact JSON):
-{
-  "action": "click",
-  "selector": "e15",
-  "value": null,
-  "timeout_ms": 30000,
-  "thinking": "To accomplish the goal I need to click the submit button...",
-  "next_goal": "Verify login success"
-}"""
+# Backward-compatible alias
+OTA_SYSTEM_PROMPT = OTA_CURSOR_SYSTEM_PROMPT
 
 
 # ── ToolRegistry ──────────────────────────────────────────────────────────────
@@ -261,16 +227,23 @@ class AgentRunner:
         # 运行时状态
         self.current_url: str = ""
         self.turns_used: int = 0
+        self._force_next_screenshot: bool = False
+        self._consecutive_act_failures: int = 0
+        self._last_candidates: tuple = ()
+        self._pending_hint: str | None = None
 
     # ── OTA 三步 ─────────────────────────────────────────────────────────
 
-    async def observe(self) -> dict[str, Any]:
-        """采集当前页面状态。
+    async def observe(
+        self,
+        *,
+        force_screenshot: bool = False,
+    ) -> dict[str, Any]:
+        """采集当前页面状态（快照；困难页/失败轮按需截图）。
 
         Returns:
-            {"snapshot": str, "url": str, "screenshot_b64": str | None}
+            {"snapshot": str, "url": str, "screenshot_b64": str | None, ...}
         """
-        # 获取 DOM 快照
         snapshot = await self._mcp_manager.get_dom_snapshot()
         from core.locator_candidates import (
             actionable_candidates,
@@ -278,7 +251,6 @@ class AgentRunner:
             snapshot_version,
         )
 
-        # 获取当前 URL
         url = ""
         try:
             result = await self._mcp_manager.call_tool("browser_evaluate", {
@@ -290,27 +262,32 @@ class AgentRunner:
             logger.debug("获取当前 URL 失败: %s", exc)
 
         self.current_url = url
+        candidates = actionable_candidates(extract_candidates(snapshot or ""))
+        self._last_candidates = candidates
+
+        want_shot = should_capture_screenshot(
+            snapshot,
+            consecutive_failures=self._consecutive_act_failures,
+            force=force_screenshot or self._force_next_screenshot,
+            pending_hint=self._pending_hint,
+        )
+        self._force_next_screenshot = False
+        screenshot_b64 = None
+        if want_shot:
+            screenshot_b64 = await capture_screenshot_b64(self._mcp_manager)
 
         return {
             "snapshot": snapshot,
             "url": url,
-            "screenshot_b64": None,  # 默认不截图，节省 token
+            "screenshot_b64": screenshot_b64,
             "snapshot_version": snapshot_version(snapshot or ""),
-            "candidates": actionable_candidates(extract_candidates(snapshot or "")),
+            "candidates": candidates,
         }
 
     async def think(self, observation: dict[str, Any]) -> dict[str, Any]:
-        """LLM 根据目标 + 上下文 + 观察决定下一步动作。
-
-        Args:
-            observation: observe() 的返回值
-
-        Returns:
-            LLM 生成的工具调用字典（含 action, selector, value, thinking 等）
-        """
+        """LLM 根据目标 + 上下文 + 观察（含可选截图）决定下一步动作。"""
         from core.llm_wrapper import generate_tool_call
 
-        # 构建 LLM 输入
         history_text = self.context.get_context()
         snapshot = observation.get("snapshot", "(empty page)")
 
@@ -326,6 +303,11 @@ class AgentRunner:
             f"\n\nCANDIDATE ELEMENTS (choose selector only from this list):\n"
             f"{serialize_candidates(observation.get('candidates', ())) or '(none)'}"
         )
+        if observation.get("screenshot_b64"):
+            step_description += (
+                "\n\nA VIEWPORT SCREENSHOT is attached for this turn. "
+                "Prefer snapshot refs first; use click_xy from the image when refs are unreliable."
+            )
         if self._pending_hint:
             step_description += f"\n\nRETRY CONTEXT: {self._pending_hint}"
             self._pending_hint = None
@@ -339,6 +321,8 @@ class AgentRunner:
                     model=self._model,
                     system_prompt=self._system_prompt,
                     base_url=self.base_url,
+                    screenshot_b64=observation.get("screenshot_b64"),
+                    replace_system_prompt=True,
                 ),
                 timeout=100,
             )
@@ -355,7 +339,11 @@ class AgentRunner:
         action = tool_call.model_dump()
         from core.locator_candidates import is_snapshot_ref, validate_candidate_ref
         selector = action.get("selector")
-        if is_snapshot_ref(selector):
+        act_name = (action.get("action") or "").strip().lower()
+        # click_xy may carry a ref in selector — rewrite later; skip ref whitelist for coords
+        if is_snapshot_ref(selector) and act_name not in (
+            "click_xy", "browser_mouse_click_xy", "move_mouse", "drag_xy",
+        ):
             validation = validate_candidate_ref(
                 selector,
                 snapshot_version=observation.get("snapshot_version", ""),
@@ -370,17 +358,15 @@ class AgentRunner:
                     "thinking": "候选元素校验失败",
                 }
         action["snapshot_version"] = observation.get("snapshot_version")
+        action = await maybe_rewrite_click_xy_from_ref(
+            action,
+            mcp_manager=self._mcp_manager,
+            candidates=observation.get("candidates") or self._last_candidates,
+        )
         return action
 
     async def act(self, action: dict[str, Any]) -> dict[str, Any]:
-        """执行 LLM 决定的动作。
-
-        Args:
-            action: think() 返回的 LLM 工具调用字典
-
-        Returns:
-            {"success": bool, "error": str | None, "done": bool | None}
-        """
+        """执行 LLM 决定的动作。"""
         action_name = action.get("action", "?")
         logger.info("Act: %s (selector=%s, value=%s)",
                      action_name, action.get("selector"), action.get("value"))
@@ -423,17 +409,23 @@ class AgentRunner:
         self._retries_this_run = 0
         self._heal_exhausted = False
         self._pending_hint: str | None = None
+        self._force_next_screenshot = False
+        self._consecutive_act_failures = 0
+        self._click_xy_fallback_used = False
 
         # 将目标写入上下文
         self.context.add_turn("user", f"目标: {self.goal}")
 
         for turn in range(1, self.max_turns + 1):
             self.turns_used = turn
+            self._click_xy_fallback_used = False  # one bbox→xy retry per turn
             logger.info("━━━ Turn %d/%d ━━━", turn, self.max_turns)
 
             # ── Observe ──
             try:
-                observation = await self.observe()
+                observation = await self.observe(
+                    force_screenshot=self._consecutive_act_failures > 0,
+                )
             except Exception as exc:
                 logger.exception("observe() 异常 (turn %d)", turn)
                 return self._make_result(
@@ -475,7 +467,7 @@ class AgentRunner:
                 logger.exception("act() 异常 (turn %d)", turn)
                 result = {"success": False, "error": str(exc)}
 
-            # ── Act 失败恢复（025-ref-click US3）──
+            # ── Act 失败恢复（025-ref-click US3 + Cursor click_xy）──
             if not result.get("success"):
                 error = result.get("error", "") or ""
                 from core.self_healing import (
@@ -484,10 +476,32 @@ class AgentRunner:
                     recover_candidates,
                 )
 
-                if is_stale_ref_error(error) and self._retries_this_run < 1:
+                # Cursor-style: one bbox→click_xy retry after ref click miss
+                if not self._click_xy_fallback_used:
+                    xy_action = await click_xy_fallback_after_ref_fail(
+                        action,
+                        mcp_manager=self._mcp_manager,
+                        candidates=observation.get("candidates") or self._last_candidates,
+                    )
+                    if xy_action is not None:
+                        self._click_xy_fallback_used = True
+                        try:
+                            logger.info(
+                                "click_xy fallback (turn %d): value=%s",
+                                turn, xy_action.get("value"),
+                            )
+                            action = xy_action
+                            thinking_text = action.get("thinking", "") or thinking_text
+                            result = await self.act(action)
+                        except Exception as exc:
+                            logger.warning(
+                                "click_xy fallback failed (turn %d): %s", turn, exc,
+                            )
+
+                if not result.get("success") and is_stale_ref_error(error) and self._retries_this_run < 1:
                     self._retries_this_run += 1
                     try:
-                        fresh_obs = await self.observe()
+                        fresh_obs = await self.observe(force_screenshot=True)
                         self._pending_hint = build_failure_hint(error)
                         retry_action = await self.think(fresh_obs)
                         if isinstance(retry_action, dict) and retry_action.get("action") not in (
@@ -503,7 +517,11 @@ class AgentRunner:
                             )
                     except Exception as exc:
                         logger.warning("Stale-ref recovery failed (turn %d): %s", turn, exc)
-                elif not self._heal_exhausted and not is_stale_ref_error(error):
+                elif (
+                    not result.get("success")
+                    and not self._heal_exhausted
+                    and not is_stale_ref_error(error)
+                ):
                     heal_candidates = await recover_candidates(
                         self._mcp_manager,
                         step_description=self.goal,
@@ -511,7 +529,7 @@ class AgentRunner:
                     )
                     if heal_candidates:
                         try:
-                            fresh_obs = await self.observe()
+                            fresh_obs = await self.observe(force_screenshot=True)
                             self._pending_hint = build_failure_hint(error, heal_candidates)
                             retry_action = await self.think(fresh_obs)
                             if isinstance(retry_action, dict) and retry_action.get("action") not in (
@@ -531,6 +549,12 @@ class AgentRunner:
                             logger.warning("Heal recovery failed (turn %d): %s", turn, exc)
                     else:
                         self._heal_exhausted = True
+
+            if result.get("success"):
+                self._consecutive_act_failures = 0
+            else:
+                self._consecutive_act_failures += 1
+                self._force_next_screenshot = True
 
             # 记录到上下文
             action_summary = (

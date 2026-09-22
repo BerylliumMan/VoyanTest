@@ -181,6 +181,8 @@ const ApiTestPage: React.FC = () => {
   const [definitions, setDefinitions] = useState<ApiDefinition[]>([]);
   const [defLoading, setDefLoading] = useState(false);
   const [selectedDef, setSelectedDef] = useState<ApiDefinition | null>(null);
+  /** 当前分组：选中分组节点或接口所属分组；新建接口落入此分组（null = 未分组） */
+  const [selectedModuleId, setSelectedModuleId] = useState<number | null>(null);
 
   const [step, setStep] = useState<ApiStep>(createStep());
   const [response, setResponse] = useState<DebugResponse | null>(null);
@@ -280,6 +282,11 @@ const ApiTestPage: React.FC = () => {
     loadDefinitions();
   }, [loadDefinitions]);
 
+  useEffect(() => {
+    setSelectedModuleId(null);
+    setSelectedDef(null);
+  }, [projectId]);
+
   // ---- 已存在的接口用例（用于「执行用例」复用） ----
   const loadApiCases = useCallback(async () => {
     if (!projectId) {
@@ -361,6 +368,11 @@ const ApiTestPage: React.FC = () => {
   };
 
   // ---- 新增 / 删除接口定义 ----
+  const selectedModule = useMemo(
+    () => (selectedModuleId == null ? null : modules.find((m) => m.id === selectedModuleId) || null),
+    [modules, selectedModuleId]
+  );
+
   const openCreateDefinition = () => {
     defForm.resetFields();
     defForm.setFieldsValue({ method: 'GET' });
@@ -377,20 +389,24 @@ const ApiTestPage: React.FC = () => {
     }
     setSavingDef(true);
     try {
-      await apiPost(
+      const created = await apiPost<ApiDefinition>(
         '/api/api-test/definitions',
         {
           project_id: projectId,
+          module_id: selectedModuleId,
           name: values.name,
           method: values.method,
           path: values.path,
           summary: values.summary || null,
         },
-        '接口已新增'
+        selectedModule ? `接口已新增到「${selectedModule.name}」` : '接口已新增（未分组）'
       );
       setDefModalVisible(false);
       defForm.resetFields();
       await loadDefinitions();
+      if (created?.id) {
+        await handleSelectDefinition(`${DEF_KEY_PREFIX}${created.id}`);
+      }
     } catch {
       /* 409 等错误 detail 已由 apiRequest 弹出 */
     } finally {
@@ -543,6 +559,7 @@ const ApiTestPage: React.FC = () => {
       return;
     }
     if (editingModule?.id === mod.id) setModuleModalVisible(false);
+    if (selectedModuleId === mod.id) setSelectedModuleId(null);
     await loadDefinitions();
   };
 
@@ -980,7 +997,18 @@ const ApiTestPage: React.FC = () => {
                 expandedKeys={expandedKeys}
                 onExpand={(keys) => setExpandedKeys(keys)}
                 onSelect={(keys) => {
-                  handleSelectDefinition(String(keys[0] || ''));
+                  const key = String(keys[0] || '');
+                  if (key.startsWith(DEF_KEY_PREFIX)) {
+                    const def = definitions.find(
+                      (d) => d.id === Number(key.slice(DEF_KEY_PREFIX.length))
+                    );
+                    setSelectedModuleId(def?.module_id ?? null);
+                    handleSelectDefinition(key);
+                  } else if (key.startsWith(MODULE_KEY_PREFIX)) {
+                    setSelectedModuleId(Number(key.slice(MODULE_KEY_PREFIX.length)) || null);
+                  } else if (key === UNGROUPED_KEY) {
+                    setSelectedModuleId(null);
+                  }
                 }}
                 draggable
                 allowDrop={(info) => {
@@ -1068,7 +1096,7 @@ const ApiTestPage: React.FC = () => {
       />
 
       <Modal
-        title="新增接口"
+        title={selectedModule ? `新增接口（${selectedModule.name}）` : '新增接口（未分组）'}
         visible={defModalVisible}
         onOk={handleCreateDefinition}
         confirmLoading={savingDef}

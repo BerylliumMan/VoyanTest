@@ -399,7 +399,7 @@ async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)
 
 @router.get("/execution-backend", response_model=ExecutionBackendConfig)
 async def get_execution_backend(admin=Depends(require_admin)) -> ExecutionBackendConfig:
-    """获取执行后端（playwright_mcp | browser_use | hybrid）。"""
+    """获取执行后端配置（仅 ota）。"""
     return _execution_backend_config
 
 
@@ -407,7 +407,7 @@ async def get_execution_backend(admin=Depends(require_admin)) -> ExecutionBacken
 async def update_execution_backend(
     cfg: ExecutionBackendConfig, admin=Depends(require_admin),
 ) -> ExecutionBackendConfig:
-    """切换执行后端。hybrid 仅客户端 Agent：MCP 默认，定位失败同浏览器 browser-use 救场。"""
+    """更新执行后端配置。UI 引擎仅保留 ota；历史 backend 名会规范化为 ota。"""
     from app.runtime_config import (
         execution_backend_config as _rt,
         save_execution_backend_config,

@@ -1,22 +1,17 @@
-"""客户端 Agent 执行端点 — 浏览器跑在远端 Agent 上。
+"""客户端 Agent 执行端点 — 浏览器跑在远端 Agent 上（仅 OTA / AgentBridge）。
 
 - POST /api/testcases/{case_id}/run-client    — 单用例推到 Agent
 - POST /api/testcases/batch-run-client       — 批量推到 Agent
 
 每个端点都会:
-1. 选可用 Agent（按名称匹配或取第一个）
-2. 创建 RunBatch
-3. 起后台任务调 agent_manager.execute_on_agent
-4. 把结果写报告 + DB
-5. 失败保持浏览器打开，成功则发 SHUTDOWN
+1. 校验活跃 execution AgentDefinition（须启用工具）
+2. 选可用 Agent（本 worker WS 或 DB 心跳跨 worker）
+3. 走 AgentBridge / create_pending_agent_run（poller 接管）
 """
 from __future__ import annotations
 
 import asyncio as _asyncio
-import json as _json
 import logging
-import os as _os
-import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,41 +23,15 @@ from app.crud import agent_definition as crud_agent_definition
 from app.auth import get_current_user, get_user_project_filter
 from app import database as db_mod
 from app.database import get_async_db
-from app.tz import now as tz_now
-from core.runner import save_run_results
 
 from ._schemas import BatchCaseIdsRequest
 
 logger = logging.getLogger(__name__)
 
-
-def _write_json(path: str, data: dict) -> None:
-    """同步写入 JSON 文件 — 供 asyncio.to_thread 调用。"""
-    with open(path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _ensure_dir(path: str) -> None:
-    """同步创建目录 — 供 asyncio.to_thread 调用。"""
-    _os.makedirs(path, exist_ok=True)
-
-
-async def _resolve_execution_base_url(
-    project_id: int,
-    environment_id: Optional[int] = None,
-) -> Optional[str]:
-    """解析执行用 BASE URL：优先环境配置，其次项目 base_url。"""
-    async with db_mod.AsyncSessionLocal() as db:
-        if environment_id:
-            from app.crud.environment import get_environment
-            env = await get_environment(db, environment_id)
-            if env and (env.base_url or "").strip():
-                return env.base_url.strip()
-        project = await crud.get_project(db, project_id)
-        if project and (getattr(project, "base_url", None) or "").strip():
-            return project.base_url.strip()
-    return None
-
+_OTA_AGENT_REQUIRED = (
+    "OTA 执行需要启用工具的活跃 execution AgentDefinition，"
+    "请先在设置中配置并启用至少一个工具"
+)
 
 router = APIRouter()
 
@@ -83,41 +52,23 @@ async def _find_online_agent_in_db(db: AsyncSession, agent_name: str | None) -> 
     return None
 
 
-async def _ensure_agent_def_id(db: AsyncSession) -> int:
-    """返回一个有效的 agent_definition_id，用于 client 执行的 AgentRun 记录。"""
-    try:
-        r = await db.execute(select(db_models.AgentDefinition).limit(1))
-        first = r.scalar_one_or_none()
-        if first:
-            return first.id
-    except Exception:
-        pass
-    return 1
-
-
 async def _create_pending_execution(
-    db: AsyncSession, case_id: int, agent_name: str | None, db_case, batch_id: int | None = None,
+    db: AsyncSession,
+    case_id: int,
+    agent_name: str | None,
+    agent_def,
+    batch_id: int | None = None,
     user_id: int | None = None,
     environment_id: Optional[int] = None,
     is_init: bool = False,
     seq: int | None = None,
     reuse_browser_session: bool = False,
 ) -> dict:
-    """在 DB 中创建待执行记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
+    """在 DB 中创建待执行 OTA 记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
     from app.db_models import AgentRun
-    from app.models.schemas import AgentRunCreate
-    agent_name_text = agent_name or "unknown"
 
-    # 取一个有效的 agent_definition_id 作为队列标识
-    dummy_def_id = 1
-    try:
-        from app.db_models import AgentDefinition as _AD
-        r = await db.execute(select(_AD).limit(1))
-        first = r.scalar_one_or_none()
-        if first:
-            dummy_def_id = first.id
-    except Exception:
-        pass
+    agent_name_text = agent_name or "unknown"
+    def_id = getattr(agent_def, "id", None) or 1
 
     goal = {"type": "client_exec", "case_id": case_id, "agent_name": agent_name_text}
     if batch_id:
@@ -134,7 +85,8 @@ async def _create_pending_execution(
         goal["reuse_browser_session"] = True
 
     ar = AgentRun(
-        agent_definition_id=dummy_def_id,
+        agent_definition_id=def_id,
+        case_id=case_id,
         goal=goal,
         status="pending",
     )
@@ -151,6 +103,16 @@ async def _create_pending_execution(
     }
 
 
+async def _require_ota_agent_def(db: AsyncSession):
+    """返回启用工具的活跃 execution AgentDefinition，否则 HTTP 400。"""
+    from core.agent_ota import should_use_ota_agent
+
+    active = await crud_agent_definition.get_active_by_type(db, "execution")
+    if not should_use_ota_agent(active):
+        raise HTTPException(status_code=400, detail=_OTA_AGENT_REQUIRED)
+    return active
+
+
 @router.post("/{case_id}/run-client")
 async def run_test_case_on_client(
     case_id: int,
@@ -160,393 +122,166 @@ async def run_test_case_on_client(
     backend: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
-    """Run a test case on a connected client agent via WebSocket.
+    """Run a test case on a connected client agent via OTA AgentBridge.
 
-    Query ``backend``: ``nl_goal``（默认）| ``compiled_script`` | ``legacy_hybrid`` | ``legacy_mcp`` | ``browser_use``。
+    Query ``backend``: 仅 ``ota``（历史名称会规范化为 ota）。
     """
     from agent.manager import agent_manager
-    from app.runtime_config import (
-        execution_backend_config,
-        normalize_execution_backend,
-        traditional_backend,
-    )
+    from app.runtime_config import normalize_execution_backend
+    from core.agent_bridge import AgentBridge, create_pending_agent_run
 
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    if backend is None:
-        backend = execution_backend_config.backend or "nl_goal"
     backend = normalize_execution_backend(backend)
-
-    if backend not in (
-        "ota", "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "backend must be ota, nl_goal, compiled_script, legacy_hybrid, "
-                "legacy_mcp, or browser_use"
-            ),
-        )
-    backend = traditional_backend(backend)
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Test case not found")
 
-    # 检查是否有活跃 execution AgentDefinition — 跨 worker 创建 pending run，由 poller 接管
-    from core.agent_ota import should_use_ota_agent
-    active_agent_def = await crud_agent_definition.get_active_by_type(db, "execution")
-    if should_use_ota_agent(active_agent_def) and agent_name and (await _find_online_agent_in_db(db, agent_name)):
-        # 在 DB 中创建 AgentRun（status=pending），poller 会在有 WS 连接的 worker 上调起 OTA
-        from core.agent_bridge import create_pending_agent_run
-        arun = await create_pending_agent_run(db, active_agent_def, db_case.id, agent_name, environment_id, user_id=getattr(user, 'id', None))
-        return {"message": f"Agent #{arun.id} queued via AI Agent", "agent_run_id": arun.id}
+    active_agent_def = await _require_ota_agent_def(db)
 
     agents = await agent_manager.get_online_agents()
-    if not agents:
-        db_agent = await _find_online_agent_in_db(db, agent_name)
-        if not db_agent:
-            raise HTTPException(status_code=400, detail="No client agents available")
-        return await _create_pending_execution(db, case_id, agent_name, db_case, user_id=getattr(user, 'id', None), environment_id=environment_id)
-    if agent_name:
-        matched = [a for a in agents if a.name == agent_name]
-        if not matched:
-            raise HTTPException(status_code=400, detail=f"Agent '{agent_name}' not found or offline")
-        agent = matched[0]
-    else:
-        agent = agents[0]
-
-    if backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Agent '{agent.name}' 未声明 browser_use 能力。"
-                "请在客户端安装 browser-use 并重启 Agent。"
-            ),
-        )
-
-    # 同 worker 路径：显式 OTA skill 时走 AgentBridge
-    active_agent_def_same = active_agent_def or (await crud_agent_definition.get_active_by_type(db, "execution"))
-    if should_use_ota_agent(active_agent_def_same) and agent_name:
-        from core.agent_bridge import AgentBridge
-        bridge = AgentBridge(agent_manager, db, active_agent_def_same)
-        _sw_batch = await crud.create_run_batch(
-            db, project_id=db_case.project_id, name=db_case.name or "",
-            total_cases=1, triggered_by=getattr(user, 'username', None),
-        )
-        arun = await bridge.orchestrate(
-            case_id=db_case.id,
-            agent_id=agent_name,
-            goal={"type": "client_exec", "case_id": db_case.id, "agent_name": agent_name},
-            environment_id=environment_id,
-            existing_batch_id=_sw_batch.id,
-            notify_user_id=getattr(user, 'id', None),
-        )
-        return {"message": f"Agent #{arun.id} executing via AI Agent", "agent_run_id": arun.id}
-
-    run_id = uuid.uuid4().hex[:12]
-
-    steps_raw = await crud.get_steps_for_case(db, case_id)
-    steps = [
-        {
-            "id": s.id,
-            "step_order": s.step_order,
-            "description": s.description,
-            "expected_result": s.parsed_result,
-            "learned_locator": getattr(s, "learned_locator", None)
-            if isinstance(getattr(s, "learned_locator", None), dict)
-            else None,
-            "structured_step": getattr(s, "structured_step", None)
-            if isinstance(getattr(s, "structured_step", None), dict)
-            else None,
-            "cacheable": bool(getattr(s, "cacheable", True)),
-        }
-        for s in sorted(steps_raw, key=lambda x: x.step_order)
-    ]
-
-    if not steps:
-        raise HTTPException(status_code=400, detail="Test case has no steps")
-
-    # 解析 BASE URL：环境优先，否则回退项目 base_url
-    base_url_override = await _resolve_execution_base_url(db_case.project_id, environment_id)
-    if base_url_override:
-        logger.info("Client run BASE URL: %s (env_id=%s)", base_url_override, environment_id)
-    else:
-        logger.warning(
-            "Client run has no BASE URL (case=%s env_id=%s) — browser may stay on about:blank",
-            case_id, environment_id,
-        )
-
-    batch = await crud.create_run_batch(db, project_id=db_case.project_id, name=db_case.name or "", total_cases=1, triggered_by=getattr(user, 'username', None))
-
-    async def _run() -> None:
-        start_time = tz_now()
-        output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
-        await _asyncio.to_thread(_ensure_dir, output_dir)
-
-        _all_success = True
-        agent_run_id = None
-        db_run_id = None
-
-        # 预创建 TestRun，避免长跑（browser-use）期间轮询批次因「无 runs」误判失败
-        try:
-            async with db_mod.AsyncSessionLocal() as _pr_db:
-                pending = db_models.TestRun(
-                    case_id=case_id,
-                    batch_id=batch.id,
-                    status="running",
-                    start_time=start_time,
-                    end_time=start_time,
-                )
-                _pr_db.add(pending)
-                await _pr_db.commit()
-                await _pr_db.refresh(pending)
-                db_run_id = pending.id
-        except Exception:
-            logger.exception("Failed to precreate TestRun for client exec")
-
-        # 创建 AgentRun 记录
-        try:
-            async with db_mod.AsyncSessionLocal() as _ar_db:
-                def_id = await _ensure_agent_def_id(_ar_db)
-                ar = db_models.AgentRun(
-                    agent_definition_id=def_id,
-                    case_id=case_id,
-                    goal={"type": "client_exec", "case_id": case_id, "agent_name": agent.name},
-                    status="running",
-                    started_at=start_time,
-                )
-                _ar_db.add(ar)
-                await _ar_db.commit()
-                await _ar_db.refresh(ar)
-                agent_run_id = ar.id
-        except Exception:
-            logger.exception("Failed to create AgentRun record")
-
-        try:
-            # Clear stale compiled script failure / synth markers
-            agent_manager._last_compiled_script_failed = None
-            agent_manager._last_synthesized_script = None
-            step_results = await agent_manager.execute_on_agent(
-                agent.id, run_id, db_case.name, steps, output_dir=output_dir,
-                base_url_override=base_url_override,
-                backend=backend,
-                batch_id=batch.id,
-                case_id=case_id,
-                compiled_script=getattr(db_case, "compiled_script", None),
-                compiled_script_hash=getattr(db_case, "compiled_script_hash", None),
-                case_description=getattr(db_case, "description", None),
-            )
-            try:
-                from core.locator_memory import persist_learned_locators_from_results
-                from core.compiled_script import (
-                    clear_compiled_script,
-                    persist_compiled_script,
-                    should_clear_compiled_script_after_error,
-                )
-                # Use a fresh session — request-scoped db may be stale after long agent runs
-                async with db_mod.AsyncSessionLocal() as _persist_db:
-                    orm_steps = await crud.get_steps_for_case(_persist_db, case_id)
-                    by_order = {s.step_order: s for s in orm_steps}
-                    await persist_learned_locators_from_results(
-                        _persist_db, step_results, steps_by_order=by_order,
-                    )
-                    tc = await crud.get_test_case(_persist_db, case_id)
-                    failed_meta = getattr(agent_manager, "_last_compiled_script_failed", None)
-                    if failed_meta and tc and failed_meta.get("case_id") == case_id:
-                        if should_clear_compiled_script_after_error(
-                            failed_meta.get("error")
-                        ):
-                            if clear_compiled_script(tc):
-                                await _persist_db.commit()
-                                logger.info(
-                                    "cleared compiled_script after failed replay case=%s",
-                                    case_id,
-                                )
-                        else:
-                            logger.info(
-                                "keep compiled_script after infra fail case=%s: %s",
-                                case_id,
-                                str(failed_meta.get("error") or "")[:120],
-                            )
-                        agent_manager._last_compiled_script_failed = None
-                    synth = getattr(agent_manager, "_last_synthesized_script", None)
-                    if (
-                        tc
-                        and isinstance(synth, dict)
-                        and synth.get("case_id") == case_id
-                        and synth.get("script")
-                        and synth.get("steps_hash")
-                    ):
-                        persist_compiled_script(
-                            tc,
-                            script=synth["script"],
-                            steps_hash=synth["steps_hash"],
-                        )
-                        await _persist_db.commit()
-                        logger.info(
-                            "persisted LLM-synthesized compiled_script case=%s hash=%s",
-                            case_id, str(synth["steps_hash"])[:12],
-                        )
-                        agent_manager._last_synthesized_script = None
-            except Exception:
-                logger.warning("persist learned_locator/compiled_script after client exec failed", exc_info=True)
-            # empty list: all([]) is True in Python — treat as failed
-            all_passed = bool(step_results) and all(r.get("success") for r in step_results)
-            status = "passed" if all_passed else "failed"
-            if not all_passed:
-                _all_success = False
-
-            report = {
-                "test_case_id": case_id,
-                "test_case_name": db_case.name,
-                "status": status,
-                "start_time": start_time.isoformat(),
-                "end_time": tz_now().isoformat(),
-                "duration": (tz_now() - start_time).total_seconds(),
-                "steps": step_results,
-            }
-            report_path = _os.path.join(output_dir, "report.json")
-            await _asyncio.to_thread(_write_json, report_path, report)
-
-            await save_run_results(
-                case_id, status, start_time, tz_now(),
-                (tz_now() - start_time).total_seconds(),
-                report_path, None, [], batch_id=batch.id, run_id=db_run_id,
-            )
-
-            # 更新 AgentRun 状态
-            if agent_run_id:
-                try:
-                    async with db_mod.AsyncSessionLocal() as _ar_db:
-                        await crud.update_agent_run_status(_ar_db, agent_run_id, status)
-                except Exception:
-                    pass
-        except Exception:
-            logger.exception("Client execution failed")
-            _all_success = False
-            end_time = tz_now()
-
-            # 更新 AgentRun 状态为失败
-            if agent_run_id:
-                try:
-                    async with db_mod.AsyncSessionLocal() as _ar_db:
-                        await crud.update_agent_run_status(_ar_db, agent_run_id, "failed")
-                except Exception:
-                    pass
-
-            await save_run_results(
-                case_id, "failed", start_time, end_time,
-                (end_time - start_time).total_seconds(),
-                None, None,
-                [{"level": "error", "message": "客户端 Agent 执行过程中发生内部错误，请查看服务端日志获取详情"}],
-                batch_id=batch.id, run_id=db_run_id,
-            )
-
-        async with db_mod.AsyncSessionLocal() as _db:
-            _result = await _db.execute(
-                select(db_models.RunBatch).where(db_models.RunBatch.id == batch.id)
-            )
-            _batch = _result.scalar_one_or_none()
-            if _batch:
-                await crud._compute_batch_status(_db, _batch)
-                await _db.commit()
-                _uid = getattr(user, "id", None)
-                if _uid:
-                    from app.services.notifications import notify_batch_completed
-                    _asyncio.create_task(notify_batch_completed(_batch.id, _uid))
-
-        from app.runtime_config import execution_backend_config as _ebc_single
-        _keep_open_single = bool(getattr(_ebc_single, "keep_browser_after_run", True))
-        if _all_success and _keep_open_single:
-            logger.info("All cases passed — browser left open (keep_browser_after_run)")
-        elif _all_success:
-            try:
-                from agent.models import WSMessage, WSMessageType
-                session = await agent_manager.get_session(agent.id)
-                if session:
-                    await session.send(WSMessage(
-                        type=WSMessageType.SHUTDOWN, agent_id=agent.id,
-                    ))
-                    logger.info("All cases passed — shutdown signal sent to agent")
-            except Exception as exc:
-                logger.warning("Failed to send shutdown to agent: %s", exc, exc_info=True)
+    if not agent_name:
+        if agents:
+            agent_name = agents[0].name
         else:
-            logger.info("Some cases failed — browser left open for debugging")
+            db_agent = await _find_online_agent_in_db(db, None)
+            if not db_agent:
+                raise HTTPException(status_code=400, detail="No client agents available")
+            agent_name = db_agent["name"]
 
-    _task = _asyncio.create_task(_run())
-    from app import execution_control as _ec_single
-    await _ec_single.register_batch_task(batch.id, _task)
-    async def _on_run_done(t: _asyncio.Task) -> None:
-        from app import execution_control as _ec_done
-        await _ec_done.clear_batch(batch.id)
-        exc = t.exception()
-        if exc:
-            logger.error("Client agent run task failed: %s", exc)
-            try:
-                
-                from app import db_models as _dm
-                async with db_mod.AsyncSessionLocal() as _db:
-                    _result = await _db.execute(
-                        select(_dm.RunBatch).where(_dm.RunBatch.id == batch.id)
-                    )
-                    _b = _result.scalar_one_or_none()
-                    if _b and _b.status in ("running", "pending"):
-                        _b.status = "failed"
-                        _b.finished_at = tz_now()
-                        await _db.commit()
-            except Exception:
-                logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
-    _task.add_done_callback(lambda t: _asyncio.ensure_future(_on_run_done(t)))
+    # 跨 worker：Agent 在 DB 在线 → pending，由持有 WS 的 worker poller 接管
+    if await _find_online_agent_in_db(db, agent_name):
+        arun = await create_pending_agent_run(
+            db, active_agent_def, db_case.id, agent_name, environment_id,
+            user_id=getattr(user, "id", None),
+        )
+        return {"message": f"Agent #{arun.id} queued via AI Agent", "agent_run_id": arun.id}
 
+    # 本 worker：DB 心跳可能滞后，但本地有 WS
+    if not agents:
+        raise HTTPException(status_code=400, detail="No client agents available")
+    matched = [a for a in agents if a.name == agent_name]
+    if not matched:
+        raise HTTPException(status_code=400, detail=f"Agent '{agent_name}' not found or offline")
+    agent = matched[0]
+
+    _sw_batch = await crud.create_run_batch(
+        db, project_id=db_case.project_id, name=db_case.name or "",
+        total_cases=1, triggered_by=getattr(user, "username", None),
+    )
+    bridge = AgentBridge(agent_manager, db, active_agent_def)
+    arun = await bridge.orchestrate(
+        case_id=db_case.id,
+        agent_id=agent.name,
+        goal={"type": "client_exec", "case_id": db_case.id, "agent_name": agent.name},
+        environment_id=environment_id,
+        existing_batch_id=_sw_batch.id,
+        notify_user_id=getattr(user, "id", None),
+    )
     return {
-        "message": f"Test case {case_id} running on client agent {agent.name}",
-        "run_id": run_id,
-        "batch_id": batch.id,
+        "message": f"Agent #{arun.id} executing via AI Agent",
+        "agent_run_id": arun.id,
+        "backend": backend,
     }
 
 
 @router.post("/batch-run-client")
 async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
-    """Run multiple test cases sequentially on a connected client agent."""
+    """Run multiple test cases sequentially on a connected client agent via OTA."""
     from agent.manager import agent_manager
+    from app.runtime_config import normalize_execution_backend
+    from core.agent_bridge import AgentBridge
+    from core.runner._persistence import build_batch_execution_queue, precreate_pending_runs
+
+    body.backend = normalize_execution_backend(body.backend)
+
+    active_agent_def = await _require_ota_agent_def(db)
+
+    case_ids = body.case_ids
+    init_case_ids = body.init_case_ids or []
+    init_policy = getattr(body, "init_policy", None) or "before_each"
+    if not case_ids:
+        raise HTTPException(status_code=400, detail="No test case IDs provided")
 
     agents = await agent_manager.get_online_agents()
-    if not agents:
-        db_agent = await _find_online_agent_in_db(db, body.agent_name)
-        if not db_agent:
-            raise HTTPException(status_code=400, detail="No client agents available")
-        # 跨 worker：创建统一 RunBatch；按 init_policy 展开队列后入队
+    agent_name = body.agent_name
+
+    if agent_name:
+        if agents:
+            matched = [a for a in agents if a.name == agent_name]
+            if matched:
+                agent = matched[0]
+            else:
+                if not await _find_online_agent_in_db(db, agent_name):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Agent '{agent_name}' not found or offline",
+                    )
+                agent = None  # 跨 worker
+                agents = []
+        else:
+            if not await _find_online_agent_in_db(db, agent_name):
+                raise HTTPException(status_code=400, detail="No client agents available")
+            agent = None
+    else:
+        if agents:
+            agent = agents[0]
+            agent_name = agent.name
+            body.agent_name = agent_name
+        else:
+            db_agent = await _find_online_agent_in_db(db, None)
+            if not db_agent:
+                raise HTTPException(status_code=400, detail="No client agents available")
+            agent_name = db_agent["name"]
+            body.agent_name = agent_name
+            agent = None
+
+    exec_queue = build_batch_execution_queue(list(case_ids), list(init_case_ids), init_policy)
+
+    # 加载用例基本信息（权限 / 批次名）；步骤由 Bridge 自行加载
+    case_infos: list[dict] = []
+    for cid, is_init in exec_queue:
+        tc = await crud.get_test_case(db, cid)
+        if tc:
+            case_infos.append({
+                "id": tc.id,
+                "name": tc.name,
+                "project_id": tc.project_id,
+                "is_init": is_init,
+            })
+    if not case_infos:
+        raise HTTPException(status_code=400, detail="No valid test cases found")
+
+    allowed_ids = get_user_project_filter(user)
+    project_id = case_infos[0]["project_id"]
+    if allowed_ids is not None and project_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="No valid test cases found")
+
+    # 跨 worker：无本机 WS → pending 队列
+    if not agents or agent is None:
         from app.db_models import RunBatch
-        from core.runner._persistence import build_batch_execution_queue
-        queued = []
-        tc0 = None
-        init_ids = list(body.init_case_ids or [])
-        main_ids = list(body.case_ids or [])
-        init_policy = getattr(body, "init_policy", None) or "before_each"
-        exec_queue = build_batch_execution_queue(main_ids, init_ids, init_policy)
+
         reuse_session = len(exec_queue) > 1
-        for cid, _is_init in exec_queue:
-            tc = await crud.get_test_case(db, cid)
-            if tc and tc0 is None:
-                tc0 = tc
         batch = RunBatch(
             status="running",
-            project_id=tc0.project_id if tc0 else 0,
+            project_id=project_id,
             total_cases=len(exec_queue),
-            triggered_by=body.agent_name,
+            triggered_by=agent_name,
         )
         db.add(batch)
         await db.commit()
         await db.refresh(batch)
+
+        queued = []
         for seq, (cid, is_init) in enumerate(exec_queue):
             tc = await crud.get_test_case(db, cid)
             if tc:
                 await _create_pending_execution(
-                    db, cid, body.agent_name, tc,
-                    batch_id=batch.id, user_id=getattr(user, 'id', None),
+                    db, cid, agent_name, active_agent_def,
+                    batch_id=batch.id, user_id=getattr(user, "id", None),
                     environment_id=body.environment_id,
                     is_init=is_init, seq=seq,
                     reuse_browser_session=reuse_session,
@@ -556,90 +291,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             return {
                 "status": "queued",
                 "case_ids": queued,
-                "agent_name": body.agent_name,
+                "agent_name": agent_name,
+                "backend": body.backend,
                 "message": f"{len(queued)} cases queued for batch #{batch.id} (policy={init_policy})",
             }
         raise HTTPException(status_code=400, detail="No test cases to queue")
-    
-    if body.agent_name:
-        matched = [a for a in agents if a.name == body.agent_name]
-        if not matched:
-            raise HTTPException(status_code=400, detail=f"Agent '{body.agent_name}' not found or offline")
-        agent = matched[0]
-    else:
-        agent = agents[0]
-
-    if body.backend is not None:
-        from app.runtime_config import normalize_execution_backend, traditional_backend
-        nb = normalize_execution_backend(body.backend)
-        if nb not in (
-            "ota", "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp", "browser_use",
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "backend must be ota, nl_goal, compiled_script, legacy_hybrid, "
-                    "legacy_mcp, or browser_use"
-                ),
-            )
-        body.backend = traditional_backend(nb)
-    if body.backend == "browser_use" and "browser_use" not in (agent.capabilities or []):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Agent '{agent.name}' 未声明 browser_use 能力。"
-                "请在客户端安装 browser-use 并重启 Agent。"
-            ),
-        )
-
-    case_ids = body.case_ids
-    init_case_ids = body.init_case_ids or []
-    init_policy = getattr(body, "init_policy", None) or "before_each"
-    if not case_ids:
-        raise HTTPException(status_code=400, detail="No test case IDs provided")
-
-    from core.runner._persistence import build_batch_execution_queue, precreate_pending_runs
-    exec_queue = build_batch_execution_queue(list(case_ids), list(init_case_ids), init_policy)
-
-    async def _load_case_info(cid: int, is_init: bool) -> Optional[dict]:
-        tc = await crud.get_test_case(db, cid)
-        if not tc:
-            return None
-        steps_raw = await crud.get_steps_for_case(db, cid)
-        steps = [
-            {
-                "id": s.id,
-                "step_order": s.step_order,
-                "description": s.description,
-                "expected_result": s.parsed_result,
-                "learned_locator": getattr(s, "learned_locator", None)
-                if isinstance(getattr(s, "learned_locator", None), dict)
-                else None,
-                "structured_step": getattr(s, "structured_step", None)
-                if isinstance(getattr(s, "structured_step", None), dict)
-                else None,
-                "cacheable": bool(getattr(s, "cacheable", True)),
-            }
-            for s in sorted(steps_raw, key=lambda x: x.step_order)
-        ]
-        return {
-            "id": tc.id,
-            "name": tc.name,
-            "description": getattr(tc, "description", None),
-            "project_id": tc.project_id,
-            "steps": steps,
-            "is_init": is_init,
-            "compiled_script": getattr(tc, "compiled_script", None),
-            "compiled_script_hash": getattr(tc, "compiled_script_hash", None),
-        }
-
-    case_infos = []
-    for cid, is_init in exec_queue:
-        info = await _load_case_info(cid, is_init)
-        if info:
-            case_infos.append(info)
-    if not case_infos:
-        raise HTTPException(status_code=400, detail="No valid test cases found")
 
     logger.info(
         "Client batch order (%s slots, policy=%s): %s",
@@ -648,41 +304,26 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         [(c["id"], c["name"], "init" if c["is_init"] else "main") for c in case_infos],
     )
 
-    allowed_ids = get_user_project_filter(user)
-    project_id = case_infos[0]["project_id"]
-    if allowed_ids is not None and project_id not in allowed_ids:
-        raise HTTPException(status_code=404, detail="No valid test cases found")
-
-    # 解析 BASE URL：环境优先，否则回退项目 base_url（批量共用）
-    base_url_override = await _resolve_execution_base_url(project_id, body.environment_id)
-    if base_url_override:
-        logger.info(
-            "Client batch BASE URL: %s (env_id=%s)",
-            base_url_override, body.environment_id,
-        )
-    else:
-        logger.warning(
-            "Client batch has no BASE URL (project=%s env_id=%s)",
-            project_id, body.environment_id,
-        )
-
     _batch_name = case_infos[0].get("name") or ""
     if len(case_infos) > 1:
         _batch_name = f"{_batch_name} 等{len(case_infos)}个用例"
-    batch = await crud.create_run_batch(db, project_id=project_id, name=_batch_name, total_cases=len(case_infos), triggered_by=getattr(user, 'username', None))
+    batch = await crud.create_run_batch(
+        db, project_id=project_id, name=_batch_name,
+        total_cases=len(case_infos), triggered_by=getattr(user, "username", None),
+    )
 
-    # 预创建 pending TestRun，避免按序落库期间轮询把批次误判为 partial
     async with db_mod.AsyncSessionLocal() as _pr_db:
-        precreated_runs = await precreate_pending_runs(
+        await precreate_pending_runs(
             _pr_db, list(case_ids), batch.id,
             init_case_ids=list(init_case_ids), init_policy=init_policy,
         )
-    # 按执行序号取 run_id（before_each 下同一 case 可有多条）
-    precreated_run_ids_by_idx = {i: rid for i, (_cid, rid, _is_init) in enumerate(precreated_runs)}
 
     async def _run_batch() -> None:
         from app import execution_control
-        _all_success = True
+        from app.services.notifications import notify_batch_completed
+        from app.tz import now as tz_now
+        from core.runner import save_run_results
+
         _stopped_by_user = False
         try:
             for idx, info in enumerate(case_infos):
@@ -698,237 +339,66 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     break
 
                 case_id = info["id"]
-                db_run_id = precreated_run_ids_by_idx.get(idx)
-                steps = info["steps"]
-                if not steps:
-                    logger.warning("Skip case %s — no steps", case_id)
-                    await save_run_results(
-                        case_id, "failed", tz_now(), tz_now(), 0.0,
-                        None, None,
-                        [{"level": "error", "message": "用例无步骤，已跳过"}],
-                        batch_id=batch.id, run_id=db_run_id,
-                        is_init=info.get("is_init", False),
-                    )
-                    _all_success = False
-                    continue
-
-                # 仅第一个用例导航 BASE URL；后续复用同一浏览器会话（保留登录态）
-                navigate_base = idx == 0
-                # Multi-case batch: never use ephemeral compiled_script browser
                 reuse_session = len(case_infos) > 1
 
-                run_id = uuid.uuid4().hex[:12]
-                start_time = tz_now()
-                output_dir = _os.path.join("reports", f"run_{case_id}_{start_time.strftime('%Y%m%d_%H%M%S')}")
-                await _asyncio.to_thread(_ensure_dir, output_dir)
-
-                logger.info(
-                    "Client batch case %s/%s: id=%s name=%r init=%s navigate=%s reuse_session=%s",
-                    idx + 1, len(case_infos), case_id, info["name"], info.get("is_init"),
-                    navigate_base, reuse_session,
-                )
-
-                # 检查是否有活跃 execution AgentDefinition — 显式 OTA 时走桥接
                 try:
+                    from core.agent_ota import should_use_ota_agent
+
                     async with db_mod.AsyncSessionLocal() as _ad_db:
-                        from core.agent_ota import should_use_ota_agent
-                        active_agent_def = await crud_agent_definition.get_active_by_type(_ad_db, "execution")
-                        if should_use_ota_agent(active_agent_def) and body.agent_name:
-                            from core.agent_bridge import AgentBridge
-                            bridge = AgentBridge(agent_manager, _ad_db, active_agent_def)
-                            agent_manager._agent_busy.add(agent.id)
-                            try:
-                                await bridge.orchestrate(
-                                    case_id=case_id,
-                                    agent_id=body.agent_name,
-                                    goal={
-                                        "type": "client_exec",
-                                        "case_id": case_id,
-                                        "agent_name": body.agent_name,
-                                        "batch_id": batch.id,
-                                        "seq": idx,
-                                        "is_init": info.get("is_init", False),
-                                        "reuse_browser_session": reuse_session,
-                                    },
-                                    environment_id=body.environment_id,
-                                    existing_batch_id=batch.id,
-                                    notify_user_id=getattr(user, 'id', None),
-                                )
-                            finally:
-                                agent_manager._agent_busy.discard(agent.id)
-                            continue
-                except Exception:
-                    logger.exception("AgentDefinition check failed for batch case %s", case_id)
-
-                # 创建 AgentRun 记录
-                agent_run_id = None
-                try:
-                    async with db_mod.AsyncSessionLocal() as _ar_db:
-                        def_id = await _ensure_agent_def_id(_ar_db)
-                        ar = db_models.AgentRun(
-                            agent_definition_id=def_id,
-                            case_id=case_id,
-                            goal={"type": "client_exec", "case_id": case_id, "agent_name": agent.name},
-                            status="running",
-                            started_at=start_time,
+                        agent_def = await crud_agent_definition.get_active_by_type(
+                            _ad_db, "execution",
                         )
-                        _ar_db.add(ar)
-                        await _ar_db.commit()
-                        await _ar_db.refresh(ar)
-                        agent_run_id = ar.id
-                except Exception:
-                    logger.exception("Failed to create AgentRun record for batch case %s", case_id)
-
-                case_failed = False
-                try:
-                    agent_manager._last_compiled_script_failed = None
-                    agent_manager._last_synthesized_script = None
-                    step_results = await agent_manager.execute_on_agent(
-                        agent.id, run_id, info["name"], steps, output_dir=output_dir,
-                        base_url_override=base_url_override,
-                        backend=getattr(body, "backend", None),
-                        navigate_base_url=navigate_base,
-                        batch_id=batch.id,
-                        case_id=case_id,
-                        compiled_script=info.get("compiled_script"),
-                        compiled_script_hash=info.get("compiled_script_hash"),
-                        case_description=info.get("description"),
-                        reuse_browser_session=reuse_session,
-                    )
-                    try:
-                        from core.locator_memory import persist_learned_locators_from_results
-                        from core.compiled_script import (
-                            clear_compiled_script,
-                            persist_compiled_script,
-                            should_clear_compiled_script_after_error,
-                        )
-                        # Batch path: steps_raw is local to _load_case_info — reload ORM rows here
-                        async with db_mod.AsyncSessionLocal() as _persist_db:
-                            orm_steps = await crud.get_steps_for_case(_persist_db, case_id)
-                            by_order = {s.step_order: s for s in orm_steps}
-                            await persist_learned_locators_from_results(
-                                _persist_db, step_results, steps_by_order=by_order,
+                        if not should_use_ota_agent(agent_def):
+                            await save_run_results(
+                                case_id, "failed", tz_now(), tz_now(), 0.0,
+                                None, None,
+                                [{"level": "error", "message": _OTA_AGENT_REQUIRED}],
+                                batch_id=batch.id,
+                                is_init=info.get("is_init", False),
                             )
-                            tc = await crud.get_test_case(_persist_db, case_id)
-                            failed_meta = getattr(agent_manager, "_last_compiled_script_failed", None)
-                            if failed_meta and tc and failed_meta.get("case_id") == case_id:
-                                if should_clear_compiled_script_after_error(
-                                    failed_meta.get("error")
-                                ):
-                                    if clear_compiled_script(tc):
-                                        await _persist_db.commit()
-                                        logger.info(
-                                            "cleared compiled_script after failed replay case=%s",
-                                            case_id,
-                                        )
-                                else:
-                                    logger.info(
-                                        "keep compiled_script after infra fail case=%s: %s",
-                                        case_id,
-                                        str(failed_meta.get("error") or "")[:120],
-                                    )
-                                agent_manager._last_compiled_script_failed = None
-                            synth = getattr(agent_manager, "_last_synthesized_script", None)
-                            if (
-                                tc
-                                and isinstance(synth, dict)
-                                and synth.get("case_id") == case_id
-                                and synth.get("script")
-                                and synth.get("steps_hash")
-                            ):
-                                persist_compiled_script(
-                                    tc,
-                                    script=synth["script"],
-                                    steps_hash=synth["steps_hash"],
-                                )
-                                await _persist_db.commit()
-                                logger.info(
-                                    "persisted LLM-synthesized compiled_script case=%s hash=%s",
-                                    case_id, str(synth["steps_hash"])[:12],
-                                )
-                                agent_manager._last_synthesized_script = None
-                    except Exception:
-                        logger.warning(
-                            "persist learned_locator/compiled_script after batch client exec failed",
-                            exc_info=True,
-                        )
-                    # empty list: all([]) is True — must not mark batch as success
-                    all_passed = bool(step_results) and all(r.get("success") for r in step_results)
-                    status = "passed" if all_passed else "failed"
-                    if not all_passed:
-                        _all_success = False
-                        case_failed = True
-
-                    report = {
-                        "test_case_id": case_id,
-                        "test_case_name": info["name"],
-                        "status": status,
-                        "start_time": start_time.isoformat(),
-                        "end_time": tz_now().isoformat(),
-                        "duration": (tz_now() - start_time).total_seconds(),
-                        "steps": step_results,
-                    }
-                    report_path = _os.path.join(output_dir, "report.json")
-                    await _asyncio.to_thread(_write_json, report_path, report)
-
-                    await save_run_results(
-                        case_id, status, start_time, tz_now(),
-                        (tz_now() - start_time).total_seconds(),
-                        report_path, None, [], batch_id=batch.id,
-                        run_id=db_run_id,
-                        is_init=info.get("is_init", False),
-                    )
-
-                    # 更新 AgentRun 状态
-                    if agent_run_id:
+                            if info.get("is_init"):
+                                break
+                            continue
+                        bridge = AgentBridge(agent_manager, _ad_db, agent_def)
+                        agent_manager._agent_busy.add(agent.id)
                         try:
-                            async with db_mod.AsyncSessionLocal() as _ar_db:
-                                await crud.update_agent_run_status(_ar_db, agent_run_id, status)
-                        except Exception:
-                            pass
+                            await bridge.orchestrate(
+                                case_id=case_id,
+                                agent_id=agent_name,
+                                goal={
+                                    "type": "client_exec",
+                                    "case_id": case_id,
+                                    "agent_name": agent_name,
+                                    "batch_id": batch.id,
+                                    "seq": idx,
+                                    "is_init": info.get("is_init", False),
+                                    "reuse_browser_session": reuse_session,
+                                },
+                                environment_id=body.environment_id,
+                                existing_batch_id=batch.id,
+                                notify_user_id=getattr(user, "id", None),
+                            )
+                        finally:
+                            agent_manager._agent_busy.discard(agent.id)
                 except Exception:
-                    logger.exception("Agent run failed for case %s", case_id)
-                    _all_success = False
-                    case_failed = True
-                    end_time = tz_now()
-
-                    # 更新 AgentRun 状态为失败
-                    if agent_run_id:
-                        try:
-                            async with db_mod.AsyncSessionLocal() as _ar_db:
-                                await crud.update_agent_run_status(_ar_db, agent_run_id, "failed")
-                        except Exception:
-                            pass
-
-                    await save_run_results(
-                        case_id, "failed", start_time, end_time,
-                        (end_time - start_time).total_seconds(),
-                        None, None,
-                        [{"level": "error", "message": "客户端 Agent 执行过程中发生内部错误，请查看服务端日志获取详情"}],
-                        batch_id=batch.id,
-                        run_id=db_run_id,
-                        is_init=info.get("is_init", False),
-                    )
-
-                # 初始化用例失败则中止后续，避免在未登录会话上乱序继续
-                if case_failed and info.get("is_init"):
-                    logger.warning(
-                        "Init case %s failed — abort remaining %s case(s) in batch",
-                        case_id, len(case_infos) - idx - 1,
-                    )
-                    for rem_idx, remaining in enumerate(case_infos[idx + 1:], start=idx + 1):
-                        await save_run_results(
-                            remaining["id"], "failed", tz_now(), tz_now(), 0.0,
-                            None, None,
-                            [{
-                                "level": "error",
-                                "message": f"因初始化用例 {case_id} 失败而跳过",
-                            }],
-                            batch_id=batch.id,
-                            run_id=precreated_run_ids_by_idx.get(rem_idx),
-                            is_init=remaining.get("is_init", False),
+                    logger.exception("AgentBridge failed for batch case %s", case_id)
+                    if info.get("is_init"):
+                        logger.warning(
+                            "Init case %s failed — abort remaining %s case(s) in batch",
+                            case_id, len(case_infos) - idx - 1,
                         )
-                    break
+                        for remaining in case_infos[idx + 1:]:
+                            await save_run_results(
+                                remaining["id"], "failed", tz_now(), tz_now(), 0.0,
+                                None, None,
+                                [{
+                                    "level": "error",
+                                    "message": f"因初始化用例 {case_id} 失败而跳过",
+                                }],
+                                batch_id=batch.id,
+                                is_init=remaining.get("is_init", False),
+                            )
+                        break
 
         finally:
             from app import execution_control as _ec
@@ -940,44 +410,24 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             )
             _b = _result.scalar_one_or_none()
             if _b:
-                # 标记结束，避免未跑完的用例数把状态卡在 running
-                # cancelled/paused 由控制面维护，勿强行改写为其它终态
                 if _b.status not in ("cancelled", "paused") and _b.finished_at is None:
                     _b.finished_at = tz_now()
                 await crud._compute_batch_status(_db, _b)
                 await _db.commit()
                 _uid2 = getattr(user, "id", None)
-                if _uid2:
-                    from app.services.notifications import notify_batch_completed
+                if _uid2 and not _stopped_by_user:
                     _asyncio.create_task(notify_batch_completed(_b.id, _uid2))
-
-        from app.runtime_config import execution_backend_config as _ebc_batch
-        _keep_open_batch = bool(getattr(_ebc_batch, "keep_browser_after_run", True))
-        if _all_success and not _stopped_by_user and _keep_open_batch:
-            logger.info("All cases passed — browser left open (keep_browser_after_run)")
-        elif _all_success and not _stopped_by_user:
-            try:
-                from agent.models import WSMessage, WSMessageType
-                session = await agent_manager.get_session(agent.id)
-                if session:
-                    await session.send(WSMessage(
-                        type=WSMessageType.SHUTDOWN, agent_id=agent.id,
-                    ))
-                    logger.info("All cases passed — shutdown signal sent to agent")
-                else:
-                    logger.info("All cases passed — browser left open for debugging")
-            except Exception as exc:
-                logger.warning("Failed to send shutdown to agent: %s", exc, exc_info=True)
 
     from app import execution_control as _ec_reg
     _task = _asyncio.create_task(_run_batch())
     await _ec_reg.register_batch_task(batch.id, _task)
+
     async def _on_batch_done(t: _asyncio.Task) -> None:
+        from app.tz import now as tz_now
         exc = t.exception()
         if exc:
             logger.error("Client agent batch-run task failed: %s", exc)
             try:
-                
                 from app import db_models as _dm
                 async with db_mod.AsyncSessionLocal() as _db:
                     _result = await _db.execute(
@@ -990,9 +440,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                         await _db.commit()
             except Exception:
                 logger.warning("Failed to mark batch %s as failed", batch.id, exc_info=True)
+
     _task.add_done_callback(lambda t: _asyncio.ensure_future(_on_batch_done(t)))
 
     return {
         "message": f"{len(case_ids)} case(s) running on client agent {agent.name}",
         "batch_id": batch.id,
+        "backend": body.backend,
     }

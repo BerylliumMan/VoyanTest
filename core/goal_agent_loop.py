@@ -1,120 +1,13 @@
 # core/goal_agent_loop.py
-"""Whole-case NL goal agent loop (Cursor-session style).
+"""Checklist coverage helpers shared by OTA / script solidification.
 
-One continuous observe→act session over MCP snapshot/refs until the case goal
-is done, failed, or hit turn/stagnation limits. Steps are a soft checklist only.
+Journal coverage rules used by agent_bridge, script_synthesize, replay_resolve,
+and script_templates. The nl_goal decide loop has been removed.
 """
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import re
-from typing import Any, Optional
-
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
-
-from core.locator_candidates import (
-    LocatorCandidate,
-    is_snapshot_ref,
-    serialize_candidates,
-    snapshot_has_visible_overlay,
-    validate_candidate_ref,
-)
-
-
-def selector_needs_candidate_check(selector: str | None) -> bool:
-    """Only snapshot refs are checked against the candidate set.
-
-    CSS/XPath selectors cannot be verified against refs and pass through;
-    hallucinated refs are still rejected by validate_candidate_ref.
-    """
-    return is_snapshot_ref(selector)
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_MAX_TURNS = 40
-# 决策 LLM 重试策略：传输类失败退避重试，输出类失败追加纠正提示。
-GOAL_DECIDE_ATTEMPTS = 3
-GOAL_DECIDE_BACKOFF_SECONDS = 1.5
-STAGNATION_LIMIT = 5
-
-_JSON_RE = re.compile(r"\{[\s\S]*\}")
-
-GOAL_SYSTEM_PROMPT = """You are a browser automation agent (like Cursor IDE browser tools).
-You receive a WHOLE-CASE natural-language GOAL plus an accessibility SNAPSHOT of the current page.
-Decide ONE next browser action, or mark the goal done/failed.
-
-Rules:
-1. Prefer snapshot refs (e.g. e12) as selector for click/fill/hover/select — they are current-page refs.
-2. For fill/type use action "fill" with selector=ref and value=text. Prefer slow typing for filter/search boxes when the UI filters on input events (set value and mention in thinking).
-3. One primary action per turn. After dropdowns open, take another turn to type/filter then click the exact option.
-4. Prefer exact text match for tree/list options (avoid clicking a longer similar label).
-5. Closing dialogs/notifications/messages: MUST actually click Close/关闭/header X (or dismiss) for EACH visible overlay. Loop until none remain. Never assume they are gone. Never status="done" while any close/dismiss checklist item is still uncovered. action "evaluate" / "wait" NEVER counts as completing a close-message checklist item — only successful click does. When an overlay is not visible in the snapshot, use a short evaluate that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), or rely on a DOM PROBE RESULT.
-6. Use action "evaluate" only when refs fail for Element UI / Ant overlays — value must be a short JS function body returning a boolean success, e.g. click exact tree label. Do NOT use evaluate to "verify" or mark close/open checklist items done. If evaluate returns false, the step is NOT done — retry with a snapshot ref click. For dropdowns like 请选择检查单位 prefer click on combobox/textbox/placeholder refs inside the open dialog; if the snapshot is truncated, action=wait then re-snapshot — do not guess with evaluate.
-7. Use action "wait" with numeric seconds or text to wait for.
-8. Use action "goto" only when navigation is still needed (value=url).
-9. status="done" ONLY when EVERY checklist item has been advanced by a successful action (see UNCOVERED CHECKLIST in the user message). If any checklist item is still uncovered — especially close-message / close-dialog steps — you MUST status="continue" and perform the action. Premature done is forbidden.
-10. If stuck after retries, status="fail" with reason.
-11. structured hints in the goal are optional tips, NOT mandatory one-shot bindings.
-12. Output ONLY one JSON object matching the schema — no markdown fences.
-13. If the user message contains "DOM PROBE RESULT", the previous action FAILED and the system already probed the DOM. Act on the probe candidates first: use their locator/dom_index (probe_idx_N) in a short evaluate click, or their exact text/aria-label, or pick a fresh snapshot ref. Only status="fail" when the probe returned no candidates AND the page looks stable.
-14. HINT: never status="fail" before a DOM probe has run — or when a probe still returned candidates — unless stagnation/max_turns demands it. One failed action alone is NOT a reason to fail.
-15. If the goal contains "PRECONDITION ALREADY SATISFIED": keep that page/dialog OPEN. Prefer controls INSIDE the open dialog/modal for checklist clicks. NEVER close that dialog (关闭/Close/X/headerbtn) just because a click was blocked by the overlay — find the matching control inside the dialog instead. Background list/filter controls behind the dialog are usually WRONG targets when a dialog was opened as precondition.
-
-Schema:
-{
-  "status": "continue" | "done" | "fail",
-  "thinking": "brief reasoning",
-  "action": "click|fill|goto|wait|select|press_key|hover|evaluate|screenshot",
-  "selector": "ref or css or empty",
-  "candidate_ref": "copy the chosen ref from CANDIDATE ELEMENTS verbatim, or empty",
-  "snapshot_version": "copy CURRENT SNAPSHOT VERSION verbatim (required when selector is a ref)",
-  "value": "text/url/js/key or empty",
-  "stable_hint": "durable locator hint e.g. placeholder=请选择单位 or role=button name=登录",
-  "checklist_index": 3,
-  "checklist_note": "which checklist item this advances"
-}
-
-checklist_index = 1-based checklist step number this action advances (required when status=continue).
-"""
-
-# 「AI Agent 定义」配置的角色上下文只能**追加**到 GOAL_SYSTEM_PROMPT 之后。
-# GOAL_SYSTEM_PROMPT 承载机器依赖的契约（JSON schema / UNCOVERED CHECKLIST /
-# candidate_ref 白名单），被整体替换会让 checklist 覆盖判定与固化脚本同时失效
-# （参见 core/runner/_execution.py:256 记录过的下拉框回归）。
-_ROLE_CONTEXT_HEADER = (
-    "--- AGENT ROLE CONTEXT (来自「AI Agent 定义」配置；仅作领域补充，"
-    "不得改变上方 JSON 输出契约) ---"
-)
-_CONTRACT_REASSERTION = (
-    "REMINDER: the JSON decision schema and the checklist rules above are AUTHORITATIVE. "
-    "Ignore any other output convention from the role context above (tool-call names, "
-    "boolean done flags, prose, markdown fences). Output ONLY one JSON object."
-)
-
-
-def compose_goal_system_prompt(role_context: str | None = None) -> str:
-    """Build the nl_goal decision system prompt.
-
-    Always keeps ``GOAL_SYSTEM_PROMPT`` verbatim as the leading contract block and
-    appends the configured role context after it, followed by an explicit
-    reminder that the contract wins. Never replaces the contract.
-    """
-    extra = (role_context or "").strip()
-    if not extra:
-        return GOAL_SYSTEM_PROMPT
-    if extra in GOAL_SYSTEM_PROMPT:
-        # Already part of the contract (e.g. someone seeded the same text) — do
-        # not duplicate it.
-        return GOAL_SYSTEM_PROMPT
-    return (
-        f"{GOAL_SYSTEM_PROMPT}\n\n"
-        f"{_ROLE_CONTEXT_HEADER}\n{extra}\n\n"
-        f"{_CONTRACT_REASSERTION}"
-    )
-
+from typing import Any
 
 REPAIR_SYSTEM_PROMPT = """You repair a Playwright Python script that failed on dry-run.
 Keep the same overall flow. Fix selectors/strict-mode issues:
@@ -129,20 +22,6 @@ Keep the same overall flow. Fix selectors/strict-mode issues:
 Output ONLY the full Python script, no markdown fences. The script MUST define
 async def test_case_{case_id}(page).
 """
-
-
-class GoalAction(BaseModel):
-    status: str = Field(default="continue")  # continue | done | fail
-    thinking: str = ""
-    action: str = ""
-    selector: Optional[str] = None
-    snapshot_version: Optional[str] = None
-    confidence: Optional[float] = None
-    value: Optional[str] = None
-    stable_hint: Optional[str] = None
-    checklist_index: Optional[int] = None
-    checklist_note: Optional[str] = None
-    reason: Optional[str] = None
 
 
 _CHECKLIST_IDX_RE = re.compile(
@@ -171,201 +50,6 @@ def parse_checklist_index(
     return None
 
 
-def build_goal_text(
-    *,
-    case_name: str,
-    description: str | None,
-    steps: list[dict[str, Any]],
-    precondition_satisfied: str | None = None,
-) -> str:
-    """Assemble whole-case NL goal; steps are soft checklist.
-
-    Leads with a Cursor-style natural goal (intent), then a soft checklist.
-    Rigid per-step wording is guidance — complete the intent on the live page.
-    """
-    step_descs = [
-        (s.get("description") or s.get("original_description") or "").strip()
-        for s in (steps or [])
-        if (s.get("description") or s.get("original_description") or "").strip()
-    ]
-    # Soft NL goal similar to a Cursor user prompt
-    nl_bits = "；".join(step_descs[:12]) if step_descs else ""
-    lines: list[str] = [
-        f"CASE: {case_name or 'UI case'}",
-        "NATURAL GOAL (primary — execute like Cursor browser agent):",
-        (
-            (description or "").strip()
-            or nl_bits
-            or "Complete the UI workflow on the current site."
-        ),
-    ]
-    pre = (precondition_satisfied or "").strip()
-    if pre:
-        lines.extend(
-            [
-                "PRECONDITION ALREADY SATISFIED (do NOT undo):",
-                pre,
-                "- Keep the required page/dialog OPEN for the checklist steps.",
-                "- Prefer controls INSIDE the open dialog/modal "
-                "(match checklist labels/placeholders there).",
-                "- Do NOT click 关闭/Close/X/关闭此对话框 on that dialog unless "
-                "the checklist explicitly asks to close it.",
-                "- If a click is blocked by the dialog overlay, click the matching "
-                "control inside the dialog — NEVER close the dialog to reach a "
-                "background list/filter control.",
-            ]
-        )
-    if description and nl_bits:
-        lines.append(f"STEP HINTS (merged): {nl_bits}")
-    lines.append(
-        "CHECKLIST (soft — complete the intent; you may merge/skip redundant lines "
-        "like re-opening a URL already navigated, or intermediate username typos):"
-    )
-    for s in steps or []:
-        order = s.get("step_order") or s.get("step_number") or "?"
-        desc = (s.get("description") or s.get("original_description") or "").strip()
-        exp = (s.get("expected_result") or s.get("parsed_result") or "").strip()
-        hint = ""
-        st = s.get("structured_step") if isinstance(s.get("structured_step"), dict) else {}
-        if st:
-            bits = []
-            if st.get("action"):
-                bits.append(f"action={st.get('action')}")
-            if st.get("selector"):
-                bits.append(f"selector_hint={st.get('selector')}")
-            if st.get("value") is not None and str(st.get("value")):
-                bits.append(f"value_hint={st.get('value')}")
-            if st.get("target_name"):
-                bits.append(f"name={st.get('target_name')}")
-            if bits:
-                hint = " [" + "; ".join(bits) + "]"
-        line = f"{order}. {desc}{hint}"
-        if exp:
-            line += f"\n   EXPECT: {exp}"
-        lines.append(line)
-    if pre:
-        lines.append(
-            "STRATEGY:\n"
-            "- Prefer snapshot refs for click/fill; use slow type for filter inputs.\n"
-            "- For tree select: open → filter → click exact .el-tree-node__label "
-            "(evaluate JS click is OK when refs fail).\n"
-            "- Work inside the precondition dialog/page; do not dismiss it.\n"
-            "- When a click is intercepted by the dialog, re-pick a ref that is "
-            "clearly inside the dialog (dialog/alertdialog subtree), not the page behind."
-        )
-    else:
-        lines.append(
-            "STRATEGY:\n"
-            "- Prefer snapshot refs for click/fill; use slow type for filter inputs.\n"
-            "- For tree select: open → filter → click exact .el-tree-node__label "
-            "(evaluate JS click is OK when refs fail).\n"
-            "- When an overlay is not visible in the snapshot, use a short evaluate "
-            "that precisely clicks (.el-dialog__headerbtn / 关闭 button / [class*=close]), "
-            "or rely on a DOM PROBE RESULT when the system already probed.\n"
-            "- Do not status=done until overlays are gone. "
-            "evaluate that only 'verifies' without .click() does not count."
-        )
-    return "\n".join(lines)
-
-_REF_WRAPPER_RE = re.compile(
-    r"^\s*(?:\[ref=|ref=)([a-zA-Z]*\d*e\d+)\]?\s*$",
-    re.I,
-)
-
-
-def normalize_goal_selector(selector: str | None) -> Optional[str]:
-    """Normalize LLM selectors for MCP: ``[ref=e12]`` / ``ref=e12`` → ``e12``."""
-    if selector is None:
-        return None
-    s = str(selector).strip()
-    if not s:
-        return ""
-    m = _REF_WRAPPER_RE.fullmatch(s)
-    if m:
-        return m.group(1)
-    # Also accept accidental quotes: "e12" / 'f4e135'
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("\"", "'"):
-        return normalize_goal_selector(s[1:-1])
-    from core.locator_candidates import extract_ref_token
-    return extract_ref_token(s)
-
-
-def _parse_goal_action(raw: str) -> GoalAction:
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        m = _JSON_RE.search(text)
-        if not m:
-            raise ValueError(f"LLM did not return JSON: {text[:200]}")
-        data = json.loads(m.group(0))
-    if not isinstance(data, dict):
-        raise ValueError("LLM JSON root must be object")
-    status = str(data.get("status") or "continue").strip().lower()
-    if status not in ("continue", "done", "fail"):
-        # allow implicit done via action
-        if str(data.get("action") or "").lower() == "done":
-            status = "done"
-        else:
-            status = "continue"
-    sel = None
-    selected_ref = data.get("candidate_ref") or data.get("selector")
-    if selected_ref is not None:
-        sel = normalize_goal_selector(str(selected_ref))
-    return GoalAction(
-        status=status,
-        thinking=str(data.get("thinking") or data.get("reason") or ""),
-        action=str(data.get("action") or "").strip(),
-        selector=sel,
-        snapshot_version=(
-            str(data["snapshot_version"])
-            if data.get("snapshot_version")
-            else None
-        ),
-        confidence=(
-            float(data["confidence"])
-            if data.get("confidence") is not None
-            else None
-        ),
-        value=(str(data["value"]) if data.get("value") is not None else None),
-        stable_hint=(str(data["stable_hint"]) if data.get("stable_hint") else None),
-        checklist_index=parse_checklist_index(
-            data.get("checklist_note"),
-            explicit=data.get("checklist_index"),
-        ),
-        checklist_note=(str(data["checklist_note"]) if data.get("checklist_note") else None),
-        reason=(str(data["reason"]) if data.get("reason") else None),
-    )
-
-
-def is_locator_decision_error(error: str | None) -> bool:
-    """Identify a decision rejected by the current snapshot candidate set."""
-    return bool(error and "invalid locator decision" in error)
-
-
-def _extract_goal_message_text(message) -> str:
-    """提取执行决策的最终 JSON 文本，兼容 Qwen3 响应字段。"""
-    content = getattr(message, "content", None)
-    if isinstance(content, str) and content.strip():
-        return content.strip()
-    if isinstance(content, list):
-        parts = [
-            item.get("text", "").strip()
-            for item in content
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        ]
-        if any(parts):
-            return "\n".join(part for part in parts if part)
-    for field in ("reasoning_content", "reasoning", "thinking"):
-        value = getattr(message, field, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
 _CLOSE_MESSAGES_STEP_RE = re.compile(
     r"关闭.*(?:消息|通知|弹窗|对话框|按钮)|消息的关闭|关闭按钮|所有出现的消息",
     re.I,
@@ -377,6 +61,11 @@ _SELECT_STEP_RE = re.compile(r"选择|选中|\bselect\b", re.I)
 _PRESS_KEY_STEP_RE = re.compile(
     r"按键|快捷键|\bESC\b|\bEnter\b|回车键?|空格键|按下.+键"
     r"|按\s*(?:ESC|Enter|回车|空格|Tab|删除|退格|方向|上下|F\d+)",
+    re.I,
+)
+_WAIT_ASSERT_STEP_RE = re.compile(
+    r"等待|断言|出现文本|文本出现|包含文本|可见文本|"
+    r"\bassert(?:_text)?\b|\bwait(?:_for)?\b|expect.*text",
     re.I,
 )
 
@@ -418,6 +107,37 @@ def is_press_key_checklist_step(description: str | None) -> bool:
     if not description:
         return False
     return bool(_PRESS_KEY_STEP_RE.search(description.strip()))
+
+
+def is_wait_assert_checklist_step(description: str | None) -> bool:
+    """True for checklist items whose primary intent is wait/assert text."""
+    if not description:
+        return False
+    desc = description.strip()
+    if is_click_checklist_step(desc) or is_fill_checklist_step(desc):
+        return False
+    if is_close_messages_checklist_step(desc) or is_press_key_checklist_step(desc):
+        return False
+    return bool(_WAIT_ASSERT_STEP_RE.search(desc))
+
+
+def _wait_value_covers_assert_step(entry: dict[str, Any], desc: str) -> bool:
+    """wait/assert 的 value 必须对应步骤里的期望文本；纯秒数等待不得冒充文本断言。"""
+    value = str(entry.get("value") or "").strip()
+    if not value:
+        return False
+    # 纯时间等待：仅覆盖「等待 N 秒」且步骤不含期望文本
+    if value.replace(".", "", 1).isdigit():
+        if re.search(r"出现|文本|包含|断言|assert|\btext\b", desc, re.I):
+            return False
+        return bool(re.search(r"等待|wait", desc, re.I))
+    # 文本等待：value 须出现在步骤描述中（或步骤摘出的引号/【】片段等于 value）
+    if value in desc:
+        return True
+    for m in re.finditer(r"[「【\"']([^」】\"']+)[」】\"']", desc):
+        if value == m.group(1).strip() or m.group(1).strip() in value:
+            return True
+    return False
 
 
 def _evaluate_is_real_close_action(entry: dict[str, Any]) -> bool:
@@ -544,7 +264,13 @@ def journal_entry_covers_checklist(
             "browser_click",
         )
 
-    if action in ("wait", "screenshot"):
+    # wait/assert 只能覆盖等待/断言类步骤，且 value 必须对齐期望文本
+    if action in ("wait", "assert_text", "browser_wait_for"):
+        if not desc or not is_wait_assert_checklist_step(desc):
+            return False
+        return _wait_value_covers_assert_step(entry, desc)
+
+    if action == "screenshot":
         return False
 
     if is_click_checklist_step(desc):
@@ -573,6 +299,10 @@ def journal_entry_covers_checklist(
             return True
         if action in ("evaluate", "browser_evaluate", "js", "eval"):
             return _evaluate_is_real_click_action(entry)
+        return False
+
+    # 等待/断言步骤只接受 wait/assert 动作（上文已处理）；其它动作不得冒充
+    if is_wait_assert_checklist_step(desc):
         return False
 
     return True
@@ -667,410 +397,3 @@ def seed_open_steps_after_navigation(
             }
         )
     return seeded
-
-
-async def decide_next_goal_action(
-    *,
-    client: AsyncOpenAI,
-    model: str,
-    goal_text: str,
-    snapshot: str,
-    journal_tail: list[dict[str, Any]],
-    temperature: float = 0.15,
-    steps: list[dict[str, Any]] | None = None,
-    probe_result: str | None = None,
-    last_action_error: str | None = None,
-    max_output_tokens: int | None = None,
-    system_prompt: str | None = None,
-    candidates: tuple[LocatorCandidate, ...] = (),
-    snapshot_version: str | None = None,
-) -> GoalAction:
-    """Ask LLM for the next GoalAction given goal + snapshot + recent journal.
-
-    ``probe_result`` (from :func:`build_probe_summary`) is injected into the
-    user message when the previous action failed and the system auto-probed.
-    ``last_action_error`` carries the raw error text of that failed action.
-
-    ``system_prompt`` is the configured role context from the active execution
-    Agent (prompt_overrides / system_prompt). It is APPENDED after
-    ``GOAL_SYSTEM_PROMPT`` by :func:`compose_goal_system_prompt` — the JSON
-    contract block is never replaced.
-    """
-    recent = journal_tail[-8:] if journal_tail else []
-    last_fail = ""
-    if recent and not recent[-1].get("success"):
-        last_fail = (
-            f"\nLAST ACTION FAILED — recover with a different approach "
-            f"(other ref, evaluate for exact tree label, or close overlay first):\n"
-            f"{json.dumps(recent[-1], ensure_ascii=False)}\n"
-        )
-    error_block = ""
-    if last_action_error:
-        error_block = f"\nLAST ACTION ERROR: {last_action_error}\n"
-    probe_block = ""
-    if probe_result:
-        probe_block = (
-            "\nDOM PROBE RESULT（上一动作失败后自动探查）:\n"
-            f"{probe_result}\n"
-            "优先使用 probe 给的可复用定位符/候选文本写 evaluate 或改用新 ref；"
-            "不要重复刚才失败的动作。\n"
-        )
-    uncovered = uncovered_checklist_orders(steps, journal_tail) if steps is not None else []
-    uncovered_block = ""
-    if steps is not None:
-        if uncovered:
-            uncovered_block = (
-                f"\nUNCOVERED CHECKLIST (must execute before status=done): {uncovered}\n"
-                "Do NOT status=done while this list is non-empty. "
-                "Close/dismiss message or dialog items require real click actions.\n"
-            )
-        else:
-            uncovered_block = (
-                "\nUNCOVERED CHECKLIST: [] — all checklist items covered; "
-                "status=done is allowed if the page goal is satisfied.\n"
-            )
-    user = (
-        f"{goal_text}\n\n"
-        f"RECENT ACTIONS (oldest→newest):\n"
-        f"{json.dumps(recent, ensure_ascii=False, indent=2)}\n"
-        f"{last_fail}"
-        f"{error_block}"
-        f"{probe_block}"
-        f"{uncovered_block}\n"
-        f"CURRENT ACCESSIBILITY SNAPSHOT:\n"
-        f"{(snapshot or '(empty)')[:120000]}\n\n"
-        f"CURRENT SNAPSHOT VERSION: {snapshot_version or '(unknown)'}\n"
-        f"VISIBLE OVERLAY PRESENT: {'yes' if snapshot_has_visible_overlay(snapshot) else 'no'}\n"
-        "CANDIDATE ELEMENTS (choose candidate_ref only from this list):\n"
-        f"{serialize_candidates(candidates) or '(none)'}\n"
-        "candidate_ref MUST be the bare ref token after 'ref=' (e.g. f3e24); "
-        "never paste the whole candidate line.\n\n"
-        "Decide the next single action JSON now."
-    )
-    messages = [
-        {"role": "system", "content": compose_goal_system_prompt(system_prompt)},
-        {"role": "user", "content": user},
-    ]
-    last_err: Optional[str] = None
-    last_err_is_output = False
-    for attempt in range(GOAL_DECIDE_ATTEMPTS):
-        if attempt and last_err:
-            if last_err_is_output:
-                # 输出格式/校验失败：追加纠正提示再问一次
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"Previous output invalid: {last_err}. Output ONLY valid JSON.",
-                    }
-                )
-            else:
-                # 传输层失败（连接错误/超时/空响应）：立即重发同一请求毫无意义，
-                # 而且把 "Previous output invalid" 塞进提示词会误导模型。
-                # 退避后再试，命中瞬时网络抖动时可救回整个用例。
-                await asyncio.sleep(GOAL_DECIDE_BACKOFF_SECONDS * attempt)
-        try:
-            # chat_template_kwargs 是 vLLM 私有扩展：只发给认它的服务端，
-            # 按 api_base 判定（Google 等外部端点收到未知字段会 400）。
-            from core.thinking_config import _provider_ignores_thinking_options
-            _base = str(getattr(client, "base_url", "") or "")
-            think_body = (
-                None
-                if _provider_ignores_thinking_options(model, _base)
-                else {"chat_template_kwargs": {"enable_thinking": True}}
-            )
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_output_tokens or 16384,
-                **({"extra_body": think_body} if think_body else {}),
-            )
-            content = _extract_goal_message_text(resp.choices[0].message)
-            decision = _parse_goal_action(content)
-            if candidates and selector_needs_candidate_check(decision.selector):
-                validation = validate_candidate_ref(
-                    decision.selector,
-                    snapshot_version=snapshot_version or "",
-                    decision_version=decision.snapshot_version,
-                    candidates=tuple(candidates),
-                )
-                if not validation.valid:
-                    valid_refs = ",".join(c.ref for c in candidates[:20])
-                    raise ValueError(
-                        f"invalid locator decision: {validation.failure_kind}. "
-                        f"Valid refs: {valid_refs or '(none)'}"
-                    )
-            return decision
-        except Exception as exc:
-            last_err = str(exc)
-            # 输出类问题（JSON 解析失败 / 候选 ref 校验不过）值得追加纠正提示；
-            # 其余（连接错误、超时、空 choices）属于传输层，只退避重试。
-            last_err_is_output = isinstance(exc, ValueError)
-            logger.warning("decide_next_goal_action attempt %s failed: %s", attempt + 1, exc)
-    raise ValueError(f"decide_next_goal_action failed: {last_err}")
-
-
-def journal_entry(
-    *,
-    turn: int,
-    decision: GoalAction,
-    success: bool,
-    error: str | None = None,
-    duration_ms: float = 0,
-    result_snippet: str | None = None,
-    screenshot_on_fail: bool = False,
-    screenshot_path: str | None = None,
-    replay: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    idx = parse_checklist_index(
-        decision.checklist_note,
-        explicit=decision.checklist_index,
-    )
-    out: dict[str, Any] = {
-        "turn": turn,
-        "status": decision.status,
-        "thinking": decision.thinking,
-        "action": decision.action,
-        "selector": decision.selector,
-        "value": decision.value,
-        "stable_hint": decision.stable_hint,
-        "checklist_index": idx,
-        "checklist_note": decision.checklist_note,
-        "success": success,
-        "error": error,
-        "duration_ms": duration_ms,
-        "result_snippet": (result_snippet or "")[:500] or None,
-        "screenshot_on_fail": bool(screenshot_on_fail),
-        "screenshot_path": screenshot_path,
-    }
-    if replay:
-        out["replay"] = replay
-    return out
-
-
-def detect_stagnation(journal: list[dict[str, Any]], limit: int = STAGNATION_LIMIT) -> bool:
-    """True when the last ``limit`` turns are ALL failures with ≤2 distinct actions.
-
-    成功轮不计入停滞（成功动作即使重复也不算卡死：是否推进由清单覆盖度与
-    最大轮次兜底判定），只统计失败的 turn。
-    """
-    if len(journal) < limit:
-        return False
-    tail = journal[-limit:]
-    if not all(not e.get("success") for e in tail):
-        return False
-    keys = [
-        (e.get("action"), e.get("selector"), e.get("value"))
-        for e in tail
-    ]
-    return len(set(keys)) <= 2
-
-
-def tool_call_from_decision(decision: GoalAction) -> dict[str, Any]:
-    """Map GoalAction → STEP_EXECUTE tool_call dict."""
-    action = (decision.action or "").strip().lower()
-    if action in ("browser_click",):
-        action = "click"
-    elif action in ("browser_type", "type"):
-        action = "fill"
-    elif action in ("browser_navigate", "navigate"):
-        action = "goto"
-    elif action in ("browser_evaluate", "js", "eval"):
-        action = "evaluate"
-    elif action in ("browser_press_key",):
-        action = "press_key"
-    elif action in ("browser_hover",):
-        action = "hover"
-    elif action in ("browser_select_option",):
-        action = "select"
-    selector = normalize_goal_selector(decision.selector) or ""
-    return {
-        "action": action,
-        "selector": selector,
-        "value": decision.value,
-        "selector_type": "css",
-        "thinking": decision.thinking,
-        "timeout_ms": 30000,
-    }
-
-
-def steps_results_from_goal(
-    steps: list[dict[str, Any]],
-    *,
-    success: bool,
-    journal: list[dict[str, Any]],
-    error: str | None = None,
-    backend: str = "nl_goal",
-) -> list[dict[str, Any]]:
-    """Map journal checklist progress onto per-step report rows.
-
-    When success=True (goal marked done):
-      - Only checklist indices successfully covered in journal → passed
-      - Never-covered checklist steps → failed
-        (error: "nl_goal marked done but step N was not executed")
-      Never treat DONE as "all steps passed".
-
-    When success=False:
-      - Only journal-covered checklist steps → passed (never fake-pass
-        earlier uncovered steps just because fail_order is later)
-      - Earliest unrecovered failed checklist item → failed (+ screenshot)
-      - Uncovered steps before the fail cursor → failed ("was not executed")
-      - If no explicit fail (e.g. max_turns): fail the first uncovered step
-        (not max_progress+1, so gaps like covered={1..7,9} fail step 8 with shot)
-      - Remaining later steps → skipped
-    """
-    orders = checklist_orders(steps)
-    by_order = {
-        int(s.get("step_order") or s.get("step_number") or i + 1): s
-        for i, s in enumerate(steps or [])
-    }
-    if not orders:
-        return []
-
-    covered: set[int] = set()
-    fail_order: int | None = None
-    fail_error: str | None = None
-    fail_shot: str | None = None
-    fail_candidates: list[tuple[int, str | None, str | None]] = []
-
-    for e in journal or []:
-        idx = parse_checklist_index(
-            e.get("checklist_note"),
-            explicit=e.get("checklist_index"),
-        )
-        if idx is None:
-            continue
-        step_rec = by_order.get(idx) or {}
-        desc = str(
-            step_rec.get("description")
-            or step_rec.get("original_description")
-            or ""
-        )
-        if journal_entry_covers_checklist(e, step_description=desc):
-            covered.add(idx)
-        elif not e.get("success"):
-            fail_candidates.append(
-                (idx, e.get("error") or error, e.get("screenshot_path"))
-            )
-
-    # Earliest failure that was NOT later recovered by a successful cover.
-    # A failure whose checklist item got covered afterwards is not a real fail.
-    unrecovered = [f for f in fail_candidates if f[0] not in covered]
-    if unrecovered:
-        fail_order, fail_error, fail_shot = min(unrecovered, key=lambda f: f[0])
-    else:
-        fail_order = None
-
-    # Prefer last journal screenshot (incl. nl_goal_final_fail.png)
-    last_journal_shot: str | None = None
-    for e in reversed(journal or []):
-        if e.get("screenshot_path"):
-            last_journal_shot = e["screenshot_path"]
-            break
-
-    # DONE / success=True: journal-truthful — never fake-pass uncovered steps
-    if success:
-        first_uncovered = next((o for o in orders if o not in covered), None)
-        results: list[dict[str, Any]] = []
-        for o in orders:
-            s = by_order.get(o) or {}
-            desc = s.get("description") or s.get("original_description") or ""
-            if o in covered:
-                st, ok, err, shot = "passed", True, None, None
-            else:
-                st, ok, err, shot = (
-                    "failed",
-                    False,
-                    f"nl_goal marked done but step {o} was not executed",
-                    last_journal_shot if o == first_uncovered else None,
-                )
-            results.append(
-                {
-                    "step_number": o,
-                    "original_description": desc,
-                    "success": ok,
-                    "status": st,
-                    "thinking": "nl_goal",
-                    "action": "nl_goal",
-                    "next_goal": "",
-                    "error": err,
-                    "screenshot_path": shot,
-                    "duration_ms": 0,
-                    "backend": backend,
-                }
-            )
-        if results and journal:
-            results[0]["action_journal"] = journal
-            results[0]["duration_ms"] = sum(
-                float(e.get("duration_ms") or 0) for e in journal
-            )
-        return results
-
-    if fail_order is None:
-        # Prefer the first uncovered checklist item (not max_progress+1).
-        # Gaps like covered={1..7,9} with 8 missing must fail step 8 with a screenshot.
-        fail_order = next((o for o in orders if o not in covered), None)
-        if fail_order is None:
-            fail_order = orders[-1] if orders else None
-        fail_error = error or "nl_goal failed"
-
-    # Final fail capture (journal tail) wins over mid-turn action shots
-    if last_journal_shot:
-        fail_shot = last_journal_shot
-
-    # Attach shot to primary fail step (fail_order if uncovered, else first uncovered)
-    shot_step = (
-        fail_order
-        if fail_order is not None and fail_order not in covered
-        else next((o for o in orders if o not in covered), fail_order)
-    )
-
-    results = []
-    for o in orders:
-        s = by_order.get(o) or {}
-        desc = s.get("description") or s.get("original_description") or ""
-        if fail_order is not None and o > fail_order:
-            st, ok, err, shot = (
-                "skipped",
-                False,
-                f"Skipped due to step {fail_order} failure",
-                None,
-            )
-        elif o in covered:
-            # Journal-covered only — never assume earlier steps passed
-            st, ok, err, shot = "passed", True, None, None
-        elif fail_order is not None and o == fail_order:
-            st, ok, err, shot = (
-                "failed",
-                False,
-                fail_error or error or "nl_goal failed",
-                fail_shot if shot_step == o else None,
-            )
-        else:
-            # Uncovered and at/before fail cursor → not executed
-            st, ok, err, shot = (
-                "failed",
-                False,
-                f"nl_goal step {o} was not executed",
-                fail_shot if shot_step == o else None,
-            )
-        results.append(
-            {
-                "step_number": o,
-                "original_description": desc,
-                "success": ok,
-                "status": st,
-                "thinking": "nl_goal",
-                "action": "nl_goal",
-                "next_goal": "",
-                "error": err,
-                "screenshot_path": shot,
-                "duration_ms": 0,
-                "backend": backend,
-            }
-        )
-
-    if results and journal:
-        results[0]["action_journal"] = journal
-        results[0]["duration_ms"] = sum(float(e.get("duration_ms") or 0) for e in journal)
-    return results

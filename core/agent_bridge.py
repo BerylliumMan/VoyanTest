@@ -22,6 +22,14 @@ from app.db_models import AgentRun
 from app.runtime_config import resolve_prompt_for_agent
 from app.tz import now as tz_now
 from core.llm_wrapper import create_openai_client, generate_tool_call
+from core.ota_cursor import (
+    OTA_CURSOR_SYSTEM_PROMPT,
+    bridge_click_xy_act,
+    bridge_evaluate_act,
+    find_candidate,
+    parse_bbox_center_from_text,
+    should_capture_screenshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +130,8 @@ class AgentBridge:
         self._reuse_browser_session = bool((goal or {}).get("reuse_browser_session"))
         self._screenshot_dir: str | None = None
         self._screenshot_paths: dict[str, str] = {}
+        self._active_agent_id: str | None = None
+        self._active_run_id_str: str | None = None
         self._batch_id: int | None = existing_batch_id
 
         # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
@@ -184,18 +194,32 @@ class AgentBridge:
             logger.exception("Bridge report save failed for run #%d", run.id)
 
         # 跑成功 → 固化脚本（下次执行优先回放）；合成失败不影响本次结果
+        # 门禁：checklist 全覆盖且 journal 非空，避免 LLM 空口 done 后幻觉固化
         if run.status in ("completed", "passed"):
-            try:
-                await self._synthesize_compiled_script(run, case_id)
-            except Exception:
-                logger.warning(
-                    "Bridge: compiled_script synthesis failed case=%s", case_id, exc_info=True,
+            needed = self._ordered_step_numbers()
+            covered = len(self._journal_covered)
+            if needed and covered < len(needed):
+                logger.info(
+                    "Bridge: skip synthesis case=%s (covered %s/%s steps)",
+                    case_id, covered, len(needed),
                 )
+            elif not self._journal:
+                logger.info(
+                    "Bridge: skip synthesis case=%s (empty journal)", case_id,
+                )
+            else:
+                try:
+                    await self._synthesize_compiled_script(run, case_id)
+                except Exception:
+                    logger.warning(
+                        "Bridge: compiled_script synthesis failed case=%s",
+                        case_id, exc_info=True,
+                    )
 
         return run
 
     def _save_screenshot(self, b64_data: str | None, name: str) -> str | None:
-        """将 base64 截图保存到文件，返回文件路径。"""
+        """将 base64 截图保存到文件，返回可供报告页访问的相对路径。"""
         if not b64_data or not self._screenshot_dir:
             return None
         try:
@@ -205,10 +229,40 @@ class AgentBridge:
                 b64_data = b64_data.split(",", 1)[1]
             with open(path, "wb") as f:
                 f.write(base64.b64decode(b64_data))
-            self._screenshot_paths[name] = path
-            return path
+            web_path = path.replace("\\", "/")
+            self._screenshot_paths[name] = web_path
+            return web_path
         except Exception:
             return None
+
+    def _last_screenshot_path(self) -> str | None:
+        """失败报告用：优先取 failure/nav 专用图，否则最近一张。"""
+        if not self._screenshot_paths:
+            return None
+        for key in ("failure_final", "nav_fail", "nav_initial"):
+            if key in self._screenshot_paths:
+                return self._screenshot_paths[key]
+        last_key = sorted(self._screenshot_paths.keys())[-1]
+        return self._screenshot_paths[last_key]
+
+    async def _capture_failure_screenshot(
+        self, agent_id: str, run_id_str: str, name: str = "failure_final",
+    ) -> str | None:
+        """失败终止前强制 observe+截图，保证报告有现场图。"""
+        try:
+            obs = await asyncio.wait_for(
+                self.agent_manager.send_observe(
+                    agent_id, run_id_str, want_screenshot=True,
+                ),
+                timeout=30,
+            )
+            if isinstance(obs, dict):
+                return self._save_screenshot(obs.get("screenshot_b64"), name)
+        except Exception:
+            logger.debug(
+                "Bridge failure screenshot capture skipped (%s)", name, exc_info=True,
+            )
+        return None
 
     async def _create_batch(self, run: AgentRun, case_id: int) -> None:
         """执行前创建 RunBatch，标记为 running。仅当未指定 existing_batch_id 时创建。"""
@@ -293,7 +347,8 @@ class AgentBridge:
                 ss_path = None
                 if tc.success != 1:
                     ss_path = self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_observe") \
-                        or self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_act")
+                        or self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_act") \
+                        or self._last_screenshot_path()
                 logs.append({
                     "step_id": None,
                     "level": level,
@@ -306,10 +361,30 @@ class AgentBridge:
         if self._replay_logs:
             logs = list(self._replay_logs)
 
-        # 无工具调用但失败时，写一条错误日志
+        last_shot = self._last_screenshot_path()
+        # 无工具调用但失败时，写一条错误日志（挂上失败现场截图）
         if not logs and run.status in ("failed", "error"):
             err_msg = run.error or "执行失败，无详细步骤记录"
-            logs.append({"step_id": None, "level": "error", "message": err_msg, "screenshot_path": None})
+            logs.append({
+                "step_id": None,
+                "level": "error",
+                "message": err_msg,
+                "screenshot_path": last_shot,
+            })
+        # 失败跑且没有任何步骤带图 → 挂到最后一条 error（或追加）
+        elif run.status in ("failed", "error") and last_shot:
+            if not any(l.get("screenshot_path") for l in logs):
+                for l in reversed(logs):
+                    if l.get("level") == "error":
+                        l["screenshot_path"] = last_shot
+                        break
+                else:
+                    logs.append({
+                        "step_id": None,
+                        "level": "error",
+                        "message": run.error or "执行失败",
+                        "screenshot_path": last_shot,
+                    })
 
         # 调用 save_run_results 创建 TestRun
         await save_run_results(
@@ -569,6 +644,15 @@ class AgentBridge:
 
     async def _fail(self, run_id: int, error: str) -> None:
         """标记 run 为 failed；并同步预创建的非终态 TestRun。"""
+        # 终止前尽量补一张现场图（导航失败 / 熔断时常没有 turn 截图）
+        if (
+            self._active_agent_id
+            and self._active_run_id_str
+            and not self._last_screenshot_path()
+        ):
+            await self._capture_failure_screenshot(
+                self._active_agent_id, self._active_run_id_str, name="failure_final",
+            )
         await crud_agent_run.update_agent_run_status(
             self.db, run_id, "failed", error=error,
         )
@@ -636,6 +720,8 @@ class AgentBridge:
         _decision_fails = 0
         successful_acts = 0
         assertion_passed = False
+        self._active_agent_id = agent_id
+        self._active_run_id_str = run_id_str
 
         # 加载测试用例步骤 + 环境 base_url，作为 LLM 上下文
         case_steps: list[str] = []
@@ -722,15 +808,25 @@ class AgentBridge:
                 self._save_screenshot(nav_result.get("screenshot_b64"), "nav_initial")
                 if nav_result.get("success"):
                     logger.info("Bridge: navigation successful")
+                    # 初始导航计入 checklist（打开步骤），否则 LLM 易空口 done
+                    self._collect_journal_entry(nav_act, turn=0)
                 else:
                     reason = nav_result.get("error") or "unknown"
                     msg = f"导航失败，已停止执行: {case_url} — {reason}"
                     logger.error("Bridge: %s", msg)
+                    # 导航失败时常无 screenshot_b64（DNS 错误等）——强制再截一帧挂报告
+                    if not self._screenshot_paths.get("nav_initial"):
+                        await self._capture_failure_screenshot(
+                            agent_id, run_id_str, name="nav_fail",
+                        )
                     await self._fail(run.id, msg)
                     return
             except Exception as e:
                 msg = f"导航失败，已停止执行: {case_url} — {e}"
                 logger.error("Bridge: %s", msg)
+                await self._capture_failure_screenshot(
+                    agent_id, run_id_str, name="nav_fail",
+                )
                 await self._fail(run.id, msg)
                 return
 
@@ -754,15 +850,18 @@ class AgentBridge:
                 failed_turns + 1, max_failed_turns, turn, max_total_turns, run.id,
             )
 
-            # ── 1. Observe: WS 取快照 ──
+            # ── 1. Observe: WS 取快照（失败轮/困难页按需截图）──
             if carried_obs is not None:
                 obs = carried_obs
                 carried_obs = None
                 logger.debug("Bridge reusing post-act snapshot (turn %d)", turn)
             else:
+                want_shot = failed_turns > 0
                 try:
                     obs = await asyncio.wait_for(
-                        self.agent_manager.send_observe(agent_id, run_id_str),
+                        self.agent_manager.send_observe(
+                            agent_id, run_id_str, want_screenshot=want_shot,
+                        ),
                         timeout=60,
                     )
                 except asyncio.TimeoutError:
@@ -787,6 +886,25 @@ class AgentBridge:
             consecutive_failures = 0
             snapshot = obs.get("snapshot", "")
             page_url = obs.get("page_url", "")
+
+            # 困难页且尚未带图：补一次截图 observe
+            if (
+                not (obs.get("screenshot_b64") or "").strip()
+                and should_capture_screenshot(snapshot, consecutive_failures=failed_turns)
+            ):
+                try:
+                    obs_shot = await asyncio.wait_for(
+                        self.agent_manager.send_observe(
+                            agent_id, run_id_str, want_screenshot=True,
+                        ),
+                        timeout=60,
+                    )
+                    if obs_shot.get("success") and obs_shot.get("screenshot_b64"):
+                        obs = obs_shot
+                        snapshot = obs.get("snapshot", "") or snapshot
+                        page_url = obs.get("page_url", "") or page_url
+                except Exception:
+                    logger.debug("Bridge supplemental screenshot observe skipped", exc_info=True)
 
             # 保存观察截图
             self._save_screenshot(obs.get("screenshot_b64"), f"turn_{turn:02d}_observe")
@@ -814,6 +932,7 @@ class AgentBridge:
                 case_steps=case_steps,
                 case_url=case_url,
                 close_refs=_close_refs if _has_close_step else (),
+                screenshot_b64=obs.get("screenshot_b64") or None,
             )
 
             if action is None:
@@ -853,6 +972,29 @@ class AgentBridge:
                         "content": (
                             "SYSTEM: 页面仍有可见关闭控件，CLOSE_MESSAGES "
                             "步骤未完成，不得 done，继续关闭。"
+                        ),
+                    })
+                    continue
+                # 引擎门禁：有用例步骤时必须 journal 全覆盖，禁止 LLM 空口 done
+                if case_steps and len(self._journal_covered) < len(case_steps):
+                    _missed = [
+                        o for o in self._ordered_step_numbers()
+                        if o not in self._journal_covered
+                    ]
+                    failed_turns += 1
+                    logger.info(
+                        "Bridge refusing premature done: uncovered steps %s "
+                        "(covered %s/%s, run #%d turn %d)",
+                        _missed, len(self._journal_covered), len(case_steps),
+                        run.id, turn,
+                    )
+                    context_messages.append({
+                        "role": "assistant",
+                        "content": (
+                            "SYSTEM: 仍有未完成的测试步骤 "
+                            f"{_missed}，不得返回 done。"
+                            "必须用工具真正执行剩余步骤；"
+                            "若无法完成请返回 action=error。"
                         ),
                     })
                     continue
@@ -901,16 +1043,70 @@ class AgentBridge:
                 logger.exception("Act error at turn %d", turn)
                 result = {"success": False, "error": str(exc)}
 
-            # ── 3b. Act 失败恢复（025-ref-click US3：stale/hallucinated ref 刷新重试）──
-            if not result.get("success") and retries_used < 1:
+            # ── 3b. Act 失败恢复：Cursor click_xy 兜底 + stale ref 刷新 ──
+            if not result.get("success"):
                 error = result.get("error", "") or ""
+                from core.locator_candidates import (
+                    actionable_candidates,
+                    extract_candidates,
+                    is_snapshot_ref,
+                )
                 from core.self_healing import build_failure_hint, is_stale_ref_error
 
-                if is_stale_ref_error(error):
+                # bbox→click_xy once when ref click misses
+                _act_name = str(action.get("name", action.get("action", "")) or "").lower()
+                _sel = (action.get("args") or {}).get("selector")
+                if _act_name in ("click", "double_click", "right_click", "check", "hover") and is_snapshot_ref(_sel):
+                    try:
+                        cands = actionable_candidates(extract_candidates(snapshot or ""))
+                        cand = find_candidate(cands, _sel)
+                        role = getattr(cand, "role", None) if cand else "button"
+                        name = getattr(cand, "name", None) if cand else (
+                            (action.get("args") or {}).get("element_desc")
+                        )
+                        eval_act = bridge_evaluate_act(role, name)
+                        if eval_act is not None:
+                            bbox_res = await asyncio.wait_for(
+                                self.agent_manager.send_act(agent_id, run_id_str, eval_act),
+                                timeout=30,
+                            )
+                            center = parse_bbox_center_from_text(
+                                (bbox_res or {}).get("text")
+                                or (bbox_res or {}).get("error")
+                                or ""
+                            )
+                            if center is None and isinstance(bbox_res, dict):
+                                # some clients put evaluate return in message/result
+                                center = parse_bbox_center_from_text(
+                                    str(bbox_res.get("result") or bbox_res.get("value") or "")
+                                )
+                            if center is not None:
+                                xy_act = bridge_click_xy_act(
+                                    center[0], center[1],
+                                    thinking=f"ref click failed; click_xy for {_sel}",
+                                )
+                                result = await asyncio.wait_for(
+                                    self.agent_manager.send_act(agent_id, run_id_str, xy_act),
+                                    timeout=120,
+                                )
+                                if result.get("success"):
+                                    action = xy_act
+                                logger.info(
+                                    "Bridge click_xy fallback (turn %d): %s success=%s",
+                                    turn, center, result.get("success"),
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            "Bridge click_xy fallback failed (turn %d): %s", turn, exc,
+                        )
+
+                if not result.get("success") and retries_used < 1 and is_stale_ref_error(error):
                     retries_used += 1
                     try:
                         obs_retry = await asyncio.wait_for(
-                            self.agent_manager.send_observe(agent_id, run_id_str),
+                            self.agent_manager.send_observe(
+                                agent_id, run_id_str, want_screenshot=True,
+                            ),
                             timeout=60,
                         )
                         retry_action = await self._llm_decide(
@@ -923,6 +1119,7 @@ class AgentBridge:
                             case_steps=case_steps,
                             case_url=case_url,
                             extra_hint=build_failure_hint(error),
+                            screenshot_b64=obs_retry.get("screenshot_b64") or None,
                         )
                         if (
                             isinstance(retry_action, dict)
@@ -1056,8 +1253,9 @@ class AgentBridge:
         case_url: str = "",
         extra_hint: str = "",
         close_refs: tuple = (),
+        screenshot_b64: str | None = None,
     ) -> dict[str, Any] | None:
-        """LLM 决策：根据当前页面状态和上下文决定下一步操作。
+        """LLM 决策：Cursor 契约 + 可选截图视觉。
 
         Returns:
             dict with "name"/"args" keys for normal actions,
@@ -1065,18 +1263,24 @@ class AgentBridge:
             dict with "_error": True for agent error signal,
             None if LLM call failed (skip turn).
         """
-        # 解析 Agent 特定系统提示词
-        system_prompt = await resolve_prompt_for_agent(
+        # Cursor 动作契约为主；Agent 角色上下文仅作补充，不得冲掉动作表
+        role_ctx = await resolve_prompt_for_agent(
             self.db, "execution", "step_execute",
             variables={"goal": goal, "snapshot": snapshot},
         )
+        system_prompt = OTA_CURSOR_SYSTEM_PROMPT
+        if (role_ctx or "").strip() and OTA_CURSOR_SYSTEM_PROMPT.strip() not in role_ctx:
+            system_prompt = (
+                f"{OTA_CURSOR_SYSTEM_PROMPT}\n\n"
+                f"--- AGENT ROLE CONTEXT ---\n{role_ctx.strip()}\n"
+                "REMINDER: the Cursor action schema above is AUTHORITATIVE."
+            )
 
         # 构建上下文历史文本（最近 5 轮 = 10 条消息）
         context_text = ""
         for msg in context_messages[-10:]:
             context_text += f"[{msg['role']}] {msg['content']}\n"
 
-        # 构建测试步骤文本
         from core.locator_candidates import (
             actionable_candidates,
             extract_candidates,
@@ -1095,7 +1299,7 @@ class AgentBridge:
         nav_instruction = ""
         if case_url and (not page_url or "about:blank" in page_url):
             nav_instruction = (
-                f"\n第一步操作：使用 browser_navigate 打开 {case_url}"
+                f"\n第一步操作：使用 goto / browser_navigate 打开 {case_url}"
             )
 
         step_description = (
@@ -1106,9 +1310,6 @@ class AgentBridge:
             f"{nav_instruction}\n\n"
             f"IMPORTANT: You MUST complete ALL test steps above before returning done. "
             f"Only return done after verifying the last step's expected result. "
-            f"After each action, call browser_snapshot or browser_take_screenshot "
-            f"to verify the result matches the expected outcome. "
-            f"If a step fails, report the error and continue to the next step. "
             f"Based on the PAGE CONTENT below, decide the SINGLE NEXT ACTION "
             f"to move towards the GOAL. "
             f"If stuck or impossible, use action='error' with explanation in value."
@@ -1116,14 +1317,18 @@ class AgentBridge:
             f"\nCANDIDATE ELEMENTS (choose selector only from this list):\n"
             f"{serialize_candidates(candidates) or '(none)'}"
         )
-        # 025-ref-click: 防止模型不信任工具结果而重复执行/无限截图
         step_description += (
             f"\n\nHARD RULES: "
             f"(a) NEVER repeat an action whose tool result was successful. "
-            f"(b) Screenshots do NOT verify anything — only wait/assert_text results count. "
+            f"(b) Prefer snapshot refs; use click_xy when a screenshot is attached "
+            f"and refs are unreliable (overlay/canvas). "
             f"(c) When HISTORY shows every test-case step has a successful tool result, "
             f"you MUST immediately return done. No exceptions."
         )
+        if screenshot_b64:
+            step_description += (
+                "\n\nA VIEWPORT SCREENSHOT is attached for this turn."
+            )
         if extra_hint:
             step_description += f"\n\nRETRY CONTEXT: {extra_hint}"
         if close_refs:
@@ -1138,9 +1343,9 @@ class AgentBridge:
                 step_description=step_description,
                 dom_snapshot=snapshot,
                 client=llm_client,
-                system_prompt=system_prompt or None,
-                agent_type="execution",
-                db=self.db,
+                system_prompt=system_prompt,
+                screenshot_b64=screenshot_b64,
+                replace_system_prompt=True,
             )
         except Exception:
             logger.exception("LLM decision failed at turn %d", turn)
@@ -1149,7 +1354,10 @@ class AgentBridge:
         tc_dict = tool_call.model_dump()
         action_name = tc_dict.get("action", "")
         selected_ref = tc_dict.get("selector")
-        if is_snapshot_ref(selected_ref):
+        act_l = (action_name or "").strip().lower()
+        if is_snapshot_ref(selected_ref) and act_l not in (
+            "click_xy", "browser_mouse_click_xy", "move_mouse", "drag_xy",
+        ):
             validation = validate_candidate_ref(
                 selected_ref,
                 snapshot_version=current_snapshot_version,
@@ -1167,6 +1375,15 @@ class AgentBridge:
                     "_error_message": f"locator rejected: {validation.failure_kind}",
                 }
 
+        # click_xy without numeric coords but with a ref → treat as normal click
+        if act_l in ("click_xy", "browser_mouse_click_xy") and is_snapshot_ref(selected_ref):
+            import re as _re
+            nums = [int(n) for n in _re.findall(r"-?\d+", tc_dict.get("value") or "")]
+            if len(nums) < 2:
+                action_name = "click"
+                act_l = "click"
+                tc_dict["action"] = "click"
+
         # 停止信号：done / error
         if action_name == "done":
             summary = tc_dict.get("value") or ""
@@ -1179,7 +1396,6 @@ class AgentBridge:
             return {"_error": True, "_error_message": err_msg}
 
         # 普通操作：将 PlaywrightMCPToolCall 映射为 send_act 期望的格式
-        # （025-ref-click: element_desc 供 MCP 权限上下文，timeout_ms 全链路透传）
         return {
             "name": action_name,
             "tool": action_name,

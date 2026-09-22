@@ -24,7 +24,7 @@ class BatchCaseIdsRequest(BaseModel):
     agent_name: Optional[str] = None
     init_case_ids: List[int] = []
     environment_id: Optional[int] = None
-    backend: Optional[str] = None  # nl_goal | compiled_script | legacy_* | browser_use
+    backend: Optional[str] = None  # ota only (legacy values normalized)
     # 列表批跑默认 before_each；用例集入口应显式传 once
     init_policy: InitPolicy = "before_each"
 

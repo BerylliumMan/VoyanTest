@@ -6,6 +6,10 @@
     2. 批量执行入口（run_batch_test_cases）— 共享浏览器 + 预创建
        pending TestRun + 统一批次跟踪
 
+UI 用例仅走 AgentRunner OTA（run_test_case_via_agent）；OTA Agent 未就绪
+（无启用工具）时明确失败，不回退 legacy MCP / browser_use。
+API 用例（case_kind=api）短路到接口执行器。
+
 DB 操作的 SQL 细节已经下沉到 core.runner._persistence（mark_run_failed
 / precreate_pending_runs / update_run_on_completion），本模块只负责
 协调浏览器/用例循环 + 批量跟踪。
@@ -20,7 +24,6 @@ from app import crud
 from app.database import AsyncSessionLocal
 
 from core.runner._api_execution import run_api_case_server
-from core.runner._execution import run_test_case_in_browser
 from core.runner._persistence import (
     build_batch_execution_queue,
     mark_run_failed,
@@ -33,6 +36,11 @@ from core.llm_wrapper import create_openai_client
 from core.agent_ota import should_use_ota_agent
 
 logger = logging.getLogger(__name__)
+
+_OTA_NOT_READY_MSG = (
+    "OTA Agent 未就绪：请配置并启用 execution AgentDefinition 的工具列表；"
+    "服务端 UI 执行已不再回退 legacy MCP / browser_use。"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +70,41 @@ async def _should_use_agent_runner(agent_def) -> bool:
     return should_use_ota_agent(agent_def)
 
 
+async def _fail_ota_unavailable(
+    case_id: int,
+    message: str,
+    *,
+    batch_id: int | None = None,
+    run_id: int | None = None,
+) -> dict:
+    """OTA 不可用时写入 failed TestRun 并返回明确失败结果。"""
+    start_time = tz_now()
+    end_time = start_time
+    logs = [{
+        "step_id": None,
+        "level": "CRITICAL",
+        "message": message,
+        "screenshot_path": None,
+    }]
+    try:
+        saved_run_id = await save_run_results(
+            case_id, "failed", start_time, end_time, 0.0,
+            None, None, logs,
+            batch_id=batch_id,
+            run_id=run_id,
+        )
+    except Exception:
+        logger.exception("写入 OTA 不可用失败记录失败 case_id=%s", case_id)
+        saved_run_id = run_id
+    return {
+        "case_id": case_id,
+        "status": "failed",
+        "error": message,
+        "run_id": saved_run_id,
+        "batch_id": batch_id,
+    }
+
+
 async def run_test_case_via_agent(
     case_id: int,
     mcp_manager,
@@ -75,11 +118,11 @@ async def run_test_case_via_agent(
 ) -> dict | None:
     """使用 AgentRunner OTA 循环执行单条测试用例。
 
-    该函数替代 run_test_case_in_browser，通过 AgentRunner 让 LLM 自主
-    规划并执行；目标描述会包含用例步骤，并写入 TestRun / 批次计数。
+    通过 AgentRunner 让 LLM 自主规划并执行；目标描述会包含用例步骤，
+    并写入 TestRun / 批次计数。
 
     Returns:
-        执行结果字典，或 None（表示 AgentRunner 路径不可用）
+        执行结果字典，或 None（表示 AgentRunner 路径不可用，调用方应明确失败）
     """
     if not await _should_use_agent_runner(agent_def):
         return None
@@ -208,15 +251,12 @@ async def run_test_case(
     run_id: int | None = None,
     backend: str | None = None,
 ):
-    """Execute a test case using LLM + Playwright MCP (npx subprocess).
+    """Execute a UI test case via AgentRunner OTA + Playwright MCP.
 
-    Backward-compatible wrapper that creates its own PlaywrightMCPManager.
+    ``backend`` 保留兼容参数，服务端 UI 路径一律走 OTA，忽略 legacy / browser_use。
     ``run_id`` 用于调试模式等已预创建 TestRun 的场景，保证 WS 广播 id 一致。
-    ``backend`` 可选覆盖运行时配置：``playwright_mcp`` | ``browser_use`` | ``hybrid``。
-    hybrid：MCP 优先；定位失败时同 CDP 挂 browser-use 救场一步（服务端与客户端一致）。
     """
     from core.browser_pool import BrowserPool
-    from core.playwright_manager import PlaywrightMCPManager
 
     project_id: int | None = None
     case_kind: str | None = None
@@ -241,7 +281,7 @@ async def run_test_case(
             except SQLAlchemyError as exc:
                 logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
 
-    # ── API 用例分发（T040）：case_kind='api' 短路到接口执行器，不走浏览器 ──
+    # ── API 用例分发：case_kind='api' 短路到接口执行器，不走浏览器 ──
     if case_kind == "api":
         return await _run_api_case_server_entry(
             case_id, batch_id, environment_id, run_id,
@@ -251,13 +291,11 @@ async def run_test_case(
         async with BrowserPool.project_lock(project_id):
             return await _run_test_case_unlocked(
                 case_id, batch_id, browser_type, headless, base_url_override,
-                debug_mode=debug_mode, run_id=run_id, backend=backend,
-                case_kind=case_kind,
+                debug_mode=debug_mode, run_id=run_id,
             )
     return await _run_test_case_unlocked(
         case_id, batch_id, browser_type, headless, base_url_override,
-        debug_mode=debug_mode, run_id=run_id, backend=backend,
-        case_kind=case_kind,
+        debug_mode=debug_mode, run_id=run_id,
     )
 
 
@@ -267,7 +305,7 @@ async def _run_api_case_server_entry(
     environment_id: int | None,
     run_id: int | None,
 ) -> dict:
-    """单用例 api 分发入口：自开 session 调 run_api_case_server（T040）。
+    """单用例 api 分发入口：自开 session 调 run_api_case_server。
 
     case_kind='api' 的用例不走浏览器/OTA，直接短路到接口执行器。
     """
@@ -287,52 +325,12 @@ async def _run_test_case_unlocked(
     *,
     debug_mode: bool = False,
     run_id: int | None = None,
-    backend: str | None = None,
-    case_kind: str | None = None,
 ):
-    from app.runtime_config import execution_backend_config
     from core.playwright_manager import PlaywrightMCPManager
-
-    selected = (backend or execution_backend_config.backend or "hybrid").strip()
-    # UI cases default to hybrid when caller did not override and config is plain MCP
-    if (
-        backend is None
-        and (case_kind or "") == "ui"
-        and selected == "playwright_mcp"
-    ):
-        selected = "hybrid"
-
-    # Scheme B: optional browser-use backend (server-side only)
-    if selected == "browser_use":
-        from core.browser_use_runner import run_test_case_via_browser_use
-
-        logger.info(
-            "Using browser-use backend for case %s (max_steps_per_nl=%s)",
-            case_id, execution_backend_config.max_steps_per_nl,
-        )
-        return await run_test_case_via_browser_use(
-            case_id,
-            batch_id=batch_id,
-            run_id=run_id,
-            base_url_override=base_url_override,
-            headless=execution_backend_config.headless if execution_backend_config.headless is not None else headless,
-            max_steps_per_nl=execution_backend_config.max_steps_per_nl,
-        )
-
-    hybrid = selected == "hybrid"
-    # hybrid needs chromium CDP; firefox/webkit fall back to plain MCP
-    use_shared_cdp = hybrid and browser_type == "chromium"
-    if hybrid and not use_shared_cdp:
-        logger.warning(
-            "hybrid requested but browser=%s; server fallback requires chromium — MCP only",
-            browser_type,
-        )
-        hybrid = False
 
     mcp_manager = PlaywrightMCPManager(
         browser_type=browser_type,
         headless=headless,
-        shared_cdp=use_shared_cdp,
     )
     start_time = tz_now()
     try:
@@ -359,43 +357,41 @@ async def _run_test_case_unlocked(
         return {"case_id": case_id, "status": "failed", "error": str(exc)}
 
     try:
+        _agent_def = None
         try:
             from app.crud.agent_definition import get_active_by_type as _get_active
-        except Exception:
-            _get_active = None
-        _agent_def = None
-        if _get_active is not None:
-            try:
-                async with AsyncSessionLocal() as _agent_db:
-                    _agent_def = await _get_active(_agent_db, "execution")
-            except Exception:
-                pass
-
-        if await _should_use_agent_runner(_agent_def):
             async with AsyncSessionLocal() as _agent_db:
-                result = await run_test_case_via_agent(
-                    case_id, mcp_manager, _agent_db, _agent_def,
-                    base_url=base_url_override,
-                    batch_id=batch_id,
-                    run_id=run_id,
-                )
-            logger.info("AgentRunner 完成 case_id=%s status=%s", case_id, (result or {}).get("status", "N/A"))
-            if result is None:
-                await run_test_case_in_browser(
-                    case_id, mcp_manager,
-                    batch_id=batch_id, run_id=run_id,
-                    base_url_override=base_url_override, debug_mode=debug_mode,
-                    hybrid=hybrid,
-                )
-        else:
-            await run_test_case_in_browser(
-                case_id, mcp_manager,
+                _agent_def = await _get_active(_agent_db, "execution")
+        except Exception:
+            logger.warning("加载 execution AgentDefinition 失败", exc_info=True)
+
+        if not await _should_use_agent_runner(_agent_def):
+            return await _fail_ota_unavailable(
+                case_id, _OTA_NOT_READY_MSG,
                 batch_id=batch_id, run_id=run_id,
-                base_url_override=base_url_override, debug_mode=debug_mode,
-                hybrid=hybrid,
             )
+
+        async with AsyncSessionLocal() as _agent_db:
+            result = await run_test_case_via_agent(
+                case_id, mcp_manager, _agent_db, _agent_def,
+                base_url=base_url_override,
+                batch_id=batch_id,
+                run_id=run_id,
+            )
+        if result is None:
+            return await _fail_ota_unavailable(
+                case_id,
+                "OTA AgentRunner 不可用（LLM 客户端创建失败或 Agent 未就绪）",
+                batch_id=batch_id, run_id=run_id,
+            )
+        logger.info("AgentRunner 完成 case_id=%s status=%s", case_id, result.get("status", "N/A"))
+        return result
     except Exception:  # noqa: BLE001
-        logger.exception("Unhandled error in run_test_case_in_browser for case %s", case_id)
+        logger.exception("Unhandled error in OTA run_test_case for case %s", case_id)
+        return await _fail_ota_unavailable(
+            case_id, "OTA 执行发生未处理异常",
+            batch_id=batch_id, run_id=run_id,
+        )
     finally:
         try:
             await mcp_manager.stop()
@@ -440,12 +436,8 @@ async def run_batch_test_cases(
         ``once`` — run inits once at batch start；
         ``before_each`` — re-run inits before every main case.
 
-    Each case executes in order; main-case failures are caught per-case and
-    logged, and the loop continues. Init-case failure aborts remaining cases.
-    Browser cleanup happens in a finally block.
-
-    Note: 该函数通过 FastAPI BackgroundTasks.add_task 调用。FastAPI 的
-    BackgroundTasks 原生支持 async 协程，无需额外包装。
+    UI cases use AgentRunner OTA only. API cases use the API runner.
+    Init-case failure aborts remaining cases. Browser cleanup happens in finally.
     """
     if browser_pool is None:
         from core.browser_pool import BrowserPool as browser_pool
@@ -473,13 +465,11 @@ async def run_batch_test_cases(
 
     try:
         async with BrowserPool.project_lock(project_id), AsyncSessionLocal() as batch_db:
-            # ── AgentRunner 分发检查（T011）────────────────────────────────────
-            # 在打开浏览器之前，先检查是否有激活的 execution AgentDefinition。
-            # 如果有且配置了工具，则使用 AgentRunner OTA 循环替代传统的
-            # run_test_case_in_browser 逐步骤执行。
+            # ── AgentRunner OTA 就绪检查 ────────────────────────────────────
             agent_def = None
             use_agent_runner = False
             agent_llm_client = None
+            agent_init_error: str | None = None
             try:
                 from app.crud.agent_definition import get_active_by_type
                 agent_def = await get_active_by_type(batch_db, "execution")
@@ -490,8 +480,11 @@ async def run_batch_test_cases(
                         "AgentRunner 模式已激活: agent_def_id=%s, name=%s",
                         agent_def.id, agent_def.name,
                     )
+                else:
+                    agent_init_error = _OTA_NOT_READY_MSG
             except Exception as exc:
-                logger.warning("AgentRunner 初始化失败，回退传统模式: %s", exc, exc_info=True)
+                agent_init_error = f"OTA AgentRunner 初始化失败: {exc}"
+                logger.warning("%s", agent_init_error, exc_info=True)
 
             # Get project/environment browser settings
             try:
@@ -521,7 +514,7 @@ async def run_batch_test_cases(
                 init_case_ids=init_case_ids, init_policy=init_policy,
             )
 
-            # ── API 用例分发（T040）：加载 case_kind 映射 ──────────────────
+            # ── API 用例分发：加载 case_kind 映射 ──────────────────
             # case_kind='api' 的用例短路到 run_api_case_server，不走浏览器；
             # 全部为 api 时跳过浏览器创建（避免无浏览器环境启动失败）。
             case_kinds: dict[int, str] = {}
@@ -538,75 +531,37 @@ async def run_batch_test_cases(
                 case_kinds.get(cid, "functional") == "api"
                 for cid, _, _ in precreated_runs
             )
+            has_ui = any(
+                case_kinds.get(cid, "functional") != "api"
+                for cid, _, _ in precreated_runs
+            )
 
             async def _abort_remaining_from(start_idx: int, message: str) -> None:
                 for j in range(start_idx, len(precreated_runs)):
                     _, rid, _ = precreated_runs[j]
                     await mark_run_failed(batch_db, rid, message, batch_id=batch_id)
 
-            # Scheme B: browser-use batch — per-case session, skip Playwright MCP pool
-            from app.runtime_config import execution_backend_config as _exec_backend
-            if _exec_backend.backend == "browser_use":
-                from core.browser_use_runner import run_test_case_via_browser_use
-
+            # UI 用例需要 OTA；未就绪则明确失败，不回退 legacy
+            if has_ui and not use_agent_runner:
+                fail_msg = agent_init_error or _OTA_NOT_READY_MSG
                 results = []
-                for idx, (case_id, _rid, is_init) in enumerate(precreated_runs):
-                    from app import execution_control
-                    await execution_control.wait_if_paused(batch_id)
-                    if execution_control.is_stopped(batch_id):
-                        await crud.cancel_remaining_batch_runs(
-                            batch_db, batch_id, message="用户停止执行",
+                for case_id, _rid, is_init in precreated_runs:
+                    if case_kinds.get(case_id) == "api":
+                        result = await run_api_case_server(
+                            case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
+                            environment_id=environment_id,
                         )
-                        await batch_db.commit()
-                        break
-                    try:
-                        if case_kinds.get(case_id) == "api":
-                            result = await run_api_case_server(
-                                case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
-                                environment_id=environment_id,
-                            )
-                        else:
-                            result = await run_test_case_via_browser_use(
-                                case_id,
-                                batch_id=batch_id,
-                                run_id=_rid,
-                                base_url_override=base_url_override,
-                                headless=_exec_backend.headless,
-                                max_steps_per_nl=_exec_backend.max_steps_per_nl,
-                            )
-                        results.append(result)
-                        status = (result or {}).get("status")
-                        logger.info(
-                            "Batch browser-use case %s finished: %s (init=%s)",
-                            case_id, status, is_init,
-                        )
-                        if is_init and status == "failed":
-                            logger.warning(
-                                "Init case %s failed — abort remaining in batch %s",
-                                case_id, batch_id,
-                            )
-                            await _abort_remaining_from(
-                                idx + 1, f"因初始化用例 {case_id} 失败而跳过",
-                            )
-                            break
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("Batch browser-use case %s failed", case_id)
+                    else:
                         await _record_batch_case_failure(
-                            batch_db, _rid, batch_id,
-                            message=f"browser-use executor exception: {exc}",
+                            batch_db, _rid, batch_id, message=fail_msg,
                         )
-                        results.append({
+                        result = {
                             "case_id": case_id,
                             "status": "failed",
-                            "error": str(exc),
+                            "error": fail_msg,
                             "batch_id": batch_id,
-                            "backend": "browser_use",
-                        })
-                        if is_init:
-                            await _abort_remaining_from(
-                                idx + 1, f"因初始化用例 {case_id} 失败而跳过",
-                            )
-                            break
+                        }
+                    results.append(result)
                 return results
 
             # 创建或复用浏览器（全部为 api 用例时跳过，无需浏览器）
@@ -659,7 +614,7 @@ async def run_batch_test_cases(
                             case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
                             environment_id=environment_id,
                         )
-                    elif use_agent_runner and agent_def is not None:
+                    else:
                         result = await run_test_case_via_agent(
                             case_id, mcp_manager, batch_db, agent_def,
                             llm_client=agent_llm_client,
@@ -668,19 +623,16 @@ async def run_batch_test_cases(
                             run_id=_rid,
                         )
                         if result is None:
-                            result = await run_test_case_in_browser(
-                                case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                                batch_id=batch_id, run_id=_rid,
-                                base_url_override=base_url_override,
-                                debug_mode=debug_mode,
+                            fail_msg = "OTA AgentRunner 不可用（执行中返回 None）"
+                            await _record_batch_case_failure(
+                                batch_db, _rid, batch_id, message=fail_msg,
                             )
-                    else:
-                        result = await run_test_case_in_browser(
-                            case_id, mcp_manager, db=batch_db, clear_cookies=False,
-                            batch_id=batch_id, run_id=_rid,
-                            base_url_override=base_url_override,
-                            debug_mode=debug_mode,
-                        )
+                            result = {
+                                "case_id": case_id,
+                                "status": "failed",
+                                "error": fail_msg,
+                                "batch_id": batch_id,
+                            }
                     results.append(result)
                     status = result.get("status") if isinstance(result, dict) else None
                     logger.info(
@@ -697,10 +649,7 @@ async def run_batch_test_cases(
                         )
                         break
                 except Exception as exc:  # noqa: BLE001 - 见下方注释
-                    # Broad catch is necessary: run_test_case_in_browser touches DB,
-                    # MCP stdio, LLM HTTP, JSON parsing, and assertions. Any
-                    # unhandled error must be recorded on the pre-created TestRun
-                    # row so the report page stays consistent.
+                    # Broad catch: OTA / API / DB 任一未处理异常都要落到预创建 TestRun
                     label = "init-case" if is_init else "case"
                     logger.exception("Batch %s %s failed with exception", label, case_id)
                     await _record_batch_case_failure(

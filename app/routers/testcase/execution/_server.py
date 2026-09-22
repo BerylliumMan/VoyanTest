@@ -1,4 +1,4 @@
-"""服务端执行端点 — 浏览器跑在服务端。
+"""服务端执行端点 — OTA（AgentRunner）在服务端跑浏览器。
 
 - POST /api/testcases/{case_id}/run         — 单用例
 - POST /api/testcases/{case_id}/run-debug   — 调试模式（带暂停+WS广播）
@@ -6,7 +6,7 @@
 - POST /api/testcases/module/{module_id}/run   — 模块下所有用例
 - POST /api/testcases/project/{project_id}/run — 项目下所有用例
 
-注意: run_test_case / run_batch_test_cases / run_test_case_in_browser 在函数体内延迟
+注意: run_test_case / run_batch_test_cases 在函数体内延迟
 从 app.routers.testcase.execution 包导入，以便测试 monkeypatch(execution, "run_test_case", ...)
 能生效 — 直接 import core.runner 会绕过包级 monkeypatch。
 """
@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
 from app.auth import get_current_user, get_user_project_filter
-from app.database import AsyncSessionLocal, get_async_db
+from app.database import get_async_db
 from app.tz import now as tz_now
 from app.services.notifications import notify_batch_completed
 
@@ -46,27 +46,17 @@ async def run_test_case_endpoint(
 ) -> dict:
     """运行单个测试用例 - 创建单用例批次
 
-    Query ``backend``: ``nl_goal`` | ``browser_use`` | ``legacy_*``.
+    Query ``backend``: 仅 ``ota``（历史名称会规范化为 ota）。
     """
     db_case = await crud.get_test_case(db, case_id)
     if db_case is None:
         raise HTTPException(status_code=404, detail="Test case not found")
 
     if backend is not None:
-        from app.runtime_config import normalize_execution_backend, traditional_backend
+        from app.runtime_config import normalize_execution_backend
         backend = normalize_execution_backend(backend)
-        if backend not in (
-            "ota", "nl_goal", "compiled_script", "legacy_hybrid", "legacy_mcp",
-            "browser_use",
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "backend must be ota, nl_goal, compiled_script, legacy_hybrid, "
-                    "legacy_mcp, or browser_use"
-                ),
-            )
-        backend = traditional_backend(backend)
+    else:
+        backend = "ota"
 
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
@@ -74,55 +64,27 @@ async def run_test_case_endpoint(
 
     batch = await crud.create_run_batch(db, project_id=db_case.project_id, total_cases=1, triggered_by=getattr(user, 'username', None))
 
-    from core.browser_pool import BrowserPool
-
-    project_id = db_case.project_id
     user_id = getattr(user, "id", None)
     batch_id = batch.id
-    case_kind = getattr(db_case, "case_kind", None) or "functional"
 
-    # api 用例不走浏览器（T040）：即使项目有活跃浏览器也走 run_test_case 短路
-    if await BrowserPool.is_active(project_id) and backend != "browser_use" and case_kind != "api":
-        from app.routers.testcase import execution as _exec
+    from app.routers.testcase import execution as _exec
 
-        async def _run_with_existing_browser() -> None:
-            try:
-                async with BrowserPool.project_lock(project_id):
-                    mgr = await BrowserPool.get(project_id)
-                    if mgr is not None:
-                        base_url_override = None
-                        if environment_id:
-                            async with AsyncSessionLocal() as _env_db:
-                                env = await crud.get_environment(_env_db, environment_id)
-                                if env:
-                                    base_url_override = env.base_url
-                        await _exec.run_test_case_in_browser(
-                            case_id, mgr, batch_id=batch_id, base_url_override=base_url_override,
-                        )
-            finally:
-                if user_id:
-                    await notify_batch_completed(batch_id, user_id)
+    async def _run_and_notify() -> None:
+        try:
+            await _exec.run_test_case(
+                case_id, batch_id, environment_id=environment_id, backend=backend,
+            )
+        finally:
+            if user_id:
+                await notify_batch_completed(batch_id, user_id)
 
-        background_tasks.add_task(_run_with_existing_browser)
-    else:
-        from app.routers.testcase import execution as _exec
-
-        async def _run_and_notify() -> None:
-            try:
-                await _exec.run_test_case(
-                    case_id, batch_id, environment_id=environment_id, backend=backend,
-                )
-            finally:
-                if user_id:
-                    await notify_batch_completed(batch_id, user_id)
-
-        background_tasks.add_task(_run_and_notify)
+    background_tasks.add_task(_run_and_notify)
 
     return {
         "id": batch_id,
         "status": "running",
         "batch_id": batch_id,
-        "backend": backend or "default",
+        "backend": backend,
     }
 
 

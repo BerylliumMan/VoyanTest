@@ -11,22 +11,22 @@
 
 ---
 
-VoyanTest 是一个 **AI 驱动的 Web UI 自动化测试平台**。你用**中文自然语言**描述整案目标与步骤，默认走 **nl_goal**（观察 → 行动 → journal）；成功后用 Playwright codegen 同源算法固化定位，合成可重放脚本入库。下次优先直跑脚本，失败再回退 AI。
+VoyanTest 是一个 **AI 驱动的 Web UI 自动化测试平台**。你用**中文自然语言**描述整案目标与步骤，由 **智能 OTA**（观察 → 决策 → 操作）自主执行；成功后用 Playwright codegen 同源算法固化定位，合成可重放脚本入库。下次优先直跑脚本，失败再回退 OTA。
 
 ```
 自然语言用例 / 清单步骤
-  ↓ nl_goal（LLM + 快照 / MCP / hybrid）
-成功 journal + codegen locator
+  ↓ OTA（LLM + 无障碍快照 / Playwright MCP）
+成功轨迹 + codegen locator
   ↓ 合成 Playwright async 脚本（校验后入库）
-下次：compiled_script 零 LLM 直跑 → 失败再 fall back nl_goal
+下次：compiled_script 零 LLM 直跑 → 失败再 fall back OTA
 ```
 
 ## ✨ 特性
 
 ### 测试执行
-- **🗣️ 自然语言整案（nl_goal，默认）**：整案目标循环，步骤作 checklist；支持 hybrid（MCP + browser-use）
+- **🤖 智能 OTA（唯一执行引擎）**：Observe → Think → Act；步骤作 checklist
 - **⚡ Playwright 脚本固化**：成功后写入 `compiled_script`；优先 codegen `get_by_*` 定位，无 ephemeral ref
-- **🔁 脚本优先 / 失败回退**：有有效脚本则直跑；失败可回退 nl_goal，并按策略清理或重固化
+- **🔁 脚本优先 / 失败回退**：有有效脚本则直跑；失败回退 OTA，并按策略清理或重固化
 - **🧩 初始化用例**：批量执行可勾选登录等 init 用例，同一浏览器会话复用登录态（后续用例跳过 BASE URL）
 - **⏸️ 批量控制**：执行中支持暂停、继续、停止
 - **🖥️ Real Browser**：Playwright MCP / 共享 CDP Chromium；客户端 GUI 有头执行
@@ -133,8 +133,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 **执行（推荐客户端 Agent）：**
 1. 启动 GUI / CLI Agent 并连上服务端  
 2. 在用例页批量运行；可勾选**初始化用例**（如登录）保留会话  
-3. 首跑多为 **nl_goal**；成功后固化 Playwright 脚本  
-4. 再跑优先 **compiled_script**；失败回退 AI  
+3. 首跑走 **OTA**；成功后固化 Playwright 脚本  
+4. 再跑优先 **compiled_script**；失败回退 OTA  
 
 ### 3. CDP 录制回放
 
@@ -146,7 +146,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
 ### 5. AI / 执行后端配置
 
-「系统设置」中配置 LLM；执行后端默认 **nl_goal**，可选 `compiled_script` / `legacy_hybrid` / `legacy_mcp` / `browser_use`（见 `data/execution_backend.json`）。
+「系统设置」中配置 LLM；执行引擎为 **智能 OTA**（见 `data/execution_backend.json`）。
 
 ### 分布式 Agent（Windows 客户端）
 
@@ -166,11 +166,11 @@ python -m agent.cli_entry --server ws://<服务端IP>:8002 --name my-agent --use
 ## 📖 工作流程（固化）
 
 ```
-nl_goal 成功
-  → journal.replay（含 playwright_locator / checklist 真值）
+OTA 成功
+  → 轨迹 / journal.replay（含 playwright_locator / checklist 真值）
   → 模板或 LLM 合成 Playwright 脚本
-  →（单用例）无头校验通过才入库；批量 init→main 可跳过阻塞 dry-run 以免拖慢下一例
-  → 下次优先 compiled_script；共享 CDP 时保留浏览器会话
+  → 校验后入库
+  → 下次优先 compiled_script；失败回退 OTA；共享 CDP 时保留浏览器会话
 ```
 
 定位约定：
@@ -191,7 +191,7 @@ flowchart LR
         PY[compiled_script]
     end
     subgraph Backend["后端 FastAPI"]
-        NL[nl_goal 循环]
+        NL[OTA 循环]
         SYN[脚本合成 / codegen]
         RUN[执行编排 / 批量]
         HEAL[自愈 / 断言]
@@ -232,13 +232,14 @@ flowchart LR
 VoyanTest/
 ├── app/                 # FastAPI（路由 / 模型 / 生成 / 设置）
 ├── core/                # 执行与固化
-│   ├── goal_agent_loop.py     # nl_goal 决策与 checklist
+│   ├── agent_runner/          # 服务端 OTA（Observe→Think→Act）
+│   ├── agent_bridge.py        # 客户端 OTA + 固化回放
+│   ├── goal_agent_loop.py     # checklist 覆盖判定（合成门禁）
 │   ├── codegen_locator.py     # codegen IIFE 注入 / 解析
 │   ├── replay_resolve.py      # journal.replay 合并
 │   ├── script_templates.py    # 按步拼 Playwright 脚本
 │   ├── script_synthesize.py   # LLM 合成 / 修复
 │   ├── compiled_script.py     # 入库 / hash / 清理
-│   ├── browser_use_exec.py    # browser-use 回退
 │   ├── runner/                # 报告落库等
 │   └── assets/codegen_locator.iife.js
 ├── agent/               # Agent（manager / client_core / GUI）

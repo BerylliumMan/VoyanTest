@@ -414,6 +414,8 @@ async def generate_tool_call(
     system_prompt: str | None = None,
     agent_type: str | None = None,
     db: Any = None,
+    screenshot_b64: str | None = None,
+    replace_system_prompt: bool = False,
 ) -> PlaywrightMCPToolCall:
     """Generate a single PlaywrightMCPToolCall from a NL step description.
 
@@ -424,6 +426,9 @@ async def generate_tool_call(
         model: Override default model
         temperature: LLM temperature (lower = more deterministic)
         client: Pre-configured OpenAI client (created if not provided)
+        screenshot_b64: Optional PNG base64 for vision (OTA Cursor-style)
+        replace_system_prompt: When True, use ``system_prompt`` as the full
+            system message (OTA Cursor prompt) instead of prefixing SYSTEM_PROMPT.
 
     Returns:
         Validated PlaywrightMCPToolCall
@@ -436,7 +441,7 @@ async def generate_tool_call(
 
     _, _, resolved_model = await _resolve_config(explicit_model=model)
 
-    user_message = (
+    user_text = (
         f"STEP DESCRIPTION (authoritative — execute faithfully, do not reinterpret):\n"
         f"{step_description}\n\n"
         f"PAGE CONTENT (visible text / accessibility snapshot):\n"
@@ -445,16 +450,22 @@ async def generate_tool_call(
         f"if ambiguous prefer wait/error over a similar wrong control.\n\n"
     )
     if base_url:
-        user_message += (
+        user_text += (
             "BASE URL (use only if this step requires navigation):\n"
             f"{base_url}\n\n"
         )
     if expected_result:
-        user_message += (
+        user_text += (
             "EXPECTED RESULT (post-condition hint only — do not invent extra actions):\n"
             f"{expected_result}\n\n"
         )
-    user_message += "Generate the browser action JSON for THIS step now."
+    if screenshot_b64:
+        user_text += (
+            "A VIEWPORT SCREENSHOT is attached. Use it when refs are unreliable "
+            "(overlay/canvas/truncated snapshot). Prefer click_xy with visible "
+            "pixel coordinates when ref clicks would miss.\n\n"
+        )
+    user_text += "Generate the browser action JSON for THIS step now."
 
     # 解析 system_prompt：显式参数 > DB 查找 > 硬编码常量
     resolved_system_prompt: str | None = system_prompt
@@ -470,18 +481,31 @@ async def generate_tool_call(
                 "(agent_type=%s), falling back to hardcoded SYSTEM_PROMPT",
                 agent_type, exc_info=True,
             )
+    if replace_system_prompt and (system_prompt or "").strip():
+        resolved_system_prompt = system_prompt.strip()
     # 025-ref-click: SYSTEM_PROMPT 是输出契约（ref 用法 + JSON schema），
     # 必须始终在场；DB/Agent 解析结果仅作为角色前缀补充，不能整体替换。
-    if resolved_system_prompt is None or SYSTEM_PROMPT.strip() in (resolved_system_prompt or ""):
+    elif resolved_system_prompt is None or SYSTEM_PROMPT.strip() in (resolved_system_prompt or ""):
         resolved_system_prompt = SYSTEM_PROMPT
     elif resolved_system_prompt.strip():
         resolved_system_prompt = f"{SYSTEM_PROMPT}\n\n--- AGENT ROLE CONTEXT ---\n{resolved_system_prompt}"
     else:
         resolved_system_prompt = SYSTEM_PROMPT
 
+    if screenshot_b64:
+        user_content: Any = [
+            {"type": "text", "text": user_text},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
+        ]
+    else:
+        user_content = user_text
+
     messages: list[dict] = [
         {'role': 'system', 'content': resolved_system_prompt},
-        {'role': 'user', 'content': user_message},
+        {'role': 'user', 'content': user_content},
     ]
 
     # Try up to 2 retries on invalid output
