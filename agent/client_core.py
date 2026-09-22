@@ -14,6 +14,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import parse_qsl
 
 import websockets
 
@@ -24,14 +25,103 @@ sys.path.insert(0, project_root)
 from agent.models import (
     AgentRegistration, WSMessage, WSMessageType,
     StepResultPayload, SnapshotPayload,
+    ApiRequestPayload, API_RESPONSE_MAX_BYTES, CAP_API_TEST,
 )
 
 logger = logging.getLogger("agent.client")
+
+_JSON_CONTENT_TYPE = "application/json"
+
 
 def _resolve_mcp_tool(action: str) -> str:
     """将 action 名解析为 MCP 工具名（共享 core.mcp_args.TOOL_MAP，避免两端漂移）。"""
     from core.mcp_args import resolve_mcp_tool
     return resolve_mcp_tool(action or "")
+
+
+def _mask_api_headers(headers) -> dict:
+    """API 日志脱敏：与服务器共用 core.api_runner.variables.mask_headers。"""
+    from core.api_runner.variables import mask_headers
+    masked = mask_headers(dict(headers or {}))
+    return masked if isinstance(masked, dict) else {}
+
+
+def _create_api_http_client(*, verify_ssl: bool = True, follow_redirects: bool = True):
+    """创建 API 执行用 httpx 客户端（测试 monkeypatch 本工厂注入 MockTransport）。"""
+    import httpx
+    return httpx.AsyncClient(verify=verify_ssl, follow_redirects=follow_redirects)
+
+
+def _api_timeout_seconds(timeout_ms) -> float:
+    """毫秒 → 秒；钳制范围与 core.api_runner.request_builder 一致。"""
+    from core.api_runner.request_builder import (
+        DEFAULT_TIMEOUT_MS, TIMEOUT_MAX_MS, TIMEOUT_MIN_MS,
+    )
+    try:
+        value = int(timeout_ms)
+    except (TypeError, ValueError):
+        value = DEFAULT_TIMEOUT_MS
+    return max(TIMEOUT_MIN_MS, min(TIMEOUT_MAX_MS, value)) / 1000.0
+
+
+def _api_body_kwargs(body) -> dict:
+    """body.type → httpx 参数（语义对齐 request_builder._build_body）。"""
+    body = body or {}
+    body_type = str(body.get("type") or "none")
+    if body_type == "none":
+        return {}
+    content = body.get("content")
+    text = "" if content is None else str(content)
+    if body_type == "form":
+        return {"data": dict(parse_qsl(text, keep_blank_values=True))}
+    return {"content": text}
+
+
+def _api_response_payload(resp, started: float) -> dict:
+    """httpx.Response → 契约 §4 api_response payload（超限截断并置 truncated）。"""
+    raw = resp.content
+    truncated = len(raw) > API_RESPONSE_MAX_BYTES
+    if truncated:
+        body_text = raw[:API_RESPONSE_MAX_BYTES].decode(
+            resp.encoding or "utf-8", errors="replace"
+        )
+    else:
+        body_text = resp.text
+    return {
+        "success": True,
+        "status": resp.status_code,
+        "duration_ms": int((time.perf_counter() - started) * 1000),
+        "size": len(raw),
+        "headers": dict(resp.headers),
+        "body": body_text,
+        "truncated": truncated,
+        "error": None,
+    }
+
+
+def _api_error_payload(started: float, error: str) -> dict:
+    """异常路径的 api_response payload（字段与成功路径同形状）。"""
+    return {
+        "success": False,
+        "status": None,
+        "duration_ms": int((time.perf_counter() - started) * 1000),
+        "size": 0,
+        "headers": {},
+        "body": "",
+        "truncated": False,
+        "error": error,
+    }
+
+
+def _api_error_label(exc: Exception) -> str:
+    """httpx 异常 → 可读标签（措辞对齐 core/api_runner/runner.py）。"""
+    import httpx
+    name = type(exc).__name__
+    if isinstance(exc, httpx.ConnectError):
+        return f"连接失败 ({name})"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"超时 ({name})"
+    return f"请求异常 ({name}): {exc}"
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, target_host: str, target_port: int) -> None:
@@ -1213,7 +1303,13 @@ class AgentClient:
         await self._ws.send(msg.model_dump_json())
 
     async def _send_registration(self):
-        caps = ["mcp", "playwright", "ui_testing", "local_browser", "compiled_script"]
+        # 能力标识 ↔ WS 消息类型（029 契约 §4）：声明 CAP_API_TEST 才会收到
+        # api_request 并被等待 api_response。历史教训：compiled_script 曾在客户端
+        # 漏声明，服务端按超时空等——新增能力必须两端同步修改。
+        caps = [
+            "mcp", "playwright", "ui_testing", "local_browser",
+            "compiled_script", CAP_API_TEST,
+        ]
         try:
             import browser_use  # noqa: F401
             caps.append("browser_use")
@@ -1389,6 +1485,11 @@ class AgentClient:
             finally:
                 self._active_run_id = None
                 self._active_backend = None
+
+        elif msg.type == WSMessageType.API_REQUEST:
+            # 029 接口测试：无 RUN_START/浏览器上下文，独立执行一条 HTTP 请求，
+            # 用同一 run_id 回 api_response。
+            await self._handle_api_request(msg)
 
         elif msg.type == WSMessageType.SHUTDOWN:
             self._log_info("Shutdown signal received — closing browser")
@@ -1684,6 +1785,63 @@ class AgentClient:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+
+    async def _handle_api_request(self, msg: WSMessage):
+        """执行服务端派发的单个 HTTP 请求并回传 api_response（契约 §4）。
+
+        body 五类型语义对齐 request_builder._build_body；响应体超过 1MB 截断并置
+        truncated=true；任何异常都转成 ``{"success": False, "error": ...}`` 回传，
+        绝不冒泡断连。
+        """
+        run_id = msg.run_id
+        started = time.perf_counter()
+        try:
+            req = ApiRequestPayload(**(msg.payload or {}))
+        except Exception as exc:
+            await self._send(
+                WSMessageType.API_RESPONSE,
+                run_id,
+                _api_error_payload(started, f"api_request payload 非法: {exc}"),
+            )
+            return
+
+        headers = dict(req.headers or {})
+        if req.body.get("type") == "json" and not any(
+            key.lower() == "content-type" for key in headers
+        ):
+            headers["Content-Type"] = _JSON_CONTENT_TYPE
+        self._log_info(
+            f"API 请求 {req.method} {req.url} timeout_ms={req.timeout_ms} "
+            f"follow_redirects={req.follow_redirects} verify_ssl={req.verify_ssl} "
+            f"headers={_mask_api_headers(headers)}"
+        )
+        try:
+            client = _create_api_http_client(
+                verify_ssl=req.verify_ssl,
+                follow_redirects=req.follow_redirects,
+            )
+            try:
+                resp = await client.request(
+                    method=req.method,
+                    url=req.url,
+                    headers=headers or None,
+                    timeout=_api_timeout_seconds(req.timeout_ms),
+                    **_api_body_kwargs(req.body),
+                )
+            finally:
+                await client.aclose()
+            result = _api_response_payload(resp, started)
+        except Exception as exc:
+            result = _api_error_payload(started, _api_error_label(exc))
+
+        error = result.get("error")
+        self._log_info(
+            f"API 响应 run_id={run_id} success={result.get('success')} "
+            f"status={result.get('status')} duration_ms={result.get('duration_ms')} "
+            f"size={result.get('size')} truncated={result.get('truncated')}"
+            + (f" error={error}" if error else "")
+        )
+        await self._send(WSMessageType.API_RESPONSE, run_id, result)
 
     async def _handle_step_browser_use(self, msg: WSMessage):
         """Hybrid fallback: run one NL step via browser-use on the shared CDP browser."""

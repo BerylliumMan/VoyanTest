@@ -36,7 +36,11 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   const [clearingScript, setClearingScript] = useState(false);
   const kindLabel = caseKind === 'functional'
     ? (t['menu.testcases.functional'] || '功能测试用例')
-    : (t['menu.testcases.ui'] || 'UI自动化用例');
+    : caseKind === 'api'
+      ? (t['menu.api_test_cases'] || '接口用例')
+      : (t['menu.testcases.ui'] || 'UI自动化用例');
+  const kindColor = caseKind === 'functional' ? 'arcoblue' : caseKind === 'api' ? 'orange' : 'green';
+  const isApi = caseKind === 'api';
 
   const hasCompiledScript = Boolean(editingCase?.compiled_script);
 
@@ -123,7 +127,7 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
       <Form form={form} layout="vertical">
         <Form.Item label={t['case.kind'] || '用例类型'}>
           <div className={styles['editor-kind-row']}>
-            <Tag color={caseKind === 'functional' ? 'arcoblue' : 'green'}>{kindLabel}</Tag>
+            <Tag color={kindColor}>{kindLabel}</Tag>
           </div>
         </Form.Item>
         {caseKind === 'ui' && hasCompiledScript ? (
@@ -174,24 +178,32 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
             autoSize={{ minRows: 2 }}
           />
         </Form.Item>
-        <Form.Item label={t['case.steps']}>
-          <StepList
-            steps={steps}
-            onAdd={addStep}
-            onRemove={removeStep}
-            onUpdate={updateStep}
-            onInsert={insertStep}
-            onCopy={copyStep}
-            onPaste={pasteStep}
-            copiedStep={copiedStep}
-            onDragStart={handleDragStart}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            t={t}
-            caseKind={caseKind}
-          />
-        </Form.Item>
+        {isApi ? (
+          <Form.Item label={t['case.steps']}>
+            <div className={styles['editor-kind-row']}>
+              <Tag color="orange">{t['api_case.steps_hint'] || '接口用例的请求步骤请在「接口测试」页维护'}</Tag>
+            </div>
+          </Form.Item>
+        ) : (
+          <Form.Item label={t['case.steps']}>
+            <StepList
+              steps={steps}
+              onAdd={addStep}
+              onRemove={removeStep}
+              onUpdate={updateStep}
+              onInsert={insertStep}
+              onCopy={copyStep}
+              onPaste={pasteStep}
+              copiedStep={copiedStep}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              t={t}
+              caseKind={caseKind}
+            />
+          </Form.Item>
+        )}
       </Form>
       <Modal
         visible={scriptModalVisible}

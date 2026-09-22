@@ -12,6 +12,11 @@
 #      under `app/models/` (each file imports `Base` from `app.database`).
 #   2. Add a re-export line below.
 
+# API testing (029): definitions / imports / datasets
+from app.models.api_test import (  # noqa: F401
+    ApiDataset, ApiDefinition, ApiImport, ApiScenario,
+)
+
 # Re-export the SQLAlchemy declarative Base so call sites that historically
 # did `from app.db_models import Base` (alembic env, app.main) keep working.
 from app.database import Base  # noqa: F401

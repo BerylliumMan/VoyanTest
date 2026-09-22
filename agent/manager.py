@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from app.tz import now as tz_now
 from typing import Dict, List, Optional, Callable, Awaitable
@@ -18,8 +19,10 @@ from agent.models import (
     AgentInfo, AgentStatus, AgentRegistration,
     WSMessage, WSMessageType,
     StepResultPayload, SnapshotPayload, RunCompletePayload,
+    ApiRequestPayload, CAP_API_TEST,
 )
 
+from core.api_runner.variables import mask_headers
 from core.llm_wrapper import create_openai_client, generate_tool_call, _resolve_config as _llm_resolve_config
 from core.step_executor import HYBRID_SETTLE_SECONDS
 from core.locator_failure import (
@@ -2048,6 +2051,98 @@ class AgentManager:
         logger.info("compiled_script SUCCESS case=%s steps=%s", case_id, len(results))
         return results
 
+    # ---- API test: client-side HTTP execution (029-api-testing contract §4) ----
+
+    async def request_api_call(
+        self,
+        agent_name: str,
+        payload: dict,
+        timeout: float = 60.0,
+    ) -> dict:
+        """派发一条 ``api_request`` 并等待同 run_id 的 ``api_response``。
+
+        返回 dict 形状与 ``api_response.payload`` 一致；所有失败路径都返回
+        ``{"success": False, "error": ...}`` 而不是抛异常，便于调用方（T050）
+        回退服务端执行。
+        """
+        session = await self.get_session(agent_name)
+        if not session:
+            return {
+                "success": False,
+                "agent_missing": True,
+                "error": f"Agent 不存在或离线: {agent_name}",
+            }
+        # 能力协商（T049）：未声明 CAP_API_TEST 的客户端不认识 api_request
+        # （老客户端会忽略该消息），必须在此短路——否则只会白等到超时。
+        if not supports_api_test(session.agent.capabilities):
+            reason = (
+                f"Agent {agent_name} 未声明 api_test 能力，跳过客户端执行"
+                "（请升级 Agent 客户端后重连；调用方可回退服务端执行）"
+            )
+            logger.warning("api_request skipped — %s", reason)
+            return {
+                "success": False,
+                "unsupported": True,
+                "capability_missing": True,
+                "error": reason,
+            }
+
+        try:
+            request_payload = ApiRequestPayload(**payload).model_dump()
+        except Exception as exc:
+            return {"success": False, "error": f"api_request payload 非法: {exc}"}
+
+        run_id = uuid.uuid4().hex
+        logger.info(
+            "api_request run_id=%s agent=%s %s %s timeout_ms=%s "
+            "follow_redirects=%s verify_ssl=%s headers=%s",
+            run_id,
+            agent_name,
+            request_payload["method"],
+            request_payload["url"],
+            request_payload["timeout_ms"],
+            request_payload["follow_redirects"],
+            request_payload["verify_ssl"],
+            mask_headers(request_payload.get("headers") or {}),
+        )
+        try:
+            resp = await session.request(
+                WSMessage(
+                    type=WSMessageType.API_REQUEST,
+                    agent_id=agent_name,
+                    run_id=run_id,
+                    payload=request_payload,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("api_request timeout run_id=%s agent=%s", run_id, agent_name)
+            return {"success": False, "error": "客户端执行超时"}
+        except Exception as exc:
+            logger.warning(
+                "api_request dispatch failed run_id=%s agent=%s: %s",
+                run_id, agent_name, exc,
+            )
+            return {"success": False, "error": f"客户端执行失败: {exc}"}
+
+        if not isinstance(resp, dict):
+            return {
+                "success": False,
+                "error": f"Agent 返回非法 api_response: {type(resp).__name__}",
+            }
+        logger.info(
+            "api_response run_id=%s agent=%s success=%s status=%s "
+            "duration_ms=%s size=%s truncated=%s",
+            run_id,
+            agent_name,
+            resp.get("success"),
+            resp.get("status"),
+            resp.get("duration_ms"),
+            resp.get("size"),
+            resp.get("truncated"),
+        )
+        return resp
+
     async def _execute_on_agent_snapshot_path(
         self, agent_id: str, run_id: str,
         case_name: str, steps: List[dict],
@@ -3972,3 +4067,14 @@ def supports_compiled_script(capabilities) -> bool:
     if not capabilities:
         return False
     return "compiled_script" in capabilities
+
+
+def supports_api_test(capabilities) -> bool:
+    """客户端是否声明 CAP_API_TEST 能力；无能力列表一律视为不支持。
+
+    与 WSMessageType.API_REQUEST / API_RESPONSE 一一对应（见 agent/models.py）：
+    服务端只向声明了该能力的客户端派发 api_request。
+    """
+    if not capabilities:
+        return False
+    return CAP_API_TEST in capabilities

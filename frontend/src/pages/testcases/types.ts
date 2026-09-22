@@ -1,4 +1,4 @@
-export type CaseKind = 'functional' | 'ui';
+export type CaseKind = 'functional' | 'ui' | 'api';
 
 export interface TestCase {
   id: number;
@@ -22,6 +22,21 @@ export interface Module {
   children?: Module[];
 }
 
+export interface EnvVariable {
+  key: string;
+  value: string;
+  secret?: boolean;
+  enable?: boolean;
+  /** 仅 GET 回显：secret 项在库中是否真有值（value 恒为 "******"） */
+  has_value?: boolean;
+}
+
+export interface EnvHeader {
+  key: string;
+  value: string;
+  enable?: boolean;
+}
+
 export interface Environment {
   id: number;
   name: string;
@@ -31,6 +46,8 @@ export interface Environment {
   is_default: boolean;
   project_id: number;
   cookies?: Array<{ name: string; value: string; domain?: string }>;
+  variables?: EnvVariable[];
+  headers?: EnvHeader[];
 }
 
 export interface Agent {

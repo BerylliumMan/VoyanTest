@@ -1,31 +1,9 @@
 import React from 'react';
 import { Modal, Descriptions, Card, Tag, Button } from '@arco-design/web-react';
 import useLocale from '@/utils/useLocale';
+import ApiStepDetail from './ApiStepDetail';
 import styles from './style/index.module.less';
-
-interface StepDetail {
-  step_number?: number;
-  description?: string;
-  original_description?: string;
-  status?: string;
-  success?: boolean;
-  error?: string;
-  action?: string;
-  screenshot_path?: string;
-}
-
-interface RunItem {
-  id: number;
-  run_id: number;
-  case_id: number;
-  case_name: string;
-  status: string;
-  duration: number;
-  started_at: string;
-  finished_at: string;
-  steps: StepDetail[];
-  logs?: string;
-}
+import type { StepDetail, RunItem } from './types';
 
 interface RunDetailProps {
   visible: boolean;
@@ -113,6 +91,7 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
                       />
                     </div>
                   )}
+                  <ApiStepDetail step={step} />
                 </Card>
               ))}
             </div>

@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .routers import project_router, testcase_router, module_router, report_router, config_router, environment_router, scheduler_router, agent_router
 from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router, agent_definition_router, agent_run_router, suite_router
+from .routers import api_test as api_test_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -235,6 +236,23 @@ async def _run_startup_init():
         await _ddl(
             "ALTER TABLE test_cases ALTER COLUMN case_kind SET DEFAULT 'functional'",
             "test_cases.case_kind 默认值改为 functional",
+        )
+        # ── 029-api-testing：接口测试扩列（新表由 create_all 建立）──
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS api_spec JSONB",
+            "test_cases.api_spec 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS variables JSONB DEFAULT '[]'::jsonb",
+            "environments.variables 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS headers JSONB DEFAULT '[]'::jsonb",
+            "environments.headers 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS session_kind VARCHAR(16) DEFAULT 'doc'",
+            "gen_sessions.session_kind 迁移",
         )
         await _ddl(
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'ui'",
@@ -864,6 +882,7 @@ app.include_router(notification_router.router)
 app.include_router(setup_router.router)
 app.include_router(agent_definition_router.router)
 app.include_router(agent_run_router.router)
+app.include_router(api_test_router.router)
 
 if AGENT_SUPPORT:
     app.include_router(agent_router)

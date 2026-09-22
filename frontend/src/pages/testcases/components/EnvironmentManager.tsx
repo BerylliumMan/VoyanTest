@@ -4,6 +4,7 @@ import {
 } from '@arco-design/web-react';
 import { IconPlus, IconEdit, IconDelete, IconCheck } from '@arco-design/web-react/icon';
 import { Environment } from '../types';
+import { EnvVariablesList, EnvHeadersList } from '@/components/EnvVariablesEditor';
 import styles from '../style/components.module.less';
 
 // Arco Design Form.Item/Input.Password 支持 valuePropName/showEyeButton 但未在类型中暴露，
@@ -119,7 +120,13 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({
               <Switch />
             </FormItem>
           </Space>
-          <Collapse className={styles['cookie-collapse']}>
+          <Collapse className={styles['cookie-collapse']} defaultActiveKey={['variables', 'headers']}>
+            <Collapse.Item header={t['environment.variables']} name="variables">
+              <EnvVariablesList form={form} t={t} />
+            </Collapse.Item>
+            <Collapse.Item header={t['environment.headers']} name="headers">
+              <EnvHeadersList t={t} />
+            </Collapse.Item>
             <Collapse.Item header="认证 Cookie" name="cookies">
               <Form.List field="cookies">
                 {(fields, { add, remove }) => (

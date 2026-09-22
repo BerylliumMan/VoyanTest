@@ -20,8 +20,25 @@ const PASSWORD_CHANGE_ALLOWED = [
   '/api/setup/status',
   '/api/setup/database',
 ];
+/**
+ * CSRF 契约（app/middleware/csrf.py，Double Submit Cookie）：非安全方法必须把
+ * `csrf_token` cookie 回填到 `X-CSRF-Token`，否则开启 csrf_enabled 的环境会 403。
+ */
+function readCsrfToken(): string {
+  const m = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
 axios.interceptors.request.use(
   (config) => {
+    const method = (config.method || 'get').toLowerCase();
+    if (!['get', 'head', 'options'].includes(method)) {
+      const token = readCsrfToken();
+      if (token) {
+        config.headers = config.headers || {};
+        (config.headers as Record<string, string>)['X-CSRF-Token'] = token;
+      }
+    }
     const state = store.getState() as GlobalState;
     if (
       state.userInfo?.must_change_password &&

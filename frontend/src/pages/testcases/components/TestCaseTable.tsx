@@ -25,6 +25,7 @@ interface TestCaseTableProps {
   batchActions?: React.ReactNode;
   onCreate: () => void;
   canCreate?: boolean;
+  createButton?: React.ReactNode;
   t: Record<string, string>;
 }
 
@@ -32,7 +33,7 @@ const TestCaseTable: React.FC<TestCaseTableProps> = ({
   data, loading, total, page, pageSize, columns,
   selectedRowKeys, onSelectionChange, onPageChange,
   searchQuery, onSearchChange, onSearch, onClearSearch,
-  filterExtra, batchActions, onCreate, canCreate, t,
+  filterExtra, batchActions, onCreate, canCreate, createButton, t,
 }) => {
   return (
     <div className={styles['table-wrapper']}>
@@ -49,9 +50,11 @@ const TestCaseTable: React.FC<TestCaseTableProps> = ({
         {filterExtra}
         <Space>
           {batchActions}
-          <Button type="primary" icon={<IconPlus />} onClick={onCreate} disabled={!canCreate}>
-            {t['new.case']}
-          </Button>
+          {createButton ?? (
+            <Button type="primary" icon={<IconPlus />} onClick={onCreate} disabled={!canCreate}>
+              {t['new.case']}
+            </Button>
+          )}
         </Space>
       </div>
       <Card className={styles['table-card']}>

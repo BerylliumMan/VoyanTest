@@ -17,6 +17,22 @@ router = APIRouter(
 )
 
 
+def _validate_env_items(items, field_name: str) -> None:
+    """校验 variables/headers 结构：必须是 list，每项是 dict 且含 key。
+
+    契约 §1.6：非 list 或元素缺 key → 400 可读错误。
+    """
+    if items is None:
+        return
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail=f"{field_name} 必须是数组")
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            raise HTTPException(status_code=400, detail=f"{field_name}[{i}] 必须是对象")
+        if not str(it.get("key") or "").strip():
+            raise HTTPException(status_code=400, detail=f"{field_name}[{i}] 缺少 key")
+
+
 @router.get("/projects/{project_id}/environments", response_model=List[models.Environment])
 async def list_environments(
     project_id: int, db: AsyncSession = Depends(get_async_db),
@@ -51,6 +67,9 @@ async def create_environment(
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    _validate_env_items(env.variables, "variables")
+    _validate_env_items(env.headers, "headers")
+
     try:
         return await crud.create_environment(db, project_id, env)
     except HTTPException:
@@ -74,6 +93,9 @@ async def update_environment(
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and db_env.project_id not in allowed_ids:
         raise HTTPException(status_code=403, detail="无权访问该项目")
+
+    _validate_env_items(env.variables, "variables")
+    _validate_env_items(env.headers, "headers")
 
     try:
         result = await crud.update_environment(db, env_id, env)

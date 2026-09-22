@@ -175,3 +175,13 @@ config.json
 uitest.db
 uitest-platform-windows.tar.gz
 voyantest-agent-build.tar.gz
+
+# 运行时产物与测试残留（029 接口测试会话，2026-09-22）
+/reports/
+/_tmp_test_out.txt
+/test.md
+/.cursor/
+/bin/
+/test_*.png
+/final_test_*.png
+/password_mask_check.png

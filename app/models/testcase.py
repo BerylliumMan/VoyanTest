@@ -27,8 +27,10 @@ class TestCase(Base):
     priority = Column(String, default="medium")  # low, medium, high, critical
     status = Column(String, default="active")  # active, deprecated, draft
     is_init = Column(Boolean, default=False, nullable=False)  # 是否作为初始化用例
-    # functional = 功能测试用例；ui = UI 自动化用例（默认可执行）
+    # functional = 功能测试用例；ui = UI 自动化用例；api = HTTP 接口用例（029）
     case_kind = Column(String(32), default="functional", nullable=False, index=True)
+    # 接口用例定义（case_kind='api' 时非空；结构见 specs/029-api-testing/data-model.md §3）
+    api_spec = Column(JSON, nullable=True, default=None)
 
     # Whole-case Playwright script solidified after a successful run.
     # Cleared whenever steps are modified.

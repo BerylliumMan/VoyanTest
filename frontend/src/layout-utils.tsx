@@ -29,6 +29,8 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconFile className={styles.icon} />;
     case 'testcases/ui':
       return <IconCode className={styles.icon} />;
+    case 'testcases/api':
+      return <IconThunderbolt className={styles.icon} />;
     case 'testcases/suites':
       return <IconList className={styles.icon} />;
     case 'gen':
@@ -41,6 +43,12 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconRobot className={styles.icon} />;
     case 'recordings':
       return <IconCamera className={styles.icon} />;
+    case 'api_test':
+      return <IconThunderbolt className={styles.icon} />;
+    case 'api_test/definitions':
+      return <IconCode className={styles.icon} />;
+    case 'api_test/scenarios':
+      return <IconList className={styles.icon} />;
     case 'agent_definitions':
       return <IconCode className={styles.icon} />;
     case 'agent-runs':

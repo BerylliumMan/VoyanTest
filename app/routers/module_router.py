@@ -130,8 +130,9 @@ async def delete_module(module_id: int, user=Depends(get_current_user), db: Asyn
         raise HTTPException(status_code=403, detail="无权访问该项目")
     try:
         result = await crud.delete_module(db, module_id)
-    except ValueError:
-        raise HTTPException(status_code=409, detail="模块删除失败：存在冲突或约束限制")
+    except ValueError as exc:
+        # 把删除保护的具体原因原样回给前端（"模块下有 N 个接口定义"等），否则用户无法自查
+        raise HTTPException(status_code=409, detail=str(exc) or "模块删除失败：存在冲突或约束限制")
     if result is None:
         raise HTTPException(status_code=404, detail="Module not found")
     return Response(status_code=204)

@@ -175,3 +175,98 @@
 .screenshotTopMargin {
   margin-top: 8px;
 }
+
+/* API 用例步骤明细 */
+.apiSection {
+  margin-top: 10px;
+  border-top: 1px dashed var(--color-border-2);
+  padding-top: 8px;
+}
+
+.apiBlock {
+  margin-bottom: 8px;
+}
+
+.apiBlockTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-2);
+  margin-bottom: 6px;
+}
+
+.apiRequestLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.apiMethodTag {
+  font-family: monospace;
+}
+
+.apiUrl {
+  font-family: monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.apiResponseMeta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.apiMetaText {
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+
+.apiCollapse {
+  margin-bottom: 4px;
+}
+
+.apiBody {
+  margin: 0;
+  padding: 8px;
+  background: var(--color-fill-2);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.apiPassed {
+  color: var(--color-success-6);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.apiFailed {
+  color: var(--color-danger-6);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.apiAssertionError {
+  margin-left: 8px;
+  color: var(--color-danger-6);
+  font-size: 12px;
+}
+
+.apiExpectedFail,
+.apiActualFail {
+  color: var(--color-danger-6);
+  font-weight: 600;
+}
+
+.apiAssertionRowFail {
+  background: var(--color-danger-light-1);
+}

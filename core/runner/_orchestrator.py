@@ -19,6 +19,7 @@ from app.tz import now as tz_now
 from app import crud
 from app.database import AsyncSessionLocal
 
+from core.runner._api_execution import run_api_case_server
 from core.runner._execution import run_test_case_in_browser
 from core.runner._persistence import (
     build_batch_execution_queue,
@@ -240,6 +241,12 @@ async def run_test_case(
             except SQLAlchemyError as exc:
                 logger.warning("Environment lookup failed for env_id=%s: %s", environment_id, exc, exc_info=True)
 
+    # ── API 用例分发（T040）：case_kind='api' 短路到接口执行器，不走浏览器 ──
+    if case_kind == "api":
+        return await _run_api_case_server_entry(
+            case_id, batch_id, environment_id, run_id,
+        )
+
     if project_id is not None:
         async with BrowserPool.project_lock(project_id):
             return await _run_test_case_unlocked(
@@ -252,6 +259,23 @@ async def run_test_case(
         debug_mode=debug_mode, run_id=run_id, backend=backend,
         case_kind=case_kind,
     )
+
+
+async def _run_api_case_server_entry(
+    case_id: int,
+    batch_id: int | None,
+    environment_id: int | None,
+    run_id: int | None,
+) -> dict:
+    """单用例 api 分发入口：自开 session 调 run_api_case_server（T040）。
+
+    case_kind='api' 的用例不走浏览器/OTA，直接短路到接口执行器。
+    """
+    async with AsyncSessionLocal() as _db:
+        return await run_api_case_server(
+            case_id, db=_db, batch_id=batch_id, run_id=run_id,
+            environment_id=environment_id,
+        )
 
 
 async def _run_test_case_unlocked(
@@ -497,6 +521,24 @@ async def run_batch_test_cases(
                 init_case_ids=init_case_ids, init_policy=init_policy,
             )
 
+            # ── API 用例分发（T040）：加载 case_kind 映射 ──────────────────
+            # case_kind='api' 的用例短路到 run_api_case_server，不走浏览器；
+            # 全部为 api 时跳过浏览器创建（避免无浏览器环境启动失败）。
+            case_kinds: dict[int, str] = {}
+            try:
+                for _cid, _rid, _is_init in precreated_runs:
+                    _tc = await crud.get_test_case(batch_db, _cid)
+                    case_kinds[_cid] = (
+                        getattr(_tc, "case_kind", None) or "functional"
+                        if _tc is not None else "functional"
+                    )
+            except Exception:  # noqa: BLE001 - 映射加载失败回退浏览器路径
+                logger.warning("加载 case_kind 映射失败，api 用例将走浏览器路径", exc_info=True)
+            all_api = bool(precreated_runs) and all(
+                case_kinds.get(cid, "functional") == "api"
+                for cid, _, _ in precreated_runs
+            )
+
             async def _abort_remaining_from(start_idx: int, message: str) -> None:
                 for j in range(start_idx, len(precreated_runs)):
                     _, rid, _ = precreated_runs[j]
@@ -518,14 +560,20 @@ async def run_batch_test_cases(
                         await batch_db.commit()
                         break
                     try:
-                        result = await run_test_case_via_browser_use(
-                            case_id,
-                            batch_id=batch_id,
-                            run_id=_rid,
-                            base_url_override=base_url_override,
-                            headless=_exec_backend.headless,
-                            max_steps_per_nl=_exec_backend.max_steps_per_nl,
-                        )
+                        if case_kinds.get(case_id) == "api":
+                            result = await run_api_case_server(
+                                case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
+                                environment_id=environment_id,
+                            )
+                        else:
+                            result = await run_test_case_via_browser_use(
+                                case_id,
+                                batch_id=batch_id,
+                                run_id=_rid,
+                                base_url_override=base_url_override,
+                                headless=_exec_backend.headless,
+                                max_steps_per_nl=_exec_backend.max_steps_per_nl,
+                            )
                         results.append(result)
                         status = (result or {}).get("status")
                         logger.info(
@@ -561,36 +609,39 @@ async def run_batch_test_cases(
                             break
                 return results
 
-            # 创建或复用浏览器
-            try:
-                async def _factory():
-                    mgr = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
-                    await mgr.start()
-                    return mgr
+            # 创建或复用浏览器（全部为 api 用例时跳过，无需浏览器）
+            if all_api:
+                mcp_manager = None
+            else:
+                try:
+                    async def _factory():
+                        mgr = PlaywrightMCPManager(browser_type=browser_type, headless=headless)
+                        await mgr.start()
+                        return mgr
 
-                existing = await browser_pool.get_or_create(project_id, _factory)
-                if existing is not None:
-                    mcp_manager = existing
-                else:
-                    mcp_manager = await _factory()
-                    await browser_pool.register(project_id, mcp_manager)
-            except Exception as exc:  # noqa: BLE001 - 见下方注释
-                # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
-                # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
-                # Failures can surface as OSError (subprocess), ConnectionError, or
-                # asyncio.TimeoutError — any of them must be reported as a clean
-                # "browser startup failed" so all pre-created pending TestRun
-                # records get marked as failed consistently.
-                logger.exception("Failed to start browser for batch %s", batch_id)
-                for _cid, _rid, _is_init in precreated_runs:
-                    await _record_batch_case_failure(
-                        batch_db, _rid, batch_id,
-                        message=f"Browser startup failed: {exc}",
-                    )
-                return
+                    existing = await browser_pool.get_or_create(project_id, _factory)
+                    if existing is not None:
+                        mcp_manager = existing
+                    else:
+                        mcp_manager = await _factory()
+                        await browser_pool.register(project_id, mcp_manager)
+                except Exception as exc:  # noqa: BLE001 - 见下方注释
+                    # Broad catch is necessary: PlaywrightMCPManager.start spawns an npx
+                    # subprocess, opens stdio pipes, and talks to a Playwright MCP server.
+                    # Failures can surface as OSError (subprocess), ConnectionError, or
+                    # asyncio.TimeoutError — any of them must be reported as a clean
+                    # "browser startup failed" so all pre-created pending TestRun
+                    # records get marked as failed consistently.
+                    logger.exception("Failed to start browser for batch %s", batch_id)
+                    for _cid, _rid, _is_init in precreated_runs:
+                        await _record_batch_case_failure(
+                            batch_db, _rid, batch_id,
+                            message=f"Browser startup failed: {exc}",
+                        )
+                    return
 
-            # Clear cookies once at batch start
-            await mcp_manager.clear_cookies()
+                # Clear cookies once at batch start
+                await mcp_manager.clear_cookies()
 
             results = []
             for idx, (case_id, _rid, is_init) in enumerate(precreated_runs):
@@ -603,7 +654,12 @@ async def run_batch_test_cases(
                     await batch_db.commit()
                     break
                 try:
-                    if use_agent_runner and agent_def is not None:
+                    if case_kinds.get(case_id) == "api":
+                        result = await run_api_case_server(
+                            case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
+                            environment_id=environment_id,
+                        )
+                    elif use_agent_runner and agent_def is not None:
                         result = await run_test_case_via_agent(
                             case_id, mcp_manager, batch_db, agent_def,
                             llm_client=agent_llm_client,

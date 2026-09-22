@@ -133,7 +133,8 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
             elif msg.type in (WSMessageType.STEP_RESULT, WSMessageType.SNAPSHOT_RESULT,
                               WSMessageType.SCREENSHOT_RESULT, WSMessageType.RUN_COMPLETE,
                               WSMessageType.COMPILED_SCRIPT_RESULT,
-                              WSMessageType.RECORDING_READY, WSMessageType.RECORDING_EVENTS):
+                              WSMessageType.RECORDING_READY, WSMessageType.RECORDING_EVENTS,
+                              WSMessageType.API_RESPONSE):
                 if session:
                     session.resolve(msg)
                     if msg.run_id:

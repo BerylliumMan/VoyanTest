@@ -7,32 +7,15 @@ import axios from 'axios';
 import { apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
 import RunDetail from './RunDetail';
+import ApiStepDetail from './ApiStepDetail';
 import styles from './style/index.module.less';
+import type { StepDetail, RunItem } from './types';
 
 interface BatchItem {
   id: number; name: string; project_id: number; project_name: string;
   status: string; total_cases: number; passed: number; failed: number;
   created_at: string; started_at: string; finished_at: string;
   triggered_by?: string;
-}
-
-interface StepDetail {
-  step_number?: number;
-  description?: string;
-  original_description?: string;
-  status?: string;
-  success?: boolean;
-  error?: string;
-  action?: string;
-  screenshot_path?: string;
-}
-
-interface RunItem {
-  id: number; run_id: number; case_id: number; case_name: string;
-  status: string; duration: number;
-  started_at: string; finished_at: string;
-  steps: StepDetail[];
-  logs?: string;
 }
 
 interface BatchDetail {
@@ -471,6 +454,7 @@ const Reports: React.FC = () => {
                                   />
                                 </div>
                               )}
+                              <ApiStepDetail step={step} />
                             </Card>
                           ))}
                         </div>

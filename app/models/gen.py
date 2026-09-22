@@ -18,6 +18,8 @@ class GenSession(Base):
     user_id = Column(Integer, nullable=True)
     project_description = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="pending")
+    # 'doc' = 文档→UI 用例；'api' = 接口文档→接口用例（029）
+    session_kind = Column(String(16), nullable=False, default="doc")
     error_message = Column(Text, nullable=True)
     progress = Column(Integer, default=0)  # 0-100，跨 worker 可读
     progress_message = Column(String(500), nullable=True)

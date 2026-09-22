@@ -136,6 +136,21 @@ async def delete_module(db: AsyncSession, module_id: int) -> bool | None:
     if case_count > 0:
         raise ValueError(f"模块或其子模块下有 {case_count} 个测试用例，无法删除")
 
+    # 接口测试的接口定义同样挂在模块上（api_definitions.module_id，FK 无 ON DELETE）：
+    # 不检查就会在删除时抛 FK 约束错（500），这里给出可读的 409
+    from app import db_models as _models
+
+    def_count_result = await db.execute(
+        select(func.count())
+        .select_from(_models.ApiDefinition)
+        .where(_models.ApiDefinition.module_id.in_(descendant_ids))
+    )
+    definition_count = def_count_result.scalar()
+    if definition_count > 0:
+        raise ValueError(
+            f"模块或其子模块下有 {definition_count} 个接口定义，无法删除（请先移动到其他分组或删除接口）"
+        )
+
     # 先删除所有子模块（从叶子到根），再删除自身
     child_ids = [cid for cid in descendant_ids if cid != module_id]
     if child_ids:

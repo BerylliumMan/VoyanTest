@@ -65,7 +65,7 @@ async def get_next_project_case_number(db: AsyncSession, project_id: int) -> int
 async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_models.TestCase:
     """创建测试用例及其步骤（单事务）"""
     kind = getattr(case, "case_kind", None) or "functional"
-    if kind not in ("functional", "ui"):
+    if kind not in ("functional", "ui", "api"):
         kind = "ui"
     db_case = db_models.TestCase(
         project_id=case.project_id,
@@ -77,6 +77,8 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
         is_init=bool(getattr(case, "is_init", False)),
         tags=getattr(case, "tags", None),
         priority=getattr(case, "priority", None) or "medium",
+        # 接口用例（case_kind='api'）的请求快照；UI/功能用例恒为 None
+        api_spec=getattr(case, "api_spec", None),
     )
     db.add(db_case)
     await db.flush()
@@ -233,6 +235,11 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
     db_case.name = case.name
     db_case.description = case.description
     db_case.module_id = case.module_id
+    requested_kind = getattr(case, "case_kind", None)
+    if requested_kind in ("functional", "ui", "api"):
+        db_case.case_kind = requested_kind
+    if getattr(case, "api_spec", None) is not None:
+        db_case.api_spec = case.api_spec
 
     # Preserve learned locators across step rewrite (match by step_order)
     old_learned = {

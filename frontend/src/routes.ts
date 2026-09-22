@@ -111,6 +111,26 @@ export const routes: IRoute[] = [
     key: 'recordings',
   },
   {
+    name: 'menu.api_test',
+    key: 'api_test',
+    children: [
+      {
+        name: 'menu.api_test.definitions',
+        key: 'api_test/definitions',
+      },
+      {
+        name: 'menu.api_test.scenarios',
+        key: 'api_test/scenarios',
+      },
+    ],
+  },
+  {
+    name: '接口测试重定向',
+    key: 'api_test-redirect',
+    path: '/api_test',
+    ignore: true,
+  },
+  {
     name: 'menu.agent_runs',
     key: 'agent-runs',
     exact: true,

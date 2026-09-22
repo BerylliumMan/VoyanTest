@@ -1,5 +1,6 @@
 # app/crud/environment.py - 环境 CRUD
 import logging
+from typing import Any
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +49,8 @@ async def create_environment(db: AsyncSession, project_id: int, env: models.Envi
         browser=env.browser,
         headless=env.headless,
         cookies=env.cookies or [],
+        variables=env.variables or [],
+        headers=env.headers or [],
         is_default=(existing == 0),
     )
     db.add(db_env)
@@ -72,6 +75,10 @@ async def update_environment(db: AsyncSession, env_id: int, env: models.Environm
         return None
 
     update_data = env.model_dump(exclude_unset=True)
+    if "variables" in update_data:
+        update_data["variables"] = _merge_masked_variables(
+            db_env.variables or [], update_data["variables"] or []
+        )
     for key, value in update_data.items():
         setattr(db_env, key, value)
 
@@ -87,6 +94,70 @@ async def update_environment(db: AsyncSession, env_id: int, env: models.Environm
         await _sync_env_to_project(db, db_env.project_id, db_env)
 
     return db_env
+
+
+def _merge_masked_variables(old_items: list, new_items: list) -> list:
+    """写入幂等（契约 §1.6）：secret 项回传 value == "******" 表示未修改，
+    保留库中原值；非 secret 项原样落库。"""
+    old_secret_values: dict[str, Any] = {}
+    for it in old_items or []:
+        if isinstance(it, dict) and it.get("secret"):
+            key = str(it.get("key") or "").strip()
+            if key:
+                old_secret_values[key] = it.get("value")
+    out = []
+    for it in new_items or []:
+        if not isinstance(it, dict):
+            out.append(it)
+            continue
+        item = dict(it)
+        key = str(item.get("key") or "").strip()
+        if item.get("secret") and item.get("value") == "******" and key in old_secret_values:
+            item["value"] = old_secret_values[key]
+        out.append(item)
+    return out
+
+
+async def update_environment_variables(
+    db: AsyncSession, env_id: int, updates: dict[str, str]
+) -> bool:
+    """把 environment 作用域提取的变量写回 environments.variables。
+
+    保留原项的 secret/enable 元数据，只更新 value；新 key 追加
+    ``{"key","value","secret":False,"enable":True}``。
+    注意：必须重建 dict 对象（JSON 列赋值时新旧值 == 不会触发 UPDATE）。
+    """
+    db_env = await get_environment(db, env_id)
+    if db_env is None:
+        return False
+    old_items = db_env.variables or []
+    by_key: dict[str, dict] = {}
+    for it in old_items:
+        if isinstance(it, dict) and str(it.get("key") or "").strip():
+            by_key[str(it["key"]).strip()] = it
+    new_items: list[dict] = []
+    updated_keys: set[str] = set()
+    for it in old_items:
+        if not isinstance(it, dict):
+            new_items.append(it)
+            continue
+        key = str(it.get("key") or "").strip()
+        if key in updates:
+            new_items.append({**it, "value": updates[key]})
+            updated_keys.add(key)
+        else:
+            new_items.append(dict(it))
+    for key, value in updates.items():
+        if key not in updated_keys:
+            new_items.append({"key": key, "value": value, "secret": False, "enable": True})
+    db_env.variables = new_items
+    try:
+        await db.commit()
+        await db.refresh(db_env)
+    except Exception as e:
+        await db.rollback()
+        raise ValueError(f"更新环境变量失败: {e}") from e
+    return True
 
 
 async def delete_environment(db: AsyncSession, env_id: int) -> dict[str, str] | None:

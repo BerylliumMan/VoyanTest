@@ -35,6 +35,9 @@ class Environment(Base):
     # 预置 cookie 列表（执行前注入到浏览器上下文，避免重复登录）
     # 结构: [{"name": "session", "value": "xxx", "domain": "example.com", "path": "/"}]
     cookies = Column(JSON, default=list)
+    # 接口测试变量与公共请求头（029）：[{"key","value","secret","enable"}]
+    variables = Column(JSON, default=list)
+    headers = Column(JSON, default=list)
     created_at = Column(DateTime(timezone=True), default=tz_now)
 
 

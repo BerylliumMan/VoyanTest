@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useHistory } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
 import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox, Input } from '@arco-design/web-react';
-import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug } from '@arco-design/web-react/icon';
+import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug, IconImport } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
@@ -15,6 +15,9 @@ import ModuleEditor from './components/ModuleEditor';
 import BatchMoveCopyModal from './components/BatchMoveCopyModal';
 import EnvironmentManager from './components/EnvironmentManager';
 import { hydrateStructuredFromDescription } from './utils/parseInstantStep';
+import {
+  serializeEnvHeaders, serializeEnvVariables, toEnvHeadersForm, toEnvVariablesForm,
+} from './utils/envPayload';
 import styles from './index.module.less';
 
 interface TestCasesProps {
@@ -24,7 +27,10 @@ interface TestCasesProps {
 const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const t = useLocale();
   const history = useHistory();
-  const allowRun = caseKind === 'ui';
+  const location = useLocation();
+  const isApi = caseKind === 'api';
+  const allowRowRun = caseKind === 'ui';
+  const allowBatchRun = caseKind === 'ui' || caseKind === 'api';
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState<number | null>(null);
@@ -67,7 +73,15 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
 
   useEffect(() => {
     apiGet<Project[]>('/api/projects/')
-      .then((data) => setProjects(data || []))
+      .then((data) => {
+        const list = data || [];
+        setProjects(list);
+        const qp = new URLSearchParams(location.search).get('projectId');
+        const pid = qp ? Number(qp) : NaN;
+        if (!Number.isNaN(pid) && list.some((p) => p.id === pid)) {
+          setSelectedProject(pid);
+        }
+      })
       .catch((e) => {
         logger.error('Failed to load agents:', e);
       });
@@ -111,10 +125,28 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
 
   const handleProjectChange = (val: number) => { setSelectedProject(val); setSelectedModuleId(null); setPage(1); setSelectedRowKeys([]); setSearchQuery(''); setSubmittedQuery(''); setInitCaseFilter('all'); };
   const handleEnvironmentChange = (val: number) => setSelectedEnvironment(val);
-  const openCreateEnv = () => { setEditingEnv(null); envForm.resetFields(); envForm.setFieldsValue({ browser: 'chromium', headless: true }); setEnvFormVisible(true); };
-  const openEditEnv = (env: Environment) => { setEditingEnv(env); envForm.resetFields(); envForm.setFieldsValue(env); setEnvFormVisible(true); };
+  const openCreateEnv = () => { setEditingEnv(null); envForm.resetFields(); envForm.setFieldsValue({ browser: 'chromium', headless: true, variables: [], headers: [] }); setEnvFormVisible(true); };
+  const openEditEnv = (env: Environment) => {
+    setEditingEnv(env);
+    envForm.resetFields();
+    envForm.setFieldsValue({
+      ...env,
+      variables: toEnvVariablesForm(env.variables),
+      headers: toEnvHeadersForm(env.headers),
+    });
+    setEnvFormVisible(true);
+  };
   const openEnvManage = () => setEnvManageVisible(true);
-  const handleEnvSubmit = async () => { const values = await envForm.validate(); try { if (editingEnv) { await axios.put(`/api/environments/${editingEnv.id}`, values); Message.success(t['environment.update_success']); } else { await axios.post(`/api/projects/${selectedProject}/environments`, values); Message.success(t['environment.create_success']); } setEnvFormVisible(false); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
+  const handleEnvSubmit = async () => {
+    const values = await envForm.validate();
+    // secret 项「未修改」时 value 保持 "******"，后端据此保留原值；has_value 等仅 UI 字段剔除
+    const payload = {
+      ...values,
+      variables: serializeEnvVariables(values.variables),
+      headers: serializeEnvHeaders(values.headers),
+    };
+    try { if (editingEnv) { await axios.put(`/api/environments/${editingEnv.id}`, payload); Message.success(t['environment.update_success']); } else { await axios.post(`/api/projects/${selectedProject}/environments`, payload); Message.success(t['environment.create_success']); } setEnvFormVisible(false); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); }
+  };
   const handleDeleteEnv = async (id: number) => { try { await axios.delete(`/api/environments/${id}`); Message.success(t['environment.delete_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleSetDefaultEnv = async (id: number) => { try { await axios.put(`/api/environments/${id}/default`); Message.success(t['environment.set_default_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const openCreate = () => { setEditingCase(null); form.resetFields(); if (selectedModuleId) form.setFieldsValue({ module_id: selectedModuleId }); setSteps([{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0, cacheable: true, structured_step: caseKind === 'ui' ? { action: 'click' } : null }]); setVisible(true); };
@@ -276,7 +308,7 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     {
       title: t['actions'], render: (_: unknown, record: TestCase) => (
         <div className={styles.actionsCell}>
-          {allowRun && (
+          {allowRowRun && (
             <>
               <Button type="primary" size="mini" icon={<IconPlayArrow />} onClick={() => handleRun(record.id)}>{t['run']}</Button>
               <Select value={selectedAgent} onChange={(val: string) => setSelectedAgent(val)} className={styles.agentSelectMini} size="mini">
@@ -311,15 +343,17 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     <Button type="outline" onClick={() => openBatchModal('move')}>{t['batch.move']}</Button>
     <Button type="outline" onClick={() => openBatchModal('copy')}>{t['batch.copy']}</Button>
     <Button type="outline" onClick={() => { setSaveSuiteName(''); setSaveSuiteVisible(true); }}>{t['suite.save']}</Button>
-    {allowRun && (
+    {allowBatchRun && (
       <>
         <Button type="primary" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('server')}>{t['batch.run.server']}</Button>
-        <div className={styles.inlineFlex}>
-          <Select value={selectedAgent} onChange={setSelectedAgent} className={styles.agentSelectWide} placeholder={t['select.agent']}>
-            {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
-          </Select>
-          <Button type="outline" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('client')}>{t['batch.run.client']}</Button>
-        </div>
+        {!isApi && (
+          <div className={styles.inlineFlex}>
+            <Select value={selectedAgent} onChange={setSelectedAgent} className={styles.agentSelectWide} placeholder={t['select.agent']}>
+              {(agents.length > 0 ? agents : [{ name: '', status: 'offline' }]).map(a => <Select.Option key={a.name} value={a.name} disabled={!a.name}>{a.name || t['select.agent']}</Select.Option>)}
+            </Select>
+            <Button type="outline" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('client')}>{t['batch.run.client']}</Button>
+          </div>
+        )}
       </>
     )}
   </> : null;
@@ -365,12 +399,18 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     </Space>
   ) : null;
 
+  const createButton = isApi ? (
+    <Button type="primary" icon={<IconImport />} onClick={() => history.push('/api_test')}>
+      {t['api_case.goto_import'] || '去接口测试页导入生成'}
+    </Button>
+  ) : undefined;
+
   return (
     <>
       <style>{`.testcase-select .arco-select-view { background-color: var(--color-fill-2) !important; } .arco-tree-node { position: relative; } .arco-tree-node-title { width: 100%; padding-right: 0 !important; } .arco-tree-node-title .module-node-title { display: flex; align-items: center; justify-content: space-between; flex: 1; min-width: 0; } .step-row.drag-over { border-color: rgb(var(--primary-6)) !important; box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.12); }`}</style>
       <div className={styles.layout}>
-        <ModuleTree projects={projects} selectedProject={selectedProject} onProjectChange={handleProjectChange} selectedEnvironment={selectedEnvironment} environments={environments} onEnvironmentChange={handleEnvironmentChange} modules={modules} moduleTree={moduleTree} selectedModuleId={selectedModuleId} onSelectModule={handleSelectModule} onCreateModule={() => openModuleModal()} onEditModule={openModuleModal} onDeleteModule={(id, name) => Modal.confirm({ title: t['confirm.delete'], content: t['confirm.delete.module'].replace('{name}', name), onOk: () => handleModuleDelete(id) })} onRunModule={allowRun ? handleRunModule : undefined} onRunAll={allowRun ? handleRunAll : undefined} allowRun={allowRun} t={t} openCreateEnv={openCreateEnv} openEnvManage={openEnvManage} />
-        <TestCaseTable data={filteredData} loading={loading} total={total} page={page} pageSize={pageSize} columns={columns} selectedRowKeys={selectedRowKeys} onSelectionChange={setSelectedRowKeys} onPageChange={(p, ps) => { setPage(p); setPageSize(ps); }} searchQuery={searchQuery} onSearchChange={setSearchQuery} onSearch={(v) => { setPage(1); setSubmittedQuery(v); }} onClearSearch={() => { setSearchQuery(''); setSubmittedQuery(''); }} batchActions={batchActions} onCreate={openCreate} canCreate={!!selectedProject} filterExtra={filterExtra} t={t} />
+        <ModuleTree projects={projects} selectedProject={selectedProject} onProjectChange={handleProjectChange} selectedEnvironment={selectedEnvironment} environments={environments} onEnvironmentChange={handleEnvironmentChange} modules={modules} moduleTree={moduleTree} selectedModuleId={selectedModuleId} onSelectModule={handleSelectModule} onCreateModule={() => openModuleModal()} onEditModule={openModuleModal} onDeleteModule={(id, name) => Modal.confirm({ title: t['confirm.delete'], content: t['confirm.delete.module'].replace('{name}', name), onOk: () => handleModuleDelete(id) })} onRunModule={allowRowRun ? handleRunModule : undefined} onRunAll={allowRowRun ? handleRunAll : undefined} allowRun={allowRowRun} t={t} openCreateEnv={openCreateEnv} openEnvManage={openEnvManage} />
+        <TestCaseTable data={filteredData} loading={loading} total={total} page={page} pageSize={pageSize} columns={columns} selectedRowKeys={selectedRowKeys} onSelectionChange={setSelectedRowKeys} onPageChange={(p, ps) => { setPage(p); setPageSize(ps); }} searchQuery={searchQuery} onSearchChange={setSearchQuery} onSearch={(v) => { setPage(1); setSubmittedQuery(v); }} onClearSearch={() => { setSearchQuery(''); setSubmittedQuery(''); }} batchActions={batchActions} onCreate={openCreate} canCreate={!!selectedProject} createButton={createButton} filterExtra={filterExtra} t={t} />
         <TestCaseEditor
           visible={visible}
           editingCase={editingCase}

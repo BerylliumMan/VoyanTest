@@ -18,6 +18,8 @@ from app.gen.prompts import (
     TC_GENERATE_FLOW_PROMPT,
 )
 
+from app.gen.api.prompts import API_CASE_GENERATE_PROMPT
+
 logger = logging.getLogger(__name__)
 
 # Import after gen.prompts to avoid circular imports at module load in some paths.
@@ -356,6 +358,16 @@ def get_seed_prompts() -> dict[str, dict]:
             "content": VERIFY_EXPECTED_PROMPT.strip(),
             "variables": ["action", "expected"],
             "description": "验证测试步骤的预期结果",
+        },
+        "api_case_generate": {
+            "name": "接口用例生成（AI 增强）",
+            "category": "generation",
+            "content": API_CASE_GENERATE_PROMPT,
+            "variables": ["definition", "existing_cases", "options"],
+            "description": (
+                "接口测试用例生成的 LLM 增强段；硬规则：参数值必须具体、断言必须可判定，"
+                "违反即丢弃草案（与 app/gen/api/llm_cases.py 同口径）"
+            ),
         },
     }
 

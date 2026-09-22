@@ -72,7 +72,9 @@ class TestCaseBase(BaseModel):
     is_init: bool = False
     tags: Optional[str] = None
     priority: str = "medium"
-    case_kind: str = Field("functional", pattern="^(functional|ui)$")
+    case_kind: str = Field("functional", pattern="^(functional|ui|api)$")
+    # 接口用例（case_kind='api'）的请求快照；UI/功能用例为 None
+    api_spec: Optional[dict] = None
 
 class TestStepBase(BaseModel):
     case_id: int
@@ -123,7 +125,8 @@ class ProjectCreate(ProjectBase):
     pass
 
 class ModuleCreate(ModuleBase):
-    pass
+    # 建模块以 URL 路径的项目为准（router 在 body 提供时会交叉校验一致性），故可省略
+    project_id: Optional[int] = None
 
 
 class ProjectUpdate(ProjectBase):
@@ -152,7 +155,8 @@ class TestCaseUpdate(BaseModel):
     is_init: Optional[bool] = None
     tags: Optional[str] = None
     priority: Optional[str] = None
-    case_kind: Optional[str] = Field(None, pattern="^(functional|ui)$")
+    case_kind: Optional[str] = Field(None, pattern="^(functional|ui|api)$")
+    api_spec: Optional[dict] = None
 
 class TestStepCreatePayload(BaseModel):
     step_order: int = Field(..., gt=0)
@@ -197,6 +201,7 @@ class TestCase(TestCaseBase):
     steps: List[TestStep] = []
     is_init: bool = False
     case_kind: str = "functional"
+    api_spec: Optional[dict] = None
     compiled_script: Optional[str] = None
     compiled_script_hash: Optional[str] = None
     compiled_at: Optional[datetime] = None
@@ -255,6 +260,10 @@ class EnvironmentBase(BaseModel):
     headless: bool = True
     # 预置 cookie 列表，执行测试时自动注入到浏览器上下文
     cookies: list = Field(default_factory=list)
+    # 接口测试环境变量 [{key,value,secret,enable}] 与公共请求头 [{key,value,enable}]
+    # 类型用 Any：结构校验（非 list / 元素缺 key）在 router 层做，返回 400 可读错误
+    variables: Any = Field(default_factory=list)
+    headers: Any = Field(default_factory=list)
 
 class EnvironmentCreate(EnvironmentBase):
     pass
@@ -265,6 +274,8 @@ class EnvironmentUpdate(BaseModel):
     browser: Optional[str] = Field(default=None, pattern="^(chromium|firefox|webkit)$")
     headless: Optional[bool] = None
     cookies: Optional[list] = None
+    variables: Optional[Any] = None
+    headers: Optional[Any] = None
 
 class Environment(EnvironmentBase):
     id: int
@@ -279,6 +290,26 @@ class Environment(EnvironmentBase):
         if v is None:
             return []
         return v
+
+    @field_validator("variables", mode="before")
+    @classmethod
+    def _mask_variables(cls, v):
+        """GET 回显脱敏（契约 §1.6）：secret=true 的变量值打码为 "******"，
+        附 has_value 布尔（有值 true / 空值 false）；非 secret 原样返回。"""
+        if v is None:
+            return []
+        out = []
+        for it in v:
+            if not isinstance(it, dict):
+                out.append(it)
+                continue
+            item = dict(it)
+            if item.get("secret"):
+                has_value = item.get("value") not in (None, "")
+                item["value"] = "******"
+                item["has_value"] = has_value
+            out.append(item)
+        return out
 
     model_config = {"from_attributes": True}
 
@@ -488,7 +519,7 @@ class TestSuiteCreate(BaseModel):
     project_id: int
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
-    case_kind: str = Field("ui", pattern="^(functional|ui)$")
+    case_kind: str = Field("ui", pattern="^(functional|ui|api)$")
     case_ids: List[int] = []
 
 
@@ -517,3 +548,210 @@ class SuiteRunRequest(BaseModel):
     init_case_ids: List[int] = []
     agent_name: Optional[str] = None
     backend: Optional[str] = None
+
+
+# ==================== 接口测试（029-api-testing） ====================
+# 契约：specs/029-api-testing/contracts/api-test-contract.md；结构：data-model.md §3
+
+class ApiKeyValue(BaseModel):
+    """通用键值项（请求头/查询参数/变量/用例变量）。"""
+
+    key: str
+    value: str = ""
+    enable: bool = True
+    secret: bool = False
+
+
+class ApiBodySpec(BaseModel):
+    type: str = "none"  # none|json|form|form_data|raw|binary
+    content: str = ""
+
+
+class ApiAuthSpec(BaseModel):
+    type: str = "none"  # none|basic|bearer|api_key
+    username: Optional[str] = None
+    password: Optional[str] = None
+    token: Optional[str] = None
+    key_name: Optional[str] = None
+    key_value: Optional[str] = None
+    in_: Optional[str] = None  # api_key 位置：header|query
+
+
+class ApiRequestSpec(BaseModel):
+    method: str = "GET"
+    url: str = ""
+    headers: List[ApiKeyValue] = []
+    query: List[ApiKeyValue] = []
+    body: ApiBodySpec = ApiBodySpec()
+    auth: ApiAuthSpec = ApiAuthSpec()
+    timeout_ms: int = Field(default=30000, ge=1000, le=300000)
+    follow_redirects: bool = True
+    verify_ssl: bool = True
+
+
+class ApiAssertionSpec(BaseModel):
+    enable: bool = True
+    type: str  # status_code|jsonpath|header|body_contains|body_regex|response_time|jsonschema
+    condition: str = "equals"
+    expression: str = ""
+    expected: str = ""
+    name: str = ""
+
+
+class ApiExtractorSpec(BaseModel):
+    enable: bool = True
+    type: str  # jsonpath|regex|header|cookie
+    expression: str
+    variable: str
+    scope: str = "case"  # case|environment
+    required: bool = True
+
+
+class ApiStepSpec(BaseModel):
+    order: int = Field(ge=1)
+    name: str = ""
+    enable: bool = True
+    definition_id: Optional[int] = None
+    request: ApiRequestSpec
+    assertions: List[ApiAssertionSpec] = []
+    extractors: List[ApiExtractorSpec] = []
+    pre: List[dict] = []
+    post: List[dict] = []
+
+
+class ApiSpecPayload(BaseModel):
+    """test_cases.api_spec 的载荷（schema_version=1）。"""
+
+    schema_version: int = 1
+    variables: List[ApiKeyValue] = []
+    dataset_id: Optional[int] = None
+    fail_policy: str = "fail_fast"  # fail_fast|continue
+    steps: List[ApiStepSpec] = []
+
+
+class ApiImportRequest(BaseModel):
+    project_id: int
+    module_id: Optional[int] = None
+    on_conflict: str = "skip"  # skip|overwrite
+    swagger_url: Optional[str] = None
+
+
+class ApiImportResponse(BaseModel):
+    import_id: int
+    source: str
+    total_operations: int
+    created: int
+    updated: int
+    skipped: int
+    warnings: List[str] = []
+    operations: List[dict] = []
+
+
+class ApiDefinitionResponse(BaseModel):
+    id: int
+    project_id: int
+    module_id: Optional[int] = None
+    name: str
+    method: str
+    path: str
+    summary: Optional[str] = None
+    tags: Optional[str] = None
+    operation_id: Optional[str] = None
+    source: str = "manual"
+    request_schema: dict = {}
+    response_schema: Optional[dict] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ApiDefinitionUpdate(BaseModel):
+    name: Optional[str] = None
+    summary: Optional[str] = None
+    tags: Optional[str] = None
+    module_id: Optional[int] = None
+
+
+class ApiImportHistoryItem(BaseModel):
+    id: int
+    file_name: str
+    source: str
+    total_operations: int
+    created_count: int
+    updated_count: int
+    skipped_count: int
+    error: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ApiGenerateOptions(BaseModel):
+    normal: bool = True
+    boundary: bool = True
+    missing_required: bool = True
+    type_error: bool = False
+    auth_fail: bool = False
+    max_cases_per_operation: int = Field(default=5, ge=1, le=20)
+    use_llm: bool = True
+
+
+class ApiGenerateRequest(BaseModel):
+    project_id: int
+    definition_ids: List[int] = []
+    module_id: Optional[int] = None
+    options: ApiGenerateOptions = ApiGenerateOptions()
+
+
+class ApiGenerateCase(BaseModel):
+    draft_id: int
+    definition_id: int
+    name: str
+    priority: str = "medium"
+    api_spec: dict = {}
+    notes: List[str] = []
+
+
+class ApiGenerateResponse(BaseModel):
+    session_id: str
+    total: int
+    cases: List[ApiGenerateCase] = []
+
+
+class ApiGenerateImportRequest(BaseModel):
+    draft_ids: List[int] = []
+
+
+class ApiDebugRequest(BaseModel):
+    environment_id: Optional[int] = None
+    case_variables: List[ApiKeyValue] = []
+    step: dict
+    dry_run: bool = False
+
+
+class ApiDebugResponse(BaseModel):
+    rendered: dict = {}
+    response: Optional[dict] = None
+    assertions: List[dict] = []
+    extracted: List[dict] = []
+    error: Optional[str] = None
+
+
+class ApiDatasetPayload(BaseModel):
+    project_id: int
+    name: str
+    columns: List[str] = []
+    rows: List[dict[str, Any]] = []
+    source: str = "manual"
+
+
+class ApiDatasetResponse(BaseModel):
+    id: int
+    project_id: int
+    name: str
+    columns: List[str] = []
+    rows: List[dict[str, Any]] = []
+    source: str = "manual"
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}

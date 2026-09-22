@@ -1,0 +1,894 @@
+/* ========== 接口测试页（三栏布局） ========== */
+
+.page {
+  padding: 16px;
+  /* 顶栏与 padding 之和：navbar 60 + content padding 16 + breadcrumb 48 + page padding 32 + toolbar 32 + gap 12 */
+  height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+}
+
+/* ---- 顶部工具栏 ---- */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-select {
+  width: 220px;
+}
+
+.env-select {
+  width: 180px;
+}
+
+/* ---- 三栏 grid ---- */
+.layout {
+  display: grid;
+  grid-template-columns: 260px minmax(420px, 1fr) minmax(360px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.left-panel,
+.middle-panel,
+.right-panel {
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* Card body 撑满卡片，内部再按列布局 */
+  :global(.arco-card-body) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+.left-panel {
+  min-height: 0;
+}
+
+.middle-panel {
+  min-width: 0;
+}
+
+.right-panel {
+  min-width: 0;
+}
+
+/* ---- 左栏：接口树 ---- */
+.left-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.left-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tree-def-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.tree-def-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tree-def-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-def-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tree-def-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.tree-def-row:hover .tree-def-actions,
+.tree-def-row:focus-within .tree-def-actions {
+  opacity: 1;
+}
+
+.tree-delete-btn,
+.tree-move-btn {
+  flex-shrink: 0;
+}
+
+.def-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 左栏 Spin 撑满剩余高度，Tree 在其内部滚动 */
+.left-spin {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+
+  :global(.arco-spin-children) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+.tree-module-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.tree-module-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.tree-module-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  font-weight: 500;
+}
+
+.tree-module-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-module-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.tree-module-row:hover .tree-module-actions,
+.tree-module-row:focus-within .tree-module-actions {
+  opacity: 1;
+}
+
+.tree-module-icon {
+  color: var(--color-text-3);
+  flex-shrink: 0;
+}
+
+.tree-count {
+  font-size: 12px;
+  color: var(--color-text-3);
+  background: var(--color-fill-2);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.tree-def-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.tree-method-tag {
+  flex-shrink: 0;
+}
+
+.tree-def-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* ---- 中栏：请求编辑器 ---- */
+.request-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.request-def-name {
+  font-size: 12px;
+  color: var(--color-text-3);
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-top-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.method-select {
+  width: 110px;
+  flex-shrink: 0;
+}
+
+.dry-run-switch {
+  flex-shrink: 0;
+}
+
+.send-btn {
+  flex-shrink: 0;
+}
+
+.request-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  /* tab 头固定，内容区滚动填满 */
+  :global(.arco-tabs-header) {
+    flex-shrink: 0;
+  }
+
+  :global(.arco-tabs-content) {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+}
+
+/* ---- 键值表 ---- */
+.kv-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kv-empty {
+  color: var(--color-text-3);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.kv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kv-switch {
+  flex-shrink: 0;
+}
+
+.kv-input {
+  flex: 1;
+}
+
+.kv-secret-btn {
+  flex-shrink: 0;
+}
+
+.kv-add-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* ---- 变量输入 ---- */
+.var-input-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.var-preview {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-2);
+  word-break: break-all;
+  max-height: 60px;
+  overflow: auto;
+}
+
+.var-token {
+  color: rgb(var(--arcoblue-6));
+  background: rgb(var(--arcoblue-1));
+  border-radius: 3px;
+  padding: 0 2px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+/* ---- Body 编辑器 ---- */
+.body-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.body-type-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.body-type-label {
+  font-size: 13px;
+  color: var(--color-text-2);
+}
+
+.body-empty {
+  color: var(--color-text-3);
+  font-size: 13px;
+  padding: 24px 0;
+  text-align: center;
+}
+
+.cm-editor {
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* ---- 断言 / 提取面板 ---- */
+.panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-empty {
+  color: var(--color-text-3);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.panel-item {
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-item-name {
+  flex: 1;
+}
+
+.panel-item-body {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.panel-item-field {
+  flex: 1;
+  min-width: 120px;
+}
+
+.panel-item-required {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.panel-item-required-label {
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+
+.panel-add-btn {
+  align-self: flex-start;
+}
+
+/* ---- 前置后置 ---- */
+.pre-post-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pre-post-title {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.pre-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pre-type {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.pre-field {
+  flex: 1;
+}
+
+/* ---- 设置 ---- */
+.settings-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-label {
+  width: 120px;
+  font-size: 13px;
+  color: var(--color-text-2);
+  flex-shrink: 0;
+}
+
+/* ---- 右栏：响应面板 ---- */
+.right-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.response-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.response-empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--color-text-3);
+}
+
+.response-section {
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.response-section-title {
+  font-weight: 500;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.response-sub-title {
+  font-size: 12px;
+  color: var(--color-text-2);
+  cursor: pointer;
+  margin: 8px 0 4px;
+  user-select: none;
+}
+
+.rendered-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rendered-url {
+  word-break: break-all;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+}
+
+.response-error {
+  color: rgb(var(--red-6));
+  font-size: 13px;
+}
+
+.response-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.response-meta-item {
+  font-size: 12px;
+  color: var(--color-text-2);
+}
+
+.response-headers {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.response-header-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.response-header-key {
+  color: var(--color-text-2);
+  flex-shrink: 0;
+}
+
+.response-header-value {
+  word-break: break-all;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.response-pre {
+  background: var(--color-fill-1);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.assertion-result-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.assertion-result-name {
+  flex-shrink: 0;
+}
+
+.assertion-result-detail {
+  color: var(--color-text-3);
+  word-break: break-all;
+}
+
+/* ---- 抽屉 ---- */
+.drawer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.drawer-label {
+  font-size: 13px;
+  color: var(--color-text-2);
+  flex-shrink: 0;
+}
+
+.import-result {
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.generate-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* 响应式：窄屏降为单列 */
+@media (max-width: 1200px) {
+  .layout {
+    grid-template-columns: 220px 1fr;
+  }
+
+  .right-panel {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+
+  /* 窄屏纵向堆叠：高度改回自适应，避免 100vh 挤压 */
+  .page {
+    height: auto;
+  }
+
+  .left-panel {
+    max-height: 300px;
+  }
+}
+
+/* ---- 数据集面板 ---- */
+.dataset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dataset-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dataset-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dataset-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dataset-field-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dataset-field-label {
+  width: 60px;
+  font-size: 13px;
+  color: var(--color-text-2);
+  flex-shrink: 0;
+}
+
+.dataset-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.dataset-section-title {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.dataset-empty-hint {
+  color: var(--color-text-3);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.dataset-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dataset-column-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 200px;
+}
+
+.dataset-editor-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--color-border-2);
+  padding-top: 12px;
+}
+
+/* ---- 环境变量编辑器 ---- */
+.env-modal {
+  width: min(760px, 94vw);
+}
+
+.env-modal :global(.arco-modal-content) {
+  max-height: min(78vh, 820px);
+  overflow: auto;
+}
+
+.env-section-title {
+  font-weight: 500;
+  font-size: 13px;
+  margin: 12px 0 6px;
+}
+
+.env-hint {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-3);
+  line-height: 1.6;
+  margin: 6px 0;
+}
+
+.env-empty-hint {
+  font-size: 12px;
+  color: var(--color-text-3);
+  padding: 8px 0;
+}
+
+.env-readonly-table {
+  margin-bottom: 4px;
+}
+
+/* ============================================================
+   camelCase 别名
+   vite 2 默认 css.modules.localsConvention=asIs，组件中 styles.leftPanel
+   这类 camelCase 访问 kebab-case 类名会失效；此处用 composes 补齐映射。
+   ============================================================ */
+.leftPanel { composes: left-panel; }
+.middlePanel { composes: middle-panel; }
+.rightPanel { composes: right-panel; }
+.leftHeader { composes: left-header; }
+.defTree { composes: def-tree; }
+.leftSpin { composes: left-spin; }
+.requestEditor { composes: request-editor; }
+.requestDefName { composes: request-def-name; }
+.requestTopBar { composes: request-top-bar; }
+.methodSelect { composes: method-select; }
+.dryRunSwitch { composes: dry-run-switch; }
+.sendBtn { composes: send-btn; }
+.requestTabs { composes: request-tabs; }
+.rightHeader { composes: right-header; }
+.responsePanel { composes: response-panel; }.assertionResultDetail { composes: assertion-result-detail; }
+.assertionResultName { composes: assertion-result-name; }
+.assertionResultRow { composes: assertion-result-row; }
+.bodyEditor { composes: body-editor; }
+.bodyEmpty { composes: body-empty; }
+.bodyTypeLabel { composes: body-type-label; }
+.bodyTypeRow { composes: body-type-row; }
+.cmEditor { composes: cm-editor; }
+.drawerLabel { composes: drawer-label; }
+.drawerRow { composes: drawer-row; }
+.envSelect { composes: env-select; }
+.generateOptions { composes: generate-options; }
+.importResult { composes: import-result; }
+.kvAddBtn { composes: kv-add-btn; }
+.kvEmpty { composes: kv-empty; }
+.kvInput { composes: kv-input; }
+.kvRow { composes: kv-row; }
+.kvSecretBtn { composes: kv-secret-btn; }
+.kvSwitch { composes: kv-switch; }
+.kvTable { composes: kv-table; }
+.panelAddBtn { composes: panel-add-btn; }
+.panelEmpty { composes: panel-empty; }
+.panelItem { composes: panel-item; }
+.panelItemBody { composes: panel-item-body; }
+.panelItemField { composes: panel-item-field; }
+.panelItemHeader { composes: panel-item-header; }
+.panelItemName { composes: panel-item-name; }
+.panelItemRequired { composes: panel-item-required; }
+.panelItemRequiredLabel { composes: panel-item-required-label; }
+.panelList { composes: panel-list; }
+.preField { composes: pre-field; }
+.prePostSection { composes: pre-post-section; }
+.prePostTitle { composes: pre-post-title; }
+.preRow { composes: pre-row; }
+.preType { composes: pre-type; }
+.projectSelect { composes: project-select; }
+.renderedRow { composes: rendered-row; }
+.renderedUrl { composes: rendered-url; }
+.responseEmpty { composes: response-empty; }
+.responseError { composes: response-error; }
+.responseHeaderKey { composes: response-header-key; }
+.responseHeaderRow { composes: response-header-row; }
+.responseHeaderValue { composes: response-header-value; }
+.responseHeaders { composes: response-headers; }
+.responseMeta { composes: response-meta; }
+.responseMetaItem { composes: response-meta-item; }
+.responsePre { composes: response-pre; }
+.responseSection { composes: response-section; }
+.responseSectionTitle { composes: response-section-title; }
+.responseSubTitle { composes: response-sub-title; }
+.settingsGrid { composes: settings-grid; }
+.settingsLabel { composes: settings-label; }
+.settingsRow { composes: settings-row; }
+.toolbarLeft { composes: toolbar-left; }
+.toolbarRight { composes: toolbar-right; }
+.treeCount { composes: tree-count; }
+.treeDefPath { composes: tree-def-path; }
+.treeDefTitle { composes: tree-def-title; }
+.treeMethodTag { composes: tree-method-tag; }
+.treeModuleIcon { composes: tree-module-icon; }
+.treeModuleTitle { composes: tree-module-title; }
+.varInputWrap { composes: var-input-wrap; }
+.varPreview { composes: var-preview; }
+.varToken { composes: var-token; }
+.datasetAlert { composes: dataset-alert; }
+.datasetColumnRow { composes: dataset-column-row; }
+.datasetColumns { composes: dataset-columns; }
+.datasetEditor { composes: dataset-editor; }
+.datasetEditorFooter { composes: dataset-editor-footer; }
+.datasetEmptyHint { composes: dataset-empty-hint; }
+.datasetFieldLabel { composes: dataset-field-label; }
+.datasetFieldRow { composes: dataset-field-row; }
+.datasetList { composes: dataset-list; }
+.datasetListHeader { composes: dataset-list-header; }
+.datasetSectionHeader { composes: dataset-section-header; }
+.datasetSectionTitle { composes: dataset-section-title; }
+.leftHeaderActions { composes: left-header-actions; }
+.treeDefRow { composes: tree-def-row; }
+.treeDefMain { composes: tree-def-main; }
+.treeDefName { composes: tree-def-name; }
+.treeDefMeta { composes: tree-def-meta; }
+.treeDeleteBtn { composes: tree-delete-btn; }
+.envModal { composes: env-modal; }
+.envSectionTitle { composes: env-section-title; }
+.envHint { composes: env-hint; }
+.envEmptyHint { composes: env-empty-hint; }
+.envReadonlyTable { composes: env-readonly-table; }
+.treeModuleRow { composes: tree-module-row; }
+.treeModuleMain { composes: tree-module-main; }
+.treeModuleName { composes: tree-module-name; }
+.treeModuleActions { composes: tree-module-actions; }
+.treeDefActions { composes: tree-def-actions; }
+.treeMoveBtn { composes: tree-move-btn; }
+.treeCopyBtn { composes: tree-move-btn; }

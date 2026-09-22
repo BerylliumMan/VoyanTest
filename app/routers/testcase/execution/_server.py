@@ -79,8 +79,10 @@ async def run_test_case_endpoint(
     project_id = db_case.project_id
     user_id = getattr(user, "id", None)
     batch_id = batch.id
+    case_kind = getattr(db_case, "case_kind", None) or "functional"
 
-    if await BrowserPool.is_active(project_id) and backend != "browser_use":
+    # api 用例不走浏览器（T040）：即使项目有活跃浏览器也走 run_test_case 短路
+    if await BrowserPool.is_active(project_id) and backend != "browser_use" and case_kind != "api":
         from app.routers.testcase import execution as _exec
 
         async def _run_with_existing_browser() -> None:
