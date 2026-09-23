@@ -15,6 +15,29 @@ from croniter import croniter
 logger = logging.getLogger(__name__)
 
 
+async def _sync_scheduler(row) -> None:
+    """把数据库中的任务同步到正在运行的调度器。停用或删除则从内存移除。"""
+    from app.scheduler import scheduler
+
+    if row is None:
+        return
+    try:
+        if getattr(row, "enabled", False):
+            await scheduler.add_task(
+                str(row.id),
+                row.name,
+                row.cron_expression,
+                row.task_type,
+                int(row.target_id),
+                enabled=True,
+                description=row.description or "",
+            )
+        else:
+            await scheduler.remove_task(str(row.id))
+    except Exception:
+        logger.exception("同步定时任务到调度器失败 id=%s", getattr(row, "id", "?"))
+
+
 async def _resolve_task_project_id(db: AsyncSession, task_type: str, target_id: int) -> int | None:
     """根据任务类型解析目标的所属项目 ID。"""
     if task_type == "project":
@@ -25,6 +48,16 @@ async def _resolve_task_project_id(db: AsyncSession, task_type: str, target_id: 
     if task_type == "testcase":
         case = await crud.get_test_case(db, target_id)
         return case.project_id if case else None
+    if task_type == "api_scenario":
+        from app.crud import api_scenario as crud_scenario
+
+        scenario = await crud_scenario.get_scenario(db, target_id)
+        return scenario.project_id if scenario else None
+    if task_type == "api_import":
+        from app import db_models
+
+        row = await db.get(db_models.ApiImport, target_id)
+        return row.project_id if row else None
     return None
 
 
@@ -62,7 +95,7 @@ async def create_schedule(
         itr = croniter(schedule.cron_expression, tz_now())
         next_run = itr.get_next(datetime)
 
-        return await crud.create_scheduled_task(
+        created = await crud.create_scheduled_task(
             db,
             name=schedule.name,
             cron_expression=schedule.cron_expression,
@@ -72,6 +105,8 @@ async def create_schedule(
             description=schedule.description or "",
             next_run_at=next_run,
         )
+        await _sync_scheduler(created)
+        return created
     except HTTPException:
         raise
     except (ValueError, SQLAlchemyError):
@@ -114,6 +149,7 @@ async def update_schedule(
         )
         if result is None:
             raise HTTPException(status_code=404, detail="Schedule not found")
+        await _sync_scheduler(result)
         return result
     except HTTPException:
         raise
@@ -134,6 +170,8 @@ async def delete_schedule(
         success = await crud.delete_scheduled_task(db, schedule_id)
         if not success:
             raise HTTPException(status_code=404, detail="Schedule not found")
+        from app.scheduler import scheduler
+        await scheduler.remove_task(str(schedule_id))
         return {"detail": "Schedule deleted"}
     except HTTPException:
         raise
@@ -165,6 +203,7 @@ async def toggle_schedule(
         result = await crud.toggle_scheduled_task(db, schedule_id, next_run_at=next_run_at)
         if result is None:
             raise HTTPException(status_code=404, detail="Schedule not found")
+        await _sync_scheduler(result)
         return result
     except HTTPException:
         raise
@@ -172,3 +211,30 @@ async def toggle_schedule(
         # ValueError: croniter.CroniterBadCronError；SQLAlchemyError: 数据库写入失败
         logger.exception("切换定时任务状态失败 (id=%d)", schedule_id)
         raise HTTPException(status_code=400, detail="Could not toggle schedule")
+
+
+@router.post("/schedules/{schedule_id}/run")
+async def run_schedule_now(
+    schedule_id: int,
+    admin=Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """立即执行一次定时任务，不等待 cron。"""
+    row = await crud.get_scheduled_task(db, schedule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    from app.scheduler import ScheduledTask, scheduler
+
+    if scheduler._executor is None:
+        raise HTTPException(status_code=503, detail="调度器尚未就绪")
+    task = ScheduledTask(
+        id=str(row.id),
+        name=row.name,
+        cron_expression=row.cron_expression,
+        task_type=row.task_type,
+        target_id=int(row.target_id),
+        enabled=True,
+        description=row.description or "",
+    )
+    result = await scheduler._executor(task)
+    return result or {}

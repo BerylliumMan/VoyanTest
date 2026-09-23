@@ -11,7 +11,7 @@
 """
 from fastapi import APIRouter
 
-from app.routers.api_test import datasets, debug, definitions, generate, import_, scenarios
+from app.routers.api_test import datasets, debug, definitions, generate, import_, mocks, overview, scenarios
 
 router = APIRouter(prefix="/api/api-test", tags=["api-test"])
 router.include_router(import_.router)
@@ -20,6 +20,8 @@ router.include_router(generate.router)
 router.include_router(debug.router)
 router.include_router(datasets.router)
 router.include_router(scenarios.router)
+router.include_router(overview.router)
+router.include_router(mocks.router)
 
 
 @router.get("/health")

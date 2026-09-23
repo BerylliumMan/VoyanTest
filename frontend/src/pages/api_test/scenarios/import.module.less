@@ -1,0 +1,38 @@
+.body {
+  display: flex;
+  height: 480px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.treePane {
+  width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--color-border-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.tablePane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.count {
+  color: var(--color-text-2);
+}

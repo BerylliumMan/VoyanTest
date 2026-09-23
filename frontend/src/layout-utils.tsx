@@ -45,6 +45,8 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconCamera className={styles.icon} />;
     case 'api_test':
       return <IconThunderbolt className={styles.icon} />;
+    case 'api_test/overview':
+      return <IconDashboard className={styles.icon} />;
     case 'api_test/definitions':
       return <IconCode className={styles.icon} />;
     case 'api_test/scenarios':

@@ -79,6 +79,8 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
         priority=getattr(case, "priority", None) or "medium",
         # 接口用例（case_kind='api'）的请求快照；UI/功能用例恒为 None
         api_spec=getattr(case, "api_spec", None),
+        api_definition_id=getattr(case, "api_definition_id", None),
+        definition_version=getattr(case, "definition_version", None),
     )
     db.add(db_case)
     await db.flush()

@@ -70,7 +70,7 @@ async def create_run_log(db: AsyncSession, run_id: int, level: str, message: str
 # 运行批次 CRUD
 # ----------------------------
 
-async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0, triggered_by: str | None = None) -> db_models.RunBatch:
+async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0, triggered_by: str | None = None, source: str | None = None, source_id: int | None = None) -> db_models.RunBatch:
     """创建运行批次"""
     batch = db_models.RunBatch(
         project_id=project_id,
@@ -81,6 +81,8 @@ async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", to
         failed=0,
         started_at=tz_now(),
         triggered_by=triggered_by,
+        source=source,
+        source_id=source_id,
     )
     db.add(batch)
     await db.commit()
@@ -281,11 +283,12 @@ async def _compute_batch_status(db: AsyncSession, batch, preloaded_runs: list = 
         stuck_failed = sum(1 for r in runs if getattr(r, "status", "") == "failed" and getattr(r, "_stuck_marked", False))
         counts["failed"] = counts.get("failed", 0) + stuck_failed
 
-    # 实际已完成（passed + failed + cancelled）的用例数
+    # 实际已完成（passed + failed + cancelled + skipped）的用例数
     completed = (
         counts.get("passed", 0)
         + counts.get("failed", 0)
         + counts.get("cancelled", 0)
+        + counts.get("skipped", 0)
     )
     running = counts.get("running", 0) + counts.get("pending", 0)
 
@@ -339,6 +342,18 @@ def _get_batch_project_filter(project_id: int | None, allowed_ids: list[int] | N
         return db_models.RunBatch.project_id.in_(allowed_ids)
     if project_id:
         return db_models.RunBatch.project_id == project_id
+    return None
+
+
+def _get_run_project_filter(project_id: int | None, allowed_ids: list[int] | None):
+    """执行记录的项目过滤：有用例用用例项目，自定义步骤用批次项目。"""
+    project_col = func.coalesce(db_models.TestCase.project_id, db_models.RunBatch.project_id)
+    if allowed_ids is not None:
+        if project_id:
+            return project_col == project_id
+        return project_col.in_(allowed_ids)
+    if project_id:
+        return project_col == project_id
     return None
 
 
@@ -454,16 +469,23 @@ async def list_recent_runs(
     返回 [(TestRun, case_name), ...]，按 start_time 倒序。
     """
     stmt = (
-        select(db_models.TestRun, db_models.TestCase.name)
-        .join(
+        select(
+            db_models.TestRun,
+            func.coalesce(db_models.TestCase.name, db_models.TestRun.display_name),
+        )
+        .outerjoin(
             db_models.TestCase,
             db_models.TestRun.case_id == db_models.TestCase.id,
+        )
+        .outerjoin(
+            db_models.RunBatch,
+            db_models.TestRun.batch_id == db_models.RunBatch.id,
         )
         .order_by(db_models.TestRun.start_time.desc())
         .limit(limit)
     )
 
-    project_filter = _get_case_project_filter(project_id, allowed_ids)
+    project_filter = _get_run_project_filter(project_id, allowed_ids)
     if project_filter is not None:
         stmt = stmt.where(project_filter)
 
@@ -479,12 +501,16 @@ async def get_run_detail_with_case(db: AsyncSession, run_id: int):
     stmt = (
         select(
             db_models.TestRun,
-            db_models.TestCase.name,
-            db_models.TestCase.project_id,
+            func.coalesce(db_models.TestCase.name, db_models.TestRun.display_name),
+            func.coalesce(db_models.TestCase.project_id, db_models.RunBatch.project_id),
         )
-        .join(
+        .outerjoin(
             db_models.TestCase,
             db_models.TestRun.case_id == db_models.TestCase.id,
+        )
+        .outerjoin(
+            db_models.RunBatch,
+            db_models.TestRun.batch_id == db_models.RunBatch.id,
         )
         .where(db_models.TestRun.id == run_id)
     )
@@ -504,15 +530,22 @@ async def list_runs_with_case(
 
     返回 {"total": int, "items": [(TestRun, case_name), ...]}。
     """
-    stmt = select(
-        db_models.TestRun,
-        db_models.TestCase.name,
-    ).join(
-        db_models.TestCase,
-        db_models.TestRun.case_id == db_models.TestCase.id,
+    stmt = (
+        select(
+            db_models.TestRun,
+            func.coalesce(db_models.TestCase.name, db_models.TestRun.display_name),
+        )
+        .outerjoin(
+            db_models.TestCase,
+            db_models.TestRun.case_id == db_models.TestCase.id,
+        )
+        .outerjoin(
+            db_models.RunBatch,
+            db_models.TestRun.batch_id == db_models.RunBatch.id,
+        )
     )
 
-    project_filter = _get_case_project_filter(project_id, allowed_ids)
+    project_filter = _get_run_project_filter(project_id, allowed_ids)
     if project_filter is not None:
         stmt = stmt.where(project_filter)
 

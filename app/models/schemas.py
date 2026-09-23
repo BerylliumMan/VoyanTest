@@ -75,6 +75,8 @@ class TestCaseBase(BaseModel):
     case_kind: str = Field("functional", pattern="^(functional|ui|api)$")
     # 接口用例（case_kind='api'）的请求快照；UI/功能用例为 None
     api_spec: Optional[dict] = None
+    api_definition_id: Optional[int] = None
+    definition_version: Optional[int] = None
 
 class TestStepBase(BaseModel):
     case_id: int
@@ -316,7 +318,7 @@ class Environment(EnvironmentBase):
 class ScheduleBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     cron_expression: str = Field(..., min_length=1)
-    task_type: str = Field(..., pattern="^(testcase|module|project)$")
+    task_type: str = Field(..., pattern="^(testcase|module|project|api_scenario|api_import)$")
     target_id: int
     description: Optional[str] = ""
     enabled: bool = True
@@ -327,7 +329,7 @@ class ScheduleCreate(ScheduleBase):
 class ScheduleUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     cron_expression: Optional[str] = None
-    task_type: Optional[str] = Field(default=None, pattern="^(testcase|module|project)$")
+    task_type: Optional[str] = Field(default=None, pattern="^(testcase|module|project|api_scenario|api_import)$")
     target_id: Optional[int] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None

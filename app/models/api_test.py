@@ -5,6 +5,7 @@
 # 从而直接复用批次/报告/套件/权限体系（详见 specs/029-api-testing/data-model.md §0）。
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -64,6 +65,13 @@ class ApiImport(Base):
     updated_count = Column(Integer, default=0, nullable=False)
     skipped_count = Column(Integer, default=0, nullable=False)
     error = Column(Text, nullable=True)
+    # 定时从 Swagger URL 同步：空 schedule 表示普通导入记录
+    url = Column(String(1000), nullable=True)
+    schedule = Column(String(100), nullable=True)
+    mode = Column(String(16), default="skip", nullable=False)
+    basic_username = Column(String(200), nullable=True)
+    basic_password = Column(String(200), nullable=True)
+    module_id = Column(Integer, ForeignKey("modules.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
 
 
@@ -100,5 +108,25 @@ class ApiScenario(Base):
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=True, index=True)
     variables = Column(JSON, default=list, nullable=False)
     steps = Column(JSON, default=list, nullable=False)
+    # 默认关闭，避免改变旧场景：整段共用 Cookie；失败后继续后续步骤
+    share_cookie = Column(Boolean, default=False, nullable=False)
+    continue_on_failure = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=tz_now)
+    updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
+
+
+class ApiMock(Base):
+    """按接口定义返回固定响应，供联调调用。不写测试报告。"""
+
+    __tablename__ = "api_mocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    definition_id = Column(Integer, ForeignKey("api_definitions.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    status_code = Column(Integer, default=200, nullable=False)
+    headers = Column(JSON, default=list, nullable=False)
+    body = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)

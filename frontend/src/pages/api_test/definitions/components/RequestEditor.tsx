@@ -38,13 +38,15 @@ interface RequestEditorProps {
   /** 当前选中接口定义的名称（未选中接口时为空） */
   definitionName?: string | null;
   onChange: (spec: ApiStep) => void;
-  onSend: () => void;
-  sending: boolean;
-  dryRun: boolean;
-  onDryRunChange: (dryRun: boolean) => void;
-  datasets: Dataset[];
-  datasetBinding: DatasetBinding;
-  onDatasetBindingChange: (binding: DatasetBinding) => void;
+  /** 嵌在场景步骤里时隐藏发送、校验和数据集 */
+  embedded?: boolean;
+  onSend?: () => void;
+  sending?: boolean;
+  dryRun?: boolean;
+  onDryRunChange?: (dryRun: boolean) => void;
+  datasets?: Dataset[];
+  datasetBinding?: DatasetBinding;
+  onDatasetBindingChange?: (binding: DatasetBinding) => void;
 }
 
 /** form 内容 <-> 键值项 序列化 */
@@ -89,13 +91,14 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
   spec,
   definitionName,
   onChange,
-  onSend,
-  sending,
-  dryRun,
-  onDryRunChange,
-  datasets,
-  datasetBinding,
-  onDatasetBindingChange,
+  embedded = false,
+  onSend = () => undefined,
+  sending = false,
+  dryRun = false,
+  onDryRunChange = () => undefined,
+  datasets = [],
+  datasetBinding = { dataset_id: null, dataset_mode: 'sequential' },
+  onDatasetBindingChange = () => undefined,
 }) => {
   const { request } = spec;
 
@@ -132,6 +135,19 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
     updateStep({ pre: [...spec.pre, { type: 'set_variable', key: '', value: '' }] });
   };
 
+  const updatePost = (index: number, patch: Partial<ApiPreStep>) => {
+    const post = (spec.post || []).map((p, i) => (i === index ? { ...p, ...patch } : p));
+    updateStep({ post });
+  };
+
+  const removePost = (index: number) => {
+    updateStep({ post: (spec.post || []).filter((_, i) => i !== index) });
+  };
+
+  const addPost = () => {
+    updateStep({ post: [...(spec.post || []), { type: 'set_variable', key: '', value: '' }] });
+  };
+
   const auth = request.auth as ApiAuth;
   const authType = auth.type as string;
 
@@ -154,24 +170,28 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
           placeholder="请求 URL（支持 {{var}}，如 {{baseUrl}}/api/users）"
           showPreview={false}
         />
-        <Tooltip content="仅渲染请求并校验变量，不真正发送请求">
-          <Switch
-            checked={dryRun}
-            onChange={onDryRunChange}
-            checkedText="仅校验变量"
-            uncheckedText="仅校验变量"
-            className={styles.dryRunSwitch}
-          />
-        </Tooltip>
-        <Button
-          type="primary"
-          icon={<IconSend />}
-          loading={sending}
-          onClick={onSend}
-          className={styles.sendBtn}
-        >
-          {dryRun ? '校验' : '发送'}
-        </Button>
+        {embedded ? null : (
+          <>
+            <Tooltip content="仅渲染请求并校验变量，不真正发送请求">
+              <Switch
+                checked={dryRun}
+                onChange={onDryRunChange}
+                checkedText="仅校验变量"
+                uncheckedText="仅校验变量"
+                className={styles.dryRunSwitch}
+              />
+            </Tooltip>
+            <Button
+              type="primary"
+              icon={<IconSend />}
+              loading={sending}
+              onClick={onSend}
+              className={styles.sendBtn}
+            >
+              {dryRun ? '校验' : '发送'}
+            </Button>
+          </>
+        )}
       </div>
 
       <Tabs defaultActiveTab="params" className={styles.requestTabs}>
@@ -274,16 +294,61 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
               + 添加前置操作
             </Button>
             <div className={styles.prePostTitle} style={{ marginTop: 16 }}>
-              后置操作
+              后置操作（响应返回后执行，变量可供后续步骤使用）
             </div>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              后置脚本（P2 规划中）
-            </Text>
+            {(spec.post || []).length === 0 && (
+              <div className={styles.panelEmpty}>暂无后置操作</div>
+            )}
+            {(spec.post || []).map((p, index) => (
+              <div className={styles.preRow} key={`post-${index}`}>
+                <Select
+                  className={styles.preType}
+                  value={p.type}
+                  onChange={(v) => updatePost(index, { type: v as ApiPreStep['type'] })}
+                  options={[
+                    { label: '设置变量', value: 'set_variable' },
+                    { label: '延时', value: 'delay' },
+                  ]}
+                />
+                {p.type === 'set_variable' ? (
+                  <>
+                    <Input
+                      className={styles.preField}
+                      placeholder="变量名"
+                      value={p.key || ''}
+                      onChange={(value) => updatePost(index, { key: value })}
+                    />
+                    <Input
+                      className={styles.preField}
+                      placeholder="变量值（支持 {{var}}）"
+                      value={p.value || ''}
+                      onChange={(value) => updatePost(index, { value: value })}
+                    />
+                  </>
+                ) : (
+                  <InputNumber
+                    className={styles.preField}
+                    placeholder="延时毫秒"
+                    value={p.ms ?? 0}
+                    min={0}
+                    onChange={(value) => updatePost(index, { ms: value ?? 0 })}
+                  />
+                )}
+                <Button size="mini" type="text" status="danger" onClick={() => removePost(index)}>
+                  删除
+                </Button>
+              </div>
+            ))}
+            <Button size="small" type="outline" onClick={addPost} className={styles.panelAddBtn}>
+              + 添加后置操作
+            </Button>
           </div>
         </TabPane>
 
         <TabPane key="settings" title="设置">
           <div className={styles.settingsGrid}>
+            {embedded ? null : (
+            <>
             <div className={styles.settingsRow}>
               <span className={styles.settingsLabel}>数据集</span>
               <Select
@@ -316,6 +381,8 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
                 options={DATASET_MODES}
               />
             </div>
+            </>
+            )}
             <div className={styles.settingsRow}>
               <span className={styles.settingsLabel}>超时（ms）</span>
               <InputNumber

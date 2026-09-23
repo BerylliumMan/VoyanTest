@@ -7,9 +7,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
+from app import db_models, models
 from app.auth import get_current_user, get_user_project_filter
 from app.crud import api_definition as crud_api_def
 from app.crud.module import get_module
+from app.crud.testcase import create_test_case
 from app.database import get_async_db
 
 logger = logging.getLogger(__name__)
@@ -204,13 +208,18 @@ async def update_definition(
         raise HTTPException(status_code=400, detail="请求体必须是对象")
 
     patch = {
-        k: payload.get(k) for k in ("name", "summary", "tags", "module_id") if k in payload
+        k: payload.get(k)
+        for k in ("name", "summary", "tags", "module_id", "method", "path")
+        if k in payload
     }
-    example = payload.get("request_schema", {}).get("example") if isinstance(payload.get("request_schema"), dict) else None
-    if example is not None:
-        merged = dict(obj.request_schema or {})
-        merged["example"] = example
-        patch["request_schema"] = merged
+    if isinstance(payload.get("request_schema"), dict):
+        incoming = payload["request_schema"]
+        if "example" in incoming and set(incoming) <= {"example"}:
+            merged = dict(obj.request_schema or {})
+            merged["example"] = incoming.get("example")
+            patch["request_schema"] = merged
+        else:
+            patch["request_schema"] = incoming
 
     updated = await crud_api_def.update_api_definition(db, definition_id, patch)
     return _serialize(updated)
@@ -227,5 +236,222 @@ async def delete_definition(
     if obj is None:
         raise HTTPException(status_code=404, detail="接口定义不存在")
     _ensure_project_access(user, obj.project_id)
+    from app.crud.api_refs import scenarios_using_definition
+
+    linked = await db.execute(
+        select(db_models.TestCase.id).where(
+            db_models.TestCase.project_id == obj.project_id,
+            db_models.TestCase.case_kind == "api",
+            db_models.TestCase.api_definition_id == definition_id,
+        )
+    )
+    case_ids = {int(row[0]) for row in linked.all()}
+    names = await scenarios_using_definition(db, obj.project_id, definition_id, case_ids)
+    if names:
+        raise HTTPException(status_code=400, detail="仍被场景引用：" + "、".join(names))
     await crud_api_def.delete_api_definition(db, definition_id)
     return {"deleted": definition_id}
+
+
+def _linked_to_definition(case, definition_id: int) -> bool:
+    if getattr(case, "api_definition_id", None) == definition_id:
+        return True
+    spec = getattr(case, "api_spec", None) or {}
+    steps = spec.get("steps") if isinstance(spec, dict) else None
+    if not steps or not isinstance(steps[0], dict):
+        return False
+    try:
+        return int(steps[0].get("definition_id")) == definition_id
+    except (TypeError, ValueError):
+        return False
+
+
+def _case_brief(case, definition_version: int | None = None) -> dict:
+    saved = getattr(case, "definition_version", None)
+    stale = saved is not None and definition_version is not None and int(saved) < int(definition_version)
+    return {
+        "id": case.id,
+        "name": case.name,
+        "priority": case.priority,
+        "api_definition_id": getattr(case, "api_definition_id", None),
+        "definition_version": saved,
+        "current_version": definition_version,
+        "stale": stale,
+        "updated_at": case.updated_at.isoformat() if case.updated_at else None,
+    }
+
+
+@router.get("/definitions/{definition_id}/cases")
+async def list_definition_cases(
+    definition_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """该接口定义下的用例（含仅在 api_spec 里记下 definition_id 的旧用例）。"""
+    obj = await crud_api_def.get_api_definition(db, definition_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="接口定义不存在")
+    _ensure_project_access(user, obj.project_id)
+    result = await db.execute(
+        select(db_models.TestCase)
+        .where(
+            db_models.TestCase.project_id == obj.project_id,
+            db_models.TestCase.case_kind == "api",
+        )
+        .order_by(db_models.TestCase.id.desc())
+    )
+    items = [
+        _case_brief(c, obj.version)
+        for c in result.scalars().all()
+        if _linked_to_definition(c, definition_id)
+    ]
+    return {"total": len(items), "items": items}
+
+
+@router.post("/definitions/{definition_id}/cases", status_code=201)
+async def create_definition_case(
+    definition_id: int,
+    payload: dict,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """把当前调试快照存成挂在该定义上的接口用例。调试接口本身不落库。"""
+    obj = await crud_api_def.get_api_definition(db, definition_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="接口定义不存在")
+    _ensure_project_access(user, obj.project_id)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是对象")
+    name = str(payload.get("name") or "").strip() or obj.name or f"{obj.method} {obj.path}"
+    spec = payload.get("api_spec")
+    if not isinstance(spec, dict):
+        spec = {
+            "schema_version": 1,
+            "variables": [],
+            "fail_policy": "fail_fast",
+            "steps": [
+                {
+                    "order": 1,
+                    "name": name,
+                    "enable": True,
+                    "definition_id": definition_id,
+                    "request": {
+                        "method": obj.method,
+                        "url": "{{baseUrl}}" + (obj.path or "/"),
+                        "headers": [],
+                        "query": [],
+                        "body": {"type": "none", "content": ""},
+                        "auth": {"type": "none"},
+                        "timeout_ms": 30000,
+                        "follow_redirects": True,
+                        "verify_ssl": True,
+                    },
+                    "assertions": [],
+                    "extractors": [],
+                    "pre": [],
+                }
+            ],
+        }
+    steps = spec.get("steps")
+    if isinstance(steps, list) and steps and isinstance(steps[0], dict):
+        if steps[0].get("definition_id") in (None, ""):
+            steps[0]["definition_id"] = definition_id
+        req = steps[0].get("request") if isinstance(steps[0].get("request"), dict) else {}
+        if not str(req.get("method") or "").strip():
+            req["method"] = obj.method
+        if not str(req.get("url") or "").strip():
+            req["url"] = "{{baseUrl}}" + (obj.path or "/")
+        steps[0]["request"] = req
+        spec["steps"] = steps
+    created = await create_test_case(
+        db,
+        models.TestCaseCreate(
+            project_id=obj.project_id,
+            module_id=obj.module_id,
+            name=name,
+            description=str(payload.get("description") or ""),
+            case_kind="api",
+            api_spec=spec,
+            api_definition_id=definition_id,
+            definition_version=int(obj.version or 1),
+            priority=str(payload.get("priority") or "medium"),
+            tags=payload.get("tags"),
+            steps=[],
+        ),
+    )
+    return _case_brief(created, obj.version)
+
+
+@router.get("/definitions/{definition_id}/references")
+async def definition_references(
+    definition_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """这个接口被哪些用例和场景使用。"""
+    from app.crud.api_refs import scenarios_using_definition
+
+    obj = await crud_api_def.get_api_definition(db, definition_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="接口定义不存在")
+    _ensure_project_access(user, obj.project_id)
+    result = await db.execute(
+        select(db_models.TestCase).where(
+            db_models.TestCase.project_id == obj.project_id,
+            db_models.TestCase.case_kind == "api",
+        )
+    )
+    cases = [c for c in result.scalars().all() if _linked_to_definition(c, definition_id)]
+    case_ids = {c.id for c in cases}
+    scenarios = await scenarios_using_definition(db, obj.project_id, definition_id, case_ids)
+    return {
+        "cases": [{"id": c.id, "name": c.name} for c in cases],
+        "scenarios": scenarios,
+    }
+
+
+@router.get("/cases/{case_id}/references")
+async def case_references(
+    case_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """这个用例被哪些场景使用。"""
+    from app.crud.api_refs import scenarios_using_case
+
+    case = await db.get(db_models.TestCase, case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="用例不存在")
+    _ensure_project_access(user, case.project_id)
+    return {"scenarios": await scenarios_using_case(db, case.project_id, case_id)}
+
+
+@router.post("/definitions/{definition_id}/cases/{case_id}/sync")
+async def sync_definition_case(
+    definition_id: int,
+    case_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """把定义上的 method、path、query、body 结构同步到用例。断言和提取不动。"""
+    from app.crud.api_refs import apply_definition_to_spec
+
+    obj = await crud_api_def.get_api_definition(db, definition_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="接口定义不存在")
+    _ensure_project_access(user, obj.project_id)
+    case = await db.get(db_models.TestCase, case_id)
+    if case is None or not _linked_to_definition(case, definition_id):
+        raise HTTPException(status_code=404, detail="用例不存在或不属于该接口")
+    old_path = None
+    steps = (case.api_spec or {}).get("steps") if isinstance(case.api_spec, dict) else None
+    if steps and isinstance(steps[0], dict):
+        url = str((steps[0].get("request") or {}).get("url") or "")
+        if obj.path and obj.path not in url:
+            old_path = None
+    case.api_spec = apply_definition_to_spec(case.api_spec or {}, obj, old_path)
+    case.definition_version = int(obj.version or 1)
+    case.api_definition_id = definition_id
+    await db.commit()
+    await db.refresh(case)
+    return _case_brief(case, obj.version)

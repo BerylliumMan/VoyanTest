@@ -186,6 +186,19 @@ async def update_api_definition(
     # （早期实现统一跳过 None，导致 module_id:null 静默失效）
     if "module_id" in patch:
         setattr(obj, "module_id", patch["module_id"])
+    changed_contract = False
+    if "method" in patch and patch["method"] and str(patch["method"]).upper() != (obj.method or ""):
+        obj.method = str(patch["method"]).upper()
+        changed_contract = True
+    if "path" in patch and patch["path"] and str(patch["path"]) != (obj.path or ""):
+        obj.path = str(patch["path"])
+        changed_contract = True
+    if "request_schema" in patch and patch["request_schema"] is not None:
+        if patch["request_schema"] != (obj.request_schema or {}):
+            obj.request_schema = patch["request_schema"]
+            changed_contract = True
+    if changed_contract:
+        obj.version = int(obj.version or 1) + 1
     await db.commit()
     await db.refresh(obj)
     return obj
@@ -210,6 +223,12 @@ async def create_import(db: AsyncSession, data: dict) -> db_models.ApiImport:
         updated_count=int(data.get("updated_count") or 0),
         skipped_count=int(data.get("skipped_count") or 0),
         error=data.get("error"),
+        url=data.get("url"),
+        schedule=data.get("schedule"),
+        mode=data.get("mode") or "skip",
+        basic_username=data.get("basic_username"),
+        basic_password=data.get("basic_password"),
+        module_id=data.get("module_id"),
     )
     db.add(obj)
     await db.commit()

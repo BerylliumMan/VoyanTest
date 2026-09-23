@@ -38,22 +38,67 @@ async def _environment_name(db: AsyncSession, environment_id: Any) -> str | None
     return getattr(env, "name", None)
 
 
-async def _resolve_cases(db: AsyncSession, steps: list[dict]) -> list[dict]:
-    """把 steps 解析成带用例名的明细（已被删除的用例标 missing=True）。"""
+async def _case_api_info(db: AsyncSession, case) -> dict:
+    """用例对应的接口：优先用绑定的接口定义，否则用请求快照里的方法和地址。"""
+    from app.crud import api_definition as crud_api_def
+
+    spec = getattr(case, "api_spec", None) or {}
+    raw_steps = spec.get("steps") if isinstance(spec, dict) else None
+    first = raw_steps[0] if isinstance(raw_steps, list) and raw_steps and isinstance(raw_steps[0], dict) else {}
+    request = first.get("request") if isinstance(first.get("request"), dict) else {}
+    def_id = getattr(case, "api_definition_id", None) or first.get("definition_id")
+    method = str(request.get("method") or "").upper()
+    path = ""
+    definition_name = None
+    if def_id is not None:
+        try:
+            definition = await crud_api_def.get_api_definition(db, int(def_id))
+        except (TypeError, ValueError):
+            definition = None
+        if definition is not None:
+            method = str(definition.method or method).upper()
+            path = definition.path or ""
+            definition_name = definition.name
+    if not path:
+        url = str(request.get("url") or "")
+        path = url.replace("{{baseUrl}}", "") or url
+    return {"method": method, "path": path, "definition_name": definition_name}
+
+
+async def _resolve_steps(db: AsyncSession, steps: list[dict]) -> list[dict]:
+    """给步骤补上展示名。旧数据没有 type 时按用例步骤处理。"""
     out: list[dict] = []
     for step in steps or []:
-        entry = {
-            "case_id": step.get("case_id"),
-            "enabled": bool(step.get("enabled", True)),
-            "order": step.get("order"),
-            "name": None,
-            "missing": False,
-        }
-        tc = await crud.get_test_case(db, step.get("case_id"))
-        if tc is None:
-            entry["missing"] = True
-        else:
-            entry["name"] = getattr(tc, "name", None)
+        if not isinstance(step, dict):
+            continue
+        entry = dict(step)
+        entry["enabled"] = bool(step.get("enabled", True))
+        step_type = step.get("type") or ("case" if step.get("case_id") is not None else "request")
+        entry["type"] = step_type
+        entry["missing"] = False
+        if step_type == "case":
+            tc = await crud.get_test_case(db, step.get("case_id"))
+            if tc is None:
+                entry["missing"] = True
+                entry["name"] = None
+            else:
+                entry["name"] = getattr(tc, "name", None)
+                entry.update(await _case_api_info(db, tc))
+        elif step_type == "definition":
+            from app.crud import api_definition as crud_api_def
+
+            definition = await crud_api_def.get_api_definition(db, step.get("definition_id"))
+            if definition is None:
+                entry["missing"] = True
+            else:
+                entry["definition_name"] = definition.name
+                entry["method"] = definition.method
+                entry["path"] = definition.path
+                if not entry.get("name"):
+                    entry["name"] = definition.name
+        children = step.get("children")
+        if isinstance(children, list) and children:
+            entry["children"] = await _resolve_steps(db, children)
         out.append(entry)
     return out
 
@@ -68,6 +113,8 @@ def _summarize(obj) -> dict:
         "description": obj.description,
         "environment_id": obj.environment_id,
         "environment_name": None,  # 列表接口按需填充
+        "share_cookie": bool(getattr(obj, "share_cookie", False)),
+        "continue_on_failure": bool(getattr(obj, "continue_on_failure", False)),
         "step_count": len(steps),
         "enabled_count": len(enabled),
         "updated_at": obj.updated_at.isoformat() if obj.updated_at else None,
@@ -114,6 +161,8 @@ async def create_scenario(
                 "environment_id": payload.get("environment_id"),
                 "variables": payload.get("variables"),
                 "steps": payload.get("steps"),
+                "share_cookie": payload.get("share_cookie", False),
+                "continue_on_failure": payload.get("continue_on_failure", False),
             },
         )
     except ScenarioValidationError as exc:
@@ -135,7 +184,9 @@ async def scenario_detail(
     item = _summarize(obj)
     item["environment_name"] = await _environment_name(db, obj.environment_id)
     item["variables"] = obj.variables or []
-    item["cases"] = await _resolve_cases(db, obj.steps or [])
+    resolved = await _resolve_steps(db, obj.steps or [])
+    item["steps"] = resolved
+    item["cases"] = [s for s in resolved if s.get("type") == "case"]
     return item
 
 
@@ -155,7 +206,15 @@ async def update_scenario(
         raise HTTPException(status_code=400, detail="请求体必须是对象")
     patch = {
         k: payload.get(k)
-        for k in ("name", "description", "environment_id", "variables", "steps")
+        for k in (
+            "name",
+            "description",
+            "environment_id",
+            "variables",
+            "steps",
+            "share_cookie",
+            "continue_on_failure",
+        )
         if k in payload
     }
     try:
@@ -187,11 +246,12 @@ async def run_scenario(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
-    """执行场景：创建命名批次，按顺序逐条执行启用的用例。
+    """执行场景：创建命名批次，按启用步骤顺序执行。
 
     复用批次/报告链路：报告页、暂停/停止、完成通知与普通批量执行一致。
+    步骤间共享本次提取出的变量；share_cookie 为真时共用一个 HTTP 客户端。
     """
-    from core.runner._api_execution import run_api_case_server
+    from core.runner._api_execution import run_scenario_batch
 
     obj = await crud_scenario.get_scenario(db, scenario_id)
     if obj is None:
@@ -202,66 +262,18 @@ async def run_scenario(
         s for s in (obj.steps or []) if isinstance(s, dict) and s.get("enabled", True)
     ]
     if not enabled:
-        raise HTTPException(status_code=400, detail="场景内没有启用的用例")
-    case_ids = [int(s["case_id"]) for s in enabled]
+        raise HTTPException(status_code=400, detail="场景内没有启用的步骤")
 
-    scenario_vars: list[dict] = list(obj.variables or [])
-    environment_id = obj.environment_id
-    project_id = obj.project_id
     batch = await crud.create_run_batch(
         db,
-        project_id,
+        obj.project_id,
         name=f"场景：{obj.name}",
-        total_cases=len(case_ids),
+        total_cases=len(enabled),
         triggered_by=getattr(user, "username", None),
+        source="api_scenario",
+        source_id=obj.id,
     )
     batch_id = batch.id
     user_id = getattr(user, "id", None)
-
-    async def _run() -> None:
-        from app import execution_control
-        from app.database import AsyncSessionLocal as _SessionLocal
-        from app.services.notifications import notify_batch_completed
-
-        try:
-            async with _SessionLocal() as session:
-                for case_id in case_ids:
-                    await execution_control.wait_if_paused(batch_id)
-                    if execution_control.is_stopped(batch_id):
-                        logger.info("场景执行被停止 scenario=%s batch=%s", scenario_id, batch_id)
-                        break
-                    await run_api_case_server(
-                        case_id,
-                        db=session,
-                        batch_id=batch_id,
-                        environment_id=environment_id,
-                        case_variables=scenario_vars,
-                    )
-        except Exception:
-            logger.exception("场景执行异常 scenario=%s batch=%s", scenario_id, batch_id)
-        finally:
-            # 停止/异常导致的提前退出：把批次置为 cancelled，避免永久 running
-            try:
-                async with _SessionLocal() as session:
-                    from app import db_models
-                    from sqlalchemy import select as _select
-
-                    result = await session.execute(
-                        _select(db_models.RunBatch).where(db_models.RunBatch.id == batch_id)
-                    )
-                    b = result.scalar_one_or_none()
-                    if b is not None and b.status == "running":
-                        done = (b.passed or 0) + (b.failed or 0)
-                        if done < (b.total_cases or 0):
-                            b.status = "cancelled"
-                            await session.commit()
-            except Exception:
-                logger.exception("场景批次收尾失败 batch=%s", batch_id)
-            if user_id:
-                try:
-                    await notify_batch_completed(batch_id, user_id)
-                except Exception:
-                    logger.exception("场景批次通知失败 batch=%s", batch_id)
-
-    background_tasks.add_task(_run)
-    return {"batch_id": batch_id, "total": len(case_ids), "started": len(case_ids), "status": "running"}
+    background_tasks.add_task(run_scenario_batch, scenario_id, batch_id, user_id)
+    return {"batch_id": batch_id, "total": len(enabled), "started": len(enabled), "status": "running"}

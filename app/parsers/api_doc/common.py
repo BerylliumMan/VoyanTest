@@ -43,7 +43,7 @@ class ParsedOperation:
 class ParsedDocument:
     """整份接口文档的解析结果。"""
 
-    source: str  # "openapi3" | "swagger2" | "postman"
+    source: str  # "openapi3" | "swagger2" | "postman" | "har"
     operations: list[ParsedOperation]
     warnings: list[str] = field(default_factory=list)
 
@@ -75,6 +75,9 @@ def _detect_from_doc(doc: Any) -> str:
         return "openapi3"
     if "swagger" in doc:
         return "swagger2"
+    log = doc.get("log")
+    if isinstance(log, dict) and isinstance(log.get("entries"), list):
+        return "har"
     info = doc.get("info")
     if isinstance(info, dict):
         schema = info.get("schema")
@@ -84,7 +87,7 @@ def _detect_from_doc(doc: Any) -> str:
 
 
 def detect_source(raw: bytes | str) -> str:
-    """判定接口文档来源：``openapi3`` / ``swagger2`` / ``postman``。"""
+    """判定接口文档来源：``openapi3`` / ``swagger2`` / ``postman`` / ``har``。"""
     return _detect_from_doc(_load_json_or_yaml(raw))
 
 
@@ -99,6 +102,10 @@ def parse_document(raw: bytes | str, file_name: str = "") -> ParsedDocument:
         from .postman import parse_postman
 
         return parse_postman(doc)
+    if source == "har":
+        from .har import parse_har
+
+        return parse_har(doc)
     from .openapi import parse_openapi
 
     return parse_openapi(doc)

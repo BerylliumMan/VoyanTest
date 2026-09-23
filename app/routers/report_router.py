@@ -340,8 +340,8 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
 
     runs_data = []
     for run in runs:
-        case = cases.get(run.case_id)
-        case_name = case.name if case else ""
+        case = cases.get(run.case_id) if run.case_id else None
+        case_name = (case.name if case else None) or getattr(run, "display_name", None) or "自定义请求"
 
         run_info = {
             "run_id": run.id,

@@ -31,6 +31,10 @@ class TestCase(Base):
     case_kind = Column(String(32), default="functional", nullable=False, index=True)
     # 接口用例定义（case_kind='api' 时非空；结构见 specs/029-api-testing/data-model.md §3）
     api_spec = Column(JSON, nullable=True, default=None)
+    # 挂靠的接口定义（可空：旧用例与未从定义保存的用例）
+    api_definition_id = Column(Integer, ForeignKey("api_definitions.id"), nullable=True, index=True)
+    # 保存用例时的接口定义版本；小于定义当前 version 时界面标「待同步」
+    definition_version = Column(Integer, nullable=True)
 
     # Whole-case Playwright script solidified after a successful run.
     # Cleared whenever steps are modified.

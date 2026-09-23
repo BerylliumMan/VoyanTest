@@ -3,6 +3,7 @@ import { useHistory } from 'react-router-dom';
 import {
   Button,
   Card,
+  Drawer,
   Dropdown,
   Empty,
   Form,
@@ -13,6 +14,7 @@ import {
   Popconfirm,
   Select,
   Spin,
+  Table,
   Tag,
   Tooltip,
   Tree,
@@ -211,6 +213,15 @@ const ApiTestPage: React.FC = () => {
   const [envModalVisible, setEnvModalVisible] = useState(false);
 
   const [saveCaseVisible, setSaveCaseVisible] = useState(false);
+  const [defCasesVisible, setDefCasesVisible] = useState(false);
+  const [defCases, setDefCases] = useState<Array<{ id: number; name: string; priority?: string; stale?: boolean }>>([]);
+  const [defCasesLoading, setDefCasesLoading] = useState(false);
+  const [mockVisible, setMockVisible] = useState(false);
+  const [mocks, setMocks] = useState<Array<{ id: number; name: string; status_code: number; mock_path: string; enabled: boolean }>>([]);
+  const [mockName, setMockName] = useState('');
+  const [mockStatus, setMockStatus] = useState('200');
+  const [mockBody, setMockBody] = useState('{}');
+  const [refScenarios, setRefScenarios] = useState<string[]>([]);
   const [saveCaseForm] = Form.useForm();
   const [saveCaseLoading, setSaveCaseLoading] = useState(false);
   const [running, setRunning] = useState(false);
@@ -758,17 +769,52 @@ const ApiTestPage: React.FC = () => {
   const defaultCaseName = () =>
     selectedDef?.name || step.name || step.request.url || '接口用例';
 
+  const loadDefCases = async (definitionId: number) => {
+    setDefCasesLoading(true);
+    try {
+      const data = await apiGet<{ items: Array<{ id: number; name: string; priority?: string; stale?: boolean }> }>(
+        `/api/api-test/definitions/${definitionId}/cases`
+      );
+      setDefCases(data?.items || []);
+      const refs = await apiGet<{ scenarios?: string[] }>(
+        `/api/api-test/definitions/${definitionId}/references`
+      );
+      setRefScenarios(refs?.scenarios || []);
+    } catch {
+      setDefCases([]);
+      setRefScenarios([]);
+    } finally {
+      setDefCasesLoading(false);
+    }
+  };
+
+  const openDefCases = () => {
+    const defId = selectedDef?.id ?? step.definition_id;
+    if (defId == null) {
+      Message.warning('请先在左侧选择一个接口');
+      return;
+    }
+    setDefCasesVisible(true);
+    loadDefCases(defId);
+  };
+
   const createCase = async (name: string): Promise<number> => {
-    const created = await apiPost<{ id: number }>('/api/testcases/', {
-      project_id: projectId,
-      module_id: null,
-      name: name.trim() || '接口用例',
-      description: '',
-      case_kind: 'api',
-      api_spec: apiSpec,
-      steps: [],
-    });
-    const defId = step.definition_id;
+    const defId = selectedDef?.id ?? step.definition_id;
+    const created =
+      defId != null
+        ? await apiPost<{ id: number }>(`/api/api-test/definitions/${defId}/cases`, {
+            name: name.trim() || '接口用例',
+            api_spec: apiSpec,
+          })
+        : await apiPost<{ id: number }>('/api/testcases/', {
+            project_id: projectId,
+            module_id: null,
+            name: name.trim() || '接口用例',
+            description: '',
+            case_kind: 'api',
+            api_spec: apiSpec,
+            steps: [],
+          });
     if (defId != null) {
       setSavedCases((prev) => ({ ...prev, [defId]: { id: created.id, signature: currentSignature } }));
     }
@@ -804,6 +850,8 @@ const ApiTestPage: React.FC = () => {
       Message.success(`已保存为用例 #${id}`);
       setSaveCaseVisible(false);
       loadApiCases();
+      const defId = selectedDef?.id ?? step.definition_id;
+      if (defId != null && defCasesVisible) loadDefCases(defId);
     } catch {
       /* apiRequest 已弹错误 */
     } finally {
@@ -916,6 +964,26 @@ const ApiTestPage: React.FC = () => {
         <div className={styles.toolbarRight}>
           <Button icon={<IconSave />} onClick={openSaveCase} disabled={!projectId}>
             保存为用例
+          </Button>
+          <Button onClick={openDefCases} disabled={!projectId || !(selectedDef?.id ?? step.definition_id)}>
+            本接口用例
+          </Button>
+          <Button
+            disabled={!projectId || !(selectedDef?.id ?? step.definition_id)}
+            onClick={async () => {
+              const defId = selectedDef?.id ?? step.definition_id;
+              if (defId == null) return;
+              setMockVisible(true);
+              setMockName(selectedDef?.name || 'Mock');
+              try {
+                const data = await apiGet<{ items: typeof mocks }>(`/api/api-test/definitions/${defId}/mocks`);
+                setMocks(data?.items || []);
+              } catch {
+                setMocks([]);
+              }
+            }}
+          >
+            Mock
           </Button>
           <Button
             type="primary"
@@ -1129,6 +1197,125 @@ const ApiTestPage: React.FC = () => {
           </FormItem>
         </Form>
       </Modal>
+
+      <Drawer
+        title={selectedDef ? `用例 · ${selectedDef.name}` : '本接口用例'}
+        visible={defCasesVisible}
+        onCancel={() => setDefCasesVisible(false)}
+        width={480}
+        footer={null}
+      >
+        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+          {refScenarios.length ? `被场景引用：${refScenarios.join('、')}` : '没有场景引用这个接口'}
+        </Text>
+        <Spin loading={defCasesLoading} style={{ width: '100%' }}>
+          {defCases.length === 0 ? (
+            <Empty description="该接口下还没有用例。调试后点「保存为用例」。" />
+          ) : (
+            <Table
+              size="small"
+              pagination={false}
+              rowKey="id"
+              data={defCases}
+              columns={[
+                { title: 'ID', dataIndex: 'id', width: 70 },
+                { title: '名称', dataIndex: 'name' },
+                { title: '等级', dataIndex: 'priority', width: 90 },
+                {
+                  title: '状态',
+                  width: 90,
+                  render: (_: unknown, row: { stale?: boolean }) =>
+                    row.stale ? <Tag color="orange">待同步</Tag> : <Tag color="green">一致</Tag>,
+                },
+                {
+                  title: '操作',
+                  width: 80,
+                  render: (_: unknown, row: { id: number; stale?: boolean }) =>
+                    row.stale ? (
+                      <Button
+                        type="text"
+                        size="mini"
+                        onClick={async () => {
+                          const defId = selectedDef?.id ?? step.definition_id;
+                          if (defId == null) return;
+                          await apiPost(`/api/api-test/definitions/${defId}/cases/${row.id}/sync`, {});
+                          Message.success('已同步请求结构');
+                          loadDefCases(defId);
+                        }}
+                      >
+                        同步
+                      </Button>
+                    ) : null,
+                },
+              ]}
+            />
+          )}
+        </Spin>
+      </Drawer>
+
+      <Drawer
+        title="Mock"
+        visible={mockVisible}
+        onCancel={() => setMockVisible(false)}
+        width={520}
+        footer={null}
+      >
+        <Form layout="vertical">
+          <FormItem label="名称">
+            <Input value={mockName} onChange={setMockName} />
+          </FormItem>
+          <FormItem label="状态码">
+            <Input value={mockStatus} onChange={setMockStatus} />
+          </FormItem>
+          <FormItem label="响应体">
+            <Input.TextArea value={mockBody} onChange={setMockBody} autoSize={{ minRows: 4 }} />
+          </FormItem>
+          <Button
+            type="primary"
+            onClick={async () => {
+              const defId = selectedDef?.id ?? step.definition_id;
+              if (defId == null) return;
+              const created = await apiPost<{ items?: typeof mocks } & { id: number; mock_path: string }>(
+                `/api/api-test/definitions/${defId}/mocks`,
+                { name: mockName, status_code: Number(mockStatus) || 200, body: mockBody }
+              );
+              Message.success(`已创建 ${created.mock_path}`);
+              const data = await apiGet<{ items: typeof mocks }>(`/api/api-test/definitions/${defId}/mocks`);
+              setMocks(data?.items || []);
+            }}
+          >
+            创建 Mock
+          </Button>
+        </Form>
+        <Table
+          style={{ marginTop: 16 }}
+          size="small"
+          pagination={false}
+          rowKey="id"
+          data={mocks}
+          columns={[
+            { title: '名称', dataIndex: 'name' },
+            { title: '地址', dataIndex: 'mock_path' },
+            {
+              title: '',
+              width: 70,
+              render: (_: unknown, row: { id: number }) => (
+                <Button
+                  type="text"
+                  size="mini"
+                  status="danger"
+                  onClick={async () => {
+                    await apiDelete(`/api/api-test/mocks/${row.id}`);
+                    setMocks(mocks.filter((m) => m.id !== row.id));
+                  }}
+                >
+                  删除
+                </Button>
+              ),
+            },
+          ]}
+        />
+      </Drawer>
 
       <Modal
         title="保存为用例"

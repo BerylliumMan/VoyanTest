@@ -24,6 +24,7 @@ class ScheduledTask:
     task_type: str  # testcase, module, project
     target_id: int
     enabled: bool = True
+    description: str = ""
     last_run: Optional[datetime] = None
     next_run: Optional[datetime] = None
     run_count: int = 0
@@ -75,6 +76,7 @@ class TaskScheduler:
                         task_type=t.task_type,
                         target_id=t.target_id,
                         enabled=t.enabled,
+                        description=t.description or "",
                         last_run=t.last_run_at,
                         next_run=t.next_run_at,
                         run_count=t.run_count or 0,
@@ -85,8 +87,20 @@ class TaskScheduler:
         except Exception as e:
             logger.warning("从 DB 加载定时任务失败: %s", e)
 
+    def _arm(self, task: ScheduledTask) -> None:
+        """调度器已运行且任务启用时，重启该任务的等待循环。"""
+        if not self._running or not task.enabled:
+            return
+        old = self._task_handles.pop(task.id, None)
+        if old is not None:
+            old.cancel()
+        self._task_handles[task.id] = asyncio.create_task(
+            self._schedule_task(task), name=f"sched-{task.id}"
+        )
+
     async def add_task(self, task_id: str, name: str, cron_expression: str,
-                 task_type: str, target_id: int, enabled: bool = True) -> ScheduledTask:
+                 task_type: str, target_id: int, enabled: bool = True,
+                 description: str = "") -> ScheduledTask:
         """
         添加定时任务
 
@@ -101,22 +115,21 @@ class TaskScheduler:
         Returns:
             ScheduledTask: 创建的任务
         """
+        await self.remove_task(task_id)
         task = ScheduledTask(
             id=task_id,
             name=name,
             cron_expression=cron_expression,
             task_type=task_type,
             target_id=target_id,
-            enabled=enabled
+            enabled=enabled,
+            description=description or "",
         )
-        
-        # 计算下次执行时间
         task.next_run = task.calculate_next_run()
-        
         async with self._lock:
             self.tasks[task_id] = task
+        self._arm(task)
         logger.info("添加定时任务: %s (%s), 下次执行: %s", name, cron_expression, task.next_run)
-        
         return task
     
     async def remove_task(self, task_id: str) -> bool:

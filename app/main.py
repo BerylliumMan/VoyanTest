@@ -243,6 +243,62 @@ async def _run_startup_init():
             "test_cases.api_spec 迁移",
         )
         await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS api_definition_id INTEGER",
+            "test_cases.api_definition_id 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_scenarios ADD COLUMN IF NOT EXISTS share_cookie BOOLEAN DEFAULT FALSE",
+            "api_scenarios.share_cookie 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_scenarios ADD COLUMN IF NOT EXISTS continue_on_failure BOOLEAN DEFAULT FALSE",
+            "api_scenarios.continue_on_failure 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS display_name VARCHAR(255)",
+            "test_runs.display_name 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_runs ALTER COLUMN case_id DROP NOT NULL",
+            "test_runs.case_id 可空（场景自定义步骤）",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS definition_version INTEGER",
+            "test_cases.definition_version 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS source VARCHAR(32)",
+            "run_batches.source 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS source_id INTEGER",
+            "run_batches.source_id 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS url VARCHAR(1000)",
+            "api_imports.url 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS schedule VARCHAR(100)",
+            "api_imports.schedule 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS mode VARCHAR(16) DEFAULT 'skip'",
+            "api_imports.mode 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS basic_username VARCHAR(200)",
+            "api_imports.basic_username 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS basic_password VARCHAR(200)",
+            "api_imports.basic_password 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS module_id INTEGER",
+            "api_imports.module_id 迁移",
+        )
+        await _ddl(
             "ALTER TABLE environments ADD COLUMN IF NOT EXISTS variables JSONB DEFAULT '[]'::jsonb",
             "environments.variables 迁移",
         )
@@ -679,6 +735,7 @@ async def lifespan(app: FastAPI):
                     batch_id, case_id = batch.id, tc.id
                     await db.commit()
                     await _exec.run_test_case(case_id, batch_id)
+                    return {"batch_id": batch_id}
                 elif task_type == "module":
                     mod = await crud.get_module(db, int(target_id))
                     if not mod:
@@ -696,6 +753,47 @@ async def lifespan(app: FastAPI):
                     batch_id, project_id = batch.id, mod.project_id
                     await db.commit()
                     await _exec.run_batch_test_cases(case_ids, project_id, batch_id=batch_id)
+                    return {"batch_id": batch_id}
+                elif task_type == "api_scenario":
+                    from app.crud import api_scenario as crud_scenario
+                    from core.runner._api_execution import run_scenario_batch
+
+                    scenario = await crud_scenario.get_scenario(db, int(target_id))
+                    if scenario is None:
+                        logger.error("定时任务场景不存在: %s", target_id)
+                        return
+                    enabled = [
+                        s for s in (scenario.steps or [])
+                        if isinstance(s, dict) and s.get("enabled", True)
+                    ]
+                    if not enabled:
+                        logger.warning("定时任务场景没有启用步骤: %s", target_id)
+                        return
+                    env_override = None
+                    desc = str(getattr(task, "description", "") or "").strip()
+                    if desc.startswith("environment_id="):
+                        try:
+                            env_override = int(desc.split("=", 1)[1].strip())
+                        except ValueError:
+                            env_override = None
+                    batch = await crud.create_run_batch(
+                        db,
+                        project_id=scenario.project_id,
+                        name=f"场景：{scenario.name}",
+                        total_cases=len(enabled),
+                        triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                        source="api_scenario",
+                        source_id=scenario.id,
+                    )
+                    batch_id = batch.id
+                    await db.commit()
+                    await run_scenario_batch(scenario.id, batch_id, None, env_override)
+                    return {"batch_id": batch_id}
+                elif task_type == "api_import":
+                    from app.routers.api_test.import_ import run_scheduled_import
+
+                    await run_scheduled_import(int(target_id))
+                    return {"import_id": int(target_id)}
                 elif task_type == "project":
                     proj = await crud.get_project(db, int(target_id))
                     if not proj:
@@ -713,6 +811,7 @@ async def lifespan(app: FastAPI):
                     batch_id = batch.id
                     await db.commit()
                     await _exec.run_batch_test_cases(case_ids, int(target_id), batch_id=batch_id)
+                    return {"batch_id": batch_id}
                 else:
                     logger.error("未知定时任务类型: %s", task_type)
 
@@ -883,6 +982,8 @@ app.include_router(setup_router.router)
 app.include_router(agent_definition_router.router)
 app.include_router(agent_run_router.router)
 app.include_router(api_test_router.router)
+from app.routers.api_test.mocks import public_router as api_mock_public_router
+app.include_router(api_mock_public_router)
 
 if AGENT_SUPPORT:
     app.include_router(agent_router)

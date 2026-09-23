@@ -22,6 +22,9 @@ class RunBatch(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     triggered_by = Column(String(255), nullable=True)
+    # 统计来源：api_scenario 表示接口场景执行，source_id 为场景 id
+    source = Column(String(32), nullable=True, index=True)
+    source_id = Column(Integer, nullable=True, index=True)
 
     runs = relationship("TestRun", backref="batch")
 
@@ -30,7 +33,9 @@ class TestRun(Base):
     __tablename__ = "test_runs"
 
     id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, ForeignKey("test_cases.id"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("test_cases.id"), nullable=True, index=True)
+    # 无对应用例的场景步骤（自定义请求 / 引用定义）在报告里显示的名称
+    display_name = Column(String(255), nullable=True)
     batch_id = Column(Integer, ForeignKey("run_batches.id"), nullable=True, index=True)
     status = Column(String, nullable=False)
     # nullable: 预创建 pending 行留空，避开 _compute_batch_status 卡死检查误判

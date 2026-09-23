@@ -21,6 +21,7 @@ _EXCLUDE_PATHS = (
     "/api/auth/logout",
     "/health",
     "/api/agents/ws",
+    "/mock/",
 )
 
 

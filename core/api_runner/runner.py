@@ -63,6 +63,8 @@ class ApiRunResult:
     variables: dict[str, str] = field(default_factory=dict)
     environment_variables: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)  # dataset_mode 等降级说明
+    # 本次结束时的 runtime（提取结果）；场景把这份字典传给下一步
+    runtime: dict[str, str] = field(default_factory=dict)
 
 
 def _create_default_client(verify_ssl: bool = True) -> httpx.AsyncClient:
@@ -100,17 +102,19 @@ def _build_scope(
     environment: Optional[dict],
     case_variables: Optional[list[dict]],
     dataset_row: Optional[dict],
+    seed_runtime: Optional[dict] = None,
 ) -> VariableScope:
     """组装六级作用域：runtime > step > case > dataset > env > baseUrl。
 
     case 层 = api_spec.variables 合并参数 case_variables（后者覆盖）。
+    ``seed_runtime`` 是场景上一步提取进来的变量，优先级仍最高。
     """
     env = environment or {}
     spec_vars = variables_to_map(api_spec.get("variables"))
     param_vars = variables_to_map(case_variables)
     case_vars = {**spec_vars, **param_vars}
     return VariableScope(
-        runtime={},
+        runtime=dict(seed_runtime or {}),
         case_variables=case_vars,
         dataset_row=dict(dataset_row or {}),
         env_variables=variables_to_map(env.get("variables")),
@@ -151,6 +155,9 @@ def _request_dict(req: RenderedRequest) -> dict:
         "url": req.url,
         "headers": mask_headers(dict(req.headers)),
         "body": req.content,
+        "timeout_ms": req.timeout_ms,
+        "follow_redirects": req.follow_redirects,
+        "verify_ssl": req.verify_ssl,
     }
 
 
@@ -326,33 +333,51 @@ async def _send_request(client: httpx.AsyncClient, req: RenderedRequest) -> http
     )
 
 
-async def _run_pre_steps(pre_steps: Any, scope: VariableScope, warnings: list[str]) -> None:
-    """执行步骤前置动作（data-model §3 pre）：同步、无网络副作用。
+async def _run_hook_steps(
+    items: Any,
+    scope: VariableScope,
+    warnings: list[str],
+    *,
+    label: str,
+    write_runtime: bool,
+) -> None:
+    """前置 / 后置动作：设置变量或延时。不执行任意脚本。
 
-    - ``{"type":"set_variable","key","value"}`` → 写入 case 作用域（后续步骤可见）
-    - ``{"type":"delay","ms"}`` → ``asyncio.sleep(min(ms, 5000))``（上限 5s）
-    - 未知 type / 缺 key / ms 非法 → 记 warning，不失败
+    前置写入 case 层，供本次请求渲染使用。后置写入 runtime，供后续步骤使用。
+    变量值支持 ``{{var}}``。延时上限 5 秒。
     """
-    for pre in pre_steps or []:
-        if not isinstance(pre, dict):
-            warnings.append(f"pre 项必须是对象: {pre!r}")
+    for item in items or []:
+        if not isinstance(item, dict):
+            warnings.append(f"{label} 项必须是对象: {item!r}")
             continue
-        ptype = str(pre.get("type") or "")
-        if ptype == "set_variable":
-            key = str(pre.get("key") or "").strip()
+        kind = str(item.get("type") or "")
+        if kind == "set_variable":
+            key = str(item.get("key") or "").strip()
             if not key:
-                warnings.append("set_variable 缺少 key")
+                warnings.append(f"{label} set_variable 缺少 key")
                 continue
-            scope.case[key] = str(pre.get("value") or "")
-        elif ptype == "delay":
             try:
-                ms = int(pre.get("ms") or 0)
+                value = render(item.get("value") or "", scope)
+            except Exception as exc:
+                warnings.append(f"{label} 变量 {key} 渲染失败: {exc}")
+                continue
+            if write_runtime:
+                scope.set_runtime(key, value)
+            else:
+                scope.case[key] = value
+        elif kind == "delay":
+            try:
+                ms = int(item.get("ms") or 0)
             except (TypeError, ValueError):
-                warnings.append(f"delay.ms 非法: {pre.get('ms')!r}")
+                warnings.append(f"{label} delay.ms 非法: {item.get('ms')!r}")
                 continue
             await asyncio.sleep(max(0, min(ms, 5000)))
         else:
-            warnings.append(f"未知 pre 类型: {ptype!r}")
+            warnings.append(f"未知 {label} 类型: {kind!r}")
+
+
+async def _run_pre_steps(pre_steps: Any, scope: VariableScope, warnings: list[str]) -> None:
+    await _run_hook_steps(pre_steps, scope, warnings, label="前置", write_runtime=False)
 
 
 async def _run_step(
@@ -409,6 +434,9 @@ async def _run_step(
             request=request_dict,
         )
     duration_ms = _elapsed_ms(step_started)
+    sent_headers = getattr(getattr(resp, "request", None), "headers", None)
+    if sent_headers:
+        request_dict["headers"] = mask_headers(dict(sent_headers))
 
     response_like = ResponseLike(
         status=resp.status_code,
@@ -434,6 +462,11 @@ async def _run_step(
                     scope.set_runtime(e.variable, e.value)
     except ExtractionError as exc:
         extract_error = f"提取失败: {exc}"
+
+    try:
+        await _run_hook_steps(step.get("post"), scope, warnings, label="后置", write_runtime=True)
+    except Exception as exc:
+        warnings.append(f"后置步骤执行异常: {exc}")
 
     response_dict = _response_dict(resp, duration_ms)
     base_desc = (
@@ -490,6 +523,7 @@ async def run_api_case(
     execution_mode: Optional[str] = None,        # "server"（默认）或 "client:<agent_name>"（T050）
     agent_manager: Any = None,                   # 客户端执行用的 AgentManager（缺省取全局实例）
     step_limit: Optional[int] = None,
+    seed_runtime: Optional[dict] = None,
 ) -> ApiRunResult:
     """执行一条接口用例，返回完整结果（永不抛异常）。
 
@@ -541,7 +575,7 @@ async def run_api_case(
         for iteration, row in enumerate(rows, start=1):
             if failed and fail_policy == "fail_fast":
                 break
-            scope = _build_scope(spec, environment, case_variables, row)
+            scope = _build_scope(spec, environment, case_variables, row, seed_runtime)
             # 环境公共请求头（渲染后注入每步；步骤头覆盖同名）——每迭代独立渲染
             env_headers = _render_header_items((environment or {}).get("headers"), scope)
             iteration_failed = False
@@ -575,6 +609,7 @@ async def run_api_case(
         variables=_final_variables(final_scope) if final_scope is not None else {},
         environment_variables=env_extracted,
         notes=notes,
+        runtime=dict(final_scope.runtime) if final_scope is not None else dict(seed_runtime or {}),
     )
 
 

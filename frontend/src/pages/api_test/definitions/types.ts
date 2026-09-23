@@ -105,7 +105,8 @@ export interface ApiStep {
   assertions: ApiAssertion[];
   extractors: ApiExtractor[];
   pre: ApiPreStep[];
-  post: unknown[];
+  /** 后置操作，结构与前置相同：设置变量 / 延时 */
+  post: ApiPreStep[];
 }
 
 /** api_spec 顶层（data-model §3） */

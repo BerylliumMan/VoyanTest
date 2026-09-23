@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 async def save_run_results(
-    case_id: int,
+    case_id: int | None,
     status: str,
     start_time: datetime,
     end_time: datetime,
@@ -45,6 +45,7 @@ async def save_run_results(
     batch_id: Optional[int] = None,
     run_id: Optional[int] = None,
     is_init: bool = False,
+    display_name: Optional[str] = None,
 ) -> int | None:
     async with db_mod.AsyncSessionLocal() as db:
         try:
@@ -65,8 +66,9 @@ async def save_run_results(
                 else:
                     run_id = None
 
-            # 复用同批次下预创建的 pending/running 行，避免 OTA/批量路径重复建 run
-            if not run_id and batch_id:
+            # 复用同批次下预创建的 pending/running 行，避免 OTA/批量路径重复建 run。
+            # case_id 为空的场景步骤不能按 NULL 匹配，否则会串到别的自定义步骤。
+            if not run_id and batch_id and case_id is not None:
                 result = await db.execute(
                     select(db_models.TestRun).where(
                         db_models.TestRun.batch_id == batch_id,
@@ -95,6 +97,7 @@ async def save_run_results(
                     report_path=report_path,
                     log_path=log_path,
                     is_init=is_init,
+                    display_name=display_name,
                 )
                 db.add(db_run)
                 await db.commit()

@@ -115,6 +115,10 @@ export const routes: IRoute[] = [
     key: 'api_test',
     children: [
       {
+        name: 'menu.api_test.overview',
+        key: 'api_test/overview',
+      },
+      {
         name: 'menu.api_test.definitions',
         key: 'api_test/definitions',
       },

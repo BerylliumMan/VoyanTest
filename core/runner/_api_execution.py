@@ -182,7 +182,7 @@ async def _writeback_environment_variables(
 
 
 async def run_api_case_server(
-    case_id: int,
+    case_id: int | None,
     *,
     db,
     batch_id: int | None = None,
@@ -190,34 +190,55 @@ async def run_api_case_server(
     environment_id: int | None = None,
     client=None,
     case_variables: Optional[list[dict]] = None,
+    spec_override: Optional[dict] = None,
+    seed_runtime: Optional[dict] = None,
+    display_name: Optional[str] = None,
+    project_id: int | None = None,
 ) -> dict:
     """服务端执行一条接口用例并落库（test_runs + run_logs + report.json）。
 
     ``client`` 仅供测试注入 httpx.MockTransport；None 时 run_api_case 内部自建。
+    传入已有 client 时执行器不会关闭它（场景共享 Cookie 用）。
     ``case_variables`` 场景级变量覆盖（存在时覆盖用例自身同名变量）。
+    ``spec_override`` 用于场景里的自定义请求 / 引用定义，此时 case_id 可为空。
+    ``seed_runtime`` 是上一步提取出的变量。
     """
     from core.api_runner.runner import run_api_case
 
     start_time = tz_now()
-    try:
-        tc = await crud.get_test_case(db, case_id)
-    except Exception:  # noqa: BLE001 - 查询失败按用例不存在处理
-        logger.exception("加载用例 %s 失败", case_id)
-        tc = None
-    if tc is None:
-        error = f"用例 {case_id} 不存在"
-        end_time = tz_now()
-        await save_run_results(
-            case_id, "failed", start_time, end_time,
-            (end_time - start_time).total_seconds(),
-            None, None,
-            [{"step_id": None, "level": "ERROR", "message": error, "screenshot_path": None}],
-            batch_id=batch_id, run_id=run_id,
-        )
-        return {"case_id": case_id, "status": "failed", "error": error, "batch_id": batch_id}
+    tc = None
+    if case_id is not None and spec_override is None:
+        try:
+            tc = await crud.get_test_case(db, case_id)
+        except Exception:  # noqa: BLE001 - 查询失败按用例不存在处理
+            logger.exception("加载用例 %s 失败", case_id)
+            tc = None
+        if tc is None:
+            error = f"用例 {case_id} 不存在"
+            end_time = tz_now()
+            await save_run_results(
+                case_id, "failed", start_time, end_time,
+                (end_time - start_time).total_seconds(),
+                None, None,
+                [{"step_id": None, "level": "ERROR", "message": error, "screenshot_path": None}],
+                batch_id=batch_id, run_id=run_id,
+                display_name=display_name,
+            )
+            return {
+                "case_id": case_id,
+                "status": "failed",
+                "error": error,
+                "batch_id": batch_id,
+                "runtime": dict(seed_runtime or {}),
+            }
 
-    api_spec = tc.api_spec or {}
-    environment = await _load_api_environment(db, environment_id, tc.project_id)
+    if spec_override is not None:
+        api_spec = spec_override
+        resolved_project = project_id if project_id is not None else (tc.project_id if tc else None)
+    else:
+        api_spec = (tc.api_spec or {}) if tc is not None else {}
+        resolved_project = tc.project_id if tc is not None else project_id
+    environment = await _load_api_environment(db, environment_id, resolved_project or 0)
 
     # T050：执行位置（服务端 / 客户端 Agent）；环境级配置优先于用例级
     execution_mode = str(
@@ -246,6 +267,7 @@ async def run_api_case_server(
         client=client,
         execution_mode=execution_mode,
         dataset=dataset,
+        seed_runtime=seed_runtime,
     )
 
     # T038：environment 作用域提取 → 用例成功后写回 environments.variables
@@ -270,7 +292,8 @@ async def run_api_case_server(
 
     # report.json（复用 reports/run_{case_id}_{uid} 目录约定）
     run_uid = uuid.uuid4().hex[:12]
-    output_dir = os.path.join("reports", f"run_{case_id}_{run_uid}")
+    report_key = case_id if case_id is not None else "step"
+    output_dir = os.path.join("reports", f"run_{report_key}_{run_uid}")
     await asyncio.to_thread(os.makedirs, output_dir, exist_ok=True)
     report_path = os.path.join(output_dir, "report.json")
     report = {
@@ -315,6 +338,7 @@ async def run_api_case_server(
         (end_time - start_time).total_seconds(),
         report_path, None, logs,
         batch_id=batch_id, run_id=run_id,
+        display_name=display_name,
     )
 
     return {
@@ -325,7 +349,384 @@ async def run_api_case_server(
         "error": error,
         "report_path": report_path,
         "steps": steps,
+        "runtime": dict(result.runtime or {}),
     }
 
 
-__all__ = ["run_api_case_server"]
+def scenario_step_to_spec(step: dict) -> dict:
+    """把场景里的 definition/request 步骤包成一条 api_spec。"""
+    return {
+        "schema_version": 1,
+        "variables": [],
+        "fail_policy": "fail_fast",
+        "steps": [
+            {
+                "order": 1,
+                "name": step.get("name") or "",
+                "enable": True,
+                "definition_id": step.get("definition_id"),
+                "request": step.get("request") or {},
+                "assertions": step.get("assertions") or [],
+                "extractors": step.get("extractors") or [],
+                "pre": step.get("pre") or [],
+                "post": step.get("post") or [],
+            }
+        ],
+    }
+
+
+async def _persist_skipped_step(
+    *,
+    batch_id: int,
+    case_id: int | None,
+    display_name: str,
+    reason: str,
+    status: str = "skipped",
+) -> None:
+    start_time = tz_now()
+    end_time = tz_now()
+    run_uid = uuid.uuid4().hex[:12]
+    key = case_id if case_id is not None else "step"
+    output_dir = os.path.join("reports", f"run_{key}_{run_uid}")
+    await asyncio.to_thread(os.makedirs, output_dir, exist_ok=True)
+    report_path = os.path.join(output_dir, "report.json")
+    report = {
+        "case_id": case_id,
+        "status": status,
+        "started_at": start_time.isoformat(),
+        "steps": [
+            {
+                "step_number": 1,
+                "name": display_name,
+                "description": reason,
+                "status": status,
+                "success": status == "passed",
+                "error": reason,
+                "request": None,
+                "response": None,
+                "assertions": [],
+                "extracted": [],
+                "screenshot_path": None,
+            }
+        ],
+    }
+    await asyncio.to_thread(_write_report_sync, report_path, report)
+    await save_run_results(
+        case_id,
+        status,
+        start_time,
+        end_time,
+        0.0,
+        report_path,
+        None,
+        [{"step_id": None, "level": "warning", "message": reason, "screenshot_path": None}],
+        batch_id=batch_id,
+        display_name=display_name,
+    )
+
+
+def _enabled_steps(steps: list) -> list[dict]:
+    return [s for s in steps or [] if isinstance(s, dict) and s.get("enabled", True)]
+
+
+def _planned_run_count(steps: list, dataset_rows: dict[int, list[dict]]) -> int:
+    total = 0
+    for step in _enabled_steps(steps):
+        kind = step.get("type") or "case"
+        children = step.get("children") or []
+        if kind == "loop":
+            inner = _planned_run_count(children, dataset_rows)
+            total += (inner or 1) * int(step.get("count") or 1)
+        elif kind == "foreach":
+            rows = dataset_rows.get(int(step.get("dataset_id") or 0), [])
+            if not rows:
+                total += 1
+            else:
+                inner = _planned_run_count(children, dataset_rows)
+                total += (inner or 1) * len(rows)
+        elif kind == "if":
+            total += 1 + _planned_run_count(children, dataset_rows)
+        else:
+            total += 1
+    return total
+
+
+def _collect_dataset_ids(steps: list, acc: set[int]) -> None:
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("type") == "foreach":
+            try:
+                acc.add(int(step.get("dataset_id")))
+            except (TypeError, ValueError):
+                pass
+        _collect_dataset_ids(step.get("children") or [], acc)
+
+
+async def _load_dataset_rows(session, steps: list) -> dict[int, list[dict]]:
+    ids: set[int] = set()
+    _collect_dataset_ids(steps, ids)
+    out: dict[int, list[dict]] = {}
+    if not ids:
+        return out
+    from app.crud import api_dataset as crud_dataset
+
+    for dataset_id in ids:
+        ds = await crud_dataset.get_dataset(session, dataset_id)
+        rows: list[dict] = []
+        if ds is not None:
+            columns = [str(c) for c in (ds.columns or [])]
+            for raw in ds.rows or []:
+                if isinstance(raw, dict):
+                    rows.append({str(k): "" if v is None else str(v) for k, v in raw.items()})
+                elif isinstance(raw, list):
+                    rows.append({
+                        columns[i]: "" if i >= len(raw) or raw[i] is None else str(raw[i])
+                        for i in range(len(columns))
+                    })
+        out[dataset_id] = rows
+    return out
+
+
+def _lookup_var(name: str, runtime: dict[str, str], scenario_vars: list[dict]) -> str:
+    if name in runtime:
+        return runtime[name]
+    for item in scenario_vars or []:
+        if isinstance(item, dict) and str(item.get("key") or "") == name and item.get("enable", True):
+            return "" if item.get("value") is None else str(item.get("value"))
+    return ""
+
+
+def _condition_met(step: dict, runtime: dict[str, str], scenario_vars: list[dict]) -> bool:
+    actual = _lookup_var(str(step.get("variable") or ""), runtime, scenario_vars)
+    expected = "" if step.get("expected") is None else str(step.get("expected"))
+    if step.get("operator") == "contains":
+        return expected in actual
+    return actual == expected
+
+
+async def _skip_planned(step: dict, *, batch_id: int, dataset_rows: dict[int, list[dict]], reason: str) -> None:
+    count = _planned_run_count([step], dataset_rows)
+    label = str(step.get("name") or step.get("type") or "步骤")
+    for _ in range(max(1, count) if step.get("enabled", True) else 0):
+        await _persist_skipped_step(
+            batch_id=batch_id,
+            case_id=step.get("case_id") if (step.get("type") or "case") == "case" else None,
+            display_name=label,
+            reason=reason,
+        )
+
+
+async def _execute_scenario_steps(
+    steps: list,
+    *,
+    session,
+    batch_id: int,
+    environment_id,
+    project_id: int,
+    scenario_vars: list[dict],
+    client,
+    runtime: dict[str, str],
+    continue_on_failure: bool,
+    dataset_rows: dict[int, list[dict]],
+    execution_control,
+    scenario_id: int,
+    skip_rest: bool = False,
+) -> bool:
+    """执行一组步骤。返回是否应跳过后续步骤。runtime 就地更新。"""
+    for step in _enabled_steps(steps):
+        await execution_control.wait_if_paused(batch_id)
+        if execution_control.is_stopped(batch_id):
+            logger.info("场景执行被停止 scenario=%s batch=%s", scenario_id, batch_id)
+            return True
+        kind = step.get("type") or "case"
+        if skip_rest:
+            await _skip_planned(
+                step, batch_id=batch_id, dataset_rows=dataset_rows, reason="因前序步骤失败跳过"
+            )
+            continue
+        if kind == "wait":
+            ms = min(int(step.get("ms") or 0), 60000)
+            await asyncio.sleep(ms / 1000)
+            await _persist_skipped_step(
+                batch_id=batch_id,
+                case_id=None,
+                display_name=str(step.get("name") or "等待"),
+                reason=f"等待 {ms} ms",
+                status="passed",
+            )
+            continue
+        if kind == "loop":
+            times = int(step.get("count") or 1)
+            children = step.get("children") or []
+            if not _enabled_steps(children):
+                for _ in range(times):
+                    await _persist_skipped_step(
+                        batch_id=batch_id, case_id=None,
+                        display_name=str(step.get("name") or "循环"),
+                        reason="循环没有可执行的子步骤",
+                    )
+                continue
+            for _ in range(times):
+                skip_rest = await _execute_scenario_steps(
+                    children, session=session, batch_id=batch_id, environment_id=environment_id,
+                    project_id=project_id, scenario_vars=scenario_vars, client=client, runtime=runtime,
+                    continue_on_failure=continue_on_failure, dataset_rows=dataset_rows,
+                    execution_control=execution_control, scenario_id=scenario_id, skip_rest=skip_rest,
+                )
+            continue
+        if kind == "foreach":
+            rows = dataset_rows.get(int(step.get("dataset_id") or 0), [])
+            children = step.get("children") or []
+            if not rows or not _enabled_steps(children):
+                await _persist_skipped_step(
+                    batch_id=batch_id, case_id=None,
+                    display_name=str(step.get("name") or "遍历"),
+                    reason="数据集没有数据行" if not rows else "遍历没有可执行的子步骤",
+                )
+                continue
+            for row in rows:
+                scoped = dict(runtime)
+                scoped.update(row)
+                runtime.clear()
+                runtime.update(scoped)
+                skip_rest = await _execute_scenario_steps(
+                    children, session=session, batch_id=batch_id, environment_id=environment_id,
+                    project_id=project_id, scenario_vars=scenario_vars, client=client, runtime=runtime,
+                    continue_on_failure=continue_on_failure, dataset_rows=dataset_rows,
+                    execution_control=execution_control, scenario_id=scenario_id, skip_rest=skip_rest,
+                )
+            continue
+        if kind == "if":
+            ok = _condition_met(step, runtime, scenario_vars)
+            await _persist_skipped_step(
+                batch_id=batch_id, case_id=None,
+                display_name=str(step.get("name") or "条件"),
+                reason="条件成立" if ok else "条件不成立，跳过子步骤",
+                status="passed" if ok else "skipped",
+            )
+            if ok:
+                skip_rest = await _execute_scenario_steps(
+                    step.get("children") or [], session=session, batch_id=batch_id,
+                    environment_id=environment_id, project_id=project_id, scenario_vars=scenario_vars,
+                    client=client, runtime=runtime, continue_on_failure=continue_on_failure,
+                    dataset_rows=dataset_rows, execution_control=execution_control,
+                    scenario_id=scenario_id, skip_rest=skip_rest,
+                )
+            else:
+                for child in _enabled_steps(step.get("children") or []):
+                    await _skip_planned(
+                        child, batch_id=batch_id, dataset_rows=dataset_rows, reason="条件不成立"
+                    )
+            continue
+        if kind == "case":
+            case_id = int(step.get("case_id"))
+            tc = await crud.get_test_case(session, case_id)
+            label = getattr(tc, "name", None) or f"用例 #{case_id}"
+            result = await run_api_case_server(
+                case_id, db=session, batch_id=batch_id, environment_id=environment_id,
+                case_variables=scenario_vars, client=client, seed_runtime=runtime, display_name=label,
+            )
+        else:
+            label = str(step.get("name") or ("自定义请求" if kind == "request" else "接口请求"))
+            result = await run_api_case_server(
+                None, db=session, batch_id=batch_id, environment_id=environment_id,
+                project_id=project_id, spec_override=scenario_step_to_spec(step),
+                case_variables=scenario_vars, client=client, seed_runtime=runtime, display_name=label,
+            )
+        runtime.clear()
+        runtime.update(result.get("runtime") or {})
+        if result.get("status") == "failed" and not continue_on_failure:
+            skip_rest = True
+    return skip_rest
+
+
+async def run_scenario_batch(
+    scenario_id: int,
+    batch_id: int,
+    user_id: int | None,
+    environment_override: int | None = None,
+) -> None:
+    """按场景步骤执行：可选共用客户端与 runtime，失败可继续或跳过后续步骤。"""
+    import httpx
+
+    from app import execution_control
+    from app.database import AsyncSessionLocal
+    from app.services.notifications import notify_batch_completed
+
+    shared_client = None
+    try:
+        async with AsyncSessionLocal() as session:
+            from app.crud import api_scenario as crud_scenario
+
+            scenario = await crud_scenario.get_scenario(session, scenario_id)
+            if scenario is None:
+                logger.error("场景不存在 scenario=%s", scenario_id)
+                return
+            steps = [s for s in (scenario.steps or []) if isinstance(s, dict)]
+            environment_id = (
+                environment_override
+                if environment_override is not None
+                else scenario.environment_id
+            )
+            project_id = scenario.project_id
+            scenario_vars = list(scenario.variables or [])
+            share_cookie = bool(getattr(scenario, "share_cookie", False))
+            continue_on_failure = bool(getattr(scenario, "continue_on_failure", False))
+            if share_cookie:
+                shared_client = httpx.AsyncClient(verify=True, timeout=60.0)
+
+            dataset_rows = await _load_dataset_rows(session, steps)
+            planned = _planned_run_count(steps, dataset_rows)
+            from app import db_models as _models
+
+            batch_row = await session.get(_models.RunBatch, batch_id)
+            if batch_row is not None:
+                batch_row.total_cases = planned
+                await session.commit()
+
+            runtime: dict[str, str] = {}
+            await _execute_scenario_steps(
+                steps,
+                session=session,
+                batch_id=batch_id,
+                environment_id=environment_id,
+                project_id=project_id,
+                scenario_vars=scenario_vars,
+                client=shared_client,
+                runtime=runtime,
+                continue_on_failure=continue_on_failure,
+                dataset_rows=dataset_rows,
+                execution_control=execution_control,
+                scenario_id=scenario_id,
+            )
+    except Exception:
+        logger.exception("场景执行异常 scenario=%s batch=%s", scenario_id, batch_id)
+    finally:
+        if shared_client is not None:
+            await shared_client.aclose()
+        try:
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import select as _select
+
+                from app import db_models
+
+                result = await session.execute(
+                    _select(db_models.RunBatch).where(db_models.RunBatch.id == batch_id)
+                )
+                batch = result.scalar_one_or_none()
+                if batch is not None and batch.status == "running":
+                    done = (batch.passed or 0) + (batch.failed or 0)
+                    if done < (batch.total_cases or 0):
+                        batch.status = "cancelled"
+                        await session.commit()
+        except Exception:
+            logger.exception("场景批次收尾失败 batch=%s", batch_id)
+        if user_id:
+            try:
+                await notify_batch_completed(batch_id, user_id)
+            except Exception:
+                logger.exception("场景批次通知失败 batch=%s", batch_id)
+
+
+__all__ = ["run_api_case_server", "run_scenario_batch"]

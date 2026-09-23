@@ -192,6 +192,13 @@ async def delete_test_case(case_id: int, user=Depends(get_current_user), db: Asy
     if allowed_ids is not None and db_case.project_id not in allowed_ids:
         raise HTTPException(status_code=403, detail="无权访问该项目")
 
+    if getattr(db_case, "case_kind", None) == "api":
+        from app.crud.api_refs import scenarios_using_case
+
+        names = await scenarios_using_case(db, db_case.project_id, case_id)
+        if names:
+            raise HTTPException(status_code=400, detail="仍被场景引用：" + "、".join(names))
+
     try:
         return await crud.delete_test_case(db, case_id)
     except Exception as e:
