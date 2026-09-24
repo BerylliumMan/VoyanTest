@@ -61,14 +61,22 @@ class BrowserPool:
         spawned per project.
         """
         async with cls._lock:
-            if project_id in cls._instances:
-                mgr = cls._instances[project_id]
+            stale = cls._instances.get(project_id)
+        if stale is not None:
+            alive = await stale.ping() if hasattr(stale, "ping") else True
+            if alive:
                 logger.info(
                     "Reusing existing browser for project %s "
                     "(pool has %s active)",
                     project_id, len(cls._instances),
                 )
-                return mgr
+                return stale
+            logger.warning("Dropping unresponsive browser for project %s", project_id)
+            await cls.close(project_id)
+
+        async with cls._lock:
+            if project_id in cls._instances:
+                return cls._instances[project_id]
             fut = cls._creating.get(project_id)
             if fut is not None:
                 creating = False

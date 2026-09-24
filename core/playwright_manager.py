@@ -7,6 +7,7 @@ Playwright MCP 服务器子进程管理器。
 客户端执行浏览器操作。
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -247,6 +248,17 @@ class PlaywrightMCPManager:
         logger.info("@playwright/mcp session initialized (shared_cdp=%s).", self.shared_cdp)
         return self._session
 
+    async def ping(self) -> bool:
+        """会话还能响应就返回 True。死掉的 stdio 不能再复用。"""
+        if self._session is None:
+            return False
+        try:
+            await asyncio.wait_for(self._session.list_tools(), timeout=8)
+            return True
+        except Exception:
+            logger.warning("Browser session ping failed", exc_info=True)
+            return False
+
     async def stop(self) -> None:
         """关闭 MCP 会话和子进程。"""
         if self._session:
@@ -325,14 +337,16 @@ class PlaywrightMCPManager:
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call an MCP tool and return structured result."""
         try:
-            result = await self.session.call_tool(tool_name, arguments)
+            result = await asyncio.wait_for(
+                self.session.call_tool(tool_name, arguments), timeout=45
+            )
             content = result.content if hasattr(result, 'content') else []
             text = ""
             for c in content:
                 if hasattr(c, 'text'):
                     text += c.text
             return {'success': not result.isError, 'text': text}
-        except (RuntimeError, ConnectionError, OSError, AttributeError, TypeError) as exc:
+        except (RuntimeError, ConnectionError, OSError, AttributeError, TypeError, asyncio.TimeoutError) as exc:
             # MCP 客户端/服务端错误 + 结果结构不符合预期时，统一返回失败 dict
             return {'success': False, 'text': str(exc), 'error': str(exc)}
 

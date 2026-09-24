@@ -33,6 +33,15 @@ router = APIRouter()
 
 # 模块级集合：防止调试后台 Task 被 GC（endpoint 局部 set 会在返回后失效）
 _DEBUG_TASKS: set = set()
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> None:
+    """脱离当前 HTTP 请求的取消域。长任务放在请求的 background task 里，
+    结束时会和 MCP 的 anyio 取消域冲突，下一次复用浏览器会卡住。"""
+    task = _asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
 
 @router.post("/{case_id}/run")
@@ -78,7 +87,7 @@ async def run_test_case_endpoint(
             if user_id:
                 await notify_batch_completed(batch_id, user_id)
 
-    background_tasks.add_task(_run_and_notify)
+    _spawn(_run_and_notify())
 
     return {
         "id": batch_id,
@@ -213,7 +222,7 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
             if user_id:
                 await notify_batch_completed(batch_id, user_id)
 
-    background_tasks.add_task(_batch_and_notify)
+    _spawn(_batch_and_notify())
 
     return {"batch_id": batch_id, "total": total, "started": total, "status": "running"}
 
@@ -245,13 +254,12 @@ async def run_module_test_cases(
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids), triggered_by=getattr(user, 'username', None))
 
     from app.routers.testcase import execution as _exec
-    background_tasks.add_task(
-        _exec.run_batch_test_cases,
+    _spawn(_exec.run_batch_test_cases(
         case_ids,
         project_id,
         batch_id=batch.id,
         environment_id=environment_id,
-    )
+    ))
 
     return {"batch_id": batch.id, "total": len(test_cases), "started": len(test_cases), "status": "running"}
 
@@ -282,12 +290,11 @@ async def run_project_test_cases(
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids), triggered_by=getattr(user, 'username', None))
 
     from app.routers.testcase import execution as _exec
-    background_tasks.add_task(
-        _exec.run_batch_test_cases,
+    _spawn(_exec.run_batch_test_cases(
         case_ids,
         project_id,
         batch_id=batch.id,
         environment_id=environment_id,
-    )
+    ))
 
     return {"batch_id": batch.id, "total": len(test_cases), "started": len(test_cases), "status": "running"}

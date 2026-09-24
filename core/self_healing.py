@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
-import os
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -190,8 +189,11 @@ async def heal_ax_name_role(
         if client is None:
             logger.warning("LLM client unavailable for AX healing")
             return []
+        from core.llm_wrapper import _resolve_config
+
+        _, _, model = await _resolve_config(agent_type="execution")
         response = await client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "qwen-plus"),
+            model=model,
             messages=[
                 {"role": "system", "content": "你是 Web 自动化测试专家。只返回 JSON，无其他文字。"},
                 {"role": "user", "content": prompt},
@@ -339,8 +341,11 @@ async def heal_selector(
         if client is None:
             logger.warning("LLM client unavailable for healing")
             return []
+        from core.llm_wrapper import _resolve_config
+
+        _, _, model = await _resolve_config(agent_type="execution")
         response = await client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "qwen-plus"),
+            model=model,
             messages=[
                 {"role": "system", "content": "你是 Web 自动化测试专家。只返回 JSON，无其他文字。"},
                 {"role": "user", "content": prompt},
