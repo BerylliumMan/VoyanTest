@@ -1,6 +1,15 @@
 .icon-button {
   font-size: 16px;
-  border: 1px solid var(--color-border-2);
+  // 030-ui-refresh：图标按钮统一细边 + 7px 圆角
+  border: 1px solid var(--vt-border);
+  border-radius: var(--vt-radius-sm);
+  color: var(--vt-text-3);
+
+  &:hover {
+    color: var(--vt-text-1);
+    border-color: var(--vt-border-strong);
+    background-color: var(--vt-bg-subtle);
+  }
 
   > svg {
     vertical-align: -3px;

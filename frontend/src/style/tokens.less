@@ -1,0 +1,180 @@
+/**
+ * 030-ui-refresh · 设计令牌（唯一真源）
+ *
+ * 主色：天青 #0369a1（= --arcoblue-6，浅色阶由 @arco-design/color 生成）。
+ *
+ * 契约（不要破坏）：
+ *  1. 颜色/圆角/阴影只在本文件定义；皮肤层（global.less）与页面样式只允许引用令牌，禁止写死颜色。
+ *  2. 覆盖优先级说明：Arco 的变量定义在 `body`（浅色，特异性 0,0,1）与 `body[arco-theme='dark']`（0,1,1）。
+ *     本文件用 `:root`（0,1,0）与 `:root body[arco-theme='dark']`（0,1,2）压过它们，
+ *     以免依赖 CSS 打包顺序（Vite 中 Arco 组件样式按需注入，顺序不可控）。
+ *  3. --arcoblue-1..10 为 RGB 三元组（Arco 约定），其余为普通色值。
+ */
+
+/* ───────────────────────── 浅色（默认） ───────────────────────── */
+:root {
+  /* 天青主色阶：arcoblue-6 = #0369a1 本体；1 最浅、10 最深 */
+  --arcoblue-1: 232, 251, 255;   /* #E8FBFF */
+  --arcoblue-2: 173, 222, 236;   /* #ADDEEC */
+  --arcoblue-3: 120, 193, 217;   /* #78C1D9 */
+  --arcoblue-4: 75, 163, 199;    /* #4BA3C7 */
+  --arcoblue-5: 35, 134, 180;    /* #2386B4 */
+  --arcoblue-6: 3, 105, 161;     /* #0369A1 ← 主色 */
+  --arcoblue-7: 2, 87, 140;      /* #02578C */
+  --arcoblue-8: 1, 70, 119;      /* #014677 */
+  --arcoblue-9: 0, 54, 98;       /* #003662 */
+  --arcoblue-10: 0, 40, 77;      /* #00284D */
+
+  /* Arco 未定义 --color-primary-N 别名（源码 7 处 var(--color-primary-6) 此前因此失效）——
+     这里补齐，且随 arcoblue 在暗色下自动切换 */
+  --color-primary-1: rgb(var(--arcoblue-1));
+  --color-primary-2: rgb(var(--arcoblue-2));
+  --color-primary-3: rgb(var(--arcoblue-3));
+  --color-primary-4: rgb(var(--arcoblue-4));
+  --color-primary-5: rgb(var(--arcoblue-5));
+  --color-primary-6: rgb(var(--arcoblue-6));
+  --color-primary-7: rgb(var(--arcoblue-7));
+  --color-primary-8: rgb(var(--arcoblue-8));
+  --color-primary-9: rgb(var(--arcoblue-9));
+  --color-primary-10: rgb(var(--arcoblue-10));
+
+  /* VT 语义令牌 —— 主色族 */
+  --vt-accent: #0369a1;
+  --vt-accent-hover: #02578c;
+  --vt-accent-active: #014677;
+  --vt-accent-tint: #e6f2fa;         /* 选中/批量条浅底 */
+  --vt-accent-tint-border: #cfe6f2;
+  --vt-accent-text: #075985;         /* 浅底上的强调文字 */
+
+  /* VT 语义令牌 —— 背景/面板 */
+  --vt-bg-app: #fcfcfd;              /* 主内容底 */
+  --vt-bg-sidebar: #fafafa;          /* 侧栏 */
+  --vt-bg-panel: #ffffff;            /* 卡片/面板 */
+  --vt-bg-subtle: #fafafa;           /* 代码块/次级面 */
+  --vt-bg-subtle-2: #f4f4f5;
+
+  /* VT 语义令牌 —— 线 */
+  --vt-border: #eceef2;
+  --vt-border-weak: #f4f4f5;
+  --vt-border-strong: #e4e4e7;
+
+  /* VT 语义令牌 —— 文字 */
+  --vt-text-1: #18181b;
+  --vt-text-2: #3f3f46;
+  --vt-text-3: #71717a;
+  --vt-text-4: #a1a1aa;
+
+  /* VT 语义令牌 —— 状态（软底胶囊配色对） */
+  --vt-success: #16a34a;  --vt-success-tint: #ecfdf3;
+  --vt-error: #dc2626;    --vt-error-tint: #fef2f2;
+  --vt-warning: #d97706;  --vt-warning-tint: #fffbeb;
+  --vt-neutral-tint: #f4f4f5;
+
+  /* VT 造型 */
+  --vt-radius-sm: 7px;    /* 控件 */
+  --vt-radius-md: 10px;   /* 卡片 */
+  --vt-radius-lg: 12px;   /* 大面板 */
+  --vt-shadow-1: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --vt-shadow-2: 0 4px 14px rgba(16, 24, 40, 0.08);
+
+  /* ── Arco 语义变量对齐（浅色） ── */
+  --color-text-1: var(--vt-text-1);
+  --color-text-2: var(--vt-text-2);
+  --color-text-3: var(--vt-text-3);
+  --color-text-4: var(--vt-text-4);
+
+  --color-border-1: var(--vt-border-weak);
+  --color-border-2: var(--vt-border);
+  --color-border-3: var(--vt-border-strong);
+  --color-border-4: #d4d4d8;
+
+  --color-fill-1: var(--vt-bg-subtle);
+  --color-fill-2: var(--vt-bg-subtle-2);
+  --color-fill-3: var(--vt-border);
+  --color-fill-4: var(--vt-border-strong);
+
+  --color-bg-1: #ffffff;
+  --color-bg-2: #fafafa;
+  --color-bg-3: #f4f4f5;
+  --color-bg-4: #eceef2;
+  --color-bg-5: #ffffff;
+  --color-bg-white: #ffffff;
+  --color-bg-popup: #ffffff;
+
+  /* 侧栏（Arco Menu 浅色底） */
+  --color-menu-light-bg: var(--vt-bg-sidebar);
+  --color-menu-light-bg-hover: #f4f4f5;
+}
+
+/* ───────────────────────── 暗色 ───────────────────────── */
+:root body[arco-theme='dark'] {
+  /* 暗色主色阶（由同一主色生成的 dark 变体，6 提亮以保证暗底可读） */
+  --arcoblue-1: 0, 40, 77;       /* #00284D */
+  --arcoblue-2: 1, 54, 98;       /* #013662 */
+  --arcoblue-3: 6, 72, 119;      /* #064877 */
+  --arcoblue-4: 12, 91, 140;     /* #0C5B8C */
+  --arcoblue-5: 21, 111, 161;    /* #156FA1 */
+  --arcoblue-6: 30, 133, 180;    /* #1E85B4 ← 暗色主色 */
+  --arcoblue-7: 71, 162, 199;    /* #47A2C7 */
+  --arcoblue-8: 119, 193, 217;   /* #77C1D9 */
+  --arcoblue-9: 174, 222, 236;   /* #AEDEEC */
+  --arcoblue-10: 237, 252, 255;  /* #EDFCFF */
+
+  /* VT 语义令牌 —— 暗色 */
+  --vt-accent: #1e85b4;
+  --vt-accent-hover: #47a2c7;
+  --vt-accent-active: #77c1d9;
+  --vt-accent-tint: rgba(30, 133, 180, 0.16);
+  --vt-accent-tint-border: rgba(30, 133, 180, 0.35);
+  --vt-accent-text: #77c1d9;
+
+  --vt-bg-app: #101114;
+  --vt-bg-sidebar: #141518;
+  --vt-bg-panel: #17181c;
+  --vt-bg-subtle: #1a1c20;
+  --vt-bg-subtle-2: #1f2126;
+
+  --vt-border: #26282e;
+  --vt-border-weak: #1f2126;
+  --vt-border-strong: #2e3138;
+
+  --vt-text-1: #f2f3f5;
+  --vt-text-2: #c5c9d1;
+  --vt-text-3: #8b93a7;
+  --vt-text-4: #6b7280;
+
+  --vt-success: #34d399;  --vt-success-tint: rgba(52, 211, 153, 0.14);
+  --vt-error: #f87171;    --vt-error-tint: rgba(248, 113, 113, 0.14);
+  --vt-warning: #fbbf24;  --vt-warning-tint: rgba(251, 191, 36, 0.14);
+  --vt-neutral-tint: #23252b;
+
+  --vt-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --vt-shadow-2: 0 4px 14px rgba(0, 0, 0, 0.5);
+
+  /* ── Arco 语义变量对齐（暗色） ── */
+  --color-text-1: var(--vt-text-1);
+  --color-text-2: var(--vt-text-2);
+  --color-text-3: var(--vt-text-3);
+  --color-text-4: var(--vt-text-4);
+
+  --color-border-1: var(--vt-border-weak);
+  --color-border-2: var(--vt-border);
+  --color-border-3: var(--vt-border-strong);
+  --color-border-4: #3a3d45;
+
+  --color-fill-1: var(--vt-bg-subtle);
+  --color-fill-2: var(--vt-bg-subtle-2);
+  --color-fill-3: var(--vt-border);
+  --color-fill-4: var(--vt-border-strong);
+
+  --color-bg-1: var(--vt-bg-app);
+  --color-bg-2: var(--vt-bg-panel);
+  --color-bg-3: var(--vt-bg-subtle);
+  --color-bg-4: var(--vt-bg-subtle-2);
+  --color-bg-5: var(--vt-bg-panel);
+  --color-bg-white: var(--vt-bg-panel);
+  --color-bg-popup: #1d1f24;
+
+  --color-menu-light-bg: var(--vt-bg-sidebar);
+  --color-menu-light-bg-hover: #1f2126;
+}

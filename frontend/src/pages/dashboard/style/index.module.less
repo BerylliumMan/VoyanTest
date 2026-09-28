@@ -24,27 +24,31 @@
 }
 
 .stat-icon-container {
-  width: 54px;
-  height: 54px;
-  border-radius: 50%;
+  width: 46px;
+  height: 46px;
+  /* 030-ui-refresh：圆角方块 + 语义浅底（原为灰色圆形） */
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 24px;
-  background: var(--color-fill-2);
+  font-size: 22px;
+  background: var(--vt-bg-subtle-2);
   flex-shrink: 0;
 }
 
 .stat-icon-primary {
   color: var(--color-primary-6);
+  background: var(--vt-accent-tint);
 }
 
 .stat-icon-success {
   color: var(--color-success-6);
+  background: var(--vt-success-tint);
 }
 
 .stat-icon-danger {
   color: var(--color-danger-6);
+  background: var(--vt-error-tint);
 }
 
 .stat-text {
@@ -62,6 +66,7 @@
   font-size: 22px;
   font-weight: 600;
   color: var(--color-text-1);
+  font-variant-numeric: tabular-nums;
 }
 
 .trend-bar {

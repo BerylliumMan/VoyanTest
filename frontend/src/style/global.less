@@ -1,4 +1,12 @@
 @import 'nprogress/nprogress.css';
+@import './tokens.less';
+
+/**
+ * 030-ui-refresh · 全局皮肤层
+ *
+ * 契约：本文件只使用 tokens.less 的令牌（--vt-* / --arcoblue-* / --color-*），不写死颜色值。
+ * 造型基调：浅底 + 1px 淡线 + 灰阶分层 + 7~12px 圆角 + 极淡阴影（"极简 SaaS"）。
+ */
 
 html,
 body {
@@ -7,13 +15,325 @@ body {
   margin: 0;
   padding: 0;
   font-size: 14px;
-  background-color: var(--color-bg-1);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  background-color: var(--vt-bg-app);
+  color: var(--vt-text-1);
 }
 
+/* 细滚动条（现代感；Firefox 走 scrollbar-width） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vt-border-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--vt-border-strong);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vt-text-4);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ─────────────── 卡片 / 面板 ─────────────── */
 .arco-card {
-  border-radius: 12px;
+  border-radius: var(--vt-radius-md);
+  border: 1px solid var(--vt-border-weak);
+  box-shadow: var(--vt-shadow-1);
+  transition: box-shadow 0.15s ease;
+}
+.arco-card:hover {
+  box-shadow: var(--vt-shadow-2);
+}
+.arco-card-bordered {
+  border-color: var(--vt-border-weak);
+}
+.arco-card-header {
+  border-bottom: 1px solid var(--vt-border-weak);
+  font-weight: 600;
+  color: var(--vt-text-1);
+}
+.arco-card-body {
+  color: var(--vt-text-2);
 }
 
+/* ─────────────── 表格 ─────────────── */
+.arco-table-th {
+  background-color: transparent !important;
+  border-bottom: 1px solid var(--vt-border) !important;
+  color: var(--vt-text-3);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.arco-table-td {
+  border-bottom: 1px solid var(--vt-border-weak);
+  font-size: 13px;
+  color: var(--vt-text-2);
+}
+.arco-table-tr:hover .arco-table-td {
+  background-color: var(--vt-bg-subtle) !important;
+}
+.arco-table-tr.arco-table-tr-checked .arco-table-td {
+  background-color: var(--vt-accent-tint) !important;
+}
+/* 数字列等宽对齐（统计/耗时/数量） */
+.arco-table-td .arco-typography,
+.arco-statistic-value,
+.arco-statistic-value-int,
+.arco-statistic-value-decimal {
+  font-variant-numeric: tabular-nums;
+}
+.arco-table-border .arco-table-container {
+  border: 1px solid var(--vt-border);
+  border-radius: var(--vt-radius-md);
+}
+.arco-table-pagination {
+  margin-top: 14px;
+}
+
+/* ─────────────── 按钮 ─────────────── */
+.arco-btn {
+  border-radius: var(--vt-radius-sm);
+  font-weight: 500;
+}
+.arco-btn-secondary {
+  border: 1px solid var(--vt-border);
+  background-color: var(--vt-bg-panel);
+  color: var(--vt-text-2);
+}
+.arco-btn-secondary:hover {
+  border-color: var(--vt-border-strong);
+  background-color: var(--vt-bg-subtle);
+  color: var(--vt-text-1);
+}
+.arco-btn-text {
+  color: var(--vt-text-3);
+}
+.arco-btn-text:hover {
+  color: var(--vt-accent);
+  background-color: var(--vt-bg-subtle-2);
+}
+
+/* ─────────────── 标签（软底胶囊） ─────────────── */
+.arco-tag {
+  border: none;
+  border-radius: 5px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  height: 18px;
+}
+.arco-tag.arco-tag-size-small {
+  border-radius: 5px;
+}
+
+/* ─────────────── 输入类 ─────────────── */
+.arco-input-wrapper,
+.arco-select-view,
+.arco-picker,
+.arco-textarea-wrapper {
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid var(--vt-border);
+  background-color: var(--vt-bg-panel);
+}
+.arco-input-wrapper:hover,
+.arco-select-view:hover,
+.arco-picker:hover {
+  border-color: var(--vt-border-strong);
+  background-color: var(--vt-bg-panel);
+}
+.arco-input-wrapper.arco-input-focus,
+.arco-select-view-focus,
+.arco-picker-focused {
+  border-color: var(--vt-accent);
+  box-shadow: 0 0 0 2px var(--vt-accent-tint);
+}
+.arco-input-wrapper .arco-input {
+  font-size: 13px;
+}
+.arco-form-item-label {
+  color: var(--vt-text-2);
+  font-size: 13px;
+}
+
+/* ─────────────── 菜单 / 侧栏 ─────────────── */
+.arco-menu {
+  font-size: 13px;
+}
+.arco-menu-light {
+  background-color: transparent;
+  color: var(--vt-text-2);
+}
+.arco-menu-light .arco-menu-inner {
+  /* 030-ui-refresh：导航上下留白 + 行距加大（原 32px/2px 过挤） */
+  padding: 10px 10px 16px;
+}
+.arco-menu-light .arco-menu-item,
+.arco-menu-light .arco-menu-sub-menu-title {
+  border-radius: var(--vt-radius-sm);
+  line-height: 38px;
+  height: 38px;
+  margin-bottom: 6px;
+  font-size: 13.5px;
+}
+/* 二级菜单子项：略紧凑但保持呼吸感 */
+.arco-menu-light .arco-menu-inline-content .arco-menu-item {
+  height: 34px;
+  line-height: 34px;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+.arco-menu-light .arco-menu-inline-content {
+  padding: 2px 0 4px;
+}
+.arco-menu-light .arco-menu-item:hover,
+.arco-menu-light .arco-menu-sub-menu-title:hover {
+  background-color: var(--vt-bg-subtle-2);
+  color: var(--vt-text-1);
+}
+.arco-menu-light .arco-menu-selected {
+  background-color: var(--vt-accent-tint) !important;
+  color: var(--vt-accent-text) !important;
+  font-weight: 600;
+}
+.arco-menu-light .arco-menu-selected .arco-icon {
+  color: var(--vt-accent-text);
+}
+.arco-menu-light .arco-menu-pop-header:hover {
+  background-color: var(--vt-bg-subtle-2);
+}
+/* 折叠态（pop 菜单）与暗色菜单兜底 */
+.arco-menu-pop {
+  border-radius: var(--vt-radius-md);
+  box-shadow: var(--vt-shadow-2);
+}
+
+/* ─────────────── Tabs ─────────────── */
+.arco-tabs-header-title {
+  font-size: 13px;
+  color: var(--vt-text-3);
+}
+.arco-tabs-header-title-active,
+.arco-tabs-header-title-active:hover {
+  color: var(--vt-text-1);
+  font-weight: 600;
+}
+.arco-tabs-header-ink {
+  background-color: var(--vt-accent);
+  height: 2px;
+}
+
+/* ─────────────── 分页 ─────────────── */
+.arco-pagination-item {
+  border-radius: var(--vt-radius-sm);
+  font-size: 12px;
+  color: var(--vt-text-3);
+}
+.arco-pagination-item:hover {
+  background-color: var(--vt-bg-subtle-2);
+  color: var(--vt-text-1);
+}
+.arco-pagination-item-active {
+  font-weight: 600;
+}
+
+/* ─────────────── 浮层：Modal / Drawer / 气泡 ─────────────── */
+.arco-modal {
+  border-radius: var(--vt-radius-lg);
+  box-shadow: var(--vt-shadow-2);
+}
+.arco-modal-header {
+  border-bottom: 1px solid var(--vt-border-weak);
+}
+.arco-modal-footer {
+  border-top: 1px solid var(--vt-border-weak);
+}
+.arco-drawer {
+  box-shadow: var(--vt-shadow-2);
+}
+.arco-drawer-header {
+  border-bottom: 1px solid var(--vt-border-weak);
+  font-weight: 600;
+}
+.arco-message {
+  border-radius: var(--vt-radius-md);
+  box-shadow: var(--vt-shadow-2);
+  border: 1px solid var(--vt-border-weak);
+}
+.arco-notification {
+  border-radius: var(--vt-radius-md);
+  box-shadow: var(--vt-shadow-2);
+}
+.arco-popconfirm-content,
+.arco-tooltip-content {
+  border-radius: var(--vt-radius-sm);
+}
+.arco-dropdown,
+.arco-dropdown-menu {
+  border-radius: var(--vt-radius-md);
+  box-shadow: var(--vt-shadow-2);
+  border: 1px solid var(--vt-border-weak);
+}
+.arco-dropdown-option,
+.arco-dropdown-menu-item {
+  border-radius: var(--vt-radius-sm);
+  font-size: 13px;
+}
+
+/* ─────────────── 折叠/描述/统计 ─────────────── */
+.arco-collapse-item-header {
+  border-bottom-color: var(--vt-border-weak);
+}
+.arco-descriptions-title,
+.arco-descriptions-item-label {
+  color: var(--vt-text-3);
+}
+.arco-statistic-title {
+  color: var(--vt-text-3);
+  font-size: 12px;
+}
+
+/* ─────────────── 空态 / 加载态 ─────────────── */
+.arco-spin-mask {
+  background-color: rgba(255, 255, 255, 0.6);
+}
+body[arco-theme='dark'] .arco-spin-mask {
+  background-color: rgba(0, 0, 0, 0.5);
+}
+.arco-skeleton-header .arco-skeleton-image,
+.arco-skeleton-line-row {
+  background-color: var(--vt-bg-subtle-2);
+}
+
+/* ─────────────── 其它细节 ─────────────── */
+.arco-breadcrumb {
+  font-size: 12px;
+  color: var(--vt-text-3);
+}
+.arco-breadcrumb-item:last-child {
+  color: var(--vt-text-1);
+  font-weight: 500;
+}
+.arco-divider {
+  border-color: var(--vt-border-weak);
+}
+.arco-switch {
+  border-radius: 10px;
+}
+.arco-badge-text,
+.arco-badge-number {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─────────────── 图表 tooltip（沿用原设计） ─────────────── */
 .chart-wrapper {
   .bizcharts-tooltip {
     background: linear-gradient(

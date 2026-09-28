@@ -169,7 +169,7 @@ function PageLayout() {
     return (
       <Layout className={styles.layout}>
         <div className={cs(styles['layout-navbar'], { [styles['layout-navbar-hidden']]: !showNavbar })}>
-          <Navbar show={showNavbar} />
+          <Navbar show={showNavbar} collapsed={collapsed} onToggleMenu={showMenu ? toggleCollapse : undefined} />
         </div>
         <Spin className={styles['spin']} />
       </Layout>
@@ -183,7 +183,7 @@ function PageLayout() {
           [styles['layout-navbar-hidden']]: !showNavbar,
         })}
       >
-        <Navbar show={showNavbar} />
+        <Navbar show={showNavbar} collapsed={collapsed} onToggleMenu={showMenu ? toggleCollapse : undefined} />
       </div>
       {userLoading ? (
         <Spin className={styles['spin']} />

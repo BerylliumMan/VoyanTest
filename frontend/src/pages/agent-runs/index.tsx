@@ -53,7 +53,10 @@ const AgentRunsList: React.FC = () => {
         params.status = currentStatus;
       }
       const query = new URLSearchParams(params).toString();
-      const data = await apiRequest(`/api/agent-runs?${query}`);
+      const data = await apiRequest<{ items?: AgentRun[]; total?: number }>({
+        method: 'get',
+        url: `/api/agent-runs?${query}`,
+      });
       setRuns(data.items || []);
       setPagination((prev) => ({
         ...prev,

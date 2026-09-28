@@ -318,7 +318,7 @@ describe('useRecordings', () => {
     expect(result).toEqual({ ok: true, count: 2 });
     expect(get().steps).toEqual(second);
     const convertCalls = mocks.axiosDefault.mock.calls.filter(
-      (c: [{ url?: string }]) => String(c[0]?.url || '').includes('/convert')
+      (c: any[]) => String(c[0]?.url || '').includes('/convert')
     );
     expect(convertCalls.length).toBeGreaterThanOrEqual(2);
   });

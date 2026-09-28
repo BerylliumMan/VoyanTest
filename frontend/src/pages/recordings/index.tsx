@@ -216,14 +216,14 @@ const Recordings: React.FC = () => {
     if (status === 'stopped') {
       return (
         <Space size={6} align="center">
-          <Badge dot dotStyle={{ backgroundColor: '#86909c' }} />
+          <Badge dot dotStyle={{ backgroundColor: 'var(--vt-text-4)' }} />
           <Tag color="gray" className={styles.tagNoMargin}>{t['recordings.stopped']}</Tag>
         </Space>
       );
     }
     return (
       <Space size={6} align="center">
-        <Badge dot dotStyle={{ backgroundColor: '#165dff' }} />
+        <Badge dot dotStyle={{ backgroundColor: 'var(--vt-accent)' }} />
         <Tag color="blue" className={styles.tagNoMargin}>{t['recordings.idle']}</Tag>
       </Space>
     );

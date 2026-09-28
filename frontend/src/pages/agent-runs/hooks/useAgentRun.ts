@@ -113,13 +113,19 @@ export function useAgentRun(runId: string): UseAgentRunState {
     const fetchData = async () => {
       try {
         setLoading(true);
-        const runData: AgentRunDetail = await apiRequest(`/api/agent-runs/${runId}`);
+        const runData = await apiRequest<AgentRunDetail>({
+          method: 'get',
+          url: `/api/agent-runs/${runId}`,
+        });
         if (cancelled) return;
         setRun(runData);
 
         // 获取历史消息（已完成/失败的 run）
         try {
-          const messages: OTATurn[] = await apiRequest(`/api/agent-runs/${runId}/messages`);
+          const messages = await apiRequest<OTATurn[]>({
+            method: 'get',
+            url: `/api/agent-runs/${runId}/messages`,
+          });
           if (!cancelled) {
             setTurns(messages.sort((a, b) => a.turn_number - b.turn_number));
             messages.forEach((m) => turnsMapRef.current.set(m.id, m));

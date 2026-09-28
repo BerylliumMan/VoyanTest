@@ -5,6 +5,7 @@ import {
 import {
   IconLanguage, IconSunFill, IconMoonFill,
   IconUser, IconSettings, IconPoweroff, IconLoading, IconNotification,
+  IconMenuFold, IconMenuUnfold,
 } from '@arco-design/web-react/icon';
 import { useSelector } from 'react-redux';
 import axios from 'axios';
@@ -18,7 +19,15 @@ import Settings from '../Settings';
 import styles from './style/index.module.less';
 import defaultLocale from '@/locale';
 
-function Navbar({ show }: { show: boolean }) {
+function Navbar({
+  show,
+  collapsed,
+  onToggleMenu,
+}: {
+  show: boolean;
+  collapsed?: boolean;
+  onToggleMenu?: () => void;
+}) {
   const t = useLocale();
   const { userInfo, userLoading } = useSelector((state: GlobalState) => state);
   const { setLang, lang, theme, setTheme } = useContext(GlobalContext);
@@ -89,6 +98,22 @@ function Navbar({ show }: { show: boolean }) {
   return (
     <div className={styles.navbar}>
       <div className={styles.left}>
+        {/* 030-ui-refresh：导航隐藏/展开入口（常驻顶栏，替代原仅角落小按钮） */}
+        {onToggleMenu && (
+          <div
+            className={styles['menu-toggle']}
+            role="button"
+            tabIndex={0}
+            aria-label={collapsed ? '展开导航' : '隐藏导航'}
+            title={collapsed ? '展开导航' : '隐藏导航'}
+            onClick={onToggleMenu}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') onToggleMenu();
+            }}
+          >
+            {collapsed ? <IconMenuUnfold /> : <IconMenuFold />}
+          </div>
+        )}
         <div className={styles.logo}>
           <Logo width={28} height={28} />
           <div className={styles['logo-name']}>{t['navbar.appName']}</div>

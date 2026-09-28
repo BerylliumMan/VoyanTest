@@ -763,8 +763,9 @@ const ApiScenariosPage: React.FC = () => {
                     }
                     rowKey="id"
                     onRow={(record) => ({
-                      onDragOver: (event) => event.preventDefault(),
-                      onDrop: (event) => {
+                      onDragOver: (event: React.DragEvent<HTMLTableRowElement>) =>
+                        event.preventDefault(),
+                      onDrop: (event: React.DragEvent<HTMLTableRowElement>) => {
                         event.preventDefault();
                         reorderSteps(event.dataTransfer.getData('text/plain'), record.id);
                       },

@@ -185,3 +185,6 @@ voyantest-agent-build.tar.gz
 /test_*.png
 /final_test_*.png
 /password_mask_check.png
+
+# visual brainstorming companion
+.superpowers/

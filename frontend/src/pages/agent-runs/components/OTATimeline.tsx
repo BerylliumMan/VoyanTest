@@ -138,7 +138,7 @@ const OTATimeline: React.FC<OTATimelineProps> = ({ turns, live = false, active =
           >
             {/* 时间线节点 */}
             <div className={styles['timeline-dot-column']}>
-              <div className={styles['timeline-dot']} style={{ background: `var(--color-${roleColor}-6, #165DFF)` }} />
+              <div className={styles['timeline-dot']} style={{ background: `var(--color-${roleColor}-6, var(--vt-accent))` }} />
               {!isLast && <div className={styles['timeline-line']} />}
             </div>
 

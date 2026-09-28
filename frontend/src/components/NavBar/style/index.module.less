@@ -1,9 +1,10 @@
 .navbar {
   display: flex;
   justify-content: space-between;
-  border-bottom: 1px solid var(--color-border);
+  // 030-ui-refresh：顶栏细线分隔 + 白底（极简 SaaS）
+  border-bottom: 1px solid var(--vt-border-weak);
   box-sizing: border-box;
-  background-color: var(--color-bg-2);
+  background-color: var(--vt-bg-panel);
   height: 100%;
 }
 
@@ -12,20 +13,43 @@
   align-items: center;
 }
 
+/* 030-ui-refresh：导航隐藏/展开按钮（顶栏常驻） */
+.menu-toggle {
+  width: 32px;
+  height: 32px;
+  margin-left: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--vt-radius-sm);
+  color: var(--vt-text-3);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    background-color: var(--vt-bg-subtle-2);
+    color: var(--vt-text-1);
+  }
+
+  svg {
+    font-size: 18px;
+  }
+}
+
 .logo {
   display: flex;
   align-items: center;
   width: 200px;
-  padding-left: 20px;
+  padding-left: 14px;
   box-sizing: border-box;
 }
 
 .logo-name {
-  color: var(--color-text-1);
-  font-weight: 500;
-  font-size: 20px;
+  color: var(--vt-text-1);
+  font-weight: 600;
+  font-size: 17px;
+  letter-spacing: -0.2px;
   margin-left: 10px;
-  font-family: 'PingFang SC';
 }
 
 .right {

@@ -192,8 +192,11 @@ const ImportRequestModal: React.FC<Props> = ({
 
   const treeData = useMemo(() => {
     const q = moduleQuery.trim().toLowerCase();
-    const toNode = (node: Module): { key: string; title: string; children?: ReturnType<typeof toNode>[] } | null => {
-      const children = (node.children || []).map(toNode).filter(Boolean) as ReturnType<typeof toNode>[];
+    type ModuleTreeNode = { key: string; title: string; children?: ModuleTreeNode[] };
+    const toNode = (node: Module): ModuleTreeNode | null => {
+      const children = (node.children || [])
+        .map(toNode)
+        .filter(Boolean) as ModuleTreeNode[];
       const selfMatch = !q || node.name.toLowerCase().includes(q);
       if (!selfMatch && children.length === 0) return null;
       return {
@@ -202,7 +205,9 @@ const ImportRequestModal: React.FC<Props> = ({
         children,
       };
     };
-    const moduleNodes = tree.map(toNode).filter(Boolean);
+    const moduleNodes = tree
+      .map(toNode)
+      .filter((n): n is ModuleTreeNode => Boolean(n));
     return [
       { key: 'all', title: `${tab === 'definition' ? '全部接口' : '全部用例'} (${tab === 'definition' ? definitions.length : describedCases.length})` },
       { key: 'ungrouped', title: `未分组 (${countIn(null)})` },

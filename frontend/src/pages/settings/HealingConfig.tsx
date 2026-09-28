@@ -61,7 +61,14 @@ const HealingConfigPage: React.FC = () => {
         </Form.Item>
         <Form.Item label="相似度阈值">
           <Space>
-            <Slider value={threshold} min={0} max={1} step={0.05} onChange={setThreshold} style={{ width: 200 }} />
+            <Slider
+              value={threshold}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(val) => setThreshold(Array.isArray(val) ? val[0] : val)}
+              style={{ width: 200 }}
+            />
             <span>{(threshold * 100).toFixed(0)}%</span>
           </Space>
         </Form.Item>
