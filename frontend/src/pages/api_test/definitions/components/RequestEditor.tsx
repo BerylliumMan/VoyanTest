@@ -3,6 +3,7 @@ import {
   Button,
   Input,
   InputNumber,
+  Checkbox,
   Select,
   Switch,
   Tabs,
@@ -26,6 +27,7 @@ import KeyValueTable from './KeyValueTable';
 import BodyEditor from './BodyEditor';
 import AssertionPanel from './AssertionPanel';
 import ExtractPanel from './ExtractPanel';
+import ScriptPanel from './ScriptPanel';
 import VariableInput from './VariableInput';
 import styles from '../style/index.module.less';
 
@@ -47,6 +49,16 @@ interface RequestEditorProps {
   datasets?: Dataset[];
   datasetBinding?: DatasetBinding;
   onDatasetBindingChange?: (binding: DatasetBinding) => void;
+  /** 031（US1）测试文件选择器需要的项目上下文 */
+  projectId?: number | null;
+  /** 031（US11）：最近一次响应样本（供 AI 断言建议使用） */
+  responseSample?: {
+    method?: string;
+    url?: string;
+    status_code?: number;
+    headers?: Record<string, string>;
+    body_text?: string;
+  } | null;
 }
 
 /** form 内容 <-> 键值项 序列化 */
@@ -94,11 +106,13 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
   embedded = false,
   onSend = () => undefined,
   sending = false,
+  responseSample = null,
   dryRun = false,
   onDryRunChange = () => undefined,
   datasets = [],
   datasetBinding = { dataset_id: null, dataset_mode: 'sequential' },
   onDatasetBindingChange = () => undefined,
+  projectId,
 }) => {
   const { request } = spec;
 
@@ -110,15 +124,47 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
     onChange({ ...spec, ...patch });
   };
 
-  /** form 键值项（由 body.content 反序列化而来） */
-  const formItems = useMemo(
-    () => (request.body.type === 'form' || request.body.type === 'form_data'
-      ? parseFormContent(request.body.content)
-      : []),
-    [request.body.type, request.body.content]
-  );
+  /**
+   * form/form_data 键值项。
+   * 031（US1）：multipart 优先读结构化 ``body.form_data``（旧用例无该字段时回退解析 content）。
+   */
+  const formItems = useMemo(() => {
+    if (request.body.type === 'form') return parseFormContent(request.body.content);
+    if (request.body.type === 'form_data') {
+      const structured = request.body.form_data;
+      if (Array.isArray(structured) && structured.length > 0) {
+        return structured.map((it) => ({
+          key: it.key,
+          value: it.value,
+          enable: it.enable !== false,
+        }));
+      }
+      // 旧用例兼容：仅当 content 形如表单串（含 = 且非 JSON 花括号）才按表单解析，
+      // 避免把遗留的 JSON 正文误拆成键值行
+      const legacy = request.body.content || '';
+      if (legacy.includes('=') && !legacy.trim().startsWith('{')) {
+        return parseFormContent(legacy);
+      }
+      return [];
+    }
+    return [];
+  }, [request.body.type, request.body.content, request.body.form_data]);
 
   const handleFormItemsChange = (items: KeyValueItem[]) => {
+    if (request.body.type === 'form_data') {
+      // multipart 写结构化 form_data（执行端走 files= 通道，见 core/api_runner/runner.py）
+      updateRequest({
+        body: {
+          ...request.body,
+          form_data: items.map((it) => ({
+            key: it.key,
+            value: it.value,
+            enable: it.enable !== false,
+          })),
+        },
+      });
+      return;
+    }
     updateRequest({ body: { ...request.body, content: serializeFormContent(items) } });
   };
 
@@ -222,6 +268,9 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
             onTypeChange={(type) => updateRequest({ body: { ...request.body, type } })}
             formItems={formItems}
             onFormItemsChange={handleFormItemsChange}
+            files={request.body.files || []}
+            onFilesChange={(files) => updateRequest({ body: { ...request.body, files } })}
+            projectId={projectId}
           />
         </TabPane>
 
@@ -229,6 +278,7 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
           <AssertionPanel
             items={spec.assertions}
             onChange={(items) => updateStep({ assertions: items })}
+            responseSample={responseSample}
           />
         </TabPane>
 
@@ -240,6 +290,8 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
         </TabPane>
 
         <TabPane key="prepost" title="前置后置">
+          {/* 031（US3）：前后置脚本（受限 Python 子集，试跑零出站） */}
+          <ScriptPanel spec={spec} onChange={updateStep} />
           <div className={styles.prePostSection}>
             <div className={styles.prePostTitle}>前置操作（请求发送前执行）</div>
             {spec.pre.length === 0 && (
@@ -373,12 +425,52 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
               <span className={styles.settingsLabel}>迭代模式</span>
               <Select
                 value={datasetBinding.dataset_mode}
-                onChange={(value) =>
-                  onDatasetBindingChange({ ...datasetBinding, dataset_mode: value as DatasetMode })
-                }
+                onChange={(value) => {
+                  const mode = value as DatasetMode;
+                  onDatasetBindingChange({
+                    ...datasetBinding,
+                    dataset_mode: mode,
+                    // 031（US9）：切到 loop 时补默认次数，离开 loop 时保留（无害）
+                    loop_count: mode === 'loop' ? datasetBinding.loop_count ?? 1 : datasetBinding.loop_count,
+                  });
+                }}
                 disabled={datasetBinding.dataset_id == null}
                 style={{ width: 200 }}
                 options={DATASET_MODES}
+              />
+            </div>
+            {datasetBinding.dataset_mode === 'loop' && (
+              <div className={styles.settingsRow}>
+                <span className={styles.settingsLabel}>重复遍数</span>
+                <InputNumber
+                  value={datasetBinding.loop_count ?? 1}
+                  min={1}
+                  max={100}
+                  disabled={datasetBinding.dataset_id == null}
+                  style={{ width: 120 }}
+                  onChange={(value) =>
+                    onDatasetBindingChange({ ...datasetBinding, loop_count: value ?? 1 })
+                  }
+                />
+                <span className={styles.settingsHint}>数据集行序重复 N 遍（1~100）</span>
+              </div>
+            )}
+            <div className={styles.settingsRow}>
+              <span className={styles.settingsLabel}>迭代失败</span>
+              <Select
+                value={datasetBinding.fail_policy ?? 'fail_fast'}
+                onChange={(value) =>
+                  onDatasetBindingChange({
+                    ...datasetBinding,
+                    fail_policy: value as 'fail_fast' | 'continue',
+                  })
+                }
+                disabled={datasetBinding.dataset_id == null}
+                style={{ width: 200 }}
+                options={[
+                  { label: '立即停止（fail_fast）', value: 'fail_fast' },
+                  { label: '继续剩余迭代', value: 'continue' },
+                ]}
               />
             </div>
             </>
@@ -394,6 +486,65 @@ const RequestEditor: React.FC<RequestEditorProps> = ({
                 style={{ width: 200 }}
               />
             </div>
+            {/* 031（US5）：步骤级重试策略 */}
+            <div className={styles.settingsRow}>
+              <span className={styles.settingsLabel}>重试次数</span>
+              <InputNumber
+                style={{ width: 120 }}
+                min={0}
+                max={3}
+                value={spec.retry?.max ?? 0}
+                onChange={(value) =>
+                  updateStep({
+                    retry: value
+                      ? {
+                          max: value,
+                          delay_ms: spec.retry?.delay_ms ?? 300,
+                          on: spec.retry?.on ?? ['timeout', 'network'],
+                        }
+                      : null,
+                  })
+                }
+              />
+              <span className={styles.settingsHint}>0 = 不重试（默认：网络/超时 × 1）</span>
+            </div>
+            {(spec.retry?.max ?? 0) > 0 && (
+              <>
+                <div className={styles.settingsRow}>
+                  <span className={styles.settingsLabel}>重试间隔（ms）</span>
+                  <InputNumber
+                    style={{ width: 120 }}
+                    min={0}
+                    max={10000}
+                    value={spec.retry?.delay_ms ?? 300}
+                    onChange={(value) =>
+                      updateStep({
+                        retry: { ...(spec.retry as NonNullable<typeof spec.retry>), delay_ms: value ?? 300 },
+                      })
+                    }
+                  />
+                </div>
+                <div className={styles.settingsRow}>
+                  <span className={styles.settingsLabel}>触发条件</span>
+                  <Checkbox.Group
+                    value={spec.retry?.on ?? ['timeout', 'network']}
+                    onChange={(values) =>
+                      updateStep({
+                        retry: {
+                          ...(spec.retry as NonNullable<typeof spec.retry>),
+                          on: values as Array<'timeout' | '5xx' | 'network'>,
+                        },
+                      })
+                    }
+                    options={[
+                      { label: '网络错误', value: 'network' },
+                      { label: '超时', value: 'timeout' },
+                      { label: '5xx（慎用）', value: '5xx' },
+                    ]}
+                  />
+                </div>
+              </>
+            )}
             <div className={styles.settingsRow}>
               <span className={styles.settingsLabel}>跟随重定向</span>
               <Switch

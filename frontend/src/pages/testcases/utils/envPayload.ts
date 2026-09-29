@@ -85,3 +85,26 @@ export function serializeEnvHeaders(headers?: EnvHeaderForm[] | null): EnvHeader
       enable: h.enable !== false,
     }));
 }
+
+/** 031（US4）多域名服务：后端 dict ↔ 表单列表 */
+export interface EnvServiceForm {
+  name: string;
+  url: string;
+}
+
+export function toEnvServicesForm(
+  services?: Record<string, string> | null
+): EnvServiceForm[] {
+  if (!services || typeof services !== 'object') return [];
+  return Object.entries(services).map(([name, url]) => ({ name, url: String(url || '') }));
+}
+
+export function serializeEnvServices(list?: EnvServiceForm[] | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of list || []) {
+    const name = String(item?.name || '').trim();
+    if (!name) continue;
+    out[name] = String(item?.url || '').trim();
+  }
+  return out;
+}

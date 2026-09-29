@@ -976,3 +976,68 @@
   font-size: 12px;
   margin-bottom: 4px;
 }
+/* 031（US1）：multipart 文件字段区（BodyEditor） */
+.multipartFiles {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--vt-border);
+}
+.multipartFilesHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--vt-text-3);
+}
+
+/* 031（US7）：代码片段复制按钮与请求头预览 */
+.snippetButtons {
+  margin-left: 10px;
+  font-weight: 400;
+}
+.snippetLink {
+  margin-right: 8px;
+  font-size: 12px;
+  color: var(--vt-accent);
+  cursor: pointer;
+}
+.snippetLink:hover {
+  text-decoration: underline;
+}
+.renderedHeaders {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--vt-text-3);
+}
+.renderedHeaders summary {
+  cursor: pointer;
+}
+
+/* 031（US6）：表达式断言的 CodeMirror 内嵌编辑器 */
+.panelExpression {
+  display: flex;
+  align-items: stretch;
+}
+
+.panelExpressionEditor {
+  flex: 1;
+  border: 1px solid var(--vt-border);
+  border-radius: var(--vt-radius-sm);
+  overflow: hidden;
+  background: var(--vt-bg-panel);
+}
+
+.panelItemHint {
+  font-size: 12px;
+  color: var(--vt-text-3);
+  padding: 4px 4px 0;
+  line-height: 1.6;
+}
+
+/* 031（US5）：设置项说明文字 */
+.settingsHint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--vt-text-3);
+}

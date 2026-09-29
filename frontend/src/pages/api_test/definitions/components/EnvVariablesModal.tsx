@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Form, Modal, Table, Tag, Typography } from '@arco-design/web-react';
 import { apiPut } from '@/utils/apiRequest';
-import { EnvVariablesList, EnvHeadersList } from '@/components/EnvVariablesEditor';
+import { EnvVariablesList, EnvHeadersList, EnvServicesList } from '@/components/EnvVariablesEditor';
 import {
   serializeEnvHeaders,
   serializeEnvVariables,
   toEnvHeadersForm,
   toEnvVariablesForm,
+  toEnvServicesForm,
+  serializeEnvServices,
 } from '@/pages/testcases/utils/envPayload';
 import { EnvVariableItem, Environment } from '../types';
 import styles from '../style/index.module.less';
@@ -25,9 +27,17 @@ interface EnvVariablesModalProps {
 interface EnvVariableFormShape {
   variables?: Parameters<typeof serializeEnvVariables>[0];
   headers?: Parameters<typeof serializeEnvHeaders>[0];
+  /** 031（US4）多域名服务（表单列表 ↔ 后端 dict） */
+  services_list?: Parameters<typeof serializeEnvServices>[0];
 }
 
 const T: Record<string, string> = {
+  'environment.service.name': '服务名',
+  'environment.service.name_required': '服务名必填',
+  'environment.service.url': '服务地址（绝对 URL）',
+  'environment.service.url_invalid': '必须是绝对 URL（http(s)://…）或留空',
+  'environment.service.add': '添加服务',
+  'environment.service.hint': '模板中用 {{服务名}} 引用（优先级高于普通环境变量）',
   'environment.variable.key': '变量名',
   'environment.variable.key_required': '请输入变量名',
   'environment.variable.key_placeholder': '如 token',
@@ -71,6 +81,8 @@ const EnvVariablesModal: React.FC<EnvVariablesModalProps> = ({
     form.setFieldsValue({
       variables: toEnvVariablesForm(environment?.variables),
       headers: toEnvHeadersForm(environment?.headers),
+      // 031（US4）：多域名服务地址
+      services_list: toEnvServicesForm(environment?.services),
     });
   }, [visible, environment, form]);
 
@@ -89,6 +101,8 @@ const EnvVariablesModal: React.FC<EnvVariablesModalProps> = ({
         {
           variables: serializeEnvVariables(values.variables),
           headers: serializeEnvHeaders(values.headers),
+          // 031（US4）：服务列表 ↔ dict
+          services: serializeEnvServices(values.services_list),
         },
         '环境变量已保存'
       );
@@ -150,6 +164,7 @@ const EnvVariablesModal: React.FC<EnvVariablesModalProps> = ({
       <div className={styles.envSectionTitle}>变量配置</div>
       <Form form={form} layout="vertical">
         <EnvVariablesList form={form} t={T} />
+        <EnvServicesList form={form} t={T} />
         <div className={styles.envSectionTitle}>公共请求头</div>
         <EnvHeadersList t={T} />
       </Form>

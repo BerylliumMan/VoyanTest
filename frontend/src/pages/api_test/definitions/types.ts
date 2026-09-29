@@ -19,6 +19,9 @@ export type BodyType = 'none' | 'json' | 'form' | 'form_data' | 'raw' | 'binary'
 export interface ApiRequestBody {
   type: BodyType;
   content: string;
+  /** 031（US1）multipart：普通字段与文件字段（path 为 platform://<file_id> 或变量引用） */
+  form_data?: Array<{ key: string; value: string; enable?: boolean }>;
+  files?: Array<{ key: string; path: string; content_type?: string | null }>;
 }
 
 /** 认证配置 */
@@ -84,6 +87,10 @@ export const DATASET_MODES: Array<{ label: string; value: DatasetMode }> = [
 export interface DatasetBinding {
   dataset_id: number | null;
   dataset_mode: DatasetMode;
+  /** 031（US9）：loop 模式重复遍数（1~100） */
+  loop_count?: number;
+  /** 031（US9）：迭代失败策略（fail_fast = 立即停止，默认） */
+  fail_policy?: 'fail_fast' | 'continue';
 }
 
 /** 数据集 Select 的「不使用」哨兵值（真实 id 从 1 起） */
@@ -107,6 +114,82 @@ export interface ApiStep {
   pre: ApiPreStep[];
   /** 后置操作，结构与前置相同：设置变量 / 延时 */
   post: ApiPreStep[];
+  /** 031（US3）前置/后置脚本（Python 子集，服务端沙箱执行） */
+  pre_script?: string;
+  post_script?: string;
+  /** 031（US3）步骤级脚本超时（200~10000ms；null/undefined = 系统默认 2000ms） */
+  script_timeout_ms?: number | null;
+  /** 031（US5）重试策略；null/undefined = 默认（网络/超时 × 1，5xx 与断言不重试） */
+  retry?: RetryPolicy | null;
+}
+
+/** 031（US5）重试策略：on 缺省 = ["timeout","network"]（5xx 需显式加入） */
+export interface RetryPolicy {
+  max: number;
+  delay_ms: number;
+  on?: Array<'5xx' | 'timeout' | 'network'>;
+}
+
+/** 031（US1）测试文件（平台托管） */
+export interface TestFile {
+  id: number;
+  name: string;
+  size: number;
+  content_type?: string | null;
+  project_id?: number | null;
+  ref_count: number;
+  created_at?: string | null;
+}
+
+/** 031（US7）调试请求历史 */
+export interface RequestHistory {
+  id: number;
+  method: string;
+  url: string;
+  status_code: number | null;
+  duration_ms: number | null;
+  created_at: string | null;
+  headers_masked: Record<string, string>;
+  body_preview: string | null;
+  error: string | null;
+}
+
+/** 031（US8）CI 令牌 */
+export interface ApiToken {
+  id: number;
+  name: string;
+  token_prefix: string;
+  project_id: number | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_at: string | null;
+  /** 仅创建响应返回一次 */
+  token?: string;
+}
+
+/** 031（US11）AI 断言/提取器候选 */
+export interface SuggestedAssertion {
+  kind: 'assertion' | 'extractor';
+  type: string;
+  expression: string;
+  condition: string;
+  expected: string;
+  variable: string;
+  scope: string;
+  reason: string;
+}
+
+/** 031（US11）覆盖率条目（双口径信号） */
+export interface CoverageItem {
+  definition_id: number;
+  name: string;
+  method: string;
+  path: string;
+  covered: boolean;
+  case_count: number;
+  last_run_passed: boolean | null;
+  priority_score: number;
 }
 
 /** api_spec 顶层（data-model §3） */
@@ -283,6 +366,8 @@ export interface Environment {
   cookies?: Array<{ name: string; value: string; domain?: string }>;
   variables?: EnvVariableItem[];
   headers?: EnvHeaderItem[];
+  /** 031（US4）多域名服务地址：{服务名: 绝对 URL} */
+  services?: Record<string, string>;
 }
 
 /** 模块 */
@@ -318,6 +403,7 @@ export const DEFAULT_GENERATE_OPTIONS: GenerateOptions = {
 
 /** 断言类型选项 */
 export const ASSERTION_TYPES = [
+  'expression',
   'status_code',
   'jsonpath',
   'header',
@@ -383,7 +469,7 @@ export const createRequestSpec = (): ApiRequestSpec => ({
   url: '{{baseUrl}}/',
   headers: [],
   query: [],
-  body: { type: 'none', content: '' },
+  body: { type: 'none', content: '', form_data: [], files: [] },
   auth: { type: 'none' },
   timeout_ms: 30000,
   follow_redirects: true,
@@ -401,4 +487,92 @@ export const createStep = (): ApiStep => ({
   extractors: [],
   pre: [],
   post: [],
+  pre_script: '',
+  post_script: '',
+  retry: null,
 });
+
+/** 031（US6）断言模板库：一键插入常用断言（FR-012） */
+export interface AssertionTemplate {
+  key: string;
+  label: string;
+  hint: string;
+  build: () => ApiAssertion;
+}
+
+export const ASSERTION_TEMPLATES: AssertionTemplate[] = [
+  {
+    key: 'status_2xx',
+    label: '状态码 2xx',
+    hint: '200 <= status_code < 300',
+    build: () => ({
+      ...createAssertion(),
+      type: 'expression',
+      condition: 'expression',
+      expression: '200 <= status_code < 300',
+      name: '状态码 2xx',
+    }),
+  },
+  {
+    key: 'response_time',
+    label: '响应时间小于 1000ms',
+    hint: 'response_time ≤ 1000',
+    build: () => ({
+      ...createAssertion(),
+      type: 'response_time',
+      condition: 'lte',
+      expected: '1000',
+      name: '响应时间 < 1s',
+    }),
+  },
+  {
+    key: 'jsonpath_exists',
+    label: 'JSONPath 存在',
+    hint: '如 $.data.token（改字段名）',
+    build: () => ({
+      ...createAssertion(),
+      type: 'jsonpath',
+      condition: 'exists',
+      expression: '$.data.token',
+      expected: '',
+      name: '字段存在',
+    }),
+  },
+  {
+    key: 'body_contains',
+    label: '响应体包含文本',
+    hint: '如 success（改文本）',
+    build: () => ({
+      ...createAssertion(),
+      type: 'body_contains',
+      condition: 'contains',
+      expected: 'success',
+      name: '响应包含关键词',
+    }),
+  },
+  {
+    key: 'json_schema',
+    label: 'JSON Schema 校验',
+    hint: '粘贴 schema（改内容）',
+    build: () => ({
+      ...createAssertion(),
+      type: 'jsonschema',
+      condition: 'equals',
+      expression: '{"type": "object", "required": ["data"]}',
+      expected: '',
+      name: 'Schema 校验',
+    }),
+  },
+  {
+    key: 'expression_cross_field',
+    label: '表达式：跨字段一致',
+    hint: "len(json['data']['items']) == json['data']['total']",
+    build: () => ({
+      ...createAssertion(),
+      type: 'expression',
+      condition: 'expression',
+      expression: "len(json['data']['items']) == json['data']['total']",
+      name: '跨字段一致',
+    }),
+  },
+];

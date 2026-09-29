@@ -19,6 +19,23 @@ interface Project {
   name: string;
 }
 
+interface CoverageItem {
+  definition_id: number;
+  name: string;
+  method: string;
+  path: string;
+  referenced: boolean;
+  reference_count: number;
+  last_status: string | null;
+  last_run_at: string | null;
+}
+
+interface CoverageGap {
+  definition_id: number;
+  path: string;
+  reason: string;
+}
+
 interface Overview {
   definition_count: number;
   case_count: number;
@@ -27,6 +44,10 @@ interface Overview {
   coverage: number | null;
   scenario_runs_7d: number;
   scenario_pass_rate_7d: number | null;
+  /** 031（US11）：双口径 */
+  covered_by_last_run?: number;
+  coverage_items?: CoverageItem[];
+  coverage_gaps?: CoverageGap[];
 }
 
 const percent = (value: number | null) => (value == null ? '--' : `${Math.round(value * 100)}%`);
@@ -110,7 +131,7 @@ const ApiTestOverview: React.FC = () => {
         </Col>
       </Row>
       <Row gutter={16} className={styles['stats-row']}>
-        <Col span={8}>
+        <Col span={6}>
           <StatCard
             label="未挂用例的接口"
             value={data?.uncovered_definitions ?? 0}
@@ -118,10 +139,19 @@ const ApiTestOverview: React.FC = () => {
             tone="danger"
           />
         </Col>
-        <Col span={8}>
+        <Col span={6}>
+          {/* 031（US11）：第二口径 —— 最近执行通过（引用了但从没通过不算真覆盖） */}
+          <StatCard
+            label="最近执行通过"
+            value={data?.covered_by_last_run ?? 0}
+            icon={<IconCheckCircleFill />}
+            tone="success"
+          />
+        </Col>
+        <Col span={6}>
           <StatCard label="近 7 天场景执行" value={data?.scenario_runs_7d ?? 0} icon={<IconHistory />} />
         </Col>
-        <Col span={8}>
+        <Col span={6}>
           <StatCard
             label="近 7 天步骤通过率"
             value={percent(data?.scenario_pass_rate_7d ?? null)}
@@ -130,6 +160,23 @@ const ApiTestOverview: React.FC = () => {
           />
         </Col>
       </Row>
+
+      {/* 031（US11）：覆盖缺口清单（引用口径 + 执行口径的综合建议） */}
+      {(data?.coverage_gaps?.length ?? 0) > 0 && (
+        <Card title="覆盖缺口（建议优先补测）" className={styles['stat-card']} style={{ marginTop: 16 }}>
+          {(data?.coverage_gaps || []).slice(0, 10).map((g) => (
+            <div key={g.definition_id} style={{ padding: '6px 0', fontSize: 13, color: 'var(--vt-text-2)' }}>
+              <code style={{ marginRight: 8 }}>{g.path || `#${g.definition_id}`}</code>
+              <span style={{ color: 'var(--vt-text-3)' }}>{g.reason}</span>
+            </div>
+          ))}
+          {(data?.coverage_gaps?.length ?? 0) > 10 && (
+            <div style={{ color: 'var(--vt-text-3)', fontSize: 12 }}>
+              仅显示前 10 条，共 {data?.coverage_gaps?.length} 条
+            </div>
+          )}
+        </Card>
+      )}
       <Card title="Swagger URL 定时同步">
         <Form layout="inline">
           <FormItem label="文档地址">

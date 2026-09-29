@@ -14,6 +14,7 @@ import TestCaseEditor from './components/TestCaseEditor';
 import ModuleEditor from './components/ModuleEditor';
 import BatchMoveCopyModal from './components/BatchMoveCopyModal';
 import EnvironmentManager from './components/EnvironmentManager';
+import { toEnvServicesForm, serializeEnvServices } from './utils/envPayload';
 import { hydrateStructuredFromDescription } from './utils/parseInstantStep';
 import {
   serializeEnvHeaders, serializeEnvVariables, toEnvHeadersForm, toEnvVariablesForm,
@@ -62,6 +63,8 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const [initCases, setInitCases] = useState<TestCase[]>([]);
   const [batchRunVisible, setBatchRunVisible] = useState(false);
   const [batchRunIncludeInit, setBatchRunIncludeInit] = useState(true);
+  // 031（US10）：批次内复用会话（共享 httpx client，cookie 可见；默认关闭）
+  const [batchRunSessionReuse, setBatchRunSessionReuse] = useState(false);
   const [batchRunInitCaseIds, setBatchRunInitCaseIds] = useState<number[]>([]);
   const [batchRunLoading, setBatchRunLoading] = useState(false);
   const batchRunModeRef = useRef<'server' | 'client'>('server');
@@ -125,7 +128,7 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
 
   const handleProjectChange = (val: number) => { setSelectedProject(val); setSelectedModuleId(null); setPage(1); setSelectedRowKeys([]); setSearchQuery(''); setSubmittedQuery(''); setInitCaseFilter('all'); };
   const handleEnvironmentChange = (val: number) => setSelectedEnvironment(val);
-  const openCreateEnv = () => { setEditingEnv(null); envForm.resetFields(); envForm.setFieldsValue({ browser: 'chromium', headless: true, variables: [], headers: [] }); setEnvFormVisible(true); };
+  const openCreateEnv = () => { setEditingEnv(null); envForm.resetFields(); envForm.setFieldsValue({ browser: 'chromium', headless: true, variables: [], headers: [], services_list: [] }); setEnvFormVisible(true); };
   const openEditEnv = (env: Environment) => {
     setEditingEnv(env);
     envForm.resetFields();
@@ -133,6 +136,8 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
       ...env,
       variables: toEnvVariablesForm(env.variables),
       headers: toEnvHeadersForm(env.headers),
+      // 031（US4）：多域名服务地址
+      services_list: toEnvServicesForm((env as { services?: Record<string, string> }).services),
     });
     setEnvFormVisible(true);
   };
@@ -144,6 +149,8 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
       ...values,
       variables: serializeEnvVariables(values.variables),
       headers: serializeEnvHeaders(values.headers),
+      // 031（US4）：服务列表 ↔ dict
+      services: serializeEnvServices(values.services_list),
     };
     try { if (editingEnv) { await axios.put(`/api/environments/${editingEnv.id}`, payload); Message.success(t['environment.update_success']); } else { await axios.post(`/api/projects/${selectedProject}/environments`, payload); Message.success(t['environment.create_success']); } setEnvFormVisible(false); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); }
   };
@@ -213,9 +220,12 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
         environment_id?: number;
         init_case_ids?: number[];
         init_policy: 'before_each';
+        session_reuse?: boolean;
       } = { case_ids: selectedRowKeys, init_policy: 'before_each' };
       if (selectedEnvironment) payload.environment_id = selectedEnvironment;
       if (batchRunIncludeInit && initCaseIds.length > 0) payload.init_case_ids = initCaseIds;
+      // 031（US10）：开启后批次内共享 HTTP 客户端（登录一次，后续用例自动带 Cookie）
+      if (batchRunSessionReuse) payload.session_reuse = true;
       await axios.post('/api/testcases/batch-run', payload);
       Message.success(t['run.triggered']);
       setBatchRunVisible(false);
@@ -504,6 +514,15 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
           {initCases.length === 0 && (
             <div className={styles.initNoneText}>{t['init.case.none']}</div>
           )}
+          {/* 031（US10）：复用会话（接口用例批次内共享 Cookie） */}
+          <div className={styles.initSwitchRow} style={{ marginTop: 12 }}>
+            <Switch
+              checked={batchRunSessionReuse}
+              onChange={(v) => setBatchRunSessionReuse(v)}
+            />
+            <span className={styles.switchLabel}>{t['batch.session_reuse']}</span>
+          </div>
+          <div className={styles.initNoneText}>{t['batch.session_reuse.hint']}</div>
         </Modal>
       </div>
     </>

@@ -1,9 +1,11 @@
-import React from 'react';
-import { Select, Input } from '@arco-design/web-react';
+import React, { useState } from 'react';
+import { Button, Input, Select, Space } from '@arco-design/web-react';
+import { IconDelete, IconFolder, IconPlus } from '@arco-design/web-react/icon';
 import CodeMirror from '@uiw/react-codemirror';
 import { json } from '@codemirror/lang-json';
-import { BodyType, BODY_TYPES, KeyValueItem } from '../types';
+import { BodyType, BODY_TYPES, KeyValueItem, TestFile } from '../types';
 import KeyValueTable from './KeyValueTable';
+import TestFilePicker from './TestFilePicker';
 import styles from '../style/index.module.less';
 
 interface BodyEditorProps {
@@ -14,6 +16,11 @@ interface BodyEditorProps {
   /** form/form_data 模式下的键值项（由父组件维护） */
   formItems?: KeyValueItem[];
   onFormItemsChange?: (items: KeyValueItem[]) => void;
+  /** 031（US1）multipart 文件字段（path 为 platform://<id> 或变量引用） */
+  files?: Array<{ key: string; path: string; content_type?: string | null }>;
+  onFilesChange?: (files: Array<{ key: string; path: string; content_type?: string | null }>) => void;
+  /** 测试文件选择器需要的项目上下文 */
+  projectId?: number | null;
 }
 
 const BODY_TYPE_LABELS: Record<BodyType, string> = {
@@ -36,8 +43,26 @@ const BodyEditor: React.FC<BodyEditorProps> = ({
   onTypeChange,
   formItems = [],
   onFormItemsChange,
+  files = [],
+  onFilesChange,
+  projectId,
 }) => {
   const isForm = type === 'form' || type === 'form_data';
+  const [pickerIndex, setPickerIndex] = useState<number | null>(null);
+
+  const updateFileRow = (
+    index: number,
+    patch: Partial<{ key: string; path: string; content_type?: string | null }>
+  ) => {
+    const next = files.map((f, i) => (i === index ? { ...f, ...patch } : f));
+    onFilesChange?.(next);
+  };
+
+  const handlePickFile = (file: TestFile) => {
+    if (pickerIndex === null) return;
+    updateFileRow(pickerIndex, { path: `platform://${file.id}` });
+    setPickerIndex(null);
+  };
 
   return (
     <div className={styles.bodyEditor}>
@@ -86,6 +111,63 @@ const BodyEditor: React.FC<BodyEditorProps> = ({
           keyPlaceholder="字段名"
           valuePlaceholder="字段值"
         />
+      )}
+
+      {type === 'form_data' && (
+        <div className={styles.multipartFiles}>
+          <div className={styles.multipartFilesHeader}>
+            <span>文件字段</span>
+            <Button
+              size="small"
+              type="text"
+              icon={<IconPlus />}
+              onClick={() => onFilesChange?.([...files, { key: 'file', path: '' }])}
+            >
+              添加文件字段
+            </Button>
+          </div>
+          {files.length === 0 && (
+            <div className={styles.bodyEmpty}>
+              无文件字段；需要上传文件时点「添加文件字段」并选择平台测试文件
+            </div>
+          )}
+          {files.map((row, index) => (
+            <Space key={index} style={{ marginBottom: 6 }} wrap>
+              <Input
+                value={row.key}
+                onChange={(v) => updateFileRow(index, { key: v })}
+                placeholder="字段名"
+                style={{ width: 140 }}
+              />
+              <Input
+                value={row.path}
+                onChange={(v) => updateFileRow(index, { path: v })}
+                placeholder="platform://<id> 或 {{变量}}"
+                style={{ width: 300 }}
+              />
+              <Button
+                size="small"
+                icon={<IconFolder />}
+                onClick={() => setPickerIndex(index)}
+              >
+                选择文件
+              </Button>
+              <Button
+                size="small"
+                type="text"
+                status="danger"
+                icon={<IconDelete />}
+                onClick={() => onFilesChange?.(files.filter((_, i) => i !== index))}
+              />
+            </Space>
+          ))}
+          <TestFilePicker
+            visible={pickerIndex !== null}
+            projectId={projectId}
+            onCancel={() => setPickerIndex(null)}
+            onSelect={handlePickFile}
+          />
+        </div>
       )}
     </div>
   );

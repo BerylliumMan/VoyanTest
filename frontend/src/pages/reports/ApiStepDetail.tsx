@@ -78,6 +78,10 @@ const CollapsibleText: React.FC<{ text: string }> = ({ text }) => {
 const ApiStepDetail: React.FC<{ step: StepDetail }> = ({ step }) => {
   const t = useLocale();
   const { request, response, assertions, extracted } = step;
+  /** 031（US3）：前后置脚本错误 */
+  const scriptErrors = (step as { script_errors?: Array<{ phase: string; message: string }> }).script_errors || [];
+  /** 031（US5）：实际发送次数（含重试；>1 时展示） */
+  const attempts = Number((step as { attempts?: number }).attempts || 0);
   if (!request && !response && !assertions && !extracted) return null;
 
   const reqHeaders = normalizeHeaders(request?.headers);
@@ -140,6 +144,26 @@ const ApiStepDetail: React.FC<{ step: StepDetail }> = ({ step }) => {
         </div>
       )}
 
+      {attempts > 1 && (
+        <div className={styles.apiBlock}>
+          <span className={styles.apiBlockTitle} style={{ marginRight: 8 }}>
+            重试
+          </span>
+          <span>共发送 {attempts} 次（含重试 {attempts - 1} 次）</span>
+        </div>
+      )}
+      {scriptErrors.length > 0 && (
+        <div className={styles.apiBlock}>
+          <div className={styles.apiBlockTitle}>脚本错误</div>
+          <div>
+            {scriptErrors.map((e, i) => (
+              <div key={i} className={styles.apiAssertionError} style={{ marginBottom: 4 }}>
+                {e.phase === 'pre' ? '前置' : '后置'}脚本：{e.message}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {assertions && assertions.length > 0 && (
         <div className={styles.apiBlock}>
           <div className={styles.apiBlockTitle}>{t['api.assertions']}</div>

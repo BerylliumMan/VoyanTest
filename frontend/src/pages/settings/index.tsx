@@ -5,6 +5,7 @@ import useLocale from '@/utils/useLocale';
 import AiConfig from './AiConfig';
 import UserManagement from './UserManagement';
 import ScheduleManagement from './ScheduleManagement';
+import CITokenManagement from './CITokenManagement';
 import HealingConfig from './HealingConfig';
 import ExecutionBackendConfig from './ExecutionBackendConfig';
 import styles from './index.module.less';
@@ -31,6 +32,12 @@ function Settings() {
           title={<><IconThunderbolt className={styles.tabIcon} />执行后端</>}
         >
           <ExecutionBackendConfig />
+        </TabPane>
+        <TabPane
+          key="ci-tokens"
+          title={<><IconSafe className={styles.tabIcon} />{t['ci.token.tab']}</>}
+        >
+          <CITokenManagement />
         </TabPane>
         <TabPane key="healing" title={<><IconSafe className={styles.tabIcon} />自愈配置</>}>
           <HealingConfig />

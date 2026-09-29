@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { Message } from '@arco-design/web-react';
 import { Empty, Spin, Tag, Typography } from '@arco-design/web-react';
 import { DebugResponse } from '../types';
+import { buildSnippet } from '../../utils/snippets';
 import styles from '../style/index.module.less';
 
 const { Text } = Typography;
@@ -55,13 +57,43 @@ const ResponsePanel: React.FC<ResponsePanelProps> = ({ response, loading = false
 
   return (
     <div className={styles.responsePanel}>
-      {/* 渲染后的请求 */}
+      {/* 渲染后的请求（031 T032：预览含请求头；T031：可复制代码片段） */}
       <div className={styles.responseSection}>
-        <div className={styles.responseSectionTitle}>请求（渲染后）</div>
+        <div className={styles.responseSectionTitle}>
+          <span>请求（渲染后）</span>
+          <span className={styles.snippetButtons}>
+            {(['curl', 'python', 'js'] as const).map((kind) => (
+              <a
+                key={kind}
+                className={styles.snippetLink}
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(buildSnippet(kind, rendered));
+                    Message.success(`已复制 ${kind} 片段`);
+                  } catch {
+                    Message.error('复制失败（浏览器未授权剪贴板）');
+                  }
+                }}
+              >
+                {kind}
+              </a>
+            ))}
+          </span>
+        </div>
         <div className={styles.renderedRow}>
           <Tag color="arcoblue">{rendered.method}</Tag>
           <Text className={styles.renderedUrl}>{rendered.url}</Text>
         </div>
+        {rendered.headers && Object.keys(rendered.headers).length > 0 && (
+          <details className={styles.renderedHeaders}>
+            <summary>请求头（{Object.keys(rendered.headers).length}）</summary>
+            <pre className={styles.responsePre}>
+              {Object.entries(rendered.headers)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join('\n')}
+            </pre>
+          </details>
+        )}
         {rendered.body_preview && (
           <pre className={styles.responsePre}>{rendered.body_preview}</pre>
         )}

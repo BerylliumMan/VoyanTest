@@ -48,6 +48,8 @@ export interface Environment {
   cookies?: Array<{ name: string; value: string; domain?: string }>;
   variables?: EnvVariable[];
   headers?: EnvHeader[];
+  /** 031（US4）多域名服务地址：{服务名: 绝对 URL} */
+  services?: Record<string, string>;
 }
 
 export interface Agent {

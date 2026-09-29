@@ -215,3 +215,102 @@ export const EnvHeadersList: React.FC<{ t: Record<string, string> }> = ({ t }) =
     )}
   </Form.List>
 );
+
+/** 031（US4）多域名服务表单项：{name, url} 列表 ↔ 后端 services dict */
+export interface EnvServiceFormValue {
+  name: string;
+  url: string;
+}
+
+/**
+ * 「服务地址」表（多域名环境）：模板中用 {{服务名}} 引用，优先级高于普通环境变量。
+ * 渲染在 <Form> 内，字段名固定为 `services_list`（外层负责与 dict 互转）。
+ */
+export const EnvServicesList: React.FC<VariablesListProps> = ({ form, t }) => {
+  const services =
+    (Form.useWatch('services_list', form) as EnvServiceFormValue[] | undefined) || [];
+  return (
+    <Form.List field="services_list">
+      {(fields, { add, remove }) => (
+        <div>
+          <Table<ListField>
+            columns={[
+              {
+                title: t['environment.service.name'],
+                width: 160,
+                render: (_: unknown, field: ListField) => (
+                  <FormItem
+                    {...field}
+                    field={`${field.field}.name`}
+                    noStyle
+                    rules={[{ required: true, message: t['environment.service.name_required'] }]}
+                  >
+                    <Input placeholder="auth" />
+                  </FormItem>
+                ),
+              },
+              {
+                title: t['environment.service.url'],
+                render: (_: unknown, field: ListField) => (
+                  <FormItem
+                    {...field}
+                    field={`${field.field}.url`}
+                    noStyle
+                    rules={[
+                      {
+                        validator: (value: string | undefined, callback: (err?: string) => void) => {
+                          const text = String(value || '').trim();
+                          if (!text) return callback();
+                          if (!/^https?:\/\//i.test(text)) {
+                            return callback(t['environment.service.url_invalid']);
+                          }
+                          return callback();
+                        },
+                      },
+                    ]}
+                  >
+                    <Input placeholder="http://auth.internal:8000" />
+                  </FormItem>
+                ),
+              },
+              {
+                title: t['environment.variable.action'],
+                width: 80,
+                render: (_: unknown, field: ListField) => (
+                  <Button
+                    size="small"
+                    type="text"
+                    status="danger"
+                    icon={<IconDelete />}
+                    onClick={() => remove(field.key)}
+                  />
+                ),
+              },
+            ]}
+            data={fields}
+            rowKey="key"
+            pagination={false}
+            size="small"
+          />
+          <Button
+            size="small"
+            type="text"
+            icon={<IconPlus />}
+            onClick={() => add({ name: '', url: '' })}
+            style={{ marginTop: 8 }}
+          >
+            {t['environment.service.add']}
+          </Button>
+          <div className={styles.hint || ''} style={{ marginTop: 6, fontSize: 12, color: 'var(--vt-text-3)' }}>
+            {t['environment.service.hint']}
+            {services.length > 0 && (
+              <>
+                ：{services.filter((s) => s?.name).map((s) => `{{${s.name}}}`).join('、')}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </Form.List>
+  );
+};

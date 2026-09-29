@@ -31,6 +31,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSave,
+  IconHistory,
   IconSettings,
   IconStorage,
   IconSwap,
@@ -56,6 +57,7 @@ import DatasetPanel from './components/DatasetPanel';
 import EnvVariablesModal from './components/EnvVariablesModal';
 import RequestEditor from './components/RequestEditor';
 import ResponsePanel from './components/ResponsePanel';
+import HistoryDrawer from '../components/HistoryDrawer';
 import styles from './style/index.module.less';
 
 const { Title, Text } = Typography;
@@ -149,6 +151,8 @@ const buildStepFromDefinition = (def: ApiDefinitionDetail): ApiStep => {
 const DEFAULT_DATASET_BINDING: DatasetBinding = {
   dataset_id: null,
   dataset_mode: 'sequential',
+  loop_count: 1,
+  fail_policy: 'fail_fast',
 };
 
 const specSignature = (spec: ApiSpec): string => JSON.stringify(spec);
@@ -190,6 +194,7 @@ const ApiTestPage: React.FC = () => {
   const [response, setResponse] = useState<DebugResponse | null>(null);
   const [sending, setSending] = useState(false);
   const [dryRun, setDryRun] = useState(false);
+  const [historyVisible, setHistoryVisible] = useState(false);
 
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -758,6 +763,13 @@ const ApiTestPage: React.FC = () => {
       variables: [],
       dataset_id: datasetBinding.dataset_id,
       dataset_mode: datasetBinding.dataset_mode,
+      // 031（US9）：loop 遍数与迭代失败策略（仅 loop / 非默认时写入，保持存档精简）
+      ...(datasetBinding.dataset_mode === 'loop'
+        ? { loop_count: datasetBinding.loop_count ?? 1 }
+        : {}),
+      ...(datasetBinding.fail_policy && datasetBinding.fail_policy !== 'fail_fast'
+        ? { fail_policy: datasetBinding.fail_policy }
+        : {}),
       fail_policy: 'fail_fast',
       steps: [step],
     }),
@@ -960,6 +972,9 @@ const ApiTestPage: React.FC = () => {
           >
             环境变量
           </Button>
+          <Button icon={<IconHistory />} onClick={() => setHistoryVisible(true)} disabled={!projectId}>
+            历史
+          </Button>
         </div>
         <div className={styles.toolbarRight}>
           <Button icon={<IconSave />} onClick={openSaveCase} disabled={!projectId}>
@@ -1111,6 +1126,7 @@ const ApiTestPage: React.FC = () => {
           <RequestEditor
             spec={step}
             definitionName={selectedDef?.name}
+            projectId={projectId}
             onChange={setStep}
             onSend={handleSend}
             sending={sending}
@@ -1119,6 +1135,17 @@ const ApiTestPage: React.FC = () => {
             datasets={datasets}
             datasetBinding={datasetBinding}
             onDatasetBindingChange={setDatasetBinding}
+            responseSample={
+              response
+                ? {
+                    method: response.rendered?.method,
+                    url: response.rendered?.url,
+                    status_code: response.response?.status,
+                    headers: (response.response?.headers || {}) as Record<string, string>,
+                    body_text: response.response?.body_preview || '',
+                  }
+                : null
+            }
           />
         </Card>
 
@@ -1135,6 +1162,19 @@ const ApiTestPage: React.FC = () => {
             )}
           </div>
           <ResponsePanel response={response} loading={sending} />
+          <HistoryDrawer
+            visible={historyVisible}
+            projectId={projectId}
+            onCancel={() => setHistoryVisible(false)}
+            onPick={(row) => {
+              // 031（US7 T030）：历史 URL 为模板态 → 只回填方法与 URL
+              setStep({
+                ...step,
+                request: { ...step.request, method: row.method, url: row.url },
+              });
+              setHistoryVisible(false);
+            }}
+          />
         </Card>
       </div>
 

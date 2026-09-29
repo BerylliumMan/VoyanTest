@@ -131,7 +131,10 @@ export const routes: IRoute[] = [
   {
     name: '接口测试重定向',
     key: 'api_test-redirect',
+    // 031（US11）：必须 exact —— 否则 `/api_test` 前缀会抢匹配 `/api_test/overview`，
+    // 概览页自 44f7b1f 起实际不可达（菜单也不显示）。exact 后仅裸 /api_test 走重定向。
     path: '/api_test',
+    exact: true,
     ignore: true,
   },
   {

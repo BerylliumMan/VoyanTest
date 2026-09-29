@@ -22,6 +22,9 @@ interface BatchDetail {
   id: number; name: string; project_id: number; project_name: string;
   status: string; total_cases: number; passed: number; failed: number;
   created_at: string; started_at: string; finished_at: string;
+  /** 031（US5）：仅失败重跑的来源批次（报告页互跳） */
+  parent_batch_id?: number | null;
+  parent_batch_name?: string | null;
   runs: RunItem[];
 }
 
@@ -78,6 +81,8 @@ const Reports: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [detail, setDetail] = useState<BatchDetail | null>(null);
   const [detailVisible, setDetailVisible] = useState(false);
+  // 031（US5）：仅失败重跑进行中
+  const [rerunning, setRerunning] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedRun, setSelectedRun] = useState<RunItem | null>(null);
   const [runVisible, setRunVisible] = useState(false);
@@ -229,6 +234,32 @@ const Reports: React.FC = () => {
     }
   };
 
+  /** 031（US5）：仅失败重跑 —— 用原批次失败用例创建新批次并直接打开其详情。 */
+  const handleRerunFailed = async () => {
+    if (!detail) return;
+    setRerunning(true);
+    try {
+      const data = await apiRequest<{ batch_id: number; total: number; parent_batch_id: number }>(
+        { method: 'POST', url: `/api/reports/batches/${detail.id}/rerun-failed` },
+        { showSuccess: false, showError: true }
+      );
+      Message.success(t['batch.rerun_failed.ok'].replace('{total}', String(data.total)));
+      setPollingBatchId(data.batch_id);
+      await refreshBatchDetail(data.batch_id);
+      fetchData();
+    } catch {
+      Message.error(t['batch.rerun_failed.failed']);
+    } finally {
+      setRerunning(false);
+    }
+  };
+
+  /** 打开指定批次详情（供来源批次互跳） */
+  const openBatchDetail = async (batchId: number) => {
+    setDetailVisible(true);
+    await refreshBatchDetail(batchId);
+  };
+
   const handleCloseDetail = () => {
     setDetailVisible(false);
     setPollingBatchId(null);
@@ -358,6 +389,11 @@ const Reports: React.FC = () => {
                 <Button status="danger" onClick={() => handleBatchControl(detail.id, 'stop')}>{t['batch.stop']}</Button>
               </>
             )}
+            {detail && (detail.status === 'passed' || detail.status === 'failed' || detail.status === 'partial' || detail.status === 'cancelled') && (detail.failed ?? 0) > 0 && (
+              <Button type="primary" status="warning" onClick={handleRerunFailed} loading={rerunning}>
+                {t['batch.rerun_failed']}
+              </Button>
+            )}
             {detail?.status === 'paused' && (
               <>
                 <Button type="primary" onClick={() => handleBatchControl(detail.id, 'resume')}>{t['batch.resume']}</Button>
@@ -378,6 +414,16 @@ const Reports: React.FC = () => {
                   { label: t['project'], value: detail.project_name },
                   { label: t['status'], value: getBatchStatusTag(detail.status, detail.passed, detail.total_cases, detail.failed) },
                   { label: t['case.count'], value: detail.total_cases },
+                  ...(detail.parent_batch_id
+                    ? [{
+                        label: t['batch.source_batch'],
+                        value: (
+                          <a onClick={() => openBatchDetail(Number(detail.parent_batch_id))}>
+                            {detail.parent_batch_name || `#${detail.parent_batch_id}`}
+                          </a>
+                        ),
+                      }]
+                    : []),
                   { label: t['passed'], value: detail.passed },
                   { label: t['failed'], value: detail.failed },
                   { label: t['start.time'], value: detail.started_at ? new Date(detail.started_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--' },

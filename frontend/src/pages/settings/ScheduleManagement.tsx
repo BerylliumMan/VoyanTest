@@ -27,10 +27,19 @@ function ScheduleManagement() {
   const [envId, setEnvId] = useState<number | undefined>();
   const [envs, setEnvs] = useState<Array<{ id: number; name: string }>>([]);
 
-  const loadScenarioEnvs = async (scenarioId: number) => {
+  /**
+   * 031（US8）：按任务类型加载候选环境。
+   * - api_case：先查用例拿 project_id（接口用例没有环境就拿不到 baseUrl → 必失败）
+   * - api_scenario：查场景拿 project_id
+   */
+  const loadEnvsForTarget = async (taskType: string, targetId: number) => {
     try {
-      const scenario = await axios.get(`/api/api-test/scenarios/${scenarioId}`);
-      const projectId = scenario.data?.project_id;
+      const url =
+        taskType === 'api_case'
+          ? `/api/testcases/${targetId}`
+          : `/api/api-test/scenarios/${targetId}`;
+      const detail = await axios.get(url);
+      const projectId = detail.data?.project_id;
       if (!projectId) {
         setEnvs([]);
         return;
@@ -70,8 +79,11 @@ function ScheduleManagement() {
       setTaskType(schedule.task_type || '');
       const matched = /^environment_id=(\d+)/.exec(schedule.description || '');
       setEnvId(matched ? Number(matched[1]) : undefined);
-      if (schedule.task_type === 'api_scenario' && schedule.target_id) {
-        loadScenarioEnvs(schedule.target_id);
+      if (
+        (schedule.task_type === 'api_scenario' || schedule.task_type === 'api_case') &&
+        schedule.target_id
+      ) {
+        loadEnvsForTarget(schedule.task_type, schedule.target_id);
       }
     } else {
       setTaskType('');
@@ -83,7 +95,8 @@ function ScheduleManagement() {
 
   const handleScheduleSubmit = async () => {
     const values = await scheduleForm.validate();
-    if (values.task_type === 'api_scenario') {
+    if (values.task_type === 'api_scenario' || values.task_type === 'api_case') {
+      // 031（US8）：环境写进 description（服务端执行器按 environment_id=<id> 解析）
       values.description = envId ? `environment_id=${envId}` : '';
     }
     try {
@@ -225,6 +238,7 @@ function ScheduleManagement() {
                 { label: t['schedule.task_type.testcase'], value: 'testcase' },
                 { label: t['schedule.task_type.module'], value: 'module' },
                 { label: t['schedule.task_type.project'], value: 'project' },
+                { label: t['schedule.task_type.api_case'], value: 'api_case' },
                 { label: t['schedule.task_type.api_scenario'], value: 'api_scenario' },
                 { label: t['schedule.task_type.api_import'], value: 'api_import' },
               ]}
@@ -235,17 +249,25 @@ function ScheduleManagement() {
               type="number"
               placeholder={t['schedule.target_id.placeholder']}
               onChange={(value) => {
-                if (taskType === 'api_scenario' && Number(value) > 0) {
-                  loadScenarioEnvs(Number(value));
+                // 031（US8）：补 api_case —— 选中目标后自动带出可选环境
+                if (
+                  (taskType === 'api_scenario' || taskType === 'api_case') &&
+                  Number(value) > 0
+                ) {
+                  loadEnvsForTarget(taskType, Number(value));
                 }
               }}
             />
           </Form.Item>
-          {taskType === 'api_scenario' ? (
+          {taskType === 'api_scenario' || taskType === 'api_case' ? (
             <Form.Item label="执行环境">
               <Select
                 allowClear
-                placeholder="留空则使用场景绑定的环境"
+                placeholder={
+                  taskType === 'api_case'
+                    ? '接口用例必选（否则拿不到 baseUrl）'
+                    : '留空则使用场景绑定的环境'
+                }
                 value={envId}
                 onChange={(value) => setEnvId(value as number | undefined)}
                 options={envs.map((env) => ({ label: env.name, value: env.id }))}
