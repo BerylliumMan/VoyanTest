@@ -139,6 +139,30 @@ def _normalize_retry(raw: Any) -> dict | None:
     }
 
 
+def _warn_misplaced_multipart(step: dict, where: str, problems: list[str]) -> None:
+    """031（US1 加固）：form_data/files 若写在 request 顶层（而非 request.body 内）→ 明确提示。
+
+    实测教训：验收脚本把两者写在 request 顶层时**不会报错也不会生效**（只有 body 内的会被读取），
+    接口返回 400 很难回溯。这里给出可读问题（等价于校验失败，防止静默）。
+    """
+    request = step.get("request") if isinstance(step.get("request"), dict) else {}
+    for key in ("form_data", "files"):
+        if request.get(key):
+            problems.append(
+                f"{where}.request.{key} 位置错误：multipart 的 {key} 必须写在 request.body 内"
+                f"（body.type=form_data）"
+            )
+
+
+def _hint_file_items(items, where: str, problems: list[str]) -> None:
+    """031（US1 加固）：files 项字段名是 ``path``；写 ``value`` 时给出可读提示（实测踩过）。"""
+    for i, item in enumerate(items or []):
+        if isinstance(item, dict) and not str(item.get("path") or "").strip() and item.get("value"):
+            problems.append(
+                f"{where}.files[{i}] 字段名应为 path（当前写的是 value={item.get('value')!r}）"
+            )
+
+
 def _validate_multipart(body: dict, where: str, problems: list[str]) -> None:
     """031（US1）：multipart 结构与文件引用校验。"""
     files = body.get("files") or []
@@ -359,6 +383,8 @@ def validate_api_spec(spec: Any) -> list[str]:
             ):
                 # 031：仅在提供结构化数组时按 multipart 校验（纯字符串 content 的旧用法不受影响）
                 _validate_multipart(body, where, problems)
+        _hint_file_items(body.get("files"), where, problems)
+        _warn_misplaced_multipart(raw, where, problems)
         retry_raw = raw.get("retry")
         if retry_raw is not None:
             _validate_retry(retry_raw, where, problems)
