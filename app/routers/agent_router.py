@@ -16,11 +16,16 @@ router = APIRouter(
 
 
 @router.get("/agents", response_model=List[models.Agent])
-async def list_agents(user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> list[models.Agent]:
+async def list_agents(
+    online_only: bool = Query(False, description="只返回在线 Agent（客户端管理页使用：离线 Agent 无管理价值）"),
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> list[models.Agent]:
     """不直接用 DB 的 `status` 字段——它会"粘性 online"（一旦设过永远不重置）。
 
     status 按心跳时间动态算，看两个源头：DB.last_heartbeat（HTTP 路径）
     和 agent_manager.sessions[].last_seen（WebSocket 路径），任一 fresh 即 online。
+    online_only=True 时过滤掉离线项（WS 在线 Agent 恒保留）。
     """
     ONLINE_TIMEOUT_SECONDS = 120
     now = tz_now()
@@ -46,6 +51,9 @@ async def list_agents(user=Depends(get_current_user), db: AsyncSession = Depends
 
     for a in db_agents:
         a.status = "online" if _is_online(a.name, a.last_heartbeat) else "offline"
+
+    if online_only:
+        db_agents = [a for a in db_agents if a.status == "online"]
 
     ws_agents = await agent_manager.get_online_agents()
     for ws_a in ws_agents:

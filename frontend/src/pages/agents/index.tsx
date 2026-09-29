@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Card, Table, Button, Modal, Form, Input, Message, Tag, Space, Popconfirm, Typography } from '@arco-design/web-react';
-import { IconPlus, IconEdit, IconDelete } from '@arco-design/web-react/icon';
+import { IconPlus, IconEdit, IconDelete, IconRefresh } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import logger from '@/utils/logger';
@@ -21,7 +21,8 @@ function Agents() {
 
   const fetchAgents = () => {
     setLoading(true);
-    axios.get('/api/agents').then((res) => setAgents(res.data || [])).catch((err) => Message.error(err?.response?.data?.detail || t['operate.failed'])).finally(() => setLoading(false));
+    // online_only：管理页只关心"目前在线"的客户端（离线项无管理价值）
+    axios.get('/api/agents', { params: { online_only: true } }).then((res) => setAgents(res.data || [])).catch((err) => Message.error(err?.response?.data?.detail || t['operate.failed'])).finally(() => setLoading(false));
   };
 
   useEffect(() => { fetchAgents(); }, []);
@@ -105,7 +106,11 @@ function Agents() {
     <div>
       <Card>
         <div className={styles.toolbar}>
-          <Button type="primary" icon={<IconPlus />} onClick={() => openModal()}>{t['agent.register']}</Button>
+          <Space>
+            <Button type="primary" icon={<IconPlus />} onClick={() => openModal()}>{t['agent.register']}</Button>
+            <Button icon={<IconRefresh />} onClick={fetchAgents}>{t['refresh']}</Button>
+          </Space>
+          <Typography.Text type="secondary" className={styles['online-hint']}>{t['agent.online_only_hint']}</Typography.Text>
         </div>
         <Table
           columns={columns}
