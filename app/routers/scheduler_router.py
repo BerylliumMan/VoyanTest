@@ -15,6 +15,32 @@ from croniter import croniter
 logger = logging.getLogger(__name__)
 
 
+ALLOWED_TASK_TYPES = ("testcase", "module", "project", "api_case", "api_scenario", "api_import")
+
+
+async def _validate_target(db: AsyncSession, task_type: str, target_id: int) -> int:
+    """031（US8）：创建/更新定时任务前校验类型与目标存在性。
+
+    此前未知类型与不存在的 target 会被静默接受，直到执行时才失败（日志里只有一句
+    「定时任务用例不存在」）—— 现改为创建即 400/404 可读报错。返回目标项目 ID（project 类型即自身）。
+    """
+    ttype = str(task_type or "").strip()
+    if ttype not in ALLOWED_TASK_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的 task_type: {ttype!r}（可选 {'/'.join(ALLOWED_TASK_TYPES)}）",
+        )
+    if ttype == "project":
+        project = await crud.get_project(db, int(target_id))
+        if project is None:
+            raise HTTPException(status_code=404, detail=f"目标项目不存在: {target_id}")
+        return int(target_id)
+    project_id = await _resolve_task_project_id(db, ttype, int(target_id))
+    if project_id is None:
+        raise HTTPException(status_code=404, detail=f"目标不存在（{ttype}:{target_id}）")
+    return int(project_id)
+
+
 async def _sync_scheduler(row) -> None:
     """把数据库中的任务同步到正在运行的调度器。停用或删除则从内存移除。"""
     from app.scheduler import scheduler
@@ -46,6 +72,10 @@ async def _resolve_task_project_id(db: AsyncSession, task_type: str, target_id: 
         module = await crud.get_module(db, target_id)
         return module.project_id if module else None
     if task_type == "testcase":
+        case = await crud.get_test_case(db, target_id)
+        return case.project_id if case else None
+    if task_type == "api_case":
+        # 031（US8）：定时单条接口用例（含 UI 用例，执行器按 case_kind 分发）
         case = await crud.get_test_case(db, target_id)
         return case.project_id if case else None
     if task_type == "api_scenario":
@@ -82,12 +112,11 @@ async def create_schedule(
 ) -> models.Schedule:
     """创建定时任务"""
     try:
-        # 验证任务目标的项目访问权限
+        # 031（US8）：先校验类型与目标存在性，再做项目权限检查
+        target_project_id = await _validate_target(db, schedule.task_type, schedule.target_id)
         allowed_ids = get_user_project_filter(user)
-        if allowed_ids is not None:
-            target_project_id = await _resolve_task_project_id(db, schedule.task_type, schedule.target_id)
-            if target_project_id is not None and target_project_id not in allowed_ids:
-                raise HTTPException(status_code=403, detail="无权为该目标创建定时任务")
+        if allowed_ids is not None and target_project_id not in allowed_ids:
+            raise HTTPException(status_code=403, detail="无权为该目标创建定时任务")
 
         if not croniter.is_valid(schedule.cron_expression):
             raise HTTPException(status_code=400, detail="Invalid cron expression")

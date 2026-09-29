@@ -208,6 +208,14 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     batch_id = batch.id
     user_id = getattr(user, "id", None)
 
+    # 031（US9）：接口用例的数据驱动执行参数（执行侧覆盖用例绑定）
+    api_spec_patch = {
+        "dataset_mode": req.dataset_mode,
+        "loop_count": req.loop_count,
+        "fail_policy": ("fail_fast" if req.fail_fast else "continue") if req.fail_fast is not None else None,
+    }
+    api_spec_patch = {k: v for k, v in api_spec_patch.items() if v is not None} or None
+
     async def _batch_and_notify() -> None:
         try:
             await _exec.run_batch_test_cases(
@@ -217,6 +225,9 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
                 environment_id=req.environment_id,
                 init_case_ids=init_case_ids,
                 init_policy=init_policy,
+                api_spec_patch=api_spec_patch,
+                # 031（US10）：批次内复用会话（共享 httpx client）
+                session_reuse=bool(req.session_reuse),
             )
         finally:
             if user_id:
@@ -277,6 +288,10 @@ async def run_project_test_cases(
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # 031（US8）：CI 令牌带项目范围时禁止跨项目触发（session 请求无范围，天然放行）
+    from app.auth import enforce_current_token_project
+
+    enforce_current_token_project(project_id)
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=404, detail="Project not found")

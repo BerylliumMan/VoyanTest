@@ -14,7 +14,8 @@
 
 # API testing (029): definitions / imports / datasets
 from app.models.api_test import (  # noqa: F401
-    ApiDataset, ApiDefinition, ApiImport, ApiMock, ApiScenario,
+    ApiDataset, ApiDefinition, ApiImport, ApiMock, ApiRequestHistory, ApiScenario,
+    ApiTestFile, ApiToken,
 )
 
 # Re-export the SQLAlchemy declarative Base so call sites that historically

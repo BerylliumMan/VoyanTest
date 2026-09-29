@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db_models
+from app.security.secret_vars import encrypt_variables, decrypt_variables  # 031（US2）
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ async def create_scenario(db: AsyncSession, data: dict) -> db_models.ApiScenario
         name=name,
         description=data.get("description"),
         environment_id=data.get("environment_id"),
-        variables=normalize_scenario_variables(data.get("variables")),
+        variables=encrypt_variables(normalize_scenario_variables(data.get("variables"))),
         steps=steps,
         share_cookie=bool(data.get("share_cookie", False)),
         continue_on_failure=bool(data.get("continue_on_failure", False)),
@@ -271,7 +272,7 @@ async def update_scenario(
     if "environment_id" in data:
         obj.environment_id = data.get("environment_id")
     if "variables" in data:
-        obj.variables = normalize_scenario_variables(data.get("variables"))
+        obj.variables = encrypt_variables(normalize_scenario_variables(data.get("variables")))
     if "share_cookie" in data:
         obj.share_cookie = bool(data.get("share_cookie"))
     if "continue_on_failure" in data:

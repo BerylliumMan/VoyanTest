@@ -38,6 +38,8 @@ class Environment(Base):
     # 接口测试变量与公共请求头（029）：[{"key","value","secret","enable"}]
     variables = Column(JSON, default=list)
     headers = Column(JSON, default=list)
+    # 多域名服务表（031 US4）：{"auth": "http://a:8000", "gateway": "http://b:8080"}
+    services = Column(JSON, default=dict)
     created_at = Column(DateTime(timezone=True), default=tz_now)
 
 

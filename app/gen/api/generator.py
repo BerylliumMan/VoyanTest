@@ -25,8 +25,9 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "type_error": False,
     "auth_fail": False,
     "max_cases_per_operation": 5,
-    # multipart/form-data（文件上传）暂不支持：编码与文件源都不到位，生成出来必然执行失败
-    "skip_multipart": True,
+    # 031（US1）：multipart 已支持（执行端 files= 编码 + 平台测试文件），默认参与生成；
+    # 仍可用 skip_multipart=True 显式跳过（如靶场未准备文件）
+    "skip_multipart": False,
 }
 
 # 类型造值（正常用例兜底的具体值）
@@ -154,9 +155,15 @@ def _fill_path(path: str, values: dict[str, Any]) -> str:
 
 
 def _build_body(body_schema: Any, notes: list[str]) -> dict | None:
-    """body.example 优先；无则按 schema.properties 逐字段造值；都无 → None。"""
+    """body.example 优先；无则按 schema.properties 逐字段造值；都无 → None。
+
+    031（US1）：multipart/form-data 生成结构化 form_data + files（文件字段引用
+    ``{{upload_fixture}}``，执行前需在「测试文件」中上传并绑定）。
+    """
     if not isinstance(body_schema, dict) or not body_schema:
         return None
+    if str(body_schema.get("content_type") or "").lower().startswith("multipart/form-data"):
+        return _build_multipart_body(body_schema, notes)
     example = body_schema.get("example")
     if example is not None:
         return {"type": "json", "content": json.dumps(example, ensure_ascii=False)}
@@ -167,6 +174,37 @@ def _build_body(body_schema: Any, notes: list[str]) -> dict | None:
             obj[fname] = _pick_value(fname, fschema, notes)
         return {"type": "json", "content": json.dumps(obj, ensure_ascii=False)}
     return None
+
+
+def _build_multipart_body(body_schema: dict, notes: list[str]) -> dict:
+    """031（US1）：multipart 结构化 body（form_data + files）。"""
+    schema = body_schema.get("schema")
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    form_data: list[dict] = []
+    file_keys: list[str] = []
+    for fname, fschema in (props or {}).items():
+        spec = fschema if isinstance(fschema, dict) else {}
+        ftype = str(spec.get("type") or "").lower()
+        fmt = str(spec.get("format") or "").lower()
+        if ftype == "file" or (ftype == "string" and fmt in ("binary", "base64")):
+            file_keys.append(fname)
+        else:
+            form_data.append(
+                {"key": fname, "value": str(_pick_value(fname, spec, notes)), "enable": True}
+            )
+    if not file_keys:
+        file_keys = ["file"]
+        notes.append(
+            "multipart 未识别出文件字段，已默认使用字段名 file（请核对接口文档）"
+            if props
+            else "multipart 缺少 body schema，已生成占位文件字段 file"
+        )
+    files = [{"key": key, "path": "{{upload_fixture}}"} for key in file_keys]
+    notes.append(
+        "该用例引用测试文件（files[].path 支持 platform://<id> 或变量 {{upload_fixture}}）："
+        "执行前请在接口测试页的「测试文件」中上传/选择"
+    )
+    return {"type": "form_data", "content": "", "form_data": form_data, "files": files}
 
 
 def _normal_request(definition: dict, notes: list[str]) -> dict:
@@ -192,7 +230,8 @@ def _normal_request(definition: dict, notes: list[str]) -> dict:
             headers.append({"key": p["name"], "value": _pick_value(p["name"], p, notes), "enable": True})
 
     body = _build_body(body_schema, notes)
-    if body is not None:
+    if body is not None and body.get("type") != "form_data":
+        # 031：multipart 不手工设置 Content-Type（httpx 带 boundary 自动生成）
         content_type = body_schema.get("content_type") or "application/json"
         headers.insert(0, {"key": "Content-Type", "value": content_type, "enable": True})
 

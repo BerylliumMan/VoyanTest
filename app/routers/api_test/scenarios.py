@@ -181,6 +181,10 @@ async def scenario_detail(
     if obj is None:
         raise HTTPException(status_code=404, detail="场景不存在")
     _ensure_project_access(user, obj.project_id)
+    # 031（US8）：CI 令牌项目范围限权
+    from app.auth import enforce_current_token_project
+
+    enforce_current_token_project(obj.project_id)
     item = _summarize(obj)
     item["environment_name"] = await _environment_name(db, obj.environment_id)
     item["variables"] = obj.variables or []

@@ -250,6 +250,7 @@ async def run_test_case(
     debug_mode: bool = False,
     run_id: int | None = None,
     backend: str | None = None,
+    api_spec_patch: dict | None = None,
 ):
     """Execute a UI test case via AgentRunner OTA + Playwright MCP.
 
@@ -284,7 +285,7 @@ async def run_test_case(
     # ── API 用例分发：case_kind='api' 短路到接口执行器，不走浏览器 ──
     if case_kind == "api":
         return await _run_api_case_server_entry(
-            case_id, batch_id, environment_id, run_id,
+            case_id, batch_id, environment_id, run_id, spec_patch=api_spec_patch,
         )
 
     if project_id is not None:
@@ -304,15 +305,20 @@ async def _run_api_case_server_entry(
     batch_id: int | None,
     environment_id: int | None,
     run_id: int | None,
+    spec_patch: dict | None = None,
+    client=None,
+    session_reuse: bool = False,
 ) -> dict:
     """单用例 api 分发入口：自开 session 调 run_api_case_server。
 
     case_kind='api' 的用例不走浏览器/OTA，直接短路到接口执行器。
+    ``spec_patch``：031（US9）执行侧参数（dataset_mode/loop_count/fail_policy）。
     """
     async with AsyncSessionLocal() as _db:
         return await run_api_case_server(
             case_id, db=_db, batch_id=batch_id, run_id=run_id,
-            environment_id=environment_id,
+            environment_id=environment_id, spec_patch=spec_patch,
+            client=client, session_reuse=session_reuse,
         )
 
 
@@ -415,6 +421,9 @@ async def run_batch_test_cases(
     init_policy: str = "once",
     debug_mode: bool = False,
     triggered_by: str | None = None,
+    api_spec_patch: dict | None = None,
+    # 031（US10）：批次内复用同一 httpx.AsyncClient（cookie jar 共享）
+    session_reuse: bool = False,
 ):
     """Execute multiple test cases sequentially in a single browser.
 
@@ -456,6 +465,17 @@ async def run_batch_test_cases(
 
     mcp_manager = None
     base_url_override = None
+    # 031（US10）：复用会话 → 批次共享一个 httpx.AsyncClient（cookie jar 自然共享）
+    _shared_client = None
+    if session_reuse:
+        try:
+            import httpx as _httpx
+
+            _shared_client = _httpx.AsyncClient()
+            logger.info("复用会话模式已开启：批次内共享 HTTP 客户端（cookie 共享）batch_id=%s", batch_id)
+        except Exception:  # noqa: BLE001 - 建 client 失败不应阻断批次
+            logger.warning("创建共享 HTTP 客户端失败，退回每用例独立 client", exc_info=True)
+            _shared_client = None
 
     import asyncio
     from app import execution_control
@@ -550,6 +570,11 @@ async def run_batch_test_cases(
                         result = await run_api_case_server(
                             case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
                             environment_id=environment_id,
+                            # 031（US9）：执行侧数据驱动参数（dataset_mode/loop_count/fail_policy）
+                            spec_patch=api_spec_patch,
+                            # 031（US10）：复用会话（共享 client）
+                            client=_shared_client,
+                            session_reuse=session_reuse,
                         )
                     else:
                         await _record_batch_case_failure(
@@ -613,6 +638,11 @@ async def run_batch_test_cases(
                         result = await run_api_case_server(
                             case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
                             environment_id=environment_id,
+                            # 031（US9）：执行侧数据驱动参数
+                            spec_patch=api_spec_patch,
+                            # 031（US10）：复用会话（共享 client）
+                            client=_shared_client,
+                            session_reuse=session_reuse,
                         )
                     else:
                         result = await run_test_case_via_agent(
@@ -670,5 +700,11 @@ async def run_batch_test_cases(
 
             return results
     finally:
+        if _shared_client is not None:
+            try:
+                await _shared_client.aclose()
+            except Exception:  # noqa: BLE001 - 关闭失败不影响批次结果
+                logger.debug("关闭共享 HTTP 客户端失败", exc_info=True)
+            _shared_client = None
         if batch_id is not None:
             await execution_control.clear_batch(batch_id)

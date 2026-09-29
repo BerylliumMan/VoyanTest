@@ -31,6 +31,8 @@ _SECRET_NAME_SUBSTRINGS = (
     "token",
     "secret",
     "password",
+    # 031：签名值可在有效期内重放，按凭据对待（"signature" 子串 + 下方 sign 词形规则）
+    "signature",
 )
 
 
@@ -73,7 +75,11 @@ def _builtin(name: str) -> Optional[str]:
 
 
 class VariableScope:
-    """六级变量作用域（高 → 低：runtime > step > case > dataset > env > baseUrl）。"""
+    """变量作用域（高 → 低：runtime > step > case > dataset > services > env > baseUrl）。
+
+    031（US4）：``services`` 是环境的多域名命名空间（``{"auth": "http://a:8000"}``），
+    模板里写 ``{{auth}}`` 即服务地址；刻意高于普通环境变量，避免同名被覆盖。
+    """
 
     def __init__(
         self,
@@ -84,11 +90,15 @@ class VariableScope:
         dataset_row: Optional[dict] = None,
         env_variables: Optional[dict] = None,
         base_url: str = "",
+        services: Optional[dict] = None,
     ) -> None:
         self.runtime: dict[str, str] = dict(runtime or {})
         self.step: dict[str, str] = dict(step or {})
         self.case: dict[str, str] = dict(case_variables or {})
         self.dataset: dict[str, str] = dict(dataset_row or {})
+        self.services: dict[str, str] = {
+            str(k): str(v) for k, v in (services or {}).items() if k and v
+        }
         self.env: dict[str, str] = dict(env_variables or {})
         self.base_url = str(base_url or "")
         # 提取器 scope="environment" 写入的变量（区别于环境配置自带变量）
@@ -96,16 +106,54 @@ class VariableScope:
 
     # ── 查询/写入 ───────────────────────────────────────────────────────────
     def lookup(self, name: str) -> Optional[str]:
-        for layer in (self.runtime, self.step, self.case, self.dataset, self.env):
+        for layer in (
+            self.runtime,
+            self.step,
+            self.case,
+            self.dataset,
+            self.services,
+            self.env,
+        ):
             if name in layer:
                 return layer[name]
         if name in ("baseUrl", "base_url", "BASE_URL") and self.base_url:
             return self.base_url
         return None
 
+    def set_variable(self, name: str, value: Any) -> None:
+        """脚本写回：命中已有层则**就地覆盖**（最高层优先），否则写入用例作用域。
+
+        031（US3）后置脚本契约「覆盖写」：例如覆盖提取器写入 runtime 的同名变量。
+        """
+        text = "" if value is None else str(value)
+        for layer in (self.runtime, self.step, self.case, self.dataset, self.services, self.env):
+            if name in layer:
+                layer[name] = text
+                return
+        self.case[name] = text
+
+    def visible_map(self) -> dict[str, str]:
+        """当前可见变量的合并快照（低 → 高覆盖；含 baseUrl 与服务名）。
+
+        031（US6）：表达式断言的 ``vars`` 上下文用；也便于调试/展示。
+        """
+        merged: dict[str, str] = {}
+        if self.base_url:
+            merged["baseUrl"] = self.base_url
+        for layer in (self.env, self.services, self.dataset, self.case, self.step, self.runtime):
+            merged.update({k: v for k, v in layer.items() if v is not None})
+        return merged
+
     def available_names(self) -> list[str]:
         names: set[str] = set()
-        for layer in (self.runtime, self.step, self.case, self.dataset, self.env):
+        for layer in (
+            self.runtime,
+            self.step,
+            self.case,
+            self.dataset,
+            self.services,
+            self.env,
+        ):
             names |= set(layer)
         if self.base_url:
             names.add("baseUrl")
@@ -187,8 +235,12 @@ def is_secret_name(name: Any) -> bool:
     """名字是否暗示敏感值（请求头名 / 提取变量名共用一套判定）。
 
     用于两个必须一致的场景：写报告时决定哪些头要打码、哪些提取值要打码。
+    031 起签名类名字同样按凭据处理：裸 ``sign`` / ``*_sign`` / ``*-sign``
+    （刻意不用 "sign" 子串，避免误伤 assign_order_id / signal / signup 等）。
     """
     lowered = str(name or "").lower()
+    if lowered == "sign" or lowered.endswith("_sign") or lowered.endswith("-sign"):
+        return True
     return any(hint in lowered for hint in _SECRET_NAME_SUBSTRINGS)
 
 

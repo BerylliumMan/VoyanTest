@@ -17,6 +17,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+
+def _validate_api_case_spec(case) -> None:
+    """031（US9）：api 用例写入前校验 api_spec。
+
+    动机（实测发现）：手工/脚本创建的 api 用例若把提取器写成 ``name`` 而非 ``variable``，
+    校验器能识别但创建路径不校验 → 执行时提取器静默失效、下游步骤报「未定义变量」，
+    排查成本高。这里在写入前用同一套 validate_api_spec 拦截（422 附问题清单）。
+    """
+    if (getattr(case, "case_kind", None) or "") != "api":
+        return
+    spec = getattr(case, "api_spec", None)
+    if not spec:
+        return
+    from core.api_spec import validate_api_spec
+
+    problems = validate_api_spec(spec)
+    if problems:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "api_spec 校验未通过", "problems": problems[:8]},
+        )
+
+
 @router.post("/", response_model=models.TestCase)
 async def create_test_case(case: models.TestCaseCreate, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     allowed_ids = get_user_project_filter(user)
@@ -28,6 +51,8 @@ async def create_test_case(case: models.TestCaseCreate, user=Depends(get_current
     db_project = await crud.get_project(db, case.project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail=f"Project with id {case.project_id} not found")
+
+    _validate_api_case_spec(case)
 
     try:
         return await crud.create_test_case(db, case)
@@ -257,7 +282,10 @@ async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depen
         raise HTTPException(status_code=403, detail="无权访问该项目")
 
     try:
+        _validate_api_case_spec(case)
         return await crud.update_test_case(db, case_id, case)
+    except HTTPException:
+        raise  # 031（US9）：api_spec 校验 422 直接透传，不被 500 吞掉
     except Exception as e:
         logger.exception("更新测试用例失败 case_id=%s", case_id)
         raise HTTPException(status_code=500, detail="更新测试用例时发生内部错误")

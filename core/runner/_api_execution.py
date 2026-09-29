@@ -53,12 +53,19 @@ async def _load_api_environment(
             logger.warning("环境查询失败 env_id=%s", environment_id, exc_info=True)
             env = None
         if env is not None:
+            # 031（US2）：执行层拿明文 —— secret 变量解密；损坏/密钥更换收集为可读失败
+            from app.security.secret_vars import decrypt_variables_safe
+
+            variables, decrypt_errors = decrypt_variables_safe(env.variables or [])
             return {
                 "id": env.id,
                 "name": env.name,
                 "base_url": env.base_url or "",
-                "variables": env.variables or [],
+                "variables": variables,
                 "headers": env.headers or [],
+                # 031（US4）：多域名服务表
+                "services": dict(getattr(env, "services", None) or {}),
+                "decrypt_errors": decrypt_errors,
             }
     try:
         project = await crud.get_project(db, project_id)
@@ -191,6 +198,10 @@ async def run_api_case_server(
     client=None,
     case_variables: Optional[list[dict]] = None,
     spec_override: Optional[dict] = None,
+    # 031（US9）：执行侧参数（dataset_mode/loop_count/fail_policy）就地覆盖用例 spec
+    spec_patch: Optional[dict] = None,
+    # 031（US10）：复用会话模式（失败时追加会话过期提示；client 复用见上）
+    session_reuse: bool = False,
     seed_runtime: Optional[dict] = None,
     display_name: Optional[str] = None,
     project_id: int | None = None,
@@ -237,6 +248,9 @@ async def run_api_case_server(
         resolved_project = project_id if project_id is not None else (tc.project_id if tc else None)
     else:
         api_spec = (tc.api_spec or {}) if tc is not None else {}
+        # 031（US9）：执行侧参数就地覆盖（dataset_mode/loop_count/fail_policy 等）
+        if spec_patch:
+            api_spec = {**api_spec, **{k: v for k, v in spec_patch.items() if v is not None}}
         resolved_project = tc.project_id if tc is not None else project_id
     environment = await _load_api_environment(db, environment_id, resolved_project or 0)
 
@@ -260,16 +274,45 @@ async def run_api_case_server(
         else:
             dataset = {"id": ds.id, "columns": list(ds.columns or []), "rows": list(ds.rows or [])}
 
-    result = await run_api_case(
-        api_spec,
-        environment=environment,
-        case_variables=case_variables,
-        client=client,
-        execution_mode=execution_mode,
-        dataset=dataset,
-        seed_runtime=seed_runtime,
-    )
+    # 031（US2）：环境 secret 变量解密失败 → 明确失败（不带密文执行、不产生 pending 僵尸）
+    decrypt_errors = list((environment or {}).get("decrypt_errors") or [])
+    if decrypt_errors:
+        from core.api_runner.runner import ApiRunResult
 
+        result = ApiRunResult(
+            status="failed",
+            error=(
+                "无法解密变量 " + "、".join(decrypt_errors) + "：密文损坏或加密密钥已更换，请重新填写"
+            ),
+            steps=[],
+            duration_ms=0,
+        )
+    else:
+        platform_files: dict[int, str] = {}
+        try:
+            from app.crud import api_file as crud_file
+
+            refs = crud_file.iter_platform_refs(api_spec)
+            if refs:
+                platform_files = await crud_file.resolve_platform_paths(db, refs)
+                if len(platform_files) < len(refs):
+                    logger.warning(
+                        "测试文件引用缺失：需要 %s，解析到 %s",
+                        sorted(refs), sorted(platform_files),
+                    )
+        except Exception:
+            logger.warning("解析测试文件引用失败（按无文件执行）", exc_info=True)
+
+        result = await run_api_case(
+            api_spec,
+            environment=environment,
+            case_variables=case_variables,
+            client=client,
+            execution_mode=execution_mode,
+            dataset=dataset,
+            seed_runtime=seed_runtime,
+            platform_files=platform_files or None,
+        )
     # T038：environment 作用域提取 → 用例成功后写回 environments.variables
     if (
         result.status == "passed"
@@ -289,6 +332,13 @@ async def run_api_case_server(
     error = result.error or (_first_failure_error(steps) if status == "failed" else None)
     if error:
         error = mask_secrets_in_text(error, secret_values)
+    # 031（US10）：复用会话模式下 401/403 → 追加「会话可能已过期」分类提示（不改变判定）
+    if session_reuse:
+        from core.api_runner.runner import session_expired_hint
+
+        hint = session_expired_hint(result)
+        if hint:
+            error = ((error + "；") if error else "") + hint
 
     # report.json（复用 reports/run_{case_id}_{uid} 目录约定）
     run_uid = uuid.uuid4().hex[:12]
@@ -670,7 +720,14 @@ async def run_scenario_batch(
                 else scenario.environment_id
             )
             project_id = scenario.project_id
-            scenario_vars = list(scenario.variables or [])
+            # 031（US2）：场景 secret 变量读取即解密
+            from app.security.secret_vars import SecretDecryptError, decrypt_variables
+
+            try:
+                scenario_vars = decrypt_variables(list(scenario.variables or []))
+            except SecretDecryptError as exc:
+                logger.error("场景 %s 变量解密失败: %s", scenario_id, exc)
+                scenario_vars = []
             share_cookie = bool(getattr(scenario, "share_cookie", False))
             continue_on_failure = bool(getattr(scenario, "continue_on_failure", False))
             if share_cookie:

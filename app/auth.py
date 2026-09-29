@@ -1,4 +1,6 @@
 """认证模块 — 密码哈希、Session 管理、FastAPI 依赖注入."""
+from contextvars import ContextVar
+from typing import Optional, Any
 import base64
 import hashlib
 import hmac
@@ -156,9 +158,54 @@ async def _get_validated_session(db: AsyncSession, request: Request) -> object |
     return sess
 
 
+# 031（US8）：CI 令牌的项目范围（get_current_user 命中令牌时写入；端点可据此限权）
+_TOKEN_SCOPE: "ContextVar[Optional[int] | None]" = ContextVar("vt_token_project_scope", default=None)
+
+
+async def authenticate_api_token(db: AsyncSession, authorization: Optional[str]):
+    """按 ``Authorization: Bearer vt_…`` 解析令牌。
+
+    返回 ``(user, project_scope)``；无效（缺头/格式不符/未知/撤销/过期/创建者失效）返回 ``(None, None)``。
+    """
+    header = str(authorization or "").strip()
+    if not header.lower().startswith("bearer "):
+        return None, None
+    plaintext = header[7:].strip()
+    from app import db_models
+    from app.crud import api_token as crud_token
+
+    token = await crud_token.resolve_token(db, plaintext)
+    if token is None:
+        return None, None
+    user = (
+        await db.execute(select(db_models.User).where(db_models.User.id == token.created_by))
+    ).scalar_one_or_none()
+    if user is None or user.status == "disabled":
+        return None, None
+    return user, token.project_id
+
+
+def enforce_token_project_scope(scope: Optional[int], project_id: Optional[int]) -> None:
+    """令牌项目范围限权：范围为空（session 或全局令牌）放行；否则必须命中。"""
+    if scope is None or project_id is None:
+        return
+    if int(scope) != int(project_id):
+        raise HTTPException(status_code=403, detail="该令牌仅限指定项目使用")
+
+
+def enforce_current_token_project(project_id: Optional[int]) -> None:
+    """端点便捷入口：用当前请求上下文里的令牌范围做限权（session 请求天然放行）。"""
+    enforce_token_project_scope(_TOKEN_SCOPE.get(), project_id)
+
+
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_async_db)):
     sess = await _get_validated_session(db, request)
     if sess is None:
+        # 031（US8）：无会话时回退 CI 令牌（与 session 认证并存）
+        token_user, scope = await authenticate_api_token(db, request.headers.get("authorization"))
+        if token_user is not None:
+            _TOKEN_SCOPE.set(scope)
+            return token_user
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
     from app import db_models
     result = await db.execute(

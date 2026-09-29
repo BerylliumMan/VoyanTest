@@ -3,6 +3,9 @@
 VoyanTest CLI — 命令行测试执行工具，用于 CI/CD 流水线。
 
 用法:
+  voyan api run --case 12 [--env 20] [--base-url http://host:8002] [--token vt_…]
+                [--report json|html] [--out report.json] [--timeout 600]   # CI：走 REST + 令牌
+  voyan api run --scenario 5 --env 20 [--fail-fast]                     # CI：执行接口场景
   voyan run --project-id 1 [--env-id 2] [--case-ids 1,2,3] [--output report.json] [--headless]
   voyan run-single --case-id 5 [--env-id 2] [--output report.json] [--headless]
   voyan list-projects
@@ -10,9 +13,9 @@ VoyanTest CLI — 命令行测试执行工具，用于 CI/CD 流水线。
 
 退出码:
   0  全部通过
-  1  存在失败或错误
-  2  项目/用例未找到
-  3  数据库连接失败
+  1  存在失败或错误（含 cancelled）
+  2  参数/配置错误（目标缺失、令牌无效、目标不存在等 4xx）
+  3  服务不可达（连接失败/超时）或数据库连接失败
 """
 
 from __future__ import annotations
@@ -269,6 +272,144 @@ async def cmd_run_single(args: argparse.Namespace) -> None:
 # ────────────────────────────────────────────────────────────────────
 
 
+# ────────────────────────────────────────────────────────────────────
+# 031（US8）CI 子命令：voyan api run —— 走 REST + 令牌，轮询至终态
+# ────────────────────────────────────────────────────────────────────
+
+TERMINAL_BATCH_STATUSES = ("passed", "failed", "partial", "cancelled")
+
+
+def map_statuses_to_exit_code(statuses) -> int:
+    """批次终态 → CLI 退出码（0 全通过；1 存在失败/取消；空视为通过）。"""
+    bad = [s for s in (statuses or []) if str(s) not in ("passed",)]
+    return 1 if bad else 0
+
+
+def _api_base_and_token(args) -> tuple[str, str]:
+    base = (getattr(args, "base_url", None) or os.environ.get("VOYAN_BASE_URL") or "").rstrip("/")
+    token = getattr(args, "token", None) or os.environ.get("VOYAN_TOKEN") or ""
+    return base, token
+
+
+async def cmd_api_run(args) -> None:
+    """api run：触发接口用例/场景并轮询至终态；退出码 0/1/2/3。"""
+    import httpx
+
+    case_id = getattr(args, "case", None)
+    scenario_id = getattr(args, "scenario", None)
+    if bool(case_id) == bool(scenario_id):
+        print("错误: 请且仅请指定一个目标（--case 或 --scenario）", file=sys.stderr)
+        sys.exit(2)
+
+    base, token = _api_base_and_token(args)
+    if not base:
+        print("错误: 缺少服务地址（--base-url 或环境变量 VOYAN_BASE_URL）", file=sys.stderr)
+        sys.exit(2)
+    if not token:
+        print("错误: 缺少 CI 令牌（--token 或环境变量 VOYAN_TOKEN）", file=sys.stderr)
+        sys.exit(2)
+
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout_s = float(getattr(args, "timeout", 600) or 600)
+
+    async with httpx.AsyncClient(base_url=base, headers=headers, timeout=30.0) as client:
+        # ① 触发
+        try:
+            if case_id:
+                payload: dict = {"case_ids": [int(case_id)]}
+                if getattr(args, "env", None):
+                    payload["environment_id"] = int(args.env)
+                if getattr(args, "fail_fast", False):
+                    payload["fail_fast"] = True
+                resp = await client.post("/api/testcases/batch-run", json=payload)
+            else:
+                payload = {}
+                if getattr(args, "env", None):
+                    payload["environment_id"] = int(args.env)
+                resp = await client.post(f"/api/api-test/scenarios/{int(scenario_id)}/run", json=payload)
+        except httpx.HTTPError as exc:
+            print(f"错误: 服务不可达（{type(exc).__name__}: {exc}）", file=sys.stderr)
+            sys.exit(3)
+
+        if resp.status_code >= 500:
+            print(f"错误: 服务端异常 HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+            sys.exit(3)
+        if resp.status_code >= 400:
+            print(f"错误: 触发失败 HTTP {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            sys.exit(2)
+
+        try:
+            batch_id = int(resp.json().get("batch_id"))
+        except (ValueError, TypeError, AttributeError):
+            print(f"错误: 触发响应缺少 batch_id: {resp.text[:200]}", file=sys.stderr)
+            sys.exit(2)
+
+        target = f"用例 {case_id}" if case_id else f"场景 {scenario_id}"
+        print(f"已触发 {target} → 批次 #{batch_id}；等待执行完成（最多 {timeout_s:.0f}s）…")
+
+        # ② 轮询至终态
+        import time as _time
+
+        started = _time.monotonic()
+        detail: dict = {}
+        while True:
+            if _time.monotonic() - started > timeout_s:
+                print(f"错误: 等待超时（>{timeout_s:.0f}s），批次 #{batch_id} 仍在执行", file=sys.stderr)
+                sys.exit(3)
+            try:
+                poll = await client.get(f"/api/reports/batches/{batch_id}")
+            except httpx.HTTPError as exc:
+                print(f"错误: 轮询失败（{type(exc).__name__}: {exc}）", file=sys.stderr)
+                sys.exit(3)
+            if poll.status_code >= 400:
+                print(f"错误: 轮询失败 HTTP {poll.status_code}: {poll.text[:200]}", file=sys.stderr)
+                sys.exit(3 if poll.status_code >= 500 else 2)
+            detail = poll.json()
+            if str(detail.get("status") or "") in TERMINAL_BATCH_STATUSES:
+                break
+            await asyncio.sleep(2.0)
+
+        # ③ 汇总输出
+        runs = detail.get("runs") or []
+        statuses = [str(r.get("status") or "") for r in runs] or [str(detail.get("status") or "")]
+        passed = sum(1 for s in statuses if s == "passed")
+        failed = sum(1 for s in statuses if s in ("failed", "error"))
+        print()
+        print("=" * 60)
+        print(f"批次 #{batch_id} 完成: 状态={detail.get('status')} · {passed}/{len(statuses)} 通过 · 失败 {failed}")
+        print("=" * 60)
+        for r in runs:
+            icon = "✓" if str(r.get("status")) == "passed" else "✗"
+            name = r.get("case_name") or r.get("name") or f"用例 {r.get('case_id')}"
+            extra = f" — {r.get('error')}" if r.get("error") else ""
+            print(f"  {icon} {name}: {r.get('status')}{extra}")
+
+        # ④ 报告导出
+        report_kind = getattr(args, "report", None)
+        out_path = getattr(args, "out", None)
+        if report_kind:
+            if not out_path:
+                out_path = f"voyantest-batch-{batch_id}.{ 'html' if report_kind == 'html' else 'json'}"
+            if report_kind == "html":
+                try:
+                    exp = await client.get(f"/api/reports/batches/{batch_id}/export")
+                except httpx.HTTPError as exc:
+                    print(f"警告: 报告导出失败（{exc}）", file=sys.stderr)
+                    exp = None
+                if exp is not None and exp.status_code < 400:
+                    with open(out_path, "wb") as f:
+                        f.write(exp.content)
+                    print(f"HTML 报告已保存: {out_path}")
+                else:
+                    print("警告: HTML 报告导出失败（跳过）", file=sys.stderr)
+            else:
+                with open(out_path, "w", encoding="utf-8") as f:
+                    _json.dump(detail, f, ensure_ascii=False, indent=2)
+                print(f"JSON 报告已保存: {out_path}")
+
+    sys.exit(map_statuses_to_exit_code(statuses))
+
+
 async def _main() -> None:
     parser = argparse.ArgumentParser(
         prog="voyan",
@@ -308,6 +449,21 @@ async def _main() -> None:
     _ = p_single.add_argument("--output", type=str, default=None, help="结果 JSON 文件路径")
     _ = p_single.add_argument("--headless", action="store_true", default=False, help="无头模式运行")
 
+    # ── api（031 US8）：CI 触发（REST + 令牌）────────────────────────
+    p_api = sub.add_parser("api", help="接口测试相关（CI：REST + 令牌）")
+    api_sub = p_api.add_subparsers(dest="api_command", help="api 子命令")
+    p_api_run = api_sub.add_parser("run", help="触发接口用例/场景并等待完成")
+    _ = p_api_run.add_argument("--case", type=int, default=None, help="接口用例 ID（与 --scenario 二选一）")
+    _ = p_api_run.add_argument("--scenario", type=int, default=None, help="场景 ID（与 --case 二选一）")
+    _ = p_api_run.add_argument("--env", type=int, default=None, help="环境 ID（可选）")
+    _ = p_api_run.add_argument("--project", type=int, default=None, help="项目 ID（仅用于提示/日志）")
+    _ = p_api_run.add_argument("--base-url", type=str, default=None, help="服务地址（或 VOYAN_BASE_URL）")
+    _ = p_api_run.add_argument("--token", type=str, default=None, help="CI 令牌 vt_…（或 VOYAN_TOKEN）")
+    _ = p_api_run.add_argument("--report", choices=["json", "html"], default=None, help="导出报告格式")
+    _ = p_api_run.add_argument("--out", type=str, default=None, help="报告输出路径")
+    _ = p_api_run.add_argument("--timeout", type=float, default=600.0, help="等待超时秒数（默认 600）")
+    _ = p_api_run.add_argument("--fail-fast", action="store_true", default=False, help="用例首个迭代失败即停")
+
     # ── list-projects ───────────────────────────────────────────────
     _ = sub.add_parser("list-projects", help="列出所有项目")
 
@@ -325,6 +481,11 @@ async def _main() -> None:
         await cmd_run(args)
     elif args.command == "run-single":
         await cmd_run_single(args)
+    elif args.command == "api":
+        if getattr(args, "api_command", None) == "run":
+            await cmd_api_run(args)
+        else:
+            parser.parse_args(["api", "--help"])
     else:
         parser.print_help()
         sys.exit(1)

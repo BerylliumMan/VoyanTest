@@ -40,6 +40,8 @@ class ResponseLike:
     headers: dict = field(default_factory=dict)
     body_text: str = ""
     duration_ms: int = 0
+    # 031（US6）：表达式断言的 ``vars`` 上下文（当前可见变量快照；默认空 = 零回归）
+    variables: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -185,6 +187,47 @@ def _jsonschema_check(
         return False, f"JSON Schema 定义无效: {exc.message}", ""
 
 
+def _build_expression_context(response: ResponseLike) -> dict:
+    """表达式断言的求值上下文（spec FR-011：json/status_code/duration_ms/headers/vars）。"""
+    body_json = None
+    text = response.body_text or ""
+    if text.strip():
+        try:
+            body_json = json.loads(text)
+        except (ValueError, TypeError):
+            body_json = None
+    return {
+        "json": body_json,
+        "status_code": response.status,
+        "duration_ms": response.duration_ms,
+        "headers": {str(k).lower(): v for k, v in (response.headers or {}).items()},
+        "vars": dict(response.variables or {}),
+    }
+
+
+def _run_expression_assertion(
+    name: str, expression: Any, response: ResponseLike
+) -> "AssertionResult":
+    """031（US6）：表达式断言 —— 走共享沙箱，失败展示表达式/实际值。"""
+    from core.script_sandbox import evaluate_expression
+
+    expr_text = str(expression or "")
+    out = evaluate_expression(expr_text, _build_expression_context(response))
+    actual = "" if out.value is None else repr(out.value)
+    error = ""
+    if not out.ok:
+        error = out.error or (out.detail or "表达式未通过")
+    return AssertionResult(
+        name=name,
+        type="expression",
+        condition="expression",
+        expected=expr_text,
+        actual=actual,
+        passed=out.ok,
+        error=error,
+    )
+
+
 def _extract_actual(
     atype: str, expression: Any, response: ResponseLike
 ) -> tuple[Any, str]:
@@ -223,6 +266,8 @@ def _run_one(assertion: Any, response: ResponseLike) -> Optional[AssertionResult
     expected_str = "" if expected is None else str(expected)
 
     try:
+        if atype == "expression":
+            return _run_expression_assertion(name, expression, response)
         if atype == "jsonschema":
             passed, error, actual = _jsonschema_check(expression, expected, response)
             return AssertionResult(

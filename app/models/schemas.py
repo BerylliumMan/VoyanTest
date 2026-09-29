@@ -266,11 +266,46 @@ class EnvironmentBase(BaseModel):
     # 类型用 Any：结构校验（非 list / 元素缺 key）在 router 层做，返回 400 可读错误
     variables: Any = Field(default_factory=list)
     headers: Any = Field(default_factory=list)
+    # 031（US4）多域名：{"auth": "http://a:8000"} —— 值必须为空或绝对 URL
+    services: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("services")
+    @classmethod
+    def _validate_services(cls, value):
+        """服务名非空且唯一（dict 天然唯一）；值必须为空串或 http(s) 绝对 URL。"""
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("services 必须是对象（服务名 → 绝对 URL）")
+        for name, url in value.items():
+            if not str(name or "").strip():
+                raise ValueError("services 存在空服务名")
+            text = str(url or "").strip()
+            if text and not text.lower().startswith(("http://", "https://")):
+                raise ValueError(f"services[{name}] 必须是绝对 URL（http(s)://…）或留空")
+        return {str(k): str(v or "").strip() for k, v in value.items()}
 
 class EnvironmentCreate(EnvironmentBase):
     pass
 
 class EnvironmentUpdate(BaseModel):
+    # 031（US4）多域名服务表（未提供 = 不修改；校验规则与创建一致）
+    services: Optional[dict[str, str]] = None
+
+    @field_validator("services")
+    @classmethod
+    def _validate_services_update(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, dict):
+            raise ValueError("services 必须是对象（服务名 → 绝对 URL）")
+        for name, url in value.items():
+            if not str(name or "").strip():
+                raise ValueError("services 存在空服务名")
+            text = str(url or "").strip()
+            if text and not text.lower().startswith(("http://", "https://")):
+                raise ValueError(f"services[{name}] 必须是绝对 URL（http(s)://…）或留空")
+        return {str(k): str(v or "").strip() for k, v in value.items()}
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     base_url: Optional[str] = None
     browser: Optional[str] = Field(default=None, pattern="^(chromium|firefox|webkit)$")
@@ -318,7 +353,7 @@ class Environment(EnvironmentBase):
 class ScheduleBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     cron_expression: str = Field(..., min_length=1)
-    task_type: str = Field(..., pattern="^(testcase|module|project|api_scenario|api_import)$")
+    task_type: str = Field(..., pattern="^(testcase|module|project|api_case|api_scenario|api_import)$")
     target_id: int
     description: Optional[str] = ""
     enabled: bool = True
@@ -329,7 +364,7 @@ class ScheduleCreate(ScheduleBase):
 class ScheduleUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     cron_expression: Optional[str] = None
-    task_type: Optional[str] = Field(default=None, pattern="^(testcase|module|project|api_scenario|api_import)$")
+    task_type: Optional[str] = Field(default=None, pattern="^(testcase|module|project|api_case|api_scenario|api_import)$")
     target_id: Optional[int] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
@@ -565,8 +600,11 @@ class ApiKeyValue(BaseModel):
 
 
 class ApiBodySpec(BaseModel):
-    type: str = "none"  # none|json|form|form_data|raw|binary
+    type: str = "none"  # none|json|form|form_data|raw|binary；031：multipart 为 form_data 的兼容别名
     content: str = ""
+    # 031（US1）multipart：普通字段与文件字段（path 为 platform://<file_id> 或变量引用）
+    form_data: List[ApiKeyValue] = []
+    files: List[dict] = []  # [{"key","path","content_type"?(可选)}]
 
 
 class ApiAuthSpec(BaseModel):
@@ -619,6 +657,10 @@ class ApiStepSpec(BaseModel):
     extractors: List[ApiExtractorSpec] = []
     pre: List[dict] = []
     post: List[dict] = []
+    # 031：前置/后置脚本（Python 子集，服务端沙箱执行）与重试策略
+    pre_script: str = ""
+    post_script: str = ""
+    retry: Optional[dict] = None  # {"max":0..3,"delay_ms":int,"on":["5xx","timeout","network"]}；None=默认（网络/超时×1）
 
 
 class ApiSpecPayload(BaseModel):
@@ -729,6 +771,10 @@ class ApiDebugRequest(BaseModel):
     case_variables: List[ApiKeyValue] = []
     step: dict
     dry_run: bool = False
+    # 031（US9）：调试单请求的数据驱动执行参数
+    dataset_mode: Optional[str] = None
+    loop_count: Optional[int] = None
+    fail_fast: Optional[bool] = None
 
 
 class ApiDebugResponse(BaseModel):
@@ -737,6 +783,93 @@ class ApiDebugResponse(BaseModel):
     assertions: List[dict] = []
     extracted: List[dict] = []
     error: Optional[str] = None
+
+
+# ── 031-api-testing-enhancements 契约 ─────────────────────────────
+
+
+class TestFileOut(BaseModel):
+    id: int
+    name: str
+    size: int
+    content_type: Optional[str] = None
+    project_id: Optional[int] = None
+    ref_count: int = 0
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class RequestHistoryOut(BaseModel):
+    id: int
+    method: str
+    url: str
+    status_code: Optional[int] = None
+    duration_ms: Optional[int] = None
+    created_at: Optional[datetime] = None
+    headers_masked: dict = {}
+    body_preview: Optional[str] = None
+    error: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ApiTokenCreate(BaseModel):
+    name: str
+    project_id: Optional[int] = None
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class ApiTokenOut(BaseModel):
+    id: int
+    name: str
+    token_prefix: str
+    project_id: Optional[int] = None
+    expires_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ApiTokenCreated(ApiTokenOut):
+    token: str  # 明文仅创建响应返回一次
+
+
+class SuggestedAssertion(BaseModel):
+    kind: str = "assertion"  # assertion|extractor
+    type: str
+    expression: str = ""
+    condition: str = ""
+    expected: str = ""
+    variable: str = ""
+    scope: str = "case"
+    reason: str = ""
+
+
+class SuggestAssertionsOut(BaseModel):
+    candidates: List[SuggestedAssertion] = []
+    warnings: List[str] = []
+
+
+class CoverageItem(BaseModel):
+    definition_id: int
+    name: str
+    method: str
+    path: str
+    covered: bool
+    case_count: int = 0
+    last_run_passed: Optional[bool] = None
+    priority_score: int = 0
+
+
+class CoverageOut(BaseModel):
+    total: int
+    covered: int
+    missing: int
+    items: List[CoverageItem] = []
+    match_rule: str = "definition_id 优先；缺失时 method+path 精确匹配"
 
 
 class ApiDatasetPayload(BaseModel):

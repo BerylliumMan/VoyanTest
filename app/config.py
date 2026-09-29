@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     browser_type: str = "chromium"
     headless: bool = True
 
+    # 接口测试增强（031）：测试文件上限与脚本沙箱超时（宪法：Settings 为配置唯一来源）
+    api_test_file_max_mb: int = 50
+    api_test_file_dir: str = "data/api_test_files"  # 卷持久化目录（部署挂载 /app/data）
+    api_script_timeout_ms: int = 2000
+
     # Playwright MCP
     playwright_browser_type: str = "chromium"
     playwright_headless: bool = True

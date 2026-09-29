@@ -126,6 +126,20 @@ async def _recover_orphaned_agent_runs():
         logger.warning("孤儿 agent_run 恢复失败: %s", exc, exc_info=True)
 
 
+async def _backfill_api_secret_variables() -> None:
+    """031（US2 T024）：环境/场景 secret 明文变量幂等加密回填（失败不阻断启动）。"""
+    try:
+        from app.database import AsyncSessionLocal
+        from app.security.secret_vars import backfill_secret_variables
+
+        async with AsyncSessionLocal() as _db:
+            changed = await backfill_secret_variables(_db)
+        if changed:
+            logger.info("接口测试 secret 变量回填完成：%s 个对象", changed)
+    except Exception:  # noqa: BLE001 - 迁移失败不阻断启动
+        logger.warning("接口测试 secret 变量回填失败（跳过）", exc_info=True)
+
+
 async def _run_startup_init():
     """Run async DB initialization at startup (not at import time)."""
     import app.database as db_mod
@@ -297,6 +311,15 @@ async def _run_startup_init():
         await _ddl(
             "ALTER TABLE api_imports ADD COLUMN IF NOT EXISTS module_id INTEGER",
             "api_imports.module_id 迁移",
+        )
+        # ── 031-api-testing-enhancements：接口测试增强扩列（3 张新表由 create_all 建立）──
+        await _ddl(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS services JSONB DEFAULT '{}'::jsonb NOT NULL",
+            "environments.services 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS parent_batch_id INTEGER",
+            "run_batches.parent_batch_id 迁移",
         )
         await _ddl(
             "ALTER TABLE environments ADD COLUMN IF NOT EXISTS variables JSONB DEFAULT '[]'::jsonb",
@@ -671,6 +694,9 @@ async def _run_startup_init():
     # 恢复孤儿 agent_runs（服务重启后清理假 running 状态）
     await _recover_orphaned_agent_runs()
 
+    # 031（US2 T024）：接口测试 secret 变量幂等加密回填（失败不阻断启动）
+    await _backfill_api_secret_variables()
+
 
 async def _periodic_session_cleanup():
     """后台周期任务：每 900 秒清理一次过期会话。"""
@@ -753,6 +779,31 @@ async def lifespan(app: FastAPI):
                     batch_id, project_id = batch.id, mod.project_id
                     await db.commit()
                     await _exec.run_batch_test_cases(case_ids, project_id, batch_id=batch_id)
+                    return {"batch_id": batch_id}
+                elif task_type == "api_case":
+                    # 031（US8）：定时单条用例（接口用例按 case_kind 短路到 api 执行器）
+                    tc = await crud.get_test_case(db, int(target_id))
+                    if not tc:
+                        logger.error("定时任务用例不存在: %s", target_id)
+                        return
+                    # 环境沿用既有约定：任务描述里的 environment_id=<id>
+                    # （实测缺环境会让接口用例拿不到 baseUrl → 全部失败）
+                    desc = str(getattr(task, "description", "") or "").strip()
+                    env_id = None
+                    if desc.startswith("environment_id="):
+                        try:
+                            env_id = int(desc.split("=", 1)[1].strip())
+                        except ValueError:
+                            env_id = None
+                    batch = await crud.create_run_batch(
+                        db, project_id=tc.project_id, total_cases=1,
+                        triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                    )
+                    batch_id, case_id = batch.id, tc.id
+                    await db.commit()
+                    await _exec.run_batch_test_cases(
+                        [case_id], tc.project_id, batch_id=batch_id, environment_id=env_id
+                    )
                     return {"batch_id": batch_id}
                 elif task_type == "api_scenario":
                     from app.crud import api_scenario as crud_scenario
@@ -876,6 +927,10 @@ async def auth_middleware(request: Request, call_next):
             return await call_next(request)
         session_id = request.cookies.get("session_id")
         if not session_id:
+            # 031（US8）：CI 令牌以 `Authorization: Bearer vt_…` 传递，
+            # 这里只放行不做校验——真正的校验在端点依赖 get_current_user（令牌解析 + 项目范围）。
+            if request.headers.get("authorization", "").lower().startswith("bearer vt_"):
+                return await call_next(request)
             return JSONResponse(status_code=401, content={"detail": "未登录"})
         if not getattr(db_mod.AsyncSessionLocal, "is_ready", False):
             return JSONResponse(status_code=503, content={"detail": "数据库未配置"})

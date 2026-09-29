@@ -21,6 +21,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any, Optional
 
 import httpx
@@ -30,9 +31,14 @@ from core.api_runner.extractors import ExtractionError, run_extractors
 from core.api_runner.iteration import (
     dataset_mode_notes,
     expand_iteration_rows,
+    plan_iterations,
     tag_iteration,
 )
-from core.api_runner.request_builder import RenderedRequest, build_request
+from core.api_runner.request_builder import (
+    RenderedRequest,
+    build_request,
+    parse_platform_ref,
+)
 from core.api_runner.variables import (
     VariableScope,
     mask_headers,
@@ -42,6 +48,8 @@ from core.api_runner.variables import (
 from core.api_spec import normalize_api_spec
 
 SKIPPED_REASON_PREVIOUS_FAILURE = "因前序步骤失败跳过"
+# 031（US9）：fail_fast 下后续迭代不执行，但要在报告中可见（不静默丢弃）
+SKIPPED_REASON_PREVIOUS_ITERATION = "前序迭代失败（fail_fast）未执行"
 SKIPPED_REASON_STEP_LIMIT = "因 step_limit 截断未执行"
 SKIPPED_REASON_DISABLED = "步骤已禁用"
 
@@ -117,6 +125,8 @@ def _build_scope(
         runtime=dict(seed_runtime or {}),
         case_variables=case_vars,
         dataset_row=dict(dataset_row or {}),
+        # 031（US4）：多域名服务表（{"auth": "http://a:8000"}）
+        services=dict(env.get("services") or {}),
         env_variables=variables_to_map(env.get("variables")),
         base_url=str(env.get("base_url") or ""),
     )
@@ -205,6 +215,8 @@ def _skipped_step(step: dict, reason: Optional[str]) -> dict:
         "response": None,
         "assertions": [],
         "extracted": [],
+        "script_errors": [],
+        "attempts": 0,
         "warnings": [],
     }
 
@@ -219,6 +231,8 @@ def _failed_step(
     response: Optional[dict] = None,
     assertions: Optional[list] = None,
     extracted: Optional[list] = None,
+    script_errors: Optional[list] = None,
+    attempts: int = 0,
 ) -> dict:
     return {
         "step_number": step_number,
@@ -231,7 +245,63 @@ def _failed_step(
         "response": response,
         "assertions": assertions or [],
         "extracted": extracted or [],
+        # 031（US3）：前后置脚本错误（成功时为空数组，报告可直接渲染）
+        "script_errors": script_errors or [],
+        # 031（US5）：实际发送次数（含重试）
+        "attempts": attempts,
         "warnings": [],
+    }
+
+
+def session_expired_hint(result: Any) -> Optional[str]:
+    """031（US10）：复用会话模式下 401/403 失败 → 追加「会话可能已过期」分类提示。
+
+    仅作为**提示**（不改变判定）：复用会话时前序登录态可能过期/被清理，
+    与「用例本身断言错」区分开有助于排查。非 401/403 或已通过 → None。
+    """
+    if str(getattr(result, "status", "")) == "passed":
+        return None
+    haystack = str(getattr(result, "error", "") or "")
+    for step in getattr(result, "steps", None) or []:
+        if isinstance(step, dict):
+            haystack += " " + str(step.get("error") or "")
+    if not haystack.strip():
+        return None
+    if "401" not in haystack and "403" not in haystack:
+        return None
+    if "未授权" in haystack or "Unauthorized" in haystack or "Forbidden" in haystack or "401" in haystack:
+        return "复用会话模式下返回 401/403，会话可能已过期（请检查登录前置用例或关闭「复用会话」）"
+    return None
+
+
+def _resolve_script_timeout(step: dict) -> int:
+    """脚本超时：步骤级 script_timeout_ms 覆盖 → app/config.py::api_script_timeout_ms（默认 2000）。"""
+    step_timeout = step.get("script_timeout_ms")
+    if isinstance(step_timeout, int) and 200 <= step_timeout <= 10000:
+        return step_timeout
+    try:
+        from app.config import get_settings
+
+        return int(get_settings().api_script_timeout_ms)
+    except Exception:  # noqa: BLE001 - core 独立运行（无 app 配置）时用默认
+        return 2000
+
+
+def _response_script_context(resp, duration_ms: int) -> dict:
+    """后置脚本的响应上下文（031 US3）：status_code/duration_ms/headers/body/body_text。"""
+    body = None
+    text = getattr(resp, "text", "") or ""
+    if text.strip():
+        try:
+            body = json.loads(text)
+        except (ValueError, TypeError):
+            body = None
+    return {
+        "status_code": getattr(resp, "status_code", 0),
+        "duration_ms": duration_ms,
+        "headers": {str(k).lower(): v for k, v in (getattr(resp, "headers", {}) or {}).items()},
+        "body": body,
+        "body_text": text,
     }
 
 
@@ -310,7 +380,61 @@ class _AgentBridgeClient:
         """与 httpx.AsyncClient 的生命周期接口对齐（无连接可关）。"""
 
 
-async def _send_request(client: httpx.AsyncClient, req: RenderedRequest) -> httpx.Response:
+def _prepare_multipart(
+    req: RenderedRequest, platform_files: Optional[dict[int, str]]
+) -> tuple[list, list]:
+    """031（US1）：把 multipart 描述解析为 httpx ``files=`` 参数（纯 multipart 通道）。
+
+    实现要点（httpx 0.28 实测）：
+      · AsyncClient 不接受同步文件句柄，也不接受 ``data=`` 的 list[tuple] 形式
+        （均报 "Attempted to send an sync request with an AsyncClient instance"）；
+      · 因此文件内容整读为 **bytes**，普通字段用 ``(key, (None, value))`` 带进 files，
+        既绕开 data 限制又保留重复键语义；
+      · 平台文件上限 50MB（api_test_file_max_mb），整读内存可接受。
+    失败抛 ValueError（步骤失败且不重试）：引用缺失 / 文件不存在 / 超过大小上限。
+    """
+    from pathlib import Path
+
+    from app.config import get_settings
+
+    limit = max(1, int(get_settings().api_test_file_max_mb)) * 1024 * 1024
+    files: list = []
+    for item in req.files or []:
+        raw_path = str(item.get("path") or "")
+        file_id = parse_platform_ref(raw_path)
+        resolved = raw_path
+        if file_id is not None:
+            resolved = str((platform_files or {}).get(file_id) or "")
+            if not resolved:
+                raise ValueError(
+                    f"引用的测试文件不存在（platform://{file_id}），请重新上传并在用例中选择"
+                )
+        path = Path(resolved)
+        if not path.is_file():
+            raise ValueError(f"文件不存在: {resolved}")
+        content = path.read_bytes()
+        if len(content) > limit:
+            raise ValueError(
+                f"文件超过上限 {limit // (1024 * 1024)}MB（实际 {len(content)} 字节）: {path.name}"
+            )
+        # content-disposition 用"逻辑文件名"：剥掉平台存储的 uuid 前缀
+        # （存储形如 <32hex>_<原名>，见 app/crud/api_file.py::create_test_file）
+        display_name = re.sub(r"^[0-9a-f]{32}_", "", path.name) or path.name
+        files.append(
+            (item["key"], (display_name, content, item.get("content_type") or None))
+        )
+    for key, value in req.form_data or []:
+        files.append((key, (None, value)))
+    return files
+
+
+async def _send_request(
+    client: httpx.AsyncClient,
+    req: RenderedRequest,
+    *,
+    files: Optional[list] = None,
+    data: Optional[list] = None,
+) -> httpx.Response:
     """发送渲染后的请求；form 类型（dict content）走 data=，其余走 content=。
 
     契约要点：``req.url`` 已含完整 query（request_builder 用 urlencode 编码），
@@ -318,9 +442,13 @@ async def _send_request(client: httpx.AsyncClient, req: RenderedRequest) -> http
     导致 `?page=2&page=2` 这类重复参数。``req.params`` 仅供展示与报告。
     """
     content = req.content
-    data = None
-    if isinstance(content, dict):
-        data = content
+    if files is None:
+        data = None
+        if isinstance(content, dict):
+            data = content
+            content = None
+    else:
+        # 031（US1）multipart：Content-Type 由 httpx 带 boundary 自动生成
         content = None
     return await client.request(
         method=req.method,
@@ -328,6 +456,7 @@ async def _send_request(client: httpx.AsyncClient, req: RenderedRequest) -> http
         headers=req.headers,
         content=content,
         data=data,
+        files=files,
         timeout=req.timeout_ms / 1000,
         follow_redirects=req.follow_redirects,
     )
@@ -386,6 +515,8 @@ async def _run_step(
     scope: VariableScope,
     step_number: int,
     env_headers: Optional[dict] = None,
+    *,
+    platform_files: Optional[dict[int, str]] = None,
 ) -> dict:
     """执行单步，返回冻结字段的步骤结果字典（永不抛异常）。"""
     request_spec = step.get("request") or {}
@@ -395,10 +526,33 @@ async def _run_step(
     scope.step = variables_to_map(step.get("variables"))
 
     warnings: list[str] = []
+    script_errors: list[dict] = []
     try:
         await _run_pre_steps(step.get("pre"), scope, warnings)
     except Exception as exc:  # 防御：前置动作异常不得炸整步
         warnings.append(f"前置步骤执行异常: {exc}")
+
+    # 031（US3）：前置脚本（渲染前执行；写新变量进入本步骤渲染，失败则不发请求）
+    pre_script = str(step.get("pre_script") or "")
+    if pre_script.strip():
+        from core.script_sandbox import run_script
+
+        pre_out = run_script(
+            pre_script,
+            {"vars": scope.visible_map()},
+            timeout_ms=_resolve_script_timeout(step),
+        )
+        if not pre_out.ok:
+            script_errors.append({"phase": "pre", "message": pre_out.error})
+            return _failed_step(
+                step,
+                step_number,
+                f"前置脚本失败: {pre_out.error}",
+                description=f"{method} {raw_url} → 前置脚本失败: {pre_out.error}",
+                script_errors=script_errors,
+            )
+        for key, value in pre_out.variables.items():
+            scope.step[str(key)] = "" if value is None else str(value)
 
     try:
         req = build_request(step, scope)
@@ -415,23 +569,61 @@ async def _run_step(
     request_dict = _request_dict(req)
     step_started = time.perf_counter()
     try:
-        resp = await _send_request(client, req)
-    except httpx.HTTPError as exc:
-        label = _http_error_label(exc)
+        files_arg = _prepare_multipart(req, platform_files)
+    except ValueError as exc:
         return _failed_step(
             step,
             step_number,
-            f"{label}: {exc}",
-            description=f"{method} {req.url} → {label}",
+            f"multipart 文件不可用: {exc}",
+            description=f"{method} {req.url} → multipart 文件不可用: {exc}",
             request=request_dict,
         )
-    except Exception as exc:  # 兜底：任何发送异常不得冒泡
+    # 031（US5）：重试策略（默认：网络错误/超时 × 1，间隔 300ms；5xx 与断言不重试）
+    retry_cfg = step.get("retry") or None
+    if retry_cfg:
+        max_retry = int(retry_cfg.get("max") or 0)
+        delay_ms = int(retry_cfg.get("delay_ms") or 300)
+        retry_on = list(retry_cfg.get("on") or ["timeout", "network"])
+    else:
+        max_retry, delay_ms, retry_on = 1, 300, ["timeout", "network"]
+
+    attempts = 0
+    resp = None
+    send_error: Optional[str] = None
+    while True:
+        attempts += 1
+        send_error = None
+        retry_kind: Optional[str] = None
+        try:
+            resp = await _send_request(client, req, files=files_arg or None)
+        except httpx.HTTPError as exc:
+            resp = None
+            retry_kind = "timeout" if isinstance(exc, httpx.TimeoutException) else "network"
+            # 保留异常详情（客户端桥接的可读原因藏在异常消息里，丢弃会让报告不可读）
+            detail = str(exc).strip()
+            send_error = (
+                f"{_http_error_label(exc)}: {detail}" if detail else _http_error_label(exc)
+            )
+        except Exception as exc:  # noqa: BLE001 - 兜底：任何发送异常不得冒泡
+            resp = None
+            retry_kind = None
+            send_error = f"请求异常 ({type(exc).__name__}): {exc}"
+        else:
+            if getattr(resp, "status_code", 0) >= 500:
+                retry_kind = "5xx"
+        if retry_kind is None or attempts > max_retry or retry_kind not in retry_on:
+            break
+        await asyncio.sleep(max(0, delay_ms) / 1000.0)
+
+    if resp is None:
+        label = send_error or "请求失败"
         return _failed_step(
             step,
             step_number,
-            f"请求异常 ({type(exc).__name__}): {exc}",
-            description=f"{method} {req.url} → 请求异常 ({type(exc).__name__})",
+            f"{label}（已重试 {attempts - 1} 次）" if attempts > 1 else label,
+            description=f"{method} {raw_url} → {label}",
             request=request_dict,
+            attempts=attempts,
         )
     duration_ms = _elapsed_ms(step_started)
     sent_headers = getattr(getattr(resp, "request", None), "headers", None)
@@ -443,6 +635,8 @@ async def _run_step(
         headers=dict(resp.headers),
         body_text=resp.text,
         duration_ms=duration_ms,
+        # 031（US6）：表达式断言可读当前可见变量（vars 上下文）
+        variables=scope.visible_map(),
     )
     assertion_results = run_assertions(step.get("assertions") or [], response_like)
     assertion_dicts = [_assertion_dict(a) for a in assertion_results]
@@ -455,6 +649,11 @@ async def _run_step(
         _, extractor_results = run_extractors(step.get("extractors") or [], response_like)
         for e in extractor_results:
             extracted_dicts.append(_extractor_dict(e))
+            if not e.ok:
+                # 031（US9）：提取器未生效要显式告警（此前静默，下游「未定义变量」很难回溯）
+                warnings.append(
+                    f"提取器 {e.variable or '(未命名)'} 未生效: {e.error or '未知原因'}"
+                )
             if e.ok:
                 if e.scope == "environment":
                     scope.set_env(e.variable, e.value)
@@ -469,6 +668,33 @@ async def _run_step(
         warnings.append(f"后置步骤执行异常: {exc}")
 
     response_dict = _response_dict(resp, duration_ms)
+    # 031（US3）：后置脚本（可读响应/提取后变量；覆盖写作用域）
+    post_script = str(step.get("post_script") or "")
+    if post_script.strip():
+        from core.script_sandbox import run_script
+
+        post_out = run_script(
+            post_script,
+            {"vars": scope.visible_map(), **_response_script_context(resp, duration_ms)},
+            timeout_ms=_resolve_script_timeout(step),
+        )
+        if not post_out.ok:
+            script_errors.append({"phase": "post", "message": post_out.error})
+            return _failed_step(
+                step,
+                step_number,
+                f"后置脚本失败: {post_out.error}",
+                description=f"{method} {req.url} → {resp.status_code} ({duration_ms}ms) → 后置脚本失败",
+                request=request_dict,
+                response=response_dict,
+                assertions=assertion_dicts,
+                extracted=extracted_dicts,
+                script_errors=script_errors,
+                attempts=attempts,
+            )
+        for key, value in post_out.variables.items():
+            scope.set_variable(str(key), value)
+
     base_desc = (
         f"{method} {req.url} → {resp.status_code} ({duration_ms}ms) | "
         f"断言 {passed_count}/{total_count} 通过"
@@ -477,7 +703,7 @@ async def _run_step(
         return _failed_step(
             step, step_number, extract_error,
             description=base_desc, request=request_dict, response=response_dict,
-            assertions=assertion_dicts, extracted=extracted_dicts,
+            assertions=assertion_dicts, extracted=extracted_dicts, attempts=attempts,
         )
     failed_assertions = [a for a in assertion_dicts if not a["passed"]]
     if failed_assertions:
@@ -485,7 +711,7 @@ async def _run_step(
         return _failed_step(
             step, step_number, f"断言失败: {detail}",
             description=base_desc, request=request_dict, response=response_dict,
-            assertions=assertion_dicts, extracted=extracted_dicts,
+            assertions=assertion_dicts, extracted=extracted_dicts, attempts=attempts,
         )
     return {
         "step_number": step_number,
@@ -498,6 +724,10 @@ async def _run_step(
         "response": response_dict,
         "assertions": assertion_dicts,
         "extracted": extracted_dicts,
+        # 031（US3）：后置脚本成功后为空；失败会走 _failed_step 带具体原因
+        "script_errors": [],
+        # 031（US5）：实际发送次数（含重试）
+        "attempts": attempts,
         "warnings": warnings,
     }
 
@@ -524,6 +754,7 @@ async def run_api_case(
     agent_manager: Any = None,                   # 客户端执行用的 AgentManager（缺省取全局实例）
     step_limit: Optional[int] = None,
     seed_runtime: Optional[dict] = None,
+    platform_files: Optional[dict[int, str]] = None,  # 031：platform://<id> → 服务端绝对路径
 ) -> ApiRunResult:
     """执行一条接口用例，返回完整结果（永不抛异常）。
 
@@ -543,8 +774,15 @@ async def run_api_case(
             duration_ms=_elapsed_ms(started),
         )
 
-    notes = dataset_mode_notes(str(spec.get("dataset_mode") or "sequential"))
-    rows = expand_iteration_rows(dataset, dataset_row)
+    dataset_mode = str(spec.get("dataset_mode") or "sequential")
+    notes = dataset_mode_notes(dataset_mode)
+    # 031（US9）：迭代计划（sequential / random / loop × loop_count）
+    rows = plan_iterations(
+        dataset,
+        dataset_row,
+        mode=dataset_mode,
+        loop_count=int(spec.get("loop_count") or 1),
+    )
     multi = len(rows) > 1
     fail_policy = str(spec.get("fail_policy") or "fail_fast")
     steps = spec.get("steps") or []
@@ -574,7 +812,16 @@ async def run_api_case(
     try:
         for iteration, row in enumerate(rows, start=1):
             if failed and fail_policy == "fail_fast":
-                break
+                # 031（US9）：后续迭代逐步标记 skipped（报告可见消费），不静默丢弃
+                for step in steps:
+                    results.append(
+                        tag_iteration(
+                            _skipped_step(step, SKIPPED_REASON_PREVIOUS_ITERATION),
+                            iteration,
+                            multi,
+                        )
+                    )
+                continue
             scope = _build_scope(spec, environment, case_variables, row, seed_runtime)
             # 环境公共请求头（渲染后注入每步；步骤头覆盖同名）——每迭代独立渲染
             env_headers = _render_header_items((environment or {}).get("headers"), scope)
@@ -587,7 +834,10 @@ async def run_api_case(
                 elif iteration_failed and fail_policy == "fail_fast":
                     step_result = _skipped_step(step, SKIPPED_REASON_PREVIOUS_FAILURE)
                 else:
-                    step_result = await _run_step(client, step, scope, index + 1, env_headers)
+                    step_result = await _run_step(
+                        client, step, scope, index + 1, env_headers,
+                        platform_files=platform_files,
+                    )
                 if step_result["status"] == "failed":
                     iteration_failed = True
                     failed = True
@@ -617,5 +867,6 @@ __all__ = [
     "ApiRunResult",
     "run_api_case",
     "SKIPPED_REASON_PREVIOUS_FAILURE",
+    "SKIPPED_REASON_PREVIOUS_ITERATION",
     "SKIPPED_REASON_STEP_LIMIT",
 ]

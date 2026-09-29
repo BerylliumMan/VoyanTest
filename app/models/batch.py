@@ -25,6 +25,8 @@ class RunBatch(Base):
     # 统计来源：api_scenario 表示接口场景执行，source_id 为场景 id
     source = Column(String(32), nullable=True, index=True)
     source_id = Column(Integer, nullable=True, index=True)
+    # 「仅失败重跑」来源批次（031 US5）；NULL=普通批次
+    parent_batch_id = Column(Integer, nullable=True, index=True)
 
     runs = relationship("TestRun", backref="batch")
 

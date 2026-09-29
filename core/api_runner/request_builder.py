@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode
@@ -55,6 +56,10 @@ class RenderedRequest:
     follow_redirects: bool = True
     verify_ssl: bool = True
     auth: Optional[tuple] = None
+    # 031（US1）multipart：普通字段与文件字段（files[].path 为 platform://<id> 或变量引用，
+    # 解析与打开由执行层（服务端）完成，见 core/api_runner/runner.py 与 app/crud/api_file.py）
+    form_data: list[tuple[str, str]] = field(default_factory=list)
+    files: list[dict] = field(default_factory=list)
 
 
 def _render_items(items: Any, scope: VariableScope) -> list[tuple[str, str]]:
@@ -126,6 +131,39 @@ def _build_body(body: Any, headers: dict[str, str], scope: VariableScope) -> Any
     return rendered
 
 
+PLATFORM_REF_PREFIX = "platform://"
+_PLATFORM_REF_RE = re.compile(r"^platform://(\d+)$")
+
+
+def parse_platform_ref(value: Any) -> Optional[int]:
+    """031（US1）：``platform://12`` → 12；其它形式返回 None。
+
+    单一来源：core 层解析，app/crud/api_file.py 复用同一实现。
+    """
+    match = _PLATFORM_REF_RE.match(str(value or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def _render_files(items: Any, scope: VariableScope) -> list[dict]:
+    """031（US1）：渲染 multipart 文件字段（跳过缺 key/path 的脏项）。"""
+    out: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        path = render(item.get("path"), scope)
+        if not key or not path:
+            continue
+        out.append(
+            {
+                "key": key,
+                "path": path,
+                "content_type": item.get("content_type") or None,
+            }
+        )
+    return out
+
+
 def _build_auth(
     auth: Any,
     headers: dict[str, str],
@@ -166,7 +204,18 @@ def build_request(step: dict, scope: VariableScope) -> RenderedRequest:
     url = _resolve_url(url, scope)
     params = _build_params(url, request.get("query"), scope)
     headers = _merge_headers(request.get("headers"), scope)
-    content = _build_body(request.get("body"), headers, scope)
+    body_spec = request.get("body") or {}
+    form_data: list[tuple[str, str]] = []
+    files: list[dict] = []
+    if str(body_spec.get("type") or "") == "form_data" and (
+        body_spec.get("form_data") or body_spec.get("files")
+    ):
+        # 031（US1）：结构化 multipart —— 不设 Content-Type（httpx 带 boundary 自动设置）
+        form_data = _render_items(body_spec.get("form_data"), scope)
+        files = _render_files(body_spec.get("files"), scope)
+        content = None
+    else:
+        content = _build_body(body_spec, headers, scope)
     auth = _build_auth(request.get("auth"), headers, params, scope)
     if params:
         url = url.partition("?")[0] + "?" + urlencode(params)
@@ -187,6 +236,8 @@ def build_request(step: dict, scope: VariableScope) -> RenderedRequest:
         timeout_ms=timeout_ms,
         follow_redirects=bool(request.get("follow_redirects", True)),
         verify_ssl=bool(request.get("verify_ssl", True)),
+        form_data=form_data,
+        files=files,
         auth=auth,
     )
 

@@ -55,6 +55,10 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if request.method in ("GET", "HEAD", "OPTIONS"):
             return await call_next(request)
 
+        # 031（US8）：CI 令牌（非 cookie 凭据）无 CSRF 风险，豁免校验
+        if request.headers.get("authorization", "").lower().startswith("bearer vt_"):
+            return await call_next(request)
+
         # 校验 CSRF token
         csrf_cookie = request.cookies.get("csrf_token")
         csrf_header = request.headers.get("X-CSRF-Token", "")

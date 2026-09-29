@@ -333,6 +333,14 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
 
     project = await crud.get_project(db, batch.project_id)
     project_name = project.name if project else ""
+    parent_batch_name = None
+    parent_id = getattr(batch, "parent_batch_id", None)
+    if parent_id:
+        from app import db_models  # 031（US5）：本模块未在顶部导入聚合模型，按需局部导入
+
+        parent = await db.get(db_models.RunBatch, parent_id)
+        if parent is not None:
+            parent_batch_name = parent.name or f"批次 #{parent_id}"
 
     related = await crud.get_batch_detail_with_related(db, batch_id)
     runs = related["runs"]
@@ -399,6 +407,9 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
         "created_at": batch.created_at.isoformat() if batch.created_at else None,
         "started_at": batch.started_at.isoformat() if batch.started_at else None,
         "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
+        # 031（US5）：仅失败重跑来源批次（报告页互跳）
+        "parent_batch_id": getattr(batch, "parent_batch_id", None),
+        "parent_batch_name": parent_batch_name,
         "runs": runs_data,
     }
 
@@ -562,4 +573,89 @@ async def compare_batches(
         "b": {"id": b.id, "name": b.name, "status": b.status, "passed": b.passed, "failed": b.failed, "total": b.total_cases},
         "passed_diff": (b.passed or 0) - (a.passed or 0),
         "failed_diff": (b.failed or 0) - (a.failed or 0),
+    }
+
+
+@router.post("/batches/{batch_id}/rerun-failed")
+async def rerun_failed_batch(
+    batch_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """031（US5）：仅失败重跑 —— 用原批次的失败用例创建新批次（parent_batch_id 关联）。
+
+    语义（contracts §1.3）：
+      · 批次不存在/无权限 → 404；批次仍在运行 → 409；没有失败用例 → 409
+      · 新批次命名「<原名> · 仅失败重跑」，携带 parent_batch_id，报告页可互跳
+    """
+    from sqlalchemy import select
+
+    from app import db_models
+
+    batch = await _get_batch_for_user(batch_id, user, db)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+
+    if str(batch.status or "") in ("running", "pending"):
+        raise HTTPException(status_code=409, detail="批次仍在运行，请等结束后再重跑失败用例")
+
+    rows = list(
+        (
+            await db.execute(
+                select(db_models.TestRun).where(db_models.TestRun.batch_id == batch_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    failed_case_ids: list[int] = []
+    for run in rows:
+        if str(run.status or "") == "failed" and run.case_id:
+            if run.case_id not in failed_case_ids:
+                failed_case_ids.append(run.case_id)
+    if not failed_case_ids:
+        raise HTTPException(status_code=409, detail="该批次没有失败用例，无需重跑")
+
+    from app.crud import run as crud_run
+    from core.runner._persistence import build_batch_execution_queue
+
+    total = len(build_batch_execution_queue(failed_case_ids, [], "before_each"))
+    name = f"{(batch.name or f'批次 #{batch_id}')} · 仅失败重跑"
+    new_batch = await crud_run.create_run_batch(
+        db,
+        project_id=batch.project_id,
+        name=name,
+        total_cases=total,
+        triggered_by=getattr(user, "username", None),
+    )
+    # parent_batch_id 建立来源关联（报告页互跳）
+    new_batch.parent_batch_id = batch_id
+    await db.commit()
+    await db.refresh(new_batch)
+
+    from app.routers.testcase import execution as _exec
+
+    async def _run() -> None:
+        try:
+            await _exec.run_batch_test_cases(
+                failed_case_ids,
+                batch.project_id,
+                batch_id=new_batch.id,
+            )
+        finally:
+            user_id = getattr(user, "id", None)
+            if user_id:
+                try:
+                    from app.services.notifications import notify_batch_completed
+
+                    await notify_batch_completed(new_batch.id, user_id)
+                except Exception:  # noqa: BLE001 - 通知失败不影响批次
+                    logger.warning("重跑批次通知失败 batch=%s", new_batch.id, exc_info=True)
+
+    asyncio.create_task(_run())
+    return {
+        "batch_id": new_batch.id,
+        "total": total,
+        "parent_batch_id": batch_id,
+        "status": "running",
     }
