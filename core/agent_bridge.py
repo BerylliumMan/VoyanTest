@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -32,6 +33,9 @@ from core.ota_cursor import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 「拒绝 done」同一原因的连续上限（超过即明确失败，避免 50 失败轮空转）
+_REFUSE_DONE_LIMIT = 5
 
 
 def pick_checklist_index(
@@ -506,6 +510,70 @@ class AgentBridge:
             })
         return out
 
+    # ── 断言步骤的确定性覆盖（2026-09-30）─────────────────────────────────
+    # 背景：断言类步骤没有"动作"可覆盖，LLM 声明 done 时覆盖门永远不放行 →
+    # 实测「refusing premature done: uncovered steps [5]」空转 50 次撞失败轮上限
+    # （客户端跑 519 两次都是这样，看起来像"一直不结束"）。这里按快照做确定性验证：
+    # **期望文本确实出现在当前快照** → 记为已覆盖（不放水：文本必须真实可见）。
+    _ASSERT_STEP_RE = re.compile(r"^\s*(断言|验证|检查|确认)")
+
+    @classmethod
+    def _assertion_expectation(cls, description: str) -> str:
+        """从断言步骤描述中抽取期望文本：「断言页面包含【X】」→ X。"""
+        text = str(description or "")
+        m = re.search(r"[【「\"']([^】」\"']{2,})[】」\"']", text)
+        if m:
+            return m.group(1).strip()
+        t = re.sub(r"^\s*(断言|验证|检查|确认)", "", text).strip()
+        t = re.sub(r"^(页面|列表)?(包含|显示|出现|存在|变成|为|是)", "", t).strip()
+        return t[:40]
+
+    def _cover_assertion_steps_from_snapshot(
+        self, missed: list[int], snapshot: str
+    ) -> list[int]:
+        """断言步骤：快照中验证到期望文本即记为已覆盖；返回本次覆盖的步骤号。"""
+        if not missed or not snapshot:
+            return []
+        hay = re.sub(r"\s+", " ", snapshot).lower()
+        covered: list[int] = []
+        for order in missed:
+            rec = next(
+                (
+                    s for s in (self._run_steps or [])
+                    if int(s.get("step_order") or 0) == int(order)
+                ),
+                None,
+            )
+            if not rec:
+                continue
+            desc = str(rec.get("description") or "")
+            if not self._ASSERT_STEP_RE.match(desc):
+                continue
+            # 期望文本来源：① 描述里带【/「」的原文（最可靠）② 预期结果字段
+            # （描述只写"断言排序正确"这类判断句时，用 parsed_result 的字面值）
+            candidates: list[str] = []
+            extracted = self._assertion_expectation(desc)
+            if len(extracted) >= 2:
+                candidates.append(extracted)
+            expected_result = str(rec.get("parsed_result") or "").strip()
+            if len(expected_result) >= 2 and expected_result not in candidates:
+                # 预期结果可能带括号包裹，清一遍外层符号
+                from core.replay_resolve import clean_target_name
+
+                cleaned = clean_target_name(expected_result) or expected_result
+                if len(cleaned) >= 2 and cleaned not in candidates:
+                    candidates.append(cleaned)
+            matched = False
+            for expectation in candidates:
+                needle = re.sub(r"\s+", " ", expectation).lower()
+                if needle in hay:
+                    matched = True
+                    break
+            if matched:
+                self._journal_covered.add(int(order))
+                covered.append(int(order))
+        return covered
+
     def _ordered_step_numbers(self) -> list[int]:
         return [
             int(s.get("step_order") or i + 1)
@@ -724,6 +792,7 @@ class AgentBridge:
         _last_error_fp: str | None = None
         _consec_err_n = 0
         _decision_fails = 0
+        _refuse_done_same = 0
         successful_acts = 0
         assertion_passed = False
         self._active_agent_id = agent_id
@@ -987,23 +1056,46 @@ class AgentBridge:
                         o for o in self._ordered_step_numbers()
                         if o not in self._journal_covered
                     ]
-                    failed_turns += 1
-                    logger.info(
-                        "Bridge refusing premature done: uncovered steps %s "
-                        "(covered %s/%s, run #%d turn %d)",
-                        _missed, len(self._journal_covered), len(case_steps),
-                        run.id, turn,
-                    )
-                    context_messages.append({
-                        "role": "assistant",
-                        "content": (
-                            "SYSTEM: 仍有未完成的测试步骤 "
-                            f"{_missed}，不得返回 done。"
-                            "必须用工具真正执行剩余步骤；"
-                            "若无法完成请返回 action=error。"
-                        ),
-                    })
-                    continue
+                    # ① 断言步骤：按快照做确定性验证，验证到即覆盖（不再空转）
+                    _auto = self._cover_assertion_steps_from_snapshot(_missed, snapshot)
+                    if _auto:
+                        logger.info(
+                            "Bridge auto-covered assertion steps %s from snapshot "
+                            "(run #%d turn %d)",
+                            _auto, run.id, turn,
+                        )
+                        _missed = [
+                            o for o in self._ordered_step_numbers()
+                            if o not in self._journal_covered
+                        ]
+                    if _missed:
+                        # ② 同因拒绝上限：禁止"拒绝 done"无限空转（曾烧满 50 失败轮）
+                        _refuse_done_same += 1
+                        if _refuse_done_same >= _REFUSE_DONE_LIMIT:
+                            await self._fail(
+                                run.id,
+                                f"剩余步骤无法完成：{_missed}"
+                                f"（连续 {_refuse_done_same} 轮 done 被拒且无进展）",
+                            )
+                            return
+                        failed_turns += 1
+                        logger.info(
+                            "Bridge refusing premature done: uncovered steps %s "
+                            "(covered %s/%s, run #%d turn %d, refuse=%d)",
+                            _missed, len(self._journal_covered), len(case_steps),
+                            run.id, turn, _refuse_done_same,
+                        )
+                        context_messages.append({
+                            "role": "assistant",
+                            "content": (
+                                "SYSTEM: 仍有未完成的测试步骤 "
+                                f"{_missed}，不得返回 done。"
+                                "必须用工具真正执行剩余步骤；"
+                                "若无法完成请返回 action=error。"
+                            ),
+                        })
+                        continue
+                    # 全部步骤已覆盖（含断言自动覆盖）→ 放行到完成路径
                 _summary = action.get("_summary") or ""
                 await crud_agent_run.create_message(
                     self.db, run.id, turn, "assistant",
@@ -1210,6 +1302,7 @@ class AgentBridge:
                 _consec_err_n = 0
                 _last_error_fp = None
                 self._collect_journal_entry(action, turn)
+                _refuse_done_same = 0  # 有真实进展 → 重置「拒绝 done」计数
             if "断言通过" in status_text:
                 assertion_passed = True
 
