@@ -14,7 +14,7 @@ from openai import AsyncOpenAI
 from .. import crud
 from ..auth import require_admin
 from ..database import get_async_db
-from ..security.encryption import encrypt_value, decrypt_value
+from ..security.encryption import decrypt_value  # encrypt_value 已废弃（2026-09-30 明文落库）
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config", tags=["配置"])
@@ -101,11 +101,12 @@ async def update_ai_config(
     user = Depends(require_admin),
 ) -> AIConfigResponse:
     # 在 router 层做加密：CRUD 层只接受已加密/可存储的值
-    encrypted_key = encrypt_value(body.api_key) if body.api_key else None
+    # 2026-09-30 决策：AI key 明文落库（读取侧 decrypt_value 对非密文自动放行；历史密文由启动迁移解密）
+    api_key_value = body.api_key or None
     max_tokens = body.max_context_tokens or _DEFAULT_MAX_CONTEXT_TOKENS
     try:
         row = await crud.upsert_ai_config(
-            db, body.model, encrypted_key, body.api_base,
+            db, body.model, api_key_value, body.api_base,
             body.temperature, max_tokens,
             enable_thinking=body.enable_thinking,
         )
@@ -161,6 +162,7 @@ async def test_ai_config(
             if not model:
                 model = row.model
             if not api_key:
+                # 明文（新）与历史密文都兼容：decrypt_value 对非 gAAAAA 前缀原样返回
                 api_key = decrypt_value(row.api_key)
             if not api_base:
                 api_base = row.api_base

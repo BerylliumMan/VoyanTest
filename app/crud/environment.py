@@ -6,7 +6,8 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db_models, models
-from app.security.secret_vars import encrypt_variables  # 031（US2）：secret 密文落库
+# 2026-09-30 决策：secret 变量**落库明文**，仅做显示打码（不再加密）——
+# 加密带来的密钥管理风险（丢密钥/换密钥导致数据解不开）大于收益；历史密文由启动迁移解密。
 from app.crud.project import get_project
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ async def create_environment(db: AsyncSession, project_id: int, env: models.Envi
         browser=env.browser,
         headless=env.headless,
         cookies=env.cookies or [],
-        variables=encrypt_variables(env.variables or []),
+        variables=env.variables or [],
         headers=env.headers or [],
         is_default=(existing == 0),
     )
@@ -77,11 +78,9 @@ async def update_environment(db: AsyncSession, env_id: int, env: models.Environm
 
     update_data = env.model_dump(exclude_unset=True)
     if "variables" in update_data:
-        # 031（US2）：先按 ****** 语义合并（保留旧值），再对 secret 项加密落库
-        update_data["variables"] = encrypt_variables(
-            _merge_masked_variables(
-                db_env.variables or [], update_data["variables"] or []
-            )
+        # 2026-09-30 决策：仅按 ****** 语义合并（保留旧值），明文落库
+        update_data["variables"] = _merge_masked_variables(
+            db_env.variables or [], update_data["variables"] or []
         )
     for key, value in update_data.items():
         setattr(db_env, key, value)

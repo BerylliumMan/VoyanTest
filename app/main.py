@@ -126,18 +126,78 @@ async def _recover_orphaned_agent_runs():
         logger.warning("孤儿 agent_run 恢复失败: %s", exc, exc_info=True)
 
 
-async def _backfill_api_secret_variables() -> None:
-    """031（US2 T024）：环境/场景 secret 明文变量幂等加密回填（失败不阻断启动）。"""
+def _decrypt_secret_value(value: str) -> str:
+    """解密 ``enc:v1:<fernet>``（app/security/secret_vars.py 的历史格式）。"""
+    from app.security.secret_vars import SECRET_PREFIX, decrypt_secret_value
+
+    text = str(value or "")
+    if text.startswith(SECRET_PREFIX):
+        return str(decrypt_secret_value(text))
+    return text
+
+
+async def _migrate_secrets_to_plaintext() -> None:
+    """2026-09-30 决策：敏感值**落库明文**（仅显示打码）——把历史密文幂等解密回明文。
+
+    覆盖：environments.variables / api_scenarios.variables（enc:v1: 前缀）、ai_configs.api_key（gAAAAA Fernet）。
+    幂等（明文跳过）· 单行失败仅 warning（密钥已更换的历史行无法解密，保留原样）· 绝不阻断启动。
+    """
     try:
+        from sqlalchemy import select
+
+        from app import db_models as _m
         from app.database import AsyncSessionLocal
-        from app.security.secret_vars import backfill_secret_variables
+        from app.security.encryption import decrypt_value
+        from app.security.secret_vars import is_encrypted
+
+        changed_rows = 0
+        failed_rows = 0
 
         async with AsyncSessionLocal() as _db:
-            changed = await backfill_secret_variables(_db)
-        if changed:
-            logger.info("接口测试 secret 变量回填完成：%s 个对象", changed)
+            for model in (_m.Environment, _m.ApiScenario):
+                rows = list((await _db.execute(select(model))).scalars().all())
+                for row in rows:
+                    items = row.variables or []
+                    if not any(isinstance(i, dict) and is_encrypted(i.get("value")) for i in items):
+                        continue
+                    try:
+                        row.variables = [
+                            {**i, "value": _decrypt_secret_value(i["value"])}
+                            if isinstance(i, dict) and is_encrypted(i.get("value"))
+                            else i
+                            for i in items
+                        ]
+                        changed_rows += 1
+                    except Exception:  # noqa: BLE001 - 单行失败保留原样
+                        failed_rows += 1
+                        logger.warning(
+                            "明文迁移失败（保留原密文）%s id=%s", model.__tablename__,
+                            getattr(row, "id", "?"), exc_info=True,
+                        )
+
+            ai_rows = list((await _db.execute(select(_m.AIConfig))).scalars().all())
+            for row in ai_rows:
+                if row.api_key and str(row.api_key).startswith("gAAAAA"):
+                    try:
+                        plain = decrypt_value(row.api_key)
+                        # decrypt_value 对失败会原样返回密文（warning）——只有真的解开了才算成功迁移
+                        if plain and not str(plain).startswith("gAAAAA"):
+                            row.api_key = plain
+                            changed_rows += 1
+                        else:
+                            failed_rows += 1
+                    except Exception:  # noqa: BLE001
+                        failed_rows += 1
+                        logger.warning(
+                            "AI key 明文迁移失败（保留原密文，可在界面重新保存）id=%s",
+                            getattr(row, "id", "?"), exc_info=True,
+                        )
+            if changed_rows:
+                await _db.commit()
+        if changed_rows or failed_rows:
+            logger.info("明文迁移完成：解密 %s 行，失败保留 %s 行", changed_rows, failed_rows)
     except Exception:  # noqa: BLE001 - 迁移失败不阻断启动
-        logger.warning("接口测试 secret 变量回填失败（跳过）", exc_info=True)
+        logger.warning("明文迁移失败（跳过）", exc_info=True)
 
 
 async def _run_startup_init():
@@ -695,7 +755,7 @@ async def _run_startup_init():
     await _recover_orphaned_agent_runs()
 
     # 031（US2 T024）：接口测试 secret 变量幂等加密回填（失败不阻断启动）
-    await _backfill_api_secret_variables()
+    await _migrate_secrets_to_plaintext()
 
 
 async def _periodic_session_cleanup():
