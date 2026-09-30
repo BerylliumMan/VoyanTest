@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import inspect
 import logging
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ ALLOWED_UNIT_ACTIONS: set[str] = {
 # 需要 selector 的动作（缺失即丢弃该子动作）
 _REQUIRE_SELECTOR = {
     "click", "double_click", "right_click", "fill", "select",
-    "press_key", "check", "hover", "scroll", "assert_text",
+    "press_key", "check", "hover", "scroll",
 }
 # 需要 value 的动作
 _REQUIRE_VALUE = {"fill", "select", "press_key", "wait", "dialog", "goto", "assert_text"}
@@ -73,6 +74,137 @@ class UnitOutcome:
     @property
     def executed_count(self) -> int:
         return len(self.executed)
+
+
+_CLICK_ROLES = {
+    "button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "tab",
+    "option", "checkbox", "radio", "switch", "treeitem",
+}
+_FILL_ROLES = {"textbox", "searchbox"}
+_SELECT_ROLES = {"combobox", "listbox"}
+
+
+def _norm(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _best_candidate(candidates, target: str, *, roles: set[str] | None = None):
+    """候选里挑目标：精确名 > 最短包含名；并列（同优先级同长度）→ 放弃（安全第一）。"""
+    t = _norm(target)
+    if not t:
+        return None
+
+    def _pool(role_filter: set[str] | None):
+        out = []
+        for c in candidates or []:
+            try:
+                if not getattr(c, "visible", True) or not getattr(c, "enabled", True):
+                    continue
+                if role_filter and (getattr(c, "role", "") or "").lower() not in role_filter:
+                    continue
+                name = _norm(getattr(c, "name", "")) or _norm(getattr(c, "text", ""))
+            except Exception:  # noqa: BLE001
+                continue
+            if not name:
+                continue
+            if t == name:
+                out.append((0, len(name), c))
+            elif t in name:
+                out.append((1, len(name), c))
+        return out
+
+    pool = _pool(roles) or _pool(None)
+    if not pool:
+        return None
+    pool.sort(key=lambda item: (item[0], item[1]))
+    best = pool[0]
+    ties = [
+        p for p in pool
+        if p[0] == best[0] and p[1] == best[1] and getattr(p[2], "ref", None) != getattr(best[2], "ref", None)
+    ]
+    if ties:
+        return None
+    return best[2]
+
+
+def build_auto_unit(
+    steps: list[dict[str, Any]] | None,
+    covered_orders: set[int] | list[int] | None,
+    candidates,
+    *,
+    max_steps: int = 6,
+    min_steps: int = 2,
+    base_url: str | None = None,
+) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    """把"剩余**连续机械**步骤"组装成一个 unit（确定性，不依赖模型）。
+
+    只做机械解析 + 候选匹配；遇到任何一步解析不了/候选里找不到（含歧义）就**停止成组**，
+    把这段交给普通 OTA（LLM）。绝不猜意图、绝不猜目标。
+    """
+    from core.script_precompile import parse_step_intent
+
+    covered = {int(o) for o in (covered_orders or [])}
+    actions: list[dict[str, Any]] = []
+    notes: list[str] = []
+
+    for s in steps or []:
+        order = int(s.get("step_order") or 0)
+        if order in covered:
+            continue
+        if len(actions) >= int(max_steps):
+            notes.append(f"达到上限 {max_steps}，其余留给下一轮")
+            break
+        desc = str(s.get("description") or "")
+        intent = parse_step_intent(desc)
+        if not intent:
+            notes.append(f"step {order} 无法机械解析（停止成组）: {desc[:40]}")
+            break
+        kind = intent.get("kind")
+        if kind == "open":
+            # 只允许作为**首个**动作：显式 URL 或入口页 → goto(base_url)
+            if actions:
+                notes.append(f"step {order} 中途导航交给 LLM（停止成组）")
+                break
+            url = intent.get("url") or (base_url or "").strip()
+            if not url:
+                notes.append(f"step {order} 入口导航缺 base_url（停止成组）")
+                break
+            actions.append({"action": "goto", "value": url, "element_desc": desc[:40]})
+            continue
+        if kind == "press_key":
+            actions.append({"action": "press_key", "value": intent.get("key"), "element_desc": intent.get("key")})
+            continue
+        if kind == "wait":
+            actions.append({"action": "wait", "value": intent.get("text"), "element_desc": intent.get("text")})
+            continue
+        if kind == "assert_contains":
+            actions.append({"action": "assert_text", "value": intent.get("text"), "element_desc": intent.get("text")})
+            continue
+        if kind == "assert_title":
+            notes.append(f"step {order} 标题断言交给 LLM（停止成组）")
+            break
+        target = str(intent.get("target") or "")
+        if kind == "fill":
+            cand = _best_candidate(candidates, target, roles=_FILL_ROLES)
+        elif kind == "select":
+            cand = _best_candidate(candidates, target, roles=_SELECT_ROLES)
+        elif kind in ("click", "check", "uncheck", "hover"):
+            cand = _best_candidate(candidates, target, roles=_CLICK_ROLES)
+        elif kind == "scroll":
+            cand = _best_candidate(candidates, target)
+        else:
+            cand = None
+        if cand is None:
+            notes.append(f"step {order} 候选里找不到目标「{target}」（停止成组）")
+            break
+        act: dict[str, Any] = {"action": kind, "selector": getattr(cand, "ref", None), "element_desc": target}
+        if kind in ("fill", "select"):
+            act["value"] = intent.get("value")
+        actions.append(act)
+
+    if len(actions) < int(min_steps):
+        return None, notes
+    return actions, notes
 
 
 def normalize_unit(

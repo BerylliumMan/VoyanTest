@@ -190,6 +190,7 @@ class AgentRunner:
         context_max_turns: int = 10,
         tool_timeout_ms: int = 30000,
         system_prompt: str | None = None,
+        case_steps: list[dict[str, Any]] | None = None,
         base_url: str | None = None,
         db=None,
         run_id: int | None = None,
@@ -223,6 +224,10 @@ class AgentRunner:
         self.tool_registry = ToolRegistry(mcp_manager)
         self.context = AgentContext(max_turns=context_max_turns)
         self._system_prompt = system_prompt or OTA_SYSTEM_PROMPT
+        # Phase B(auto)：清单步骤 + 覆盖集合（确定性自动成组用）
+        self._run_steps: list[dict[str, Any]] = list(case_steps or [])
+        self._journal_covered: set[int] = set()
+        self._auto_unit_off = False
 
         # 运行时状态
         self.current_url: str = ""
@@ -403,6 +408,26 @@ class AgentRunner:
                 "error": f"操作超时 ({self.tool_timeout_ms}ms)",
             }
 
+    def _auto_unit_from_config_disabled(self) -> bool:
+        try:
+            from app.config import get_settings
+
+            cfg = get_settings()
+            return not (
+                getattr(cfg, "action_unit_enabled", True)
+                and getattr(cfg, "action_unit_auto", True)
+            )
+        except Exception:
+            return False
+
+    def _auto_unit_max(self) -> int:
+        try:
+            from app.config import get_settings
+
+            return int(getattr(get_settings(), "action_unit_max", 6) or 6)
+        except Exception:
+            return 6
+
     async def _execute_action_unit(
         self, turn: int, unit_raw: Any, observation: dict[str, Any]
     ) -> dict[str, Any]:
@@ -516,6 +541,33 @@ class AgentRunner:
                     "error", turn, error=f"观察页面失败: {exc}",
                     start_time=start_time,
                 )
+
+            # ── Phase B(auto)：确定性自动成组（机械段一次往返，不用 LLM）──
+            if (
+                not self._auto_unit_off
+                and self._run_steps
+                and not self._auto_unit_from_config_disabled()
+            ):
+                from core.action_unit import build_auto_unit
+
+                _cands = observation.get("candidates") or []
+                _unit_actions, _notes = build_auto_unit(
+                    self._run_steps, self._journal_covered, _cands,
+                    max_steps=self._auto_unit_max(),
+                    base_url=self.base_url or None,
+                )
+                if _unit_actions:
+                    logger.info(
+                        "unit(auto): 自动成组 %d 步: %s",
+                        len(_unit_actions), [a.get("action") for a in _unit_actions],
+                    )
+                    _unit_out = await self._execute_action_unit(turn, _unit_actions, observation)
+                    if _unit_out.get("success"):
+                        continue
+                    self._auto_unit_off = True
+                    continue
+                elif _notes:
+                    logger.debug("unit(auto): 不成组 — %s", "; ".join(_notes[:3]))
 
             # ── Think ──
             try:
@@ -722,7 +774,7 @@ class AgentRunner:
         if not name:
             return
         nested = action.get("args") if isinstance(action.get("args"), dict) else {}
-        self.journal.append({
+        entry = {
             "turn": turn,
             "success": True,
             "status": "ok",
@@ -734,7 +786,17 @@ class AgentRunner:
                 or action.get("target")
                 or nested.get("element_desc")
             ),
-        })
+        }
+        self.journal.append(entry)
+        # Phase B(auto)：维护覆盖集合（清单步号）
+        try:
+            from core.agent_bridge import pick_checklist_index
+
+            idx = pick_checklist_index(self._run_steps, self._journal_covered, entry)
+            if idx is not None:
+                self._journal_covered.add(int(idx))
+        except Exception:
+            pass
 
     async def _record_turn(
         self,

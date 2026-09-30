@@ -568,12 +568,21 @@ class AgentManager:
         }, timeout=60)
 
     async def send_act(self, agent_id: str, run_id: str, tool_call: dict) -> dict:
-        """通过 WS 向 Agent 发送操作指令（025-ref-click: 全字段透传）"""
-        args = tool_call.get("args", {})
+        """通过 WS 向 Agent 发送操作指令（025-ref-click: 全字段透传）。
+
+        兼容两种形状：
+          · 包装形 {"name": "fill", "args": {...}}（OTA 单动作）
+          · 扁平形 {"action": "fill", "selector": ..., "value": ...}（宏动作单元 / 自动成组）
+        此前只认包装形，宏动作单元会把 action 发成 None（客户端报 Unknown action）。
+        """
+        args = tool_call.get("args")
+        if not isinstance(args, dict):
+            _RESERVED = {"name", "tool", "action", "args", "thinking", "description", "timeout"}
+            args = {k: v for k, v in tool_call.items() if k not in _RESERVED and v is not None}
         return await self._send_and_wait(agent_id, {
             "type": "step_execute",
             "run_id": run_id,
-            "action": tool_call.get("name", tool_call.get("tool")),
+            "action": tool_call.get("name") or tool_call.get("tool") or tool_call.get("action"),
             "selector": args.get("selector"),
             "element_desc": args.get("element_desc") or args.get("element"),
             "description": tool_call.get("description") or args.get("description"),

@@ -258,6 +258,14 @@ async def run_test_case_via_agent(
 
     runner = AgentRunner(
         mcp_manager=mcp_manager,
+        case_steps=[
+            {
+                "step_order": int(getattr(st, "step_order", 0) or 0),
+                "description": getattr(st, "description", "") or "",
+                "parsed_result": getattr(st, "parsed_result", None) or "",
+            }
+            for st in (steps or [])
+        ],
         goal=goal_text,
         llm_client=llm_client,
         model=model,

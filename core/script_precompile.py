@@ -347,3 +347,67 @@ def missing_step_literals(script: str, steps: list[dict[str, Any]] | None) -> li
     """脚本里缺失的必需字面值（空列表 = 通过）。"""
     text = script or ""
     return [lit for lit in extract_step_literals(steps) if lit not in text]
+
+
+def parse_step_intent(description: str) -> dict[str, Any] | None:
+    """把一步描述解析成"机械动作意图"（供确定性自动成组 / 编译先行共用）。
+
+    Returns 形如 {"kind": ..., "target": ..., "value": ...}；无法机械解析时返回 None。
+    """
+    desc = (description or "").strip()
+    if not desc:
+        return None
+    # 打开/导航：显式 URL 或"入口页"（登录/首页/主页）可机械解析为 goto；
+    # 其余（如"打开商品列表页"这类需要已登录路径的）交给 LLM，不猜。
+    m = _RE_OPEN.match(desc)
+    if m:
+        url_m = _RE_URL.search(desc)
+        if url_m:
+            return {"kind": "open", "url": url_m.group(0), "entry": True}
+        rest = m.group("rest")
+        if any(h in rest for h in ("登录", "首页", "主页", "入口", "首屏")):
+            return {"kind": "open", "url": None, "entry": True}
+        return None
+
+    m = _RE_ASSERT_TITLE.search(desc)
+    if m:
+        return {"kind": "assert_title", "text": m.group("text")}
+    m = _RE_ASSERT_CONTAINS.search(desc)
+    if m:
+        return {"kind": "assert_contains", "text": m.group("text")}
+    if _RE_ASSERT_TEXT.search(desc):
+        return None  # "…为【1】" 这类判断句机械表达不了
+
+    m = _RE_FILL.search(desc)
+    if m:
+        return {"kind": "fill", "target": m.group("target"), "value": m.group("value")}
+    m = _RE_SELECT.search(desc) or _RE_SELECT_ALT.search(desc)
+    if m:
+        return {"kind": "select", "target": m.group("target"), "value": m.group("choice")}
+    m = _RE_UNCHECK.search(desc)
+    if m:
+        return {"kind": "uncheck", "target": m.group("target")}
+    m = _RE_CHECK.search(desc)
+    if m:
+        return {"kind": "check", "target": m.group("target")}
+    m = _RE_HOVER.search(desc)
+    if m:
+        return {"kind": "hover", "target": m.group("target")}
+    m = _RE_SCROLL.search(desc)
+    if m:
+        return {"kind": "scroll", "target": m.group("target")}
+    m = _RE_CLICK.search(desc)
+    if m:
+        return {"kind": "click", "target": m.group("target")}
+    m = _RE_WAIT_TEXT.search(desc)
+    if m:
+        return {"kind": "wait", "text": m.group("text")}
+    m = _RE_KEY.search(desc)
+    if m:
+        key_raw = m.group("key")
+        if key_raw.lower().startswith("ctrl+"):
+            key = "Control+" + key_raw.split("+", 1)[1].upper()
+        else:
+            key = _KEY_MAP.get(key_raw.lower(), key_raw)
+        return {"kind": "press_key", "key": key}
+    return None

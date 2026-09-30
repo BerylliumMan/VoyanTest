@@ -138,6 +138,7 @@ class AgentBridge:
         self._reuse_browser_session = bool((goal or {}).get("reuse_browser_session"))
         self._screenshot_dir: str | None = None
         self._screenshot_paths: dict[str, str] = {}
+        self._auto_unit_chain_ok = True  # Phase B(auto)：自动成组链路（失败后交给 LLM）
         self._active_agent_id: str | None = None
         self._active_run_id_str: str | None = None
         self._batch_id: int | None = existing_batch_id
@@ -457,6 +458,44 @@ class AgentBridge:
                     "Bridge: execution_mode 写入失败 run=%s", saved_run_id, exc_info=True
                 )
         logger.info("Bridge: report saved for run #%d (batch #%d, %d steps)", run.id, batch.id, len(logs))
+
+    def _auto_unit_actions(self, snapshot: str) -> list[dict[str, Any]] | None:
+        """Phase B(auto)：把"剩余连续机械步骤"确定性组装成 unit（不用模型）。"""
+        try:
+            from app.config import get_settings
+
+            cfg = get_settings()
+            if not (
+                getattr(cfg, "action_unit_enabled", True)
+                and getattr(cfg, "action_unit_auto", True)
+                and getattr(self, "_auto_unit_chain_ok", True)
+            ):
+                return None
+            if not getattr(self, "_run_steps", None):
+                return None
+            from core.action_unit import build_auto_unit
+            from core.locator_candidates import actionable_candidates, extract_candidates
+
+            cands = actionable_candidates(extract_candidates(snapshot or ""))
+            actions, notes = build_auto_unit(
+                self._run_steps,
+                getattr(self, "_journal_covered", set()),
+                cands,
+                max_steps=int(getattr(cfg, "action_unit_max", 6) or 6),
+                base_url=getattr(self, "_case_url", "") or None,
+            )
+            if not actions:
+                if notes:
+                    logger.debug("Bridge unit(auto): 不成组 — %s", "; ".join(notes[:3]))
+                return None
+            logger.info(
+                "Bridge unit(auto): 自动成组 %d 步: %s",
+                len(actions), [a.get("action") for a in actions],
+            )
+            return actions
+        except Exception:
+            logger.debug("Bridge unit(auto): 组装失败（跳过）", exc_info=True)
+            return None
 
     async def _execute_action_unit(
         self, run: AgentRun, turn: int, agent_id: str, run_id_str: str,
@@ -1249,6 +1288,25 @@ class AgentBridge:
                 if (c.get("ref") or "").strip()
             ]
 
+            # ── Phase B(auto)：确定性自动成组（机械段一次往返执行，不用 LLM）──
+            _auto_actions = self._auto_unit_actions(snapshot)
+            if _auto_actions:
+                _auto_out = await self._execute_action_unit(
+                    run, turn, agent_id, run_id_str, _auto_actions,
+                    snapshot, context_messages,
+                )
+                if _auto_out.get("success"):
+                    continue
+                self._auto_unit_chain_ok = False
+                try:
+                    await crud_agent_run.create_message(
+                        self.db, run.id, turn, "assistant",
+                        f"自动成组未完成（已完成 {_auto_out.get('executed', 0)} 步），转 LLM 决策",
+                    )
+                except Exception:
+                    logger.debug("unit(auto) 审计消息写入跳过", exc_info=True)
+                continue
+
             # ── 2. Think: LLM 决策 ──
             action = await self._llm_decide(
                 llm_client=llm_client,
@@ -1596,6 +1654,7 @@ class AgentBridge:
                 _consec_err_n = 0
                 _last_error_fp = None
                 self._collect_journal_entry(action, turn)
+                self._auto_unit_chain_ok = True  # LLM 推进成功 → 允许再次自动成组
                 _refuse_done_same = 0  # 有真实进展 → 重置「拒绝 done」计数
             if "断言通过" in status_text:
                 assertion_passed = True
