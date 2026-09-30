@@ -521,7 +521,7 @@ class AgentBridge:
     def _assertion_expectation(cls, description: str) -> str:
         """从断言步骤描述中抽取期望文本：「断言页面包含【X】」→ X。"""
         text = str(description or "")
-        m = re.search(r"[【「\"']([^】」\"']{2,})[】」\"']", text)
+        m = re.search(r"[【「\"']([^】」\"']{1,})[】」\"']", text)
         if m:
             return m.group(1).strip()
         t = re.sub(r"^\s*(断言|验证|检查|确认)", "", text).strip()
@@ -553,20 +553,28 @@ class AgentBridge:
             # （描述只写"断言排序正确"这类判断句时，用 parsed_result 的字面值）
             candidates: list[str] = []
             extracted = self._assertion_expectation(desc)
-            if len(extracted) >= 2:
+            if len(extracted) >= 1:
                 candidates.append(extracted)
             expected_result = str(rec.get("parsed_result") or "").strip()
-            if len(expected_result) >= 2 and expected_result not in candidates:
+            if len(expected_result) >= 1 and expected_result not in candidates:
                 # 预期结果可能带括号包裹，清一遍外层符号
                 from core.replay_resolve import clean_target_name
 
                 cleaned = clean_target_name(expected_result) or expected_result
-                if len(cleaned) >= 2 and cleaned not in candidates:
+                if len(cleaned) >= 1 and cleaned not in candidates:
                     candidates.append(cleaned)
             matched = False
             for expectation in candidates:
-                needle = re.sub(r"\s+", " ", expectation).lower()
-                if needle in hay:
+                needle = re.sub(r"\s+", " ", expectation).strip().lower()
+                if not needle:
+                    continue
+                if len(needle) <= 2:
+                    # 短期望（如购物车徽标数字「1」）：按**词边界**匹配，
+                    # 避免 "1" 命中 "134" 之类的子串造成假通过
+                    if re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", hay):
+                        matched = True
+                        break
+                elif needle in hay:
                     matched = True
                     break
             if matched:
