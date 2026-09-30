@@ -94,7 +94,7 @@ def main():
     agent = AgentClient(args.server, args.name, headless=args.headless,
                         username=args.username, password=args.password)
     try:
-        asyncio.run(agent.start())
+        asyncio.run(agent.run_forever())
     except KeyboardInterrupt:
         logger.info("Agent stopped by user")
 

@@ -392,7 +392,33 @@ class AgentClient:
             await self._stop_mcp()
             self.running = False
 
+    async def run_forever(self) -> None:
+        """断线自动重连：服务端重启/网络抖动后自动回来（stop() 或 Ctrl+C 才退出）。
+
+        2026-09-30 修复：此前 main() 里只 asyncio.run(agent.start()) **跑一次**，
+        连接被服务端关闭后进程直接结束（实测服务端重启后客户端不再上线）。
+        """
+        backoff = 3.0
+        while not getattr(self, "_stopped", False):
+            try:
+                await self.start()
+                backoff = 3.0  # 成功连上过 → 重置退避
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:  # noqa: BLE001 - 任何异常都重试
+                logger.warning("连接异常（%s），%.0fs 后重连", exc, backoff)
+            if getattr(self, "_stopped", False):
+                break
+            self._emit_status('reconnecting')
+            self._log_info(f"Connection lost — reconnecting in {int(backoff)}s ...")
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                break
+            backoff = min(backoff * 2, 30.0)
+
     async def stop(self):
+        self._stopped = True
         self.running = False
         if self._ws:
             await self._ws.close()

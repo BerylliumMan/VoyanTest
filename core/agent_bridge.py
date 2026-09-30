@@ -110,6 +110,10 @@ class AgentBridge:
         Returns:
             已 commit/refresh 的 AgentRun 实例，status 为 completed 或 failed
         """
+        # 记录本次执行所属的客户端（execution_mode=client:<agent> 用；此前只在回放分支里设置，
+        # 导致回放路径写出 client:unknown）
+        self._active_agent_id = agent_id or getattr(self, "_active_agent_id", None)
+
         self._notify_user_id = notify_user_id
         if existing_run_id:
             run = await self.db.get(AgentRun, existing_run_id)
@@ -291,6 +295,26 @@ class AgentBridge:
         self._batch_id = batch.id
         logger.info("Bridge: batch #%d created (running)", batch.id)
 
+    def _client_execution_mode(self, run: "AgentRun | None" = None) -> str:
+        """客户端执行模式标识（029 约定：client:<agent_name>）。
+
+        取值顺序：本次执行记录的 agent → run.goal 里的 agent_name（客户端派发时必带）→ unknown。
+        回放（compiled_script）路径在设置 _active_agent_id 之前就可能落报告，故这里兜底。
+        """
+        name = getattr(self, "_active_agent_id", None)
+        if not name and run is not None:
+            goal = getattr(run, "goal", None)
+            if isinstance(goal, str):
+                try:
+                    import json as _json
+
+                    goal = _json.loads(goal)
+                except Exception:
+                    goal = None
+            if isinstance(goal, dict):
+                name = goal.get("agent_name")
+        return f"client:{name or 'unknown'}"
+
     async def _save_report(self, run: AgentRun, case_id: int) -> None:
         """创建 TestRun / RunBatch 报告记录，含步骤日志。"""
         from core.runner._persistence import save_run_results
@@ -397,7 +421,7 @@ class AgentBridge:
                     })
 
         # 调用 save_run_results 创建 TestRun
-        await save_run_results(
+        saved_run_id = await save_run_results(
             case_id=case_id,
             status=run_status_map,
             start_time=run.started_at or tz_now(),
@@ -408,6 +432,19 @@ class AgentBridge:
             logs=logs,
             batch_id=batch.id,
         )
+        # 2026-09-30 修复：客户端执行的报告此前 execution_mode 落到列默认值 "server"（实际跑在客户端）。
+        # 与 029 接口客户端执行同一约定：client:<agent>。
+        if saved_run_id:
+            try:
+                from core.runner._api_execution import _persist_execution_mode
+
+                await _persist_execution_mode(
+                    self.db, int(saved_run_id), self._client_execution_mode(run)
+                )
+            except Exception:
+                logger.warning(
+                    "Bridge: execution_mode 写入失败 run=%s", saved_run_id, exc_info=True
+                )
         logger.info("Bridge: report saved for run #%d (batch #%d, %d steps)", run.id, batch.id, len(logs))
 
     async def _try_replay_compiled_script(
