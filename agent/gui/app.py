@@ -259,7 +259,8 @@ class AgentGUI:
         reconnect_delay = 5
         while not self._stop_event.is_set():
             try:
-                await agent.start()
+                # 与命令行模式一致：断线自动重连（服务端重启/网络抖动后自动回来）
+                await agent.run_forever()
             except Exception:
                 logger.error("Agent 连接异常", exc_info=True)
                 self._schedule_status_update("disconnected")
