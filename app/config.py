@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # 编译先行（Phase A）：客户端链路在没有可用固化脚本时，先"编译一段脚本"直跑，
     # 失败自动回落 OTA。可用环境变量 COMPILE_FIRST_ENABLED=false 关闭。
     compile_first_enabled: bool = True
+    # 宏动作单元（Phase B）：允许决策一次携带多个机械子动作（逐步入账、失败原地停止）。
+    action_unit_enabled: bool = True
+    action_unit_max: int = 6
 
     # Playwright MCP
     playwright_browser_type: str = "chromium"

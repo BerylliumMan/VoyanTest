@@ -297,7 +297,9 @@ class AgentRunner:
             f"GOAL: {self.goal}\n\n"
             f"CURRENT URL: {observation.get('url', 'unknown')}\n\n"
             f"HISTORY:\n{history_text}\n\n"
-            f"Based on the CURRENT PAGE snapshot below, decide the SINGLE NEXT ACTION "
+            f"Based on the CURRENT PAGE snapshot below, decide the NEXT ACTION — either one action, "
+            f"or a 'unit' array of up to 6 MECHANICAL sub-actions (fill/click/select/"
+            f"press_key/wait/assert_text with optional fallbacks) — "
             f"to move towards the GOAL. If the goal is already achieved, use action='done'."
         )
         from core.locator_candidates import serialize_candidates
@@ -401,6 +403,71 @@ class AgentRunner:
                 "error": f"操作超时 ({self.tool_timeout_ms}ms)",
             }
 
+    async def _execute_action_unit(
+        self, turn: int, unit_raw: Any, observation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Phase B：宏动作单元（服务端 MCP 版）——多子动作、逐步入账、失败原地停止。"""
+        from app.config import get_settings
+
+        s = get_settings()
+        if not getattr(s, "action_unit_enabled", True):
+            return {"success": False, "disabled": True}
+        max_steps = int(getattr(s, "action_unit_max", 6) or 6)
+
+        from core.locator_candidates import is_snapshot_ref
+
+        _cands = observation.get("candidates") or []
+        _refs = {getattr(c, "ref", None) for c in _cands}
+
+        def _valid_ref(sel: str) -> bool:
+            if not is_snapshot_ref(sel or ""):
+                return True
+            return sel in _refs
+
+        from core.action_unit import normalize_unit, run_unit
+
+        steps, problems = normalize_unit(
+            unit_raw, max_steps=max_steps, is_valid_ref=_valid_ref
+        )
+        if problems:
+            logger.info("unit: 规范化丢弃 %s（turn %d）", problems, turn)
+        if not steps:
+            self.context.add_turn(
+                "assistant",
+                "SYSTEM: unit 没有可执行子动作（" + "; ".join(problems[:3]) + "），请改用单动作。",
+            )
+            return {"success": False, "invalid": True}
+
+        async def _exec(sub_action: dict[str, Any]) -> dict[str, Any]:
+            return await self._execute_action_once(sub_action)
+
+        def _on_ok(sub_action: dict[str, Any], _result: dict[str, Any]) -> None:
+            try:
+                self._collect_journal_entry(sub_action, turn)
+            except Exception:
+                logger.debug("unit journal 记录跳过", exc_info=True)
+
+        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok)
+        if outcome.success:
+            logger.info("unit: %d 步执行成功（turn %d）", outcome.executed_count, turn)
+            self.context.add_turn(
+                "assistant", f"宏动作单元：{outcome.executed_count} 步一次往返执行成功",
+                tool_calls=list(outcome.executed),
+            )
+            return {"success": True, "executed": outcome.executed_count}
+        logger.info(
+            "unit: 第 %d 步失败停止（已完成 %d 步）: %s（turn %d）",
+            (outcome.failed_index or 0) + 1, outcome.executed_count,
+            str(outcome.error)[:100], turn,
+        )
+        self.context.add_turn(
+            "assistant",
+            f"SYSTEM: 宏动作单元在第 {(outcome.failed_index or 0) + 1} 步失败"
+            f"（已完成 {outcome.executed_count} 步）：{str(outcome.error)[:160]}。"
+            "请重新观察页面后继续（可改用单动作逐个处理该段）。",
+        )
+        return {"success": False, "executed": outcome.executed_count, "error": str(outcome.error or "")}
+
     # ── 主循环 ────────────────────────────────────────────────────────────
 
     async def run(
@@ -476,6 +543,14 @@ class AgentRunner:
                     result=summary,
                     start_time=start_time,
                 )
+
+            # ── Phase B：宏动作单元（一次往返推进一段机械动作）──
+            if isinstance(action.get("unit"), list):
+                _unit = await self._execute_action_unit(turn, action.get("unit"), observation)
+                if _unit.get("success"):
+                    continue
+                # 单元失败：已在上下文写入纠偏，进入下一轮重新决策（不计额外动作）
+                continue
 
             # ── Act ──
             try:

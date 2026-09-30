@@ -63,6 +63,27 @@ ACTIONS (maps to Playwright MCP):
 - "done": Goal achieved. value=summary.
 - "error": Cannot proceed. value=reason.
 
+BATCH UNIT (optional, saves round trips — Phase B):
+- When the next few steps are MECHANICAL (no new decision is needed between them — e.g. fill
+  several fields, then click, then select, then assert), emit a "unit" array instead of one action:
+  {"thinking": "...", "unit": [
+     {"action": "fill", "selector": "e11", "value": "standard_user", "fallbacks": ["text=Username", "input#user-name"]},
+     {"action": "fill", "selector": "e13", "value": "secret_sauce"},
+     {"action": "click", "selector": "e15", "fallbacks": ["button:has-text('Login')"]},
+     {"action": "select", "selector": "e38", "value": "Name (Z to A)"},
+     {"action": "assert_text", "selector": "e40", "value": "Test.allTheThings() T-Shirt (Red)"}
+  ]}
+- Up to 6 sub-actions. Allowed in a unit: click / double_click / right_click / fill / select /
+  press_key / check / hover / scroll / wait / goto / dialog / assert_text.
+- Each sub-action uses the SAME fields as a single action. Optional "fallbacks" is a short list of
+  alternative selectors (CSS, text=..., role=button[name=...]) tried in order when the ref fails.
+- Refs MUST come from the CURRENT snapshot candidates. Sub-actions run sequentially and each one is
+  verified; the FIRST failure stops the unit and you will receive a fresh observation with the failure.
+- Assertion steps must be expressed as "assert_text" (value = expected visible text) inside the unit.
+- NEVER put click_xy / move_mouse / drag_xy / evaluate / screenshot / done / error inside a unit.
+- Use a unit only when you are confident about the whole segment; otherwise take ONE action per turn.
+- A unit replaces the single action for this turn — do not emit both.
+
 RULES:
 - Output ONLY one JSON object — no markdown fences.
 - Always include "thinking" with brief reasoning and the chosen label/ref.
@@ -70,7 +91,7 @@ RULES:
 - After dropdowns open, take another turn to pick the option.
 - Closing overlays: click Close/关闭/X for EACH visible dialog; never assume gone.
 
-OUTPUT SCHEMA:
+OUTPUT SCHEMA (single action):
 {
   "action": "click",
   "selector": "e15",
@@ -78,6 +99,15 @@ OUTPUT SCHEMA:
   "timeout_ms": 30000,
   "thinking": "…",
   "next_goal": "…"
+}
+
+OUTPUT SCHEMA (batch unit):
+{
+  "thinking": "…",
+  "unit": [
+    {"action": "fill", "selector": "e11", "value": "standard_user", "fallbacks": ["text=Username"]},
+    {"action": "click", "selector": "e15"}
+  ]
 }
 """
 

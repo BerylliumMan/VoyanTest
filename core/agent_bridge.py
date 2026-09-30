@@ -458,6 +458,110 @@ class AgentBridge:
                 )
         logger.info("Bridge: report saved for run #%d (batch #%d, %d steps)", run.id, batch.id, len(logs))
 
+    async def _execute_action_unit(
+        self, run: AgentRun, turn: int, agent_id: str, run_id_str: str,
+        unit_raw: Any, snapshot: str, context_messages: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Phase B：执行一个"宏动作单元"（多子动作、逐步入账、失败原地停止）。
+
+        返回 {"success": bool, "executed": int}；不为 None 表示已按单元路径处理完毕，
+        调用方按成功/失败分别处理（成功进入下一轮 observe；失败注入纠偏提示）。
+        """
+        from app.config import get_settings
+
+        s = get_settings()
+        if not getattr(s, "action_unit_enabled", True):
+            return {"success": False, "executed": 0, "disabled": True}
+        max_steps = int(getattr(s, "action_unit_max", 6) or 6)
+
+        # ref 校验：只认本轮候选里的 ref；CSS/text= 等直通（与既有语义一致）
+        try:
+            from core.locator_candidates import (
+                actionable_candidates,
+                extract_candidates,
+                is_snapshot_ref,
+            )
+
+            _refs = {
+                c.ref for c in actionable_candidates(extract_candidates(snapshot or ""))
+            }
+        except Exception:
+            _refs = set()
+
+        def _valid_ref(sel: str) -> bool:
+            if not is_snapshot_ref(sel or ""):
+                return True
+            return sel in _refs
+
+        from core.action_unit import normalize_unit, run_unit
+
+        steps, problems = normalize_unit(
+            unit_raw, max_steps=max_steps, is_valid_ref=_valid_ref
+        )
+        if problems:
+            logger.info("Bridge unit: 规范化丢弃 %s（run #%d turn %d）", problems, run.id, turn)
+        if not steps:
+            context_messages.append({
+                "role": "assistant",
+                "content": (
+                    "SYSTEM: 你的 unit 没有任何可执行子动作（"
+                    + "; ".join(problems[:3])
+                    + "）。请改用普通单动作或修正后重发。"
+                ),
+            })
+            return {"success": False, "executed": 0, "invalid": True}
+
+        async def _exec(sub_action: dict[str, Any]) -> dict[str, Any]:
+            try:
+                return await asyncio.wait_for(
+                    self.agent_manager.send_act(agent_id, run_id_str, sub_action),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                return {"success": False, "error": "Act timeout (120s)"}
+            except Exception as exc:  # noqa: BLE001
+                return {"success": False, "error": str(exc)}
+
+        async def _on_ok(sub_action: dict[str, Any], _result: dict[str, Any]) -> None:
+            try:
+                self._collect_journal_entry(sub_action, turn)
+            except Exception:
+                logger.debug("Bridge unit journal 记录跳过", exc_info=True)
+
+        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok)
+        if outcome.success:
+            logger.info(
+                "Bridge unit: %d 步执行成功（run #%d turn %d）",
+                outcome.executed_count, run.id, turn,
+            )
+            try:
+                await crud_agent_run.create_message(
+                    self.db, run.id, turn, "assistant",
+                    f"宏动作单元：{outcome.executed_count} 步一次往返执行成功",
+                )
+            except Exception:
+                logger.debug("unit 审计消息写入跳过", exc_info=True)
+            return {"success": True, "executed": outcome.executed_count}
+
+        logger.info(
+            "Bridge unit: 第 %d 步失败停止（已完成 %d 步）: %s（run #%d turn %d）",
+            (outcome.failed_index or 0) + 1, outcome.executed_count,
+            str(outcome.error)[:100], run.id, turn,
+        )
+        context_messages.append({
+            "role": "assistant",
+            "content": (
+                f"SYSTEM: 宏动作单元在第 {(outcome.failed_index or 0) + 1} 步失败"
+                f"（已完成 {outcome.executed_count} 步）：{str(outcome.error)[:160]}。"
+                "请重新观察页面后继续（可改用单动作逐个处理该段）。"
+            ),
+        })
+        return {
+            "success": False,
+            "executed": outcome.executed_count,
+            "error": str(outcome.error or ""),
+        }
+
     async def _try_compile_first(self, run: AgentRun, agent_id: str, run_id_str: str) -> bool:
         """编译先行（Phase A）：没有可用固化脚本时，先"编译一段脚本"直跑。
 
@@ -507,6 +611,11 @@ class AgentBridge:
                 run, agent_id, run_id_str,
                 script_override=script, persist_on_success=True,
             )
+            if not ok:
+                logger.info(
+                    "Bridge 编译先行：脚本执行未通过 case=%s，脚本预览: %s",
+                    run.case_id, " / ".join(script.strip().splitlines()[-6:]),
+                )
             try:
                 await crud_agent_run.create_message(
                     self.db, run.id, 1, "assistant",
@@ -1272,6 +1381,24 @@ class AgentBridge:
                 )
                 continue
 
+            # ── Phase B：宏动作单元（一次往返推进一段机械动作）──
+            if isinstance(action.get("unit"), list):
+                _unit = await self._execute_action_unit(
+                    run, turn, agent_id, run_id_str, action.get("unit"),
+                    snapshot, context_messages,
+                )
+                if _unit.get("success"):
+                    continue  # 已逐步入账；下一轮 observe → think
+                failed_turns += 1
+                if failed_turns >= max_failed_turns:
+                    await self._fail(
+                        run.id,
+                        f"失败轮达到上限 ({failed_turns}/{max_failed_turns})；"
+                        f"宏动作单元步进失败: {str(_unit.get('error'))[:80]}",
+                    )
+                    return
+                continue
+
             # ── 3. Act: WS 执行 ──
             try:
                 result = await asyncio.wait_for(
@@ -1570,14 +1697,15 @@ class AgentBridge:
 
         step_description = (
             f"GOAL: {goal}\n\n"
-            f"TEST CASE STEPS (complete ALL of them, one at a time):\n{steps_text}\n\n"
+            f"TEST CASE STEPS (complete ALL of them; when consecutive steps are mechanical — you already know the target and value — group them into ONE 'unit' array instead of one action per turn):\n{steps_text}\n\n"
             f"HISTORY (recent actions and results):\n{context_text}\n"
             f"CURRENT URL: {page_url}\n"
             f"{nav_instruction}\n\n"
             f"IMPORTANT: You MUST complete ALL test steps above before returning done. "
             f"Only return done after verifying the last step's expected result. "
-            f"Based on the PAGE CONTENT below, decide the SINGLE NEXT ACTION "
-            f"to move towards the GOAL. "
+            f"Based on the PAGE CONTENT below, decide the NEXT ACTION — either one action, "
+            f"or a 'unit' array of up to 6 MECHANICAL sub-actions (fill/click/select/"
+            f"press_key/wait/assert_text with optional fallbacks) — to move towards the GOAL. "
             f"If stuck or impossible, use action='error' with explanation in value."
             f"\n\nSNAPSHOT VERSION: {current_snapshot_version}"
             f"\nCANDIDATE ELEMENTS (choose selector only from this list):\n"
@@ -1586,6 +1714,10 @@ class AgentBridge:
         step_description += (
             f"\n\nHARD RULES: "
             f"(a) NEVER repeat an action whose tool result was successful. "
+            f"(a2) When the next 2-6 checklist steps need no new decision between them "
+            f"(e.g. fill several fields -> click -> select -> assert), emit ONE \"unit\" array "
+            f"covering them instead of dripping one action per turn; include \"fallbacks\" "
+            f"(CSS/text=) for each sub-action. "
             f"(b) Prefer snapshot refs; use click_xy when a screenshot is attached "
             f"and refs are unreliable (overlay/canvas). "
             f"(c) When HISTORY shows every test-case step has a successful tool result, "
