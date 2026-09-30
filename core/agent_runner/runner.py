@@ -229,6 +229,8 @@ class AgentRunner:
         self.turns_used: int = 0
         self._force_next_screenshot: bool = False
         self._consecutive_act_failures: int = 0
+        # 成功动作日志（供 run 结束后合成固化脚本；见 _collect_journal_entry）
+        self.journal: list[dict[str, Any]] = []
         self._last_candidates: tuple = ()
         self._pending_hint: str | None = None
 
@@ -552,6 +554,8 @@ class AgentRunner:
 
             if result.get("success"):
                 self._consecutive_act_failures = 0
+                # 成功动作入 journal（服务端 OTA 的固化合成输入，形状与 AgentBridge 对齐）
+                self._collect_journal_entry(action, turn)
             else:
                 self._consecutive_act_failures += 1
                 self._force_next_screenshot = True
@@ -618,6 +622,30 @@ class AgentRunner:
 
     # ── 辅助方法 ───────────────────────────────────────────────────────────
 
+    def _collect_journal_entry(self, action: dict[str, Any], turn: int) -> None:
+        """把一次成功动作记入 journal（供 run 结束后合成固化脚本）。
+
+        与 AgentBridge._collect_journal_entry 形一致；服务端 OTA 没有 checklist 映射，
+        ``checklist_index`` 由合成侧按 steps 兜底推断。
+        """
+        name = str(action.get("action") or action.get("name") or "")
+        if not name:
+            return
+        nested = action.get("args") if isinstance(action.get("args"), dict) else {}
+        self.journal.append({
+            "turn": turn,
+            "success": True,
+            "status": "ok",
+            "action": name,
+            "selector": action.get("selector", nested.get("selector")),
+            "value": action.get("value", nested.get("value")),
+            "element_desc": (
+                action.get("element_desc")
+                or action.get("target")
+                or nested.get("element_desc")
+            ),
+        })
+
     async def _record_turn(
         self,
         turn: int,
@@ -643,10 +671,20 @@ class AgentRunner:
             self._db, self._run_id, turn, "assistant",
             str(action),
         )
+        # LLM 决策把动作参数放在**顶层**（selector/value/target…），不是嵌套 args ——
+        # 曾因此把所有 tool_args 记成 {}，回放里看不到定位符与取值。这里两者都收。
+        tool_args = action.get("args") or {
+            key: action.get(key)
+            for key in (
+                "selector", "target", "candidate_ref", "snapshot_version",
+                "value", "element_desc", "key", "path", "url", "text",
+            )
+            if action.get(key) is not None
+        }
         await crud_agent_run.create_tool_call(
             self._db, self._run_id, turn,
             action.get("name", action.get("action", "unknown")),
-            action.get("args", {}),
+            tool_args,
             result.get("success", False),
             result.get("error", ""),
         )

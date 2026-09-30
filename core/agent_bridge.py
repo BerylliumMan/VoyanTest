@@ -159,7 +159,13 @@ class AgentBridge:
                 "reuse_existing_browser": bool(
                     getattr(self, "_reuse_browser_session", False)
                 ),
-                "navigate_base_url": False,
+                # 2026-09-30 修复：此前恒为 False → **首个用例**（全新浏览器）也不导航，
+                # 页面停在 about:blank，固化脚本回放的第一条断言必然失败（实测 case=513
+                # "Locator expected to be visible: get_by_role('heading', name='Products')"），
+                # 随后被迫回落 OTA。只有批次内续跑（复用会话）才应跳过导航。
+                "navigate_base_url": not bool(
+                    getattr(self, "_reuse_browser_session", False)
+                ),
             })
             await asyncio.sleep(1)  # 等 MCP 初始化
         except Exception as e:

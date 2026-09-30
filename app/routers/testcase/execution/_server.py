@@ -173,6 +173,24 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     if not req.case_ids:
         raise HTTPException(status_code=400, detail="No cases selected")
 
+    # 2026-09-30 修复：批量指定客户端 → 走客户端派发（与 /batch-run-client 同一实现）。
+    # 前端「批量执行 + 选客户端」此前因 BatchRunRequest 缺字段被静默忽略、实际跑在服务端。
+    if req.agent_name:
+        from app.routers.testcase.execution._client import batch_run_client
+        from app.routers.testcase.execution._schemas import BatchCaseIdsRequest
+
+        return await batch_run_client(
+            BatchCaseIdsRequest(
+                case_ids=req.case_ids,
+                agent_name=req.agent_name,
+                init_case_ids=req.init_case_ids or [],
+                environment_id=req.environment_id,
+                init_policy=req.init_policy or "before_each",
+            ),
+            user=user,
+            db=db,
+        )
+
     async def _load_test_cases(cids: list[int]) -> list:
         result = []
         for cid in cids:

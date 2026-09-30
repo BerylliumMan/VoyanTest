@@ -65,6 +65,93 @@ async def _record_batch_case_failure(
 # ---------------------------------------------------------------------------
 
 
+async def _synthesize_and_persist_compiled_script(
+    *,
+    db,
+    tc,
+    case_id: int,
+    steps: list,
+    goal_text: str,
+    journal: list[dict],
+    llm_client,
+    model: str | None,
+    base_url: str | None,
+) -> None:
+    """服务端 OTA 跑通后固化脚本（失败不影响用例结果，只记日志）。
+
+    与 AgentBridge._synthesize_compiled_script 同一套合成器与落库字段；
+    steps 由 ORM 转 dict（合成器按 dict 读取）。
+    """
+    try:
+        if not journal:
+            logger.info("固化跳过 case=%s（无成功动作日志）", case_id)
+            return
+        from core.compiled_script import persist_compiled_script, steps_content_hash
+        from core.script_synthesize import synthesize_playwright_script
+
+        # 模型名必须非空（实测：空串直接 400 required model）——沿用执行 Agent 的解析链
+        resolved_model = model
+        if not (isinstance(resolved_model, str) and resolved_model.strip()):
+            try:
+                # 与 AgentBridge 同一解析链（core.llm_wrapper._resolve_config）
+                from core.llm_wrapper import _resolve_config as _llm_resolve_config
+
+                _, _, resolved_model = await _llm_resolve_config(agent_type="execution")
+            except Exception:  # noqa: BLE001 - 解析失败保持原样，交由下方空值分支处理
+                logger.debug("固化：模型解析失败，沿用原值", exc_info=True)
+        if not (isinstance(resolved_model, str) and resolved_model.strip()):
+            logger.info("固化跳过 case=%s（未解析到模型名）", case_id)
+            return
+
+        steps_payload = [
+            {
+                "step_order": int(getattr(s, "step_order", 0) or 0),
+                "description": getattr(s, "description", "") or "",
+                "parsed_result": (getattr(s, "parsed_result", None) or ""),
+            }
+            for s in (steps or [])
+        ]
+        # 补 checklist 映射：合成器把「无 checklist_index 的条目」当噪声全部丢弃
+        # （实测 journal=5 全被 dropped_noise）——与 AgentBridge 的收集逻辑对齐。
+        try:
+            from core.agent_bridge import pick_checklist_index
+
+            covered: set[int] = set()
+            for entry in journal:
+                idx = entry.get("checklist_index") or pick_checklist_index(
+                    steps_payload, covered, entry
+                )
+                if idx is None:
+                    continue
+                covered.add(int(idx))
+                entry["checklist_index"] = int(idx)
+                entry.setdefault("checklist_note", f"Step {idx}")
+        except Exception:  # noqa: BLE001 - 映射失败不阻断（合成器会按噪声丢弃）
+            logger.debug("固化：checklist 映射构建跳过", exc_info=True)
+
+        script = await synthesize_playwright_script(
+            client=llm_client,
+            model=resolved_model,
+            case_id=case_id,
+            case_name=getattr(tc, "name", "") or f"Case #{case_id}",
+            goal_text=goal_text,
+            journal=journal,
+            steps=steps_payload,
+            base_url=base_url,
+        )
+        if not script or not script.strip():
+            logger.info("固化产出为空 case=%s", case_id)
+            return
+        persist_compiled_script(tc, script=script, steps_hash=steps_content_hash(steps_payload))
+        await db.commit()
+        logger.info(
+            "固化脚本已生成 case=%s bytes=%s（journal=%s）",
+            case_id, len(script), len(journal),
+        )
+    except Exception:  # noqa: BLE001 - 固化失败绝不影响用例结果
+        logger.warning("固化脚本生成失败 case=%s（忽略）", case_id, exc_info=True)
+
+
 async def _should_use_agent_runner(agent_def) -> bool:
     """兼容旧调用；逻辑见 ``core.agent_ota.should_use_ota_agent``。"""
     return should_use_ota_agent(agent_def)
@@ -225,6 +312,14 @@ async def run_test_case_via_agent(
     except Exception:
         logger.exception("AgentRunner 写入 TestRun 失败 case_id=%s", case_id)
         saved_run_id = run_id
+
+    # 跑成功 → 固化脚本（与客户端 AgentBridge 对齐：第二次起可秒级回放、零 LLM）
+    if case_status == "passed" and tc is not None:
+        await _synthesize_and_persist_compiled_script(
+            db=db, tc=tc, case_id=case_id, steps=steps,
+            goal_text=goal_text, journal=list(getattr(runner, "journal", None) or []),
+            llm_client=llm_client, model=model, base_url=base_url,
+        )
 
     return {
         "case_id": case_id,

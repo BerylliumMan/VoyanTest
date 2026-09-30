@@ -14,6 +14,9 @@ InitPolicy = Literal["once", "before_each"]
 class BatchRunRequest(BaseModel):
     case_ids: List[int]
     environment_id: Optional[int] = None
+    # 2026-09-30 修复：前端批量会带 agent_name（选客户端执行），此前字段缺失被 Pydantic 静默忽略
+    # → 批量「选客户端」实际跑在服务端。现在显式接收并路由到客户端派发。
+    agent_name: Optional[str] = None
     init_case_ids: List[int] = []
     # 列表批跑默认 before_each；用例集入口应显式传 once
     init_policy: InitPolicy = "before_each"
