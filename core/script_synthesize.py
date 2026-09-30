@@ -767,3 +767,153 @@ async def repair_playwright_script(
             "repaired script missing required targets: " + ", ".join(missing)
         )
     return _accept_synthesized_script(fixed, case_id=case_id, steps=steps)
+
+
+# ── 编译先行：步骤 → 脚本（无 journal 场景）──────────────────────────────────
+
+SYNTH_FROM_STEPS_SYSTEM = """You write a durable Playwright async Python script for a UI test case \
+BEFORE it has ever been executed. There is NO action journal — the checklist steps are the only \
+source of truth. This script is the FIRST-RUN attempt; if it fails, the platform falls back to a \
+smart agent loop, so correctness and robustness matter more than cleverness.
+
+Rules:
+1. Function name: async def test_case_<case_id>(page) -> None
+2. Fulfil EVERY checklist step. Every assertion step (断言/验证/检查) must become an \
+   `expect(...)` assertion that would fail if the expectation did not hold.
+3. Concrete values (usernames, passwords, option texts, expected texts) must appear VERBATIM. \
+   Never invent or alter values.
+4. Locators: prefer page.get_by_role(...) / page.get_by_label(...) / page.get_by_placeholder(...); \
+   chain fallbacks with .or_(...) and finish with .first. NEVER emit snapshot refs (e1 / f1e2).
+5. Navigation: page.goto(<url>, wait_until='domcontentloaded'); at most one navigation unless a \
+   step explicitly opens another page.
+6. Waits: rely on Playwright auto-wait and expect(...) timeouts only. NEVER use \
+   page.wait_for_timeout / asyncio.sleep / networkidle.
+7. ASCII punctuation only in code (no → ， ： （ ） 「 」).
+8. Output ONLY the Python code, no prose.
+"""
+
+
+async def synthesize_script_from_steps(
+    *,
+    client: AsyncOpenAI,
+    model: str,
+    case_id: int,
+    case_name: str = "",
+    steps: list[dict[str, Any]] | None,
+    base_url: str | None = None,
+    goal_text: str = "",
+    temperature: float = 0.1,
+    use_llm: bool = True,
+) -> str | None:
+    """编译先行：从「用例步骤」直接生成可执行脚本（模板直译 → LLM 兜底 → 同一套质量闸）。
+
+    与 ``synthesize_playwright_script``（跑成功后按 journal 合成）共用质量闸：
+    语法/Unicode 修复、``.first`` 加固、字面值覆盖门。任何一环不达标返回 None，
+    由调用方回落到 OTA 智能执行（绝不半吊子落库）。
+    """
+    steps = list(steps or [])
+    if not steps:
+        return None
+
+    from core.script_precompile import (
+        build_script_from_steps,
+        extract_step_literals,
+        missing_step_literals,
+    )
+
+    _assert_steps = [
+        s2 for s2 in steps
+        if re.search(r"断言|验证|检查", str(s2.get("description") or ""))
+    ]
+
+    templated, unmapped = build_script_from_steps(
+        case_id=int(case_id), case_name=case_name, steps=steps, base_url=base_url
+    )
+    if templated and not unmapped:
+        try:
+            script = harden_locators_with_first(_ensure_entrypoint(templated, int(case_id)))
+            script = _accept_synthesized_script(script, case_id=int(case_id), steps=steps)
+            _missing_lit = missing_step_literals(script, steps)
+            if _missing_lit:
+                raise ValueError("缺少必需字面值: " + ", ".join(_missing_lit))
+            if _assert_steps and "expect(" not in script:
+                raise ValueError("缺少断言（用例有断言步骤，脚本无 expect）")
+            logger.info("precompile: 模板直译通过 case=%s bytes=%s", case_id, len(script))
+            return script
+        except ValueError as exc:
+            logger.info("precompile: 模板未过闸 case=%s — %s（转 LLM）", case_id, exc)
+    else:
+        logger.info(
+            "precompile: 模板未完全覆盖 case=%s unmapped=%s（转 LLM）", case_id, unmapped
+        )
+
+    if not use_llm:
+        return None
+
+    checklist = _checklist_for_synth(steps)
+    required_literals = extract_step_literals(steps)
+    literal_rule = (
+        "HARD RULE: these literals MUST appear verbatim in the code: "
+        + json.dumps(required_literals, ensure_ascii=False)
+        + "\n"
+        if required_literals
+        else ""
+    )
+    user = (
+        f"Write the first-run Playwright script for case_id={int(case_id)}.\n"
+        f"Function name MUST be: async def test_case_{int(case_id)}(page)\n"
+        f"base_url: {base_url or ''}\n"
+        f"case_name: {case_name}\n"
+        f"{literal_rule}\n"
+        f"CHECKLIST (source of truth):\n"
+        f"{json.dumps(checklist, ensure_ascii=False, indent=2)}\n"
+    )
+    try:
+        from core.precondition import extract_response_text
+
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYNTH_FROM_STEPS_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            temperature=temperature,
+            max_tokens=8192,
+        )
+        raw_message = resp.choices[0].message
+        script = _strip_fences(extract_response_text(raw_message))
+        if not script or "async def" not in script:
+            logger.warning(
+                "precompile: LLM 输出无法解析 case=%s content_len=%s",
+                case_id, len(getattr(raw_message, "content", None) or ""),
+            )
+            return None
+        script = harden_locators_with_first(_ensure_entrypoint(script, int(case_id)))
+        try:
+            script = _accept_synthesized_script(script, case_id=int(case_id), steps=steps)
+            _missing_lit = missing_step_literals(script, steps)
+            if _missing_lit:
+                raise ValueError("缺少必需字面值: " + ", ".join(_missing_lit))
+        except ValueError as exc:
+            logger.info("precompile: LLM 脚本未过闸 case=%s — %s（尝试修复一次）", case_id, exc)
+            repaired = await repair_playwright_script(
+                client=client,
+                model=model,
+                case_id=int(case_id),
+                script=script,
+                error=str(exc),
+                journal=None,
+                steps=steps,
+            )
+            repaired = harden_locators_with_first(_ensure_entrypoint(repaired, int(case_id)))
+            script = _accept_synthesized_script(repaired, case_id=int(case_id), steps=steps)
+            _missing_lit = missing_step_literals(script, steps)
+            if _missing_lit:
+                raise ValueError("缺少必需字面值: " + ", ".join(_missing_lit))
+            if _assert_steps and "expect(" not in script:
+                raise ValueError("缺少断言（用例有断言步骤，脚本无 expect）")
+        logger.info("precompile: LLM 生成通过 case=%s bytes=%s", case_id, len(script))
+        return script
+    except Exception:  # noqa: BLE001 — 编译失败一律回落 OTA，不阻断执行
+        logger.warning("precompile: LLM 生成失败 case=%s（回落 OTA）", case_id, exc_info=True)
+        return None

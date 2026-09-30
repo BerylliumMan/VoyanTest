@@ -157,6 +157,17 @@ class AgentBridge:
                 exc_info=True,
             )
 
+        # 编译先行（Phase A）：无可回放脚本时，先编译一段脚本直跑（失败不阻断，回落 OTA）
+        try:
+            if await self._try_compile_first(run, agent_id, run_id_str):
+                try:
+                    await self._save_report(run, case_id)
+                except Exception:
+                    logger.exception("Bridge report save failed for run #%d", run.id)
+                return run
+        except Exception:
+            logger.warning("Bridge 编译先行流程异常 — 回落 OTA", exc_info=True)
+
         # 发送 RUN_START 让 Agent 启动 MCP / 浏览器
         try:
             await self.agent_manager.send(agent_id, {
@@ -447,15 +458,89 @@ class AgentBridge:
                 )
         logger.info("Bridge: report saved for run #%d (batch #%d, %d steps)", run.id, batch.id, len(logs))
 
+    async def _try_compile_first(self, run: AgentRun, agent_id: str, run_id_str: str) -> bool:
+        """编译先行（Phase A）：没有可用固化脚本时，先"编译一段脚本"直跑。
+
+        与回放共用一套执行机制（客户端 Playwright + expect 断言）；成功即落库为固化脚本，
+        失败/不达标**不记失败轮**，静默回落 OTA 智能执行。
+        """
+        try:
+            from app.config import get_settings
+
+            if not getattr(get_settings(), "compile_first_enabled", False):
+                return False
+            steps = await self._load_case_steps(run.case_id)
+            if not steps or len(steps) < 2:
+                return False
+            from app.crud import get_test_case
+
+            tc = await get_test_case(self.db, run.case_id)
+            base_url = await self._resolve_base_url(run.case_id)
+
+            # 模型/客户端解析：与"跑成功后合成"（_synthesize_compiled_script）**逐字一致**
+            from core.llm_wrapper import _resolve_config as _llm_resolve_config
+            from core.llm_wrapper import create_openai_client
+
+            llm_client = await create_openai_client(agent_type="execution")
+            try:
+                _, _, model = await _llm_resolve_config(agent_type="execution")
+            except Exception:
+                logger.warning("编译先行：模型名解析失败 case=%s", run.case_id, exc_info=True)
+                model = ""
+            if not (isinstance(model, str) and model.strip()):
+                logger.info("编译先行：未解析到模型名 case=%s（模板可编译则仍可直译）", run.case_id)
+            from core.script_synthesize import synthesize_script_from_steps
+
+            script = await synthesize_script_from_steps(
+                client=llm_client,
+                model=model or "",
+                case_id=run.case_id,
+                case_name=(getattr(tc, "name", None) or "") if tc else "",
+                steps=steps,
+                base_url=base_url or None,
+            )
+            if not script:
+                logger.info("Bridge 编译先行：未产出可用脚本 case=%s（回落 OTA）", run.case_id)
+                return False
+
+            ok = await self._try_replay_compiled_script(
+                run, agent_id, run_id_str,
+                script_override=script, persist_on_success=True,
+            )
+            try:
+                await crud_agent_run.create_message(
+                    self.db, run.id, 1, "assistant",
+                    (
+                        f"编译先行：脚本生成并执行成功（{len(script)} 字节，已落库为固化脚本）"
+                        if ok else
+                        "编译先行：脚本生成并尝试执行未通过，回落智能执行（OTA）"
+                    ),
+                )
+            except Exception:
+                logger.debug("编译先行：审计消息写入跳过", exc_info=True)
+            return ok
+        except Exception:
+            logger.warning(
+                "Bridge 编译先行失败 case=%s（回落 OTA）", run.case_id, exc_info=True,
+            )
+            return False
+
     async def _try_replay_compiled_script(
-        self, run: AgentRun, agent_id: str, run_id_str: str
+        self, run: AgentRun, agent_id: str, run_id_str: str, *,
+        script_override: str | None = None,
+        persist_on_success: bool = False,
     ) -> bool:
-        """回放固化脚本；成功即完成 run（返回 True），失败/不支持返回 False 交给 OTA。"""
+        """回放固化脚本；成功即完成 run（返回 True），失败/不支持返回 False 交给 OTA。
+
+        ``script_override``：编译先行产出的脚本（尚未落库）——跳过 hash 校验，
+        成功且 ``persist_on_success`` 时落库为正式固化脚本（下次直接回放）。
+        """
         from app.crud import get_test_case
         from core.compiled_script import steps_content_hash
 
         tc = await get_test_case(self.db, run.case_id)
-        script = (getattr(tc, "compiled_script", None) or "").strip() if tc else ""
+        stored = (getattr(tc, "compiled_script", None) or "").strip() if tc else ""
+        script = (script_override or stored).strip()
         if not script:
             return False
         steps = await self._load_case_steps(run.case_id)
@@ -463,7 +548,7 @@ class AgentBridge:
             return False
         current_hash = steps_content_hash(steps)
         stored_hash = getattr(tc, "compiled_script_hash", None) or ""
-        if stored_hash and stored_hash != current_hash:
+        if not script_override and stored_hash and stored_hash != current_hash:
             logger.info(
                 "Bridge: compiled_script hash mismatch case=%s stored=%s current=%s — ignore",
                 run.case_id, stored_hash[:12], current_hash[:12],
@@ -504,6 +589,20 @@ class AgentBridge:
             return False
 
         logger.info("Bridge: compiled_script replay SUCCESS case=%s steps=%s", run.case_id, len(res))
+        if persist_on_success and script_override and tc is not None:
+            try:
+                from core.compiled_script import persist_compiled_script
+
+                persist_compiled_script(tc, script=script, steps_hash=current_hash)
+                await self.db.commit()
+                logger.info(
+                    "Bridge 编译先行：脚本已落库 case=%s bytes=%s（下次直接回放）",
+                    run.case_id, len(script),
+                )
+            except Exception:
+                logger.warning(
+                    "Bridge 编译先行：脚本落库失败 case=%s", run.case_id, exc_info=True,
+                )
         try:
             await crud_agent_run.create_message(
                 self.db, run.id, 1, "assistant",
@@ -1185,6 +1284,29 @@ class AgentBridge:
             except Exception as exc:
                 logger.exception("Act error at turn %d", turn)
                 result = {"success": False, "error": str(exc)}
+
+            # Phase C：瞬时失败（元素未就绪/超时/被替换）本地重试，不计失败轮
+            if not result.get("success"):
+                from core.mcp_args import is_transient_action_error
+
+                if is_transient_action_error(result.get("error")):
+                    for _delay in (0.6, 1.5):
+                        logger.info(
+                            "Bridge: act 瞬时失败，本地重试（%.1fs 后）: %s",
+                            _delay, str(result.get("error"))[:80],
+                        )
+                        await asyncio.sleep(_delay)
+                        try:
+                            result = await asyncio.wait_for(
+                                self.agent_manager.send_act(agent_id, run_id_str, action),
+                                timeout=120,
+                            )
+                        except asyncio.TimeoutError:
+                            result = {"success": False, "error": "Act timeout (120s)"}
+                        except Exception as exc:  # noqa: BLE001
+                            result = {"success": False, "error": str(exc)}
+                        if result.get("success"):
+                            break
 
             # ── 3b. Act 失败恢复：Cursor click_xy 兜底 + stale ref 刷新 ──
             if not result.get("success"):

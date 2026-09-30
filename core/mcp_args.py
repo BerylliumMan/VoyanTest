@@ -299,3 +299,22 @@ def error_fingerprint(msg: str | None) -> str:
     if not msg:
         return ""
     return str(msg).strip()[:40]
+
+
+_TRANSIENT_ACTION_ERROR_RE = re.compile(
+    r"(not found|no node|not visible|not attached|timed out|timeout|stale|"
+    r"no element|detached|waiting for|not an? element|"
+    r"元素不存在|未找到|不可见|超时|元素不在)",
+    re.I,
+)
+
+
+def is_transient_action_error(msg: str | None) -> bool:
+    """动作失败是否属于"瞬时"（元素未就绪/超时/被替换），值得本地重试。
+
+    Phase C（2026-09-30）：这类失败此前直接记失败轮，把时序问题变成回合成本；
+    现在由执行器先做本地重试（0.6s/1.5s），全部失败才记账。
+    """
+    if not msg:
+        return False
+    return bool(_TRANSIENT_ACTION_ERROR_RE.search(str(msg)))

@@ -368,23 +368,38 @@ class AgentRunner:
         return action
 
     async def act(self, action: dict[str, Any]) -> dict[str, Any]:
-        """执行 LLM 决定的动作。"""
+        """执行 LLM 决定的动作（含瞬时失败本地重试，不计失败轮）。"""
         action_name = action.get("action", "?")
         logger.info("Act: %s (selector=%s, value=%s)",
                      action_name, action.get("selector"), action.get("value"))
 
+        result = await self._execute_action_once(action)
+        if not result.get("success"):
+            from core.mcp_args import is_transient_action_error
+
+            if is_transient_action_error(result.get("error")):
+                for _delay in (0.6, 1.5):
+                    logger.info(
+                        "Runner: act 瞬时失败，本地重试（%.1fs 后）: %s",
+                        _delay, str(result.get("error"))[:80],
+                    )
+                    await asyncio.sleep(_delay)
+                    result = await self._execute_action_once(action)
+                    if result.get("success"):
+                        break
+        return result
+
+    async def _execute_action_once(self, action: dict[str, Any]) -> dict[str, Any]:
         try:
-            result = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self.tool_registry.execute(action),
                 timeout=self.tool_timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
-            result = {
+            return {
                 "success": False,
                 "error": f"操作超时 ({self.tool_timeout_ms}ms)",
             }
-
-        return result
 
     # ── 主循环 ────────────────────────────────────────────────────────────
 

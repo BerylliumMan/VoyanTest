@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     api_test_file_max_mb: int = 50
     api_test_file_dir: str = "data/api_test_files"  # 卷持久化目录（部署挂载 /app/data）
     api_script_timeout_ms: int = 2000
+    # 编译先行（Phase A）：客户端链路在没有可用固化脚本时，先"编译一段脚本"直跑，
+    # 失败自动回落 OTA。可用环境变量 COMPILE_FIRST_ENABLED=false 关闭。
+    compile_first_enabled: bool = True
 
     # Playwright MCP
     playwright_browser_type: str = "chromium"
