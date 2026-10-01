@@ -803,14 +803,13 @@ class AgentBridge:
 
     @classmethod
     def _assertion_expectation(cls, description: str) -> str:
-        """从断言步骤描述中抽取期望文本：「断言页面包含【X】」→ X。"""
-        text = str(description or "")
-        m = re.search(r"[【「\"']([^】」\"']{1,})[】」\"']", text)
-        if m:
-            return m.group(1).strip()
-        t = re.sub(r"^\s*(断言|验证|检查|确认)", "", text).strip()
-        t = re.sub(r"^(页面|列表)?(包含|显示|出现|存在|变成|为|是)", "", t).strip()
-        return t[:40]
+        """从断言步骤描述中抽取期望文本：「断言页面包含【X】」→ X。
+
+        与生成器校验器共用 ``core.script_precompile.extract_expected_text``（同一口径）。
+        """
+        from core.script_precompile import extract_expected_text
+
+        return extract_expected_text(description)
 
     def _cover_assertion_steps_from_snapshot(
         self, missed: list[int], snapshot: str

@@ -411,3 +411,54 @@ def parse_step_intent(description: str) -> dict[str, Any] | None:
             key = _KEY_MAP.get(key_raw.lower(), key_raw)
         return {"kind": "press_key", "key": key}
     return None
+
+
+# ── 断言可判定性（生成器校验器 与 运行时覆盖门 **同源**）────────────────────
+
+_RE_EXPECT_BRACKET = re.compile(r"[【「\"']([^】」\"']{1,})[】」\"']")
+_VAGUE_EXPECT = re.compile(r"^(可见|正常|正确|成功|完成|无误|可用|加载完成|存在)$")
+
+
+def extract_expected_text(description: str, parsed_result: str | None = None) -> str:
+    """从断言步骤描述中抽取期望文本：「断言页面包含【X】」→ X。
+
+    与 ``AgentBridge._assertion_expectation`` 完全一致（同一口径）：
+    ① 优先取【「" ' 包裹的原文（最可靠）；
+    ② 否则剥掉"断言/页面包含"等前缀，取前 40 字；
+    ③ 描述给不出时用预期结果字段。
+    """
+    text = str(description or "")
+    m = _RE_EXPECT_BRACKET.search(text)
+    if m:
+        return m.group(1).strip()
+    t = re.sub(r"^\s*(断言|验证|检查|确认)", "", text).strip()
+    t = re.sub(r"^(页面|列表)?(包含|显示|出现|存在|变成|为|是)", "", t).strip()
+    if t:
+        return t[:40]
+    fallback = str(parsed_result or "").strip()
+    return fallback[:40]
+
+
+def is_checkable_assertion(
+    description: str,
+    parsed_result: str | None = None,
+    value: str | None = None,
+) -> bool:
+    """断言是否**机器可判定**：期望内容必须能在页面上查找。
+
+    通过条件（满足其一）：
+      ① 描述/预期结果里有【】包裹、且内容具体（非"可见/正常/完成"这类状态词）；
+      ② 结构化步骤的 ``value`` 具体（非空、非状态词）——它就是期望查找内容。
+    拒绝：「断言购物车图标可见」「断言商品列表正常显示」等没有可查找内容的断言
+    （运行时覆盖门永远无法确认，会把用例拖死——515 的真实教训）。
+    """
+    text = str(description or "")
+    m = _RE_EXPECT_BRACKET.search(text) or _RE_EXPECT_BRACKET.search(str(parsed_result or ""))
+    if m:
+        bracket_value = m.group(1).strip()
+        if bracket_value and not _VAGUE_EXPECT.match(bracket_value):
+            return True
+    candidate = str(value if value is not None else "").strip()
+    if candidate and not _VAGUE_EXPECT.match(candidate):
+        return True
+    return False

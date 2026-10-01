@@ -6,6 +6,16 @@ from typing import Any
 import re
 from dataclasses import asdict as _asdict
 
+_ASSERT_STEP_PREFIX_RE = re.compile(r"^\s*(断言|验证|检查|确认)")
+
+
+def _is_assert_step(desc: str, action: str) -> bool:
+    if action and action.lower() in _ASSERT_ACTIONS:
+        return True
+    return bool(_ASSERT_STEP_PREFIX_RE.match(desc or ""))
+
+
+from core.script_precompile import is_checkable_assertion
 from core.step_normalize import (
     UI_ACTIONS,
     coerce_structured_step,
@@ -172,6 +182,26 @@ def _validate_test_case(
                 f"step_{i}_observe",
                 f"步骤 {i + 1} 是观察体（无法执行），须改写成动作或断言: {desc[:60]}",
             )
+
+        # 断言必须机器可判定（与运行时覆盖门同源：core.script_precompile.is_checkable_assertion）
+        if _is_assert_step(desc, action):
+            # 结构化（UI）断言：契约要求 value 就是期望文案 → 必须有具体的 value；
+            # 文本型（功能）断言：描述/预期结果里必须有【】包裹、非状态词的期望内容。
+            if require_structured:
+                ok = is_checkable_assertion("", None, step.get("value"))
+                hint = "结构化断言的 value 必须是页面上会出现的具体文案/数字（如 value=\"1\"）"
+            else:
+                ok = is_checkable_assertion(
+                    desc,
+                    step.get("parsed_result") or step.get("expected"),
+                    step.get("value"),
+                )
+                hint = "须用【】给出页面上会出现的期望文案/数字（如『断言页面包含【Products】』）"
+            if not ok:
+                result.fail(
+                    f"step_{i}_assert_unverifiable",
+                    f"步骤 {i + 1} 断言无法机器判定，{hint}: {desc[:60]}",
+                )
 
         if require_structured:
             # Hard-check raw fields BEFORE coerce strips ellipsis / type suffixes

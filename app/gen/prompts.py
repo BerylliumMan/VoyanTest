@@ -68,6 +68,14 @@ FP_EXTRACT_PROMPT = """你是资深的软件测试工程师。请仔细阅读需
 原文没有写的功能（哪怕行业里常见）一律不得输出。
 """
 
+ASSERT_CHECK_RULE = """【断言可判定 — 硬规则】
+- 每条断言必须给出**页面上能查到的期望文案或数字**，并用【】包住它：
+  ✓「断言页面包含【Products】」 ✓「断言按钮文字变为【Remove】」 ✓「断言购物车图标徽标数字为【1】」
+- 禁止无法机器判定的断言（引擎会在页面文本里查找【】里的内容，查不到即失败）：
+  ✗「断言购物车图标可见」 ✗「断言商品列表正常显示」 ✗「断言功能正常」 ✗「断言页面加载完成」 ✗「断言数据正确」
+- 判断依据必须是【】里的**期望出现的内容**（文案/数字），不能是控件名/对象名。
+"""
+
 TC_GENERATE_PROMPT = """你是资深的软件测试工程师。请为以下**测试项**生成**功能测试用例**（业务场景验证）。
 
 【可执行数据 — 硬规则】
@@ -91,6 +99,9 @@ structured_steps 的 target_name 必须是该控件的可见文案或 aria-label
 - 风格范本（照此写）：
   在【Username】输入框输入「standard_user」→ 在【Password】密码框输入「secret_sauce」
   → 点击【Login】登录按钮 → 断言页面包含【Products】
+
+""" + ASSERT_CHECK_RULE + """
+
 
 """ + _GROUNDING_CONTRACT + """
 
@@ -140,6 +151,8 @@ _UI_STEP_CONTRACT = """
   3) fill：`{"action":"fill","target_name":"<素材输入标签>","target_role":"textbox","value":"<素材或文档给出的值>"}`
   4) select：先 click 展开再 select；字段名与选项均须来自素材
   5) wait / assert：等待或断言的文案必须在素材中出现过
+""" + ASSERT_CHECK_RULE + """
+
   6) 纯图标无字：icon_click + icon_hint（位置+外观+用途），禁止 `target_name":"图标"`
 - **禁止**控件类型词进 target_name（按钮、下拉框、输入框…）
 - **禁止**省略号；看不清就跳过或改用 icon_hint
