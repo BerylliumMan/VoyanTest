@@ -529,6 +529,21 @@ def render_structured_step(step: dict[str, Any] | None) -> str:
     return action or ""
 
 
+
+def _strip_wrappers(value: str) -> str:
+    """去掉值外层的【】/「」/『』/引号/圆括号（成对或单边都清）。"""
+    v = (value or "").strip()
+    pairs = [("【", "】"), ("「", "」"), ("『", "』"), ("\"", "\""), ("'", "'"), ("（", "）"), ("(", ")")]
+    changed = True
+    while changed and v:
+        changed = False
+        for a, b in pairs:
+            if v.startswith(a) and v.endswith(b) and len(v) >= len(a) + len(b):
+                v = v[len(a): len(v) - len(b)].strip()
+                changed = True
+    return v
+
+
 def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     """Best-effort parse of Instant NL into StructuredStep. Returns None if unknown."""
     raw = (step or "").strip()
@@ -557,6 +572,59 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     s = sanitize_ui_step(raw).strip()
     if not s:
         return None
+    # 清掉嵌套包裹：点击【「Login」】→ 点击【Login】（sanitize 可能把「X」塞进【】里）
+    s = re.sub(r"【\s*[「『\"']([^】」』\"']+)[」』\"']\s*】", r"【\1】", s)
+
+    # ── 宽口径：控制类型后缀 + 任意括号值（生成提示词的规范写法就在这一档）──
+    #   「在【Username】输入框输入「standard_user」」→ fill(Username, standard_user)
+    _CTRL_OPT = r"(?:的)?(?:输入框|密码框|搜索框|文本框|输入字段|字段|下拉框|下拉菜单|下拉列表|选择器|组合框|框)?"
+    _SEP_OPT = r"\s*(?:中|里)?\s*"
+    _VAL_TAIL = r"([【「『\"']?\s*(.+?)\s*[】」』\"']?)\s*$"
+
+    m = re.match(
+        rf"^(?:在\s*)?(?P<label>【[^】]+】|[^【】]+?)\s*{_CTRL_OPT}{_SEP_OPT}(?:输入|填写|填入|键入)\s*{_VAL_TAIL}",
+        s,
+    )
+    if m and re.search(r"(输入|填写|填入|键入)", s):
+        label_raw = m.group("label").strip()
+        label = re.sub(r"^【|】$", "", label_raw).strip()
+        value = _strip_wrappers(m.group(2))
+        if label and (value or "输入框" in s or "密码框" in s or "搜索框" in s or "文本框" in s
+                      or "字段" in s or label_raw.startswith("【")):
+            return {
+                "action": "fill",
+                "target_name": strip_ellipsis_in_label(label),
+                "target_role": "textbox",
+                "value": value,
+            }
+
+    #   「在【排序下拉框】选择「Name (Z to A)」」→ select(排序, Name (Z to A))
+    m = re.match(
+        rf"^(?:在\s*)?【([^】]+)】{_CTRL_OPT}{_SEP_OPT}(?:选择|选取|选中)\s*{_VAL_TAIL}",
+        s,
+    )
+    if m:
+        label = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", m.group(1).strip(" ：:的")).strip()
+        value = _strip_wrappers(m.group(2))
+        if label and value:
+            return {
+                "action": "select",
+                "target_name": strip_ellipsis_in_label(label),
+                "target_role": "combobox",
+                "value": strip_ellipsis_in_label(value),
+            }
+
+    #   「打开首页 https://www.saucedemo.com/」/「进入商品列表页」→ goto
+    m = re.match(r"^(?:打开|进入|访问|前往)\s*(.+?)\s*$", s)
+    if m and "【" not in s:
+        rest = m.group(1).strip()
+        url_m = re.search(r"https?://\S+", rest)
+        label = re.sub(r"https?://\S+", "", rest).strip(" ，,。;；") or (url_m.group(0) if url_m else "")
+        if label:
+            out = {"action": "goto", "target_name": strip_ellipsis_in_label(label)}
+            if url_m:
+                out["value"] = url_m.group(0)
+            return out
 
     # fill: 在弹出的'输入关键词…'中输入 【值】 / 在弹出的"…"中输入 值
     m = re.match(
@@ -591,8 +659,8 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     if m:
         return {"action": "goto", "target_name": strip_ellipsis_in_label(m.group(1))}
 
-    # wait
-    m = re.match(r"^等待\s*【([^】]+)】\s*出现", s)
+    # wait（含「」写法）
+    m = re.match(r"^等待\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*出现", s)
     if m:
         label = strip_ellipsis_in_label(m.group(1))
         return {"action": "wait", "target_name": label, "value": label}
@@ -623,7 +691,18 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
                 "target_role": "combobox",
             }
 
-    # assert
+    # assert：…为/是/变为/显示为【X】（提示词教学的"徽标数字为【1】""标题为【X】"等写法）
+    m = re.match(
+        r"^断言.*?(?:为|是|变为|显示为|数量为|数字为|标题为|值为)\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*$",
+        s,
+    )
+    if m:
+        return {"action": "assert_text", "value": strip_ellipsis_in_label(m.group(1).strip())}
+
+    # assert（含「」写法）
+    m = re.match(r"^断言(?:页面|列表)?(?:中)?(?:包含|显示|出现|存在|展示)\s*[【「『\"']?([^】」』\"']+)[】」』\"']?\s*$", s)
+    if m:
+        return {"action": "assert_text", "value": strip_ellipsis_in_label(m.group(1).strip())}
     m = re.match(r"^断言页面包含\s*【([^】]+)】", s)
     if m:
         label = strip_ellipsis_in_label(m.group(1))
@@ -691,7 +770,7 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
 
     # click with optional disambiguation / trailing control-type word
     m = re.match(
-        rf"^点击\s*【([^】]+)】\s*(?:[（(]([^）)]+)[）)])?\s*(?:{_CTRL_TYPE_SUFFIX})?\s*$",
+        rf"^点击\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*(?:[（(]([^）)]+)[）)])?\s*(?:{_CTRL_TYPE_SUFFIX})?\s*$",
         s,
     )
     if m:
