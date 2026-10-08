@@ -290,6 +290,15 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def tool_args_from_action(action: dict[str, Any]) -> dict[str, Any]:
+    """子动作 → agent_tool_calls.tool_args（去控制键；报告口径与单动作一致）。"""
+    return {
+        k: v
+        for k, v in (action or {}).items()
+        if k not in ("action", "_probe") and v is not None
+    }
+
+
 async def run_unit(
     steps: list[UnitStep],
     execute: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
@@ -297,11 +306,13 @@ async def run_unit(
     on_step_ok: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None,
     retry_delays: tuple[float, ...] = (0.6, 1.5),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    probe: Callable[[str], Awaitable[tuple[list[str], dict[str, Any]]]] | None = None,
 ) -> UnitOutcome:
     """顺序执行单元；任一步最终失败即停止（已完成的步骤照常入账）。"""
     executed: list[dict[str, Any]] = []
     for step in steps:
         ok = False
+        probe_note = ""
         last: dict[str, Any] = {"success": False, "error": "not executed"}
         for attempt_action in expand_fallbacks(step):
             result = await execute(attempt_action)
@@ -323,12 +334,46 @@ async def run_unit(
                     await _maybe_await(on_step_ok(attempt_action, result))
                 break
             last = result
+        # 静态回退用尽 → DOM 探针（真实 DOM 找目标 + 派生确定性定位符，只试一轮）
+        if not ok and probe is not None:
+            target = str(step.element_desc or step.value or "").strip()
+            if target:
+                locators: list[str] = []
+                evidence: dict[str, Any] = {}
+                try:
+                    locators, evidence = await probe(target)
+                except Exception:  # noqa: BLE001
+                    logger.debug("unit: DOM 探针失败", exc_info=True)
+                for loc in locators:
+                    probe_action = dict(step.raw)
+                    probe_action["selector"] = loc
+                    result = await execute(probe_action)
+                    if result.get("success"):
+                        ok = True
+                        last = result
+                        executed.append({**probe_action, "_probe": evidence})
+                        logger.info(
+                            "unit: 第 %d 步经 DOM 探针回退成功 → %s",
+                            step.index + 1, str(loc)[:70],
+                        )
+                        if on_step_ok is not None:
+                            await _maybe_await(
+                                on_step_ok({**probe_action, "_probe": evidence}, result)
+                            )
+                        break
+                if not ok and evidence:
+                    probe_note = (
+                        f"（DOM 探针：页面上 {evidence.get('elements')} 个行动元素，"
+                        f"匹配 {evidence.get('matched')}"
+                        + ("，存在歧义" if evidence.get("ambiguous") else "")
+                        + "）"
+                    )
         if not ok:
             return UnitOutcome(
                 success=False,
                 executed=executed,
                 failed_index=step.index,
                 failed_action=step.raw,
-                error=str(last.get("error") or "unknown"),
+                error=str(last.get("error") or "unknown") + probe_note,
             )
     return UnitOutcome(success=True, executed=executed)

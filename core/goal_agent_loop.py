@@ -128,6 +128,12 @@ def _wait_value_covers_assert_step(entry: dict[str, Any], desc: str) -> bool:
         return False
     # 纯时间等待：仅覆盖「等待 N 秒」且步骤不含期望文本
     if value.replace(".", "", 1).isdigit():
+        # 断言动作的纯数字期望文本（如 断言徽标数字为【1】）与描述中的
+        # 【】/「」片段全等时按文本断言处理；秒数等待的防护保持在后
+        if (entry.get("action") or "").strip().lower() == "assert_text":
+            for m in re.finditer(r"[「【\"']([^」】\"']+)[」】\"']", desc):
+                if value == m.group(1).strip():
+                    return True
         if re.search(r"出现|文本|包含|断言|assert|\btext\b", desc, re.I):
             return False
         return bool(re.search(r"等待|wait", desc, re.I))

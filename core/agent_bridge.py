@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -508,6 +509,7 @@ class AgentBridge:
         """
         from app.config import get_settings
 
+        _t0 = time.monotonic()
         s = get_settings()
         if not getattr(s, "action_unit_enabled", True):
             return {"success": False, "executed": 0, "disabled": True}
@@ -532,7 +534,7 @@ class AgentBridge:
                 return True
             return sel in _refs
 
-        from core.action_unit import normalize_unit, run_unit
+        from core.action_unit import normalize_unit, run_unit, tool_args_from_action
 
         steps, problems = normalize_unit(
             unit_raw, max_steps=max_steps, is_valid_ref=_valid_ref
@@ -566,12 +568,51 @@ class AgentBridge:
                 self._collect_journal_entry(sub_action, turn)
             except Exception:
                 logger.debug("Bridge unit journal 记录跳过", exc_info=True)
+            # 步骤级证据（红线：每动作落库）：逐子动作写 agent_tool_calls，
+            # 报告步骤列表与单动作路径口径一致（此前只进合成 journal，报告缺步骤）
+            try:
+                await crud_agent_run.create_tool_call(
+                    self.db, run.id, turn,
+                    str(sub_action.get("action") or "unknown"),
+                    tool_args_from_action(sub_action),
+                    True,
+                    "",
+                )
+            except Exception:
+                logger.debug("Bridge unit tool_call 落库跳过", exc_info=True)
+            # 上下文历史：与单动作路径同口径——模型下一轮 HISTORY 能看到子动作
+            # 及其工具结果，避免"看不见已成功→重复执行"空转（case 551 曾 24 轮）
+            try:
+                context_messages.append({
+                    "role": "assistant",
+                    "content": (
+                        f"{sub_action.get('action', '?')}: "
+                        f"{tool_args_from_action(sub_action)}"
+                    ),
+                })
+                from core.mcp_args import build_tool_status
+                context_messages.append({
+                    "role": "tool",
+                    "content": build_tool_status(_result or {}),
+                })
+            except Exception:
+                logger.debug("Bridge unit 上下文记录跳过", exc_info=True)
 
-        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok)
+        async def _probe_caller(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+            return await _exec({"action": "evaluate", "value": args.get("function")})
+
+        async def _probe(target: str):
+            from core.browser_probe import probe_fallbacks
+
+            return await probe_fallbacks(_probe_caller, target)
+
+        _probe_arg = _probe if bool(getattr(s, "action_unit_probe", True)) else None
+
+        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok, probe=_probe_arg)
         if outcome.success:
             logger.info(
-                "Bridge unit: %d 步执行成功（run #%d turn %d）",
-                outcome.executed_count, run.id, turn,
+                "Bridge unit: %d 步执行成功（run #%d turn %d，%.1fs）",
+                outcome.executed_count, run.id, turn, time.monotonic() - _t0,
             )
             try:
                 await crud_agent_run.create_message(
@@ -580,12 +621,32 @@ class AgentBridge:
                 )
             except Exception:
                 logger.debug("unit 审计消息写入跳过", exc_info=True)
-            return {"success": True, "executed": outcome.executed_count}
+            return {
+                "success": True,
+                "executed": outcome.executed_count,
+                "last_action": (
+                    str((outcome.executed[-1] or {}).get("action") or "")
+                    if outcome.executed else ""
+                ),
+            }
+
+        # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
+        try:
+            _failed = outcome.failed_action or {}
+            await crud_agent_run.create_tool_call(
+                self.db, run.id, turn,
+                str(_failed.get("action") or "unknown"),
+                tool_args_from_action(_failed),
+                False,
+                str(outcome.error or "")[:500],
+            )
+        except Exception:
+            logger.debug("Bridge unit 失败步落库跳过", exc_info=True)
 
         logger.info(
-            "Bridge unit: 第 %d 步失败停止（已完成 %d 步）: %s（run #%d turn %d）",
+            "Bridge unit: 第 %d 步失败停止（已完成 %d 步）: %s（run #%d turn %d，%.1fs）",
             (outcome.failed_index or 0) + 1, outcome.executed_count,
-            str(outcome.error)[:100], run.id, turn,
+            str(outcome.error)[:100], run.id, turn, time.monotonic() - _t0,
         )
         context_messages.append({
             "role": "assistant",
@@ -600,6 +661,33 @@ class AgentBridge:
             "executed": outcome.executed_count,
             "error": str(outcome.error or ""),
         }
+
+    async def _maybe_engine_done(
+        self, run: AgentRun, turn: int, case_steps: list | None,
+        unit_out: dict[str, Any],
+    ) -> bool:
+        """unit 路径的引擎侧完成判定（与单动作路径同源，不依赖模型自觉 done）。
+
+        条件：用例步骤全部被 journal 覆盖（类型严配），且本单元最后一个成功
+        子动作是断言/等待（浏览器已实际验证）。满足则立即完成，省掉后续
+        observe→think 往返。
+        """
+        if not case_steps or len(self._journal_covered) < len(case_steps):
+            return False
+        if str(unit_out.get("last_action") or "") not in ("assert_text", "wait"):
+            return False
+        done_msg = (
+            f"目标已达成(引擎判定·unit)：{len(case_steps)} 个步骤的轨迹全部覆盖，末步断言已通过"
+        )
+        logger.info("Bridge: %s (run #%d turn %d)", done_msg, run.id, turn)
+        try:
+            await crud_agent_run.create_message(
+                self.db, run.id, turn, "assistant", done_msg,
+            )
+        except Exception:
+            logger.debug("engine-done 消息写入跳过", exc_info=True)
+        await self._complete(run.id, turn)
+        return True
 
     async def _try_compile_first(self, run: AgentRun, agent_id: str, run_id_str: str) -> bool:
         """编译先行（Phase A）：没有可用固化脚本时，先"编译一段脚本"直跑。
@@ -900,7 +988,15 @@ class AgentBridge:
     def _collect_journal_entry(self, action: dict, turn: int) -> None:
         """成功动作入 journal（含 checklist 映射 + replay 定位符），供 run 结束后合成固化脚本。"""
         name = str(action.get("name") or action.get("action") or "")
-        args = action.get("args") or {}
+        args = action.get("args")
+        if not isinstance(args, dict) or not args:
+            # unit 子动作把 selector/value 放顶层（无 args 嵌套）。此前丢参数导致
+            # 断言步骤无法映射覆盖（case 551 曾因此每轮重复断言、24 轮空转）
+            args = {
+                key: action.get(key)
+                for key in ("selector", "value", "element_desc")
+                if action.get(key) is not None
+            }
         entry: dict = {
             "turn": turn,
             "success": True,
@@ -1211,6 +1307,7 @@ class AgentBridge:
                 )
                 return
             turn += 1
+            _turn_t0 = time.monotonic()
             logger.info(
                 "━━━ Turn %d/%d (总 %d/%d) (run #%d) ━━━",
                 failed_turns + 1, max_failed_turns, turn, max_total_turns, run.id,
@@ -1286,6 +1383,10 @@ class AgentBridge:
                 for c in close_control_candidates(snapshot or "")
                 if (c.get("ref") or "").strip()
             ]
+            logger.info(
+                "Bridge turn %d: observe %.1fs（快照 %d 字符）",
+                turn, time.monotonic() - _turn_t0, len(snapshot or ""),
+            )
 
             # ── Phase B(auto)：确定性自动成组（机械段一次往返执行，不用 LLM）──
             _auto_actions = self._auto_unit_actions(snapshot)
@@ -1295,6 +1396,8 @@ class AgentBridge:
                     snapshot, context_messages,
                 )
                 if _auto_out.get("success"):
+                    if await self._maybe_engine_done(run, turn, case_steps, _auto_out):
+                        return
                     continue
                 self._auto_unit_chain_ok = False
                 try:
@@ -1307,6 +1410,7 @@ class AgentBridge:
                 continue
 
             # ── 2. Think: LLM 决策 ──
+            _think_t0 = time.monotonic()
             action = await self._llm_decide(
                 llm_client=llm_client,
                 goal=goal_text,
@@ -1318,6 +1422,9 @@ class AgentBridge:
                 case_url=case_url,
                 close_refs=_close_refs if _has_close_step else (),
                 screenshot_b64=obs.get("screenshot_b64") or None,
+            )
+            logger.info(
+                "Bridge turn %d: think %.1fs", turn, time.monotonic() - _think_t0,
             )
 
             if action is None:
@@ -1445,6 +1552,8 @@ class AgentBridge:
                     snapshot, context_messages,
                 )
                 if _unit.get("success"):
+                    if await self._maybe_engine_done(run, turn, case_steps, _unit):
+                        return
                     continue  # 已逐步入账；下一轮 observe → think
                 failed_turns += 1
                 if failed_turns >= max_failed_turns:
@@ -1458,6 +1567,7 @@ class AgentBridge:
 
             # ── 3. Act: WS 执行 ──
             try:
+                _act_t0 = time.monotonic()
                 result = await asyncio.wait_for(
                     self.agent_manager.send_act(agent_id, run_id_str, action),
                     timeout=120,
@@ -1468,6 +1578,9 @@ class AgentBridge:
             except Exception as exc:
                 logger.exception("Act error at turn %d", turn)
                 result = {"success": False, "error": str(exc)}
+            logger.info(
+                "Bridge turn %d: act %.1fs", turn, time.monotonic() - _act_t0,
+            )
 
             # Phase C：瞬时失败（元素未就绪/超时/被替换）本地重试，不计失败轮
             if not result.get("success"):
@@ -1710,6 +1823,7 @@ class AgentBridge:
 
         Returns:
             dict with "name"/"args" keys for normal actions,
+            dict with "unit" for a batch unit (mechanical sub-actions),
             dict with "_done": True for goal-completion signal,
             dict with "_error": True for agent error signal,
             None if LLM call failed (skip turn).
@@ -1850,6 +1964,11 @@ class AgentBridge:
             err_msg = tc_dict.get("value", "unknown agent error")
             logger.warning("Agent reported error: %s", err_msg)
             return {"_error": True, "_error_message": err_msg}
+
+        # Phase B：模型输出的宏动作单元（与单动作互斥；子动作由
+        # _execute_action_unit 规范化为白名单动作并校验 ref）
+        if isinstance(tc_dict.get("unit"), list) and tc_dict.get("unit"):
+            return {"unit": tc_dict.get("unit"), "thinking": tc_dict.get("thinking")}
 
         # 普通操作：将 PlaywrightMCPToolCall 映射为 send_act 期望的格式
         return {

@@ -557,3 +557,87 @@ class TestAgentRunnerMakeResult:
         result = runner._make_result("error", 2, error="崩溃")
         # error status != completed，应保留 context
         assert result["context"] is not None
+
+
+# ==================== AgentRunner 宏动作单元：逐子动作落库 ====================
+
+
+@pytest.mark.asyncio
+async def test_runner_action_unit_records_tool_call_per_subaction(monkeypatch):
+    """步骤级证据（红线）：unit 的每个成功子动作都要写入 agent_tool_calls。"""
+    from types import SimpleNamespace
+    from core.agent_runner.runner import AgentRunner
+
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: SimpleNamespace(
+            action_unit_enabled=True, action_unit_max=6, action_unit_probe=False,
+        ),
+    )
+
+    runner = AgentRunner(AsyncMock(), "goal", None, db=AsyncMock(), run_id=42)
+
+    async def fake_exec(sub_action):
+        return {"success": True}
+
+    monkeypatch.setattr(runner, "_execute_action_once", fake_exec)
+
+    calls = []
+
+    async def fake_create_tool_call(db, run_id, turn, name, args, success, error=""):
+        calls.append((run_id, turn, name, success))
+
+    monkeypatch.setattr("app.crud.agent_run.create_tool_call", fake_create_tool_call)
+
+    out = await runner._execute_action_unit(
+        1,
+        [
+            {"action": "fill", "selector": "#u", "value": "x"},
+            {"action": "click", "selector": "#b"},
+        ],
+        {"snapshot": "", "candidates": []},
+    )
+    assert out.get("success") is True and out.get("executed") == 2
+    assert calls == [(42, 1, "fill", True), (42, 1, "click", True)]
+
+
+@pytest.mark.asyncio
+async def test_runner_action_unit_records_failed_subaction(monkeypatch):
+    """unit 失败停止时，失败子动作也要落库（报告可定位失败步骤）。"""
+    from types import SimpleNamespace
+    from core.agent_runner.runner import AgentRunner
+
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: SimpleNamespace(
+            action_unit_enabled=True, action_unit_max=6, action_unit_probe=False,
+        ),
+    )
+
+    runner = AgentRunner(AsyncMock(), "goal", None, db=AsyncMock(), run_id=43)
+
+    async def fake_exec(sub_action):
+        if sub_action.get("selector") == "#u":
+            return {"success": True}
+        return {"success": False, "error": "strict mode violation"}
+
+    monkeypatch.setattr(runner, "_execute_action_once", fake_exec)
+
+    calls = []
+
+    async def fake_create_tool_call(db, run_id, turn, name, args, success, error=""):
+        calls.append((name, success, error))
+
+    monkeypatch.setattr("app.crud.agent_run.create_tool_call", fake_create_tool_call)
+
+    out = await runner._execute_action_unit(
+        1,
+        [
+            {"action": "fill", "selector": "#u", "value": "x"},
+            {"action": "click", "selector": "#nope"},
+        ],
+        {"snapshot": "", "candidates": []},
+    )
+    assert out.get("success") is False
+    assert [(n, s) for n, s, _ in calls] == [("fill", True), ("click", False)]
+    assert "strict mode violation" in calls[1][2]

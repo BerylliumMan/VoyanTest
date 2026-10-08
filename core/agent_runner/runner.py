@@ -420,6 +420,14 @@ class AgentRunner:
         except Exception:
             return False
 
+    def _auto_unit_probe(self) -> bool:
+        try:
+            from app.config import get_settings
+
+            return bool(getattr(get_settings(), "action_unit_probe", True))
+        except Exception:
+            return True
+
     def _auto_unit_max(self) -> int:
         try:
             from app.config import get_settings
@@ -449,7 +457,7 @@ class AgentRunner:
                 return True
             return sel in _refs
 
-        from core.action_unit import normalize_unit, run_unit
+        from core.action_unit import normalize_unit, run_unit, tool_args_from_action
 
         steps, problems = normalize_unit(
             unit_raw, max_steps=max_steps, is_valid_ref=_valid_ref
@@ -466,13 +474,36 @@ class AgentRunner:
         async def _exec(sub_action: dict[str, Any]) -> dict[str, Any]:
             return await self._execute_action_once(sub_action)
 
-        def _on_ok(sub_action: dict[str, Any], _result: dict[str, Any]) -> None:
+        async def _on_ok(sub_action: dict[str, Any], _result: dict[str, Any]) -> None:
             try:
                 self._collect_journal_entry(sub_action, turn)
             except Exception:
                 logger.debug("unit journal 记录跳过", exc_info=True)
+            if self._db is None or self._run_id is None:
+                return
+            # 步骤级证据（红线：每动作落库）：逐子动作写 agent_tool_calls，
+            # 报告步骤列表与单动作路径口径一致
+            try:
+                await crud_agent_run.create_tool_call(
+                    self._db, self._run_id, turn,
+                    str(sub_action.get("action") or "unknown"),
+                    tool_args_from_action(sub_action),
+                    True,
+                    "",
+                )
+            except Exception:
+                logger.debug("unit tool_call 落库跳过", exc_info=True)
 
-        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok)
+        async def _probe_caller(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+            return await _exec({"action": "evaluate", "value": args.get("function")})
+
+        async def _probe(target: str):
+            from core.browser_probe import probe_fallbacks
+
+            return await probe_fallbacks(_probe_caller, target)
+
+        _probe_arg = _probe if self._auto_unit_probe() else None
+        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok, probe=_probe_arg)
         if outcome.success:
             logger.info("unit: %d 步执行成功（turn %d）", outcome.executed_count, turn)
             self.context.add_turn(
@@ -480,6 +511,19 @@ class AgentRunner:
                 tool_calls=list(outcome.executed),
             )
             return {"success": True, "executed": outcome.executed_count}
+        # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
+        if self._db is not None and self._run_id is not None:
+            try:
+                _failed = outcome.failed_action or {}
+                await crud_agent_run.create_tool_call(
+                    self._db, self._run_id, turn,
+                    str(_failed.get("action") or "unknown"),
+                    tool_args_from_action(_failed),
+                    False,
+                    str(outcome.error or "")[:500],
+                )
+            except Exception:
+                logger.debug("unit 失败步落库跳过", exc_info=True)
         logger.info(
             "unit: 第 %d 步失败停止（已完成 %d 步）: %s（turn %d）",
             (outcome.failed_index or 0) + 1, outcome.executed_count,
