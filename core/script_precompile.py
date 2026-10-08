@@ -439,6 +439,20 @@ def extract_expected_text(description: str, parsed_result: str | None = None) ->
     return fallback[:40]
 
 
+def extract_bracketed_expected(description: str, parsed_result: str | None = None) -> str:
+    """只取【】/「」包裹的期望内容；没有括号返回空串（不做兜底抽取）。
+
+    与 is_checkable_assertion 同源：回填只能建立在"描述里确实有括号期望"之上，
+    不能把"断言购物车图标可见"这类无括号描述兜底成可判定断言。
+    """
+    text = str(description or "")
+    m = _RE_EXPECT_BRACKET.search(text) or _RE_EXPECT_BRACKET.search(str(parsed_result or ""))
+    if not m:
+        return ""
+    value = m.group(1).strip()
+    return "" if (not value or _VAGUE_EXPECT.match(value)) else value
+
+
 def is_checkable_assertion(
     description: str,
     parsed_result: str | None = None,

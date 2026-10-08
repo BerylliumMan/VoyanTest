@@ -160,7 +160,7 @@ def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
 
     幂等；只动断言类步骤；描述里没有括号内容的不动（那是真问题，交给校验器拦）。
     """
-    from core.script_precompile import extract_expected_text
+    from core.script_precompile import extract_bracketed_expected
 
     fixed = 0
     for case in cases or []:
@@ -179,7 +179,7 @@ def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
             if value is not None and str(value).strip():
                 continue
             desc = str(st.get("description") or "") or desc_by_index.get(i, "")
-            text = extract_expected_text(desc)
+            text = extract_bracketed_expected(desc)
             if not text:
                 continue
             st["value"] = text
