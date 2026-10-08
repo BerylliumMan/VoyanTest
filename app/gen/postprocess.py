@@ -41,15 +41,42 @@ def find_login_credentials(text: str | None) -> tuple[str, str] | None:
     return None
 
 
-def _case_text(case: dict[str, Any]) -> str:
-    parts = [
-        str(case.get("title") or ""),
-        str(case.get("precondition") or ""),
-        str(case.get("expected_result") or ""),
-    ]
-    steps = case.get("steps") or []
+
+def _get(case: Any, key: str, default: Any = None) -> Any:
+    """兼容 dict 与 dataclass（TestCase）两种用例形状。"""
+    if isinstance(case, dict):
+        return case.get(key, default)
+    return getattr(case, key, default)
+
+
+def _set(case: Any, key: str, value: Any) -> None:
+    if isinstance(case, dict):
+        case[key] = value
+        return
+    if hasattr(case, key):
+        setattr(case, key, value)
+
+
+def _step_texts(case: Any) -> list[str]:
+    """用例的步骤文本（dict 的 steps / dataclass 的 test_steps 都吃）。"""
+    out: list[str] = []
+    steps = _get(case, "steps") or []
+    if isinstance(steps, str):
+        steps = [x for x in steps.splitlines() if x.strip()]
     for s in steps:
-        parts.append(str(s.get("description") if isinstance(s, dict) else s))
+        out.append(str(s.get("description") if isinstance(s, dict) else s))
+    if not out:
+        ts = str(_get(case, "test_steps") or "")
+        out = [x.strip() for x in ts.splitlines() if x.strip()]
+    return out
+
+def _case_text(case: Any) -> str:
+    parts = [
+        str(_get(case, "title") or ""),
+        str(_get(case, "precondition") or _get(case, "preconditions") or ""),
+        str(_get(case, "expected_result") or ""),
+    ]
+    parts.extend(_step_texts(case))
     return "\n".join(parts)
 
 
@@ -91,20 +118,14 @@ def ensure_entry_steps(
     from core.step_normalize import render_structured_step
 
     for case in cases or []:
-        if not isinstance(case, dict):
-            continue
-        steps = case.get("steps") or []
-        first_text = ""
-        for s in steps:
-            first_text = str(s.get("description") if isinstance(s, dict) else s)
-            break
-        if not first_text:
-            first_text = (case.get("test_steps") or "").splitlines()[0] if case.get("test_steps") else ""
+        texts = _step_texts(case)
+        first_text = texts[0] if texts else ""
+        steps = _get(case, "steps") or []
         if _is_entry_step(first_text):
             stats["already"] += 1
             continue
 
-        title = str(case.get("title") or "")
+        title = str(_get(case, "title") or "")
         body = _case_text(case)
         needs_login = bool(
             creds
@@ -128,8 +149,8 @@ def ensure_entry_steps(
             prefix_text = [ENTRY_TEXT]
 
         # 1) 结构化步骤
-        structured = [s for s in (case.get("structured_steps") or []) if isinstance(s, dict)]
-        case["structured_steps"] = prefix_struct + structured
+        structured = [s for s in (_get(case, "structured_steps") or []) if isinstance(s, dict)]
+        _set(case, "structured_steps", prefix_struct + structured)
 
         # 2) steps（含 description/expected）
         new_steps: list[dict[str, Any]] = []
@@ -138,15 +159,16 @@ def ensure_entry_steps(
             new_steps.append({**s, "description": desc, "expected": ""})
         for s in steps:
             new_steps.append(s if isinstance(s, dict) else {"description": str(s), "expected": ""})
-        case["steps"] = new_steps
+        if isinstance(case, dict):
+            case["steps"] = new_steps
 
         # 3) 文本与预期编号列
         descs = [s.get("description") or render_structured_step(s) for s in new_steps]
-        case["test_steps"] = _to_numbered_text(descs)
+        _set(case, "test_steps", _to_numbered_text(descs))
         expected = []
         for s in new_steps:
             expected.append(s.get("expected") or "")
-        case["expected_result"] = _to_numbered_expected(expected)
+        _set(case, "expected_result", _to_numbered_expected(expected))
 
         stats["fixed"] += 1
     return stats
@@ -165,13 +187,11 @@ def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
 
     fixed = 0
     for case in cases or []:
-        if not isinstance(case, dict):
-            continue
         desc_by_index: dict[int, str] = {}
-        for i, st in enumerate(case.get("steps") or []):
+        for i, st in enumerate(_get(case, "steps") or []):
             if isinstance(st, dict):
                 desc_by_index[i] = str(st.get("description") or "")
-        for i, st in enumerate(case.get("structured_steps") or []):
+        for i, st in enumerate(_get(case, "structured_steps") or []):
             if not isinstance(st, dict):
                 continue
             if str(st.get("action") or "") not in _ASSERT_ACTIONS:
@@ -190,11 +210,12 @@ def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
                 continue
             st["value"] = text
             fixed += 1
-        # steps 镜像同步
-        for i, st in enumerate(case.get("steps") or []):
+        # steps 镜像同步（仅 dict 形状有 steps）
+        for i, st in enumerate(_get(case, "steps") or []):
             if isinstance(st, dict) and str(st.get("action") or "") in _ASSERT_ACTIONS:
                 if st.get("value") is None or str(st.get("value")).strip() == "":
-                    pair = (case.get("structured_steps") or [{}] * (i + 1))[i] if i < len(case.get("structured_steps") or []) else {}
+                    _ss = _get(case, "structured_steps") or []
+                    pair = _ss[i] if i < len(_ss) else {}
                     if isinstance(pair, dict) and pair.get("value"):
                         st["value"] = pair["value"]
     return fixed
