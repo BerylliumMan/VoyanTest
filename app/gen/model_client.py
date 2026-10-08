@@ -38,14 +38,14 @@ _ai_config_lock = asyncio.Lock()
 
 
 
-def _build_headers(api_key: str, extra_headers: dict | None) -> dict:
-    """请求头 = Content-Type + Authorization + llm_config.extra_headers（如 x-opencode-session）。"""
+def _build_headers(api_key: str, extra_headers: dict | None, api_base: str | None = None) -> dict:
+    """请求头 = Content-Type + Authorization + extra_headers（zen 端点自动补 session 头）。"""
+    from core.llm_wrapper import zen_extra_headers
+
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    for k, v in (extra_headers or {}).items():
-        if isinstance(k, str) and k.strip() and v is not None:
-            headers[k] = str(v)
+    headers.update(zen_extra_headers(api_base, extra_headers))
     return headers
 
 
@@ -199,7 +199,7 @@ async def call_model(
     if temperature is None:
         temperature = config.get('temperature', 0.1)
 
-    headers = _build_headers(api_key, config.get("extra_headers"))
+    headers = _build_headers(api_key, config.get("extra_headers"), config.get("api_base"))
 
     payload = {
         "model": model_name,

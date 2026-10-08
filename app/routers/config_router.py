@@ -175,7 +175,8 @@ async def test_ai_config(
         raise HTTPException(400, "缺少 api_base")
 
     try:
-        client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+        from core.llm_wrapper import zen_extra_headers
+        client = AsyncOpenAI(api_key=api_key, base_url=api_base, default_headers=zen_extra_headers(api_base))
         resp = await asyncio.wait_for(
             client.chat.completions.create(
                 model=model,

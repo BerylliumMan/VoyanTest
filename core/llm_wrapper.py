@@ -381,6 +381,21 @@ async def _resolve_config(
 # ------------------------------------------------------------------
 
 
+
+def zen_extra_headers(api_base: str | None, configured: dict | None = None) -> dict:
+    """OpenCode zen 网关（opencode.ai/zen/…）要求 x-opencode-session，否则 400。
+
+    按 api_base 自动注入；显式配置（llm_config.extra_headers）优先。
+    """
+    headers: dict[str, str] = {}
+    for k, v in (configured or {}).items():
+        if isinstance(k, str) and k.strip() and v is not None:
+            headers[k.strip()] = str(v)
+    base = api_base or ""
+    if "opencode.ai" in base and "/zen/" in base:
+        headers.setdefault("x-opencode-session", "vt-platform")
+    return headers
+
 async def create_openai_client(
     api_key: str | None = None,
     api_base: str | None = None,
@@ -398,7 +413,8 @@ async def create_openai_client(
             "config.json → ai.api_key or ~/.claude/settings.json"
         )
     return AsyncOpenAI(
-        api_key=key, base_url=base, timeout=180.0, max_retries=0
+        api_key=key, base_url=base, timeout=180.0, max_retries=0,
+        default_headers=zen_extra_headers(base),
     )
 
 
