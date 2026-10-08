@@ -346,6 +346,14 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
     runs = related["runs"]
     cases = related["cases"]
 
+    # 032-fix：历史批次 started_at 可能为空（旧版客户端链路未写入）——
+    # 回退到最早一条用例的 start_time，保证报告「开始时间」恒有值
+    _batch_started_at = batch.started_at
+    if _batch_started_at is None:
+        _run_starts = [r.start_time for r in runs if getattr(r, "start_time", None)]
+        if _run_starts:
+            _batch_started_at = min(_run_starts)
+
     runs_data = []
     for run in runs:
         case = cases.get(run.case_id) if run.case_id else None
@@ -405,7 +413,7 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
         "passed": batch.passed,
         "failed": batch.failed,
         "created_at": batch.created_at.isoformat() if batch.created_at else None,
-        "started_at": batch.started_at.isoformat() if batch.started_at else None,
+        "started_at": _batch_started_at.isoformat() if _batch_started_at else None,
         "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
         # 031（US5）：仅失败重跑来源批次（报告页互跳）
         "parent_batch_id": getattr(batch, "parent_batch_id", None),

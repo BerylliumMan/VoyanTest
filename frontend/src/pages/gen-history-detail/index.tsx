@@ -699,7 +699,7 @@ const GenHistoryDetailPage: React.FC = () => {
         {historyItem && (
           <div className={styles.toolbar}>
             <div className={styles.stats}>
-              <Space size={24}>
+              <Space size={24} wrap>
                 <Text>
                   功能点: <Text bold>{historyItem.functional_points_count}</Text>
                 </Text>

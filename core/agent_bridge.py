@@ -467,6 +467,7 @@ class AgentBridge:
         tc = await get_test_case(self.db, case_id)
         batch = RunBatch(status="running", triggered_by=f"agent:{self.agent_def.name}",
                          project_id=tc.project_id if tc else 0, total_cases=1,
+                         started_at=tz_now(),
                          name=(tc.name if tc and tc.name else ""))
         self.db.add(batch)
         await self.db.commit()
@@ -519,6 +520,7 @@ class AgentBridge:
                 triggered_by=f"agent:{self.agent_def.name}",
                 project_id=tc.project_id if tc else 0,
                 total_cases=1,
+                started_at=getattr(run, "started_at", None) or tz_now(),
                 passed=1 if run_status_map == "passed" else 0,
                 failed=1 if run_status_map == "failed" else 0,
                 name=(tc.name if tc and tc.name else ""),

@@ -265,10 +265,12 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         from app.db_models import RunBatch
 
         reuse_session = len(exec_queue) > 1
+        from app.tz import now as _tz_now_batch
         batch = RunBatch(
             status="running",
             project_id=project_id,
             total_cases=len(exec_queue),
+            started_at=_tz_now_batch(),
             triggered_by=agent_name,
         )
         db.add(batch)
