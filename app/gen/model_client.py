@@ -37,6 +37,18 @@ _ai_config_cache: dict | None = None
 _ai_config_lock = asyncio.Lock()
 
 
+
+def _build_headers(api_key: str, extra_headers: dict | None) -> dict:
+    """请求头 = Content-Type + Authorization + llm_config.extra_headers（如 x-opencode-session）。"""
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    for k, v in (extra_headers or {}).items():
+        if isinstance(k, str) and k.strip() and v is not None:
+            headers[k] = str(v)
+    return headers
+
+
 async def get_context_budget(
     agent_type: str | None = None,
     agent_id: int | None = None,
@@ -85,6 +97,7 @@ async def _load_ai_config(
                     'api_base': agent_cfg.get('api_base', ''),
                     'temperature': agent_cfg.get('temperature', 0.1),
                     'max_context_tokens': agent_cfg.get('max_context_tokens', 131072),
+                    'extra_headers': agent_cfg.get('extra_headers') or {},
                     'enable_thinking': agent_cfg.get('enable_thinking', True),
                 }
         except Exception:
@@ -116,6 +129,7 @@ async def _load_ai_config(
             'api_key': decrypt_value(row.api_key),
             'api_base': row.api_base,
             'temperature': row.temperature,
+            'extra_headers': {},
             'max_context_tokens': row.max_context_tokens or 131072,
             'enable_thinking': getattr(row, 'enable_thinking', True),
         }
@@ -185,9 +199,7 @@ async def call_model(
     if temperature is None:
         temperature = config.get('temperature', 0.1)
 
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _build_headers(api_key, config.get("extra_headers"))
 
     payload = {
         "model": model_name,
