@@ -106,16 +106,9 @@ class Pipeline:
         from app.gen.prompts import case_kind_from_tc_prompt_key
         tc_key = self.config.get("tc_prompt_key") or getattr(self.tc_generator, "prompt_key", None)
         require_structured = case_kind_from_tc_prompt_key(tc_key) == "ui"
-        v_result = validate_test_cases(tcs, fps, require_structured=require_structured)
-        warnings.extend(v_result["warnings"])
-        if not v_result["passed"]:
-            warnings.append(f"质量校验: {v_result['valid_count']}/{len(tcs)} 个用例通过")
-        # Keep invalid cases (with validation_errors) so users can fix & import
-        tcs = list(v_result["valid_cases"]) + list(v_result.get("invalid_cases") or [])
-
         # 确定性前置补齐：首步必须是"打开/登录/导航"（素材里能拿到账号时补完整登录）
         try:
-            from app.gen.postprocess import ensure_entry_steps
+            from app.gen.postprocess import backfill_assert_values, ensure_entry_steps
 
             settings_obj = None
             try:
@@ -130,12 +123,15 @@ class Pipeline:
                 src_text += "\n" + " ".join(
                     str(p) for p in parts if isinstance(p, str)
                 )[:20000]
+            n_fill = backfill_assert_values(tcs)
             prep = ensure_entry_steps(
                 tcs,
                 source_text=src_text,
                 default_username=getattr(settings_obj, "gen_autologin_username", "") or "",
                 default_password=getattr(settings_obj, "gen_autologin_password", "") or "",
             )
+            if n_fill:
+                warnings.append(f"断言回填: {n_fill} 个断言补上具体期望值")
             if prep["fixed"]:
                 warnings.append(
                     f"前置补齐: {prep['fixed']} 条用例补上打开/登录步骤"
@@ -143,6 +139,14 @@ class Pipeline:
                 )
         except Exception:  # noqa: BLE001
             logger.warning("前置补齐失败（不阻断）", exc_info=True)
+
+
+        v_result = validate_test_cases(tcs, fps, require_structured=require_structured)
+        warnings.extend(v_result["warnings"])
+        if not v_result["passed"]:
+            warnings.append(f"质量校验: {v_result['valid_count']}/{len(tcs)} 个用例通过")
+        # Keep invalid cases (with validation_errors) so users can fix & import
+        tcs = list(v_result["valid_cases"]) + list(v_result.get("invalid_cases") or [])
 
         return {
             "functional_points": fps,

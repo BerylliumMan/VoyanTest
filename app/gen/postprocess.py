@@ -150,3 +150,45 @@ def ensure_entry_steps(
 
         stats["fixed"] += 1
     return stats
+
+
+_ASSERT_ACTIONS = {"assert_text", "assert_visible", "assert_contains", "assert"}
+
+
+def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
+    """结构化断言缺 value、但描述里有【X】/「X」→ 回填 value=X（信息已在文本里，语义无损）。
+
+    幂等；只动断言类步骤；描述里没有括号内容的不动（那是真问题，交给校验器拦）。
+    """
+    from core.script_precompile import extract_expected_text
+
+    fixed = 0
+    for case in cases or []:
+        if not isinstance(case, dict):
+            continue
+        desc_by_index: dict[int, str] = {}
+        for i, st in enumerate(case.get("steps") or []):
+            if isinstance(st, dict):
+                desc_by_index[i] = str(st.get("description") or "")
+        for i, st in enumerate(case.get("structured_steps") or []):
+            if not isinstance(st, dict):
+                continue
+            if str(st.get("action") or "") not in _ASSERT_ACTIONS:
+                continue
+            value = st.get("value")
+            if value is not None and str(value).strip():
+                continue
+            desc = str(st.get("description") or "") or desc_by_index.get(i, "")
+            text = extract_expected_text(desc)
+            if not text:
+                continue
+            st["value"] = text
+            fixed += 1
+        # steps 镜像同步
+        for i, st in enumerate(case.get("steps") or []):
+            if isinstance(st, dict) and str(st.get("action") or "") in _ASSERT_ACTIONS:
+                if st.get("value") is None or str(st.get("value")).strip() == "":
+                    pair = (case.get("structured_steps") or [{}] * (i + 1))[i] if i < len(case.get("structured_steps") or []) else {}
+                    if isinstance(pair, dict) and pair.get("value"):
+                        st["value"] = pair["value"]
+    return fixed
