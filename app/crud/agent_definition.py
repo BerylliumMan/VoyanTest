@@ -1,7 +1,8 @@
 # app/crud/agent_definition.py — AgentDefinition CRUD
 #
 # 提供对 agent_definitions 表的纯数据库操作。
-# 特殊逻辑：is_active 同类型互斥，由 update_agent_definition 在事务中保证。
+# 特殊逻辑：execution/recording 的 is_active 同类型互斥；generation 允许多个
+# 同时启用（由「AI 用例生成」页按用途选择），由 update_agent_definition 在事务中保证。
 import logging
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,6 +61,14 @@ async def create_agent_definition(
         thinking_config=data.thinking_config,
         is_active=1 if data.is_active else 0,
     )
+    # execution/recording 同类型唯一活跃：创建即激活时先降活同类型其他项
+    # （与 update 路径同一规则；generation 允许多活跃，不受此限）
+    if data.is_active and data.agent_type in _EXCLUSIVE_ACTIVE_TYPES:
+        await db.execute(
+            update(db_models.AgentDefinition)
+            .where(db_models.AgentDefinition.agent_type == data.agent_type)
+            .values(is_active=0)
+        )
     db.add(db_obj)
     await db.commit()
     await db.refresh(db_obj)
@@ -67,7 +76,7 @@ async def create_agent_definition(
 
 
 # generation 允许多个同时启用（功能用例 / UI 自动化）；execution/recording 仍互斥
-_EXCLUSIVE_ACTIVE_TYPES = frozenset({"execution", "recording", "generation"})
+_EXCLUSIVE_ACTIVE_TYPES = frozenset({"execution", "recording"})
 
 
 async def update_agent_definition(
@@ -139,7 +148,7 @@ async def delete_agent_definition(
 async def get_active_by_type(
     db: AsyncSession, agent_type: str
 ) -> db_models.AgentDefinition | None:
-    """获取指定类型当前激活的 AgentDefinition（每个类型最多一个激活项）"""
+    """获取指定类型当前激活的 AgentDefinition（generation 可有多个，取最小 id 作默认）"""
     result = await db.execute(
         select(db_models.AgentDefinition)
         .where(
