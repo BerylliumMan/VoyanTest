@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     action_unit_max: int = 6
     # 确定性自动成组：剩余连续机械步骤且目标在当前候选里时，自动组成 unit 执行（不依赖模型）
     action_unit_auto: bool = True
+    # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
+    gen_autologin_username: str = ""
+    gen_autologin_password: str = ""
 
     # Playwright MCP
     playwright_browser_type: str = "chromium"

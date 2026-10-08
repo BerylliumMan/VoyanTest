@@ -113,6 +113,37 @@ class Pipeline:
         # Keep invalid cases (with validation_errors) so users can fix & import
         tcs = list(v_result["valid_cases"]) + list(v_result.get("invalid_cases") or [])
 
+        # 确定性前置补齐：首步必须是"打开/登录/导航"（素材里能拿到账号时补完整登录）
+        try:
+            from app.gen.postprocess import ensure_entry_steps
+
+            settings_obj = None
+            try:
+                from app.config import get_settings
+
+                settings_obj = get_settings()
+            except Exception:  # noqa: BLE001
+                settings_obj = None
+            src_text = str(self.config.get("project_description") or "")
+            parts = self.config.get("content_parts") or []
+            if isinstance(parts, list):
+                src_text += "\n" + " ".join(
+                    str(p) for p in parts if isinstance(p, str)
+                )[:20000]
+            prep = ensure_entry_steps(
+                tcs,
+                source_text=src_text,
+                default_username=getattr(settings_obj, "gen_autologin_username", "") or "",
+                default_password=getattr(settings_obj, "gen_autologin_password", "") or "",
+            )
+            if prep["fixed"]:
+                warnings.append(
+                    f"前置补齐: {prep['fixed']} 条用例补上打开/登录步骤"
+                    f"（其中 {prep['with_login']} 条含完整登录）"
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("前置补齐失败（不阻断）", exc_info=True)
+
         return {
             "functional_points": fps,
             "test_cases": tcs,
