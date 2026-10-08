@@ -189,6 +189,10 @@ def _validate_test_case(
             # 文本型（功能）断言：描述/预期结果里必须有【】包裹、非状态词的期望内容。
             if require_structured:
                 ok = is_checkable_assertion("", None, step.get("value"))
+                if not ok and str(action) == "assert_visible":
+                    # 可见性断言的判定依据就是元素本身（target_name 具体即可）
+                    label = str(step.get("target_name") or "").strip()
+                    ok = bool(label) and not re.fullmatch(r"(可见|正常|正确|成功|完成|可见性)", label)
                 hint = "结构化断言的 value 必须是页面上会出现的具体文案/数字（如 value=\"1\"）"
             else:
                 ok = is_checkable_assertion(

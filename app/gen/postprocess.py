@@ -153,6 +153,7 @@ def ensure_entry_steps(
 
 
 _ASSERT_ACTIONS = {"assert_text", "assert_visible", "assert_contains", "assert"}
+_VAGUE_TEXT_RE = __import__("re").compile(r"^(可见|正常|正确|成功|完成|可见性)$")
 
 
 def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
@@ -180,6 +181,11 @@ def backfill_assert_values(cases: list[dict[str, Any]]) -> int:
                 continue
             desc = str(st.get("description") or "") or desc_by_index.get(i, "")
             text = extract_bracketed_expected(desc)
+            if not text and str(st.get("action") or "") in ("assert_text", "assert_contains"):
+                # 模型常把期望文案写在 target_name 上（渲染器也按此渲染）→ 迁移到 value
+                cand = str(st.get("target_name") or "").strip()
+                if cand and not _VAGUE_TEXT_RE.search(cand):
+                    text = cand
             if not text:
                 continue
             st["value"] = text
