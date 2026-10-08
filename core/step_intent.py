@@ -227,6 +227,7 @@ Output ONLY JSON (no markdown) matching:
   "target_role": "button|link|textbox|combobox|option|menuitem|treeitem|listitem|img|checkbox|radio|null",
   "target_name": "exact UI label from 【】/「」 or step text",
   "value": "fill/select/wait/goto value or null",
+  "wait_mode": "wait 专用：文本消失类步骤填 gone，其余 null",
   "confidence": 0.0-1.0,
   "ambiguous": false,
   "thinking": "quote the label you chose and what you refuse to click"
@@ -237,6 +238,7 @@ Rules:
 - Prefer 【】/「」 text as target_name. Control-type words (下拉框/输入框/按钮/图标) are NOT target_name.
 - 提交≠确定≠保存; 查询≠搜索; 取消≠关闭.
 - One primary action only. If the step is wait/assert, action=wait or assert_text and value=text.
+  If the wait target should DISAPPEAR (消失/隐藏/不再出现), set wait_mode="gone" (negative wait).
 - Dropdown open-only steps (展开/打开某某下拉): target_role=combobox (or button), target_name=字段名如「单位」.
 - Dropdown option steps (选择/点击【启用】): target_role=option|menuitem|treeitem|listitem,
   target_name=选项文案（取自步骤明文，勿套用提示词示例）。Options may appear under role=tooltip / listbox / menu — still match by option name.

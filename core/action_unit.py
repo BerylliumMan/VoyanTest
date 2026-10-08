@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from core.mcp_args import is_transient_action_error
+from core.mcp_args import is_transient_action_error, is_uncertain_failure
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,8 @@ class UnitOutcome:
     failed_index: int | None = None
     failed_action: dict[str, Any] | None = None
     error: str | None = None
+    # 032-exec-evidence：失败步属于"派发后不确定（可能已生效）"时为 True
+    uncertain: bool = False
 
     @property
     def executed_count(self) -> int:
@@ -312,10 +314,16 @@ async def run_unit(
     executed: list[dict[str, Any]] = []
     for step in steps:
         ok = False
+        uncertain = False
         probe_note = ""
         last: dict[str, Any] = {"success": False, "error": "not executed"}
         for attempt_action in expand_fallbacks(step):
             result = await execute(attempt_action)
+            if not result.get("success") and is_uncertain_failure(attempt_action, result.get("error")):
+                # 派发后不确定（可能已生效）：不本地重试、不试 fallbacks，原地停止
+                uncertain = True
+                last = result
+                break
             if not result.get("success") and is_transient_action_error(result.get("error")):
                 for delay in retry_delays:
                     logger.info(
@@ -335,7 +343,8 @@ async def run_unit(
                 break
             last = result
         # 静态回退用尽 → DOM 探针（真实 DOM 找目标 + 派生确定性定位符，只试一轮）
-        if not ok and probe is not None:
+        # 032：uncertain（可能已生效）时跳过探针——不再重复执行副作用动作
+        if not ok and not uncertain and probe is not None:
             target = str(step.element_desc or step.value or "").strip()
             if target:
                 locators: list[str] = []
@@ -366,6 +375,7 @@ async def run_unit(
                         f"（DOM 探针：页面上 {evidence.get('elements')} 个行动元素，"
                         f"匹配 {evidence.get('matched')}"
                         + ("，存在歧义" if evidence.get("ambiguous") else "")
+                        + (f"；{evidence.get('diagnosis')}" if evidence.get("diagnosis") else "")
                         + "）"
                     )
         if not ok:
@@ -375,5 +385,6 @@ async def run_unit(
                 failed_index=step.index,
                 failed_action=step.raw,
                 error=str(last.get("error") or "unknown") + probe_note,
+                uncertain=uncertain,
             )
     return UnitOutcome(success=True, executed=executed)

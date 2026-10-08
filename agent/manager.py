@@ -73,7 +73,10 @@ class AgentManager:
 
     def __init__(self):
         self.sessions: Dict[str, AgentSession] = {}
-        self._pending: Dict[str, asyncio.Future] = {}
+        # 032：(future, matcher) 元组——matcher 用于丢弃迟到/串扰响应（None=兼容旧行为）
+        self._pending: Dict[str, tuple] = {}
+        # 032 US6：按连接缓存客户端上报的 MCP 工具能力（browser_find 等）
+        self._agent_caps: Dict[str, set] = {}
         self._lock = asyncio.Lock()
         # One client browser run at a time per agent (init must finish before next case).
         self._agent_run_locks: Dict[str, asyncio.Lock] = {}
@@ -323,6 +326,7 @@ class AgentManager:
         session = await self.get_session(agent_id)
         if not session:
             return None
+        self._last_console_errors: list = []  # 032 US2：回放窗口 console 证据
         try:
             session.agent.status = AgentStatus.BUSY
             logger.info(
@@ -379,6 +383,9 @@ class AgentManager:
             return None
         if resp.get("unsupported"):
             return None
+        self._last_console_errors = [
+            str(e)[:300] for e in (resp.get("console_errors") or []) if str(e).strip()
+        ][:50]
         if not resp.get("success"):
             trace_path = resp.get("trace_path")
             logger.warning(
@@ -530,14 +537,19 @@ class AgentManager:
         ws_msg = WSMessage(type=msg_type, agent_id=agent_id, run_id=run_id, payload=message)
         await session.send(ws_msg)
 
-    async def _send_and_wait(self, agent_id: str, message: dict, timeout: int = 60) -> dict:
-        """通过 WS 发送消息并等待 agent 响应，使用 _pending future 机制"""
+    async def _send_and_wait(self, agent_id: str, message: dict, timeout: int = 60,
+                             matcher=None) -> dict:
+        """通过 WS 发送消息并等待 agent 响应，使用 _pending future 机制。
+
+        032：`matcher` 用于丢弃"串扰"响应（如迟到的 act 结果命中 observe 的等待）。
+        不匹配的响应不解析、继续等待真正匹配的响应；None = 兼容旧行为。
+        """
         run_id = message.get("run_id", "")
         if not run_id:
             return {"success": False, "error": "No run_id"}
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self._pending[run_id] = future
+        self._pending[run_id] = (future, matcher)
         try:
             await self.send(agent_id, message)
             return await asyncio.wait_for(future, timeout=timeout)
@@ -549,23 +561,67 @@ class AgentManager:
             raise
 
     def resolve_pending(self, run_id: str, result: dict) -> None:
-        """解析 _pending 中与 run_id 匹配的 future"""
-        fut = self._pending.pop(run_id, None)
-        if fut and not fut.done():
-            fut.set_result(result)
+        """解析 _pending 中与 run_id 匹配的 future（032：串扰响应丢弃、不消费 future）。"""
+        entry = self._pending.get(run_id)
+        if not entry:
+            return
+        if isinstance(entry, asyncio.Future):  # 兼容未迁移的旧结构
+            fut, matcher = entry, None
+        else:
+            fut, matcher = entry
+        if fut.done():
+            self._pending.pop(run_id, None)
+            return
+        if matcher is not None and not matcher(result or {}):
+            logger.warning(
+                "WS 响应与在途请求不匹配（疑似迟到/串扰），已丢弃: run=%s keys=%s",
+                run_id, sorted((result or {}).keys())[:6],
+            )
+            return
+        self._pending.pop(run_id, None)
+        fut.set_result(result)
 
-    async def send_observe(self, agent_id: str, run_id: str, want_screenshot: bool = False) -> dict:
+    async def send_observe(self, agent_id: str, run_id: str, want_screenshot: bool = False,
+                           screenshot_target: str | None = None,
+                           screenshot_highlight: bool = False) -> dict:
         """通过 WS 向 Agent 发送 observe 指令，等待快照结果。
 
         截图按需开启（失败轮 / overlay / canvas）；成功常规轮默认关以省 token。
+        032 US3：screenshot_target（快照 ref/CSS）时优先元素级截图；旧客户端忽略该字段。
         """
-        return await self._send_and_wait(agent_id, {
+        msg = {
             "type": "step_execute",
             "run_id": run_id,
             "action": "observe",
             "want_screenshot": want_screenshot,
-            "timeout": 15000
-        }, timeout=60)
+            "timeout": 15000,
+        }
+        if screenshot_target:
+            msg["screenshot_target"] = str(screenshot_target)
+        if screenshot_highlight:
+            msg["screenshot_highlight"] = True
+        res = await self._send_and_wait(agent_id, msg, timeout=60,
+            # 032：拒收迟到的 act 结果（串扰）；observe 失败结果（success=False）照常解析
+            matcher=lambda r: ("snapshot" in r) or (r.get("success") is False))
+        # 032 US6：缓存客户端上报的 MCP 工具能力
+        try:
+            caps = res.get("caps") if isinstance(res, dict) else None
+            if caps:
+                first = agent_id not in self._agent_caps
+                self._agent_caps[agent_id] = set(str(c) for c in caps)
+                if first:
+                    logger.info(
+                        "Agent %s caps: %d tools (browser_find=%s)",
+                        agent_id, len(self._agent_caps[agent_id]),
+                        "browser_find" in self._agent_caps[agent_id],
+                    )
+        except Exception:
+            pass
+        return res
+
+    def get_agent_caps(self, agent_id: str) -> set:
+        """032 US6：客户端上报的 MCP 工具名集合（未知返回空集）。"""
+        return set(self._agent_caps.get(agent_id) or set())
 
     async def send_act(self, agent_id: str, run_id: str, tool_call: dict) -> dict:
         """通过 WS 向 Agent 发送操作指令（025-ref-click: 全字段透传）。
@@ -589,8 +645,12 @@ class AgentManager:
             "value": args.get("value"),
             "url": args.get("url"),
             "timeout_ms": args.get("timeout_ms", 30000),
-            "timeout": 120000
-        }, timeout=120)
+            "timeout": 120000,
+            # 032 US3：失败时客户端优先元素级截图（可选；旧客户端忽略）
+            "element_screenshot": bool(tool_call.get("_element_screenshot")),
+        }, timeout=120,
+            # 032：拒收迟到的 observe 结果（串扰）；act 结果（无 snapshot 键）照常解析
+            matcher=lambda r: "snapshot" not in r)
 
 
     # ---- cross-worker pending execution polling ----

@@ -93,6 +93,11 @@ class PlaywrightMCPToolCall(BaseModel):
         description="BATCH UNIT：一串机械子动作（每项与单动作同字段，可带 fallbacks）。"
         "与 action 二选一；子动作在 action_unit.normalize_unit 中做白名单与 ref 校验。",
     )
+    wait_mode: Optional[str] = Field(
+        None,
+        description="wait 专用（032）：'gone' 表示等待 value 文本消失/隐藏（textGone）；"
+        "缺省/ 'text' 表示等待出现。仅 wait 动作使用。",
+    )
 
     @model_validator(mode="before")
     @classmethod

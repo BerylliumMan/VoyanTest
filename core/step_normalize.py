@@ -405,6 +405,13 @@ def coerce_structured_step(raw: Any) -> Optional[dict[str, Any]]:
     if note is not None:
         note = str(note).strip() or None
 
+    # 032 US4：负向等待标记（gone）原样保留
+    wait_mode = raw.get("wait_mode")
+    if wait_mode is not None:
+        wait_mode = str(wait_mode).strip().lower() or None
+        if wait_mode not in ("gone", "text"):
+            wait_mode = None
+
     # Recorded Playwright/CSS selector (optional; solidified from CDP events)
     selector = raw.get("selector")
     if selector is not None:
@@ -439,6 +446,8 @@ def coerce_structured_step(raw: Any) -> Optional[dict[str, Any]]:
         out["frame_hint"] = frame_hint
     if note is not None:
         out["note"] = note
+    if wait_mode is not None:
+        out["wait_mode"] = wait_mode
     if selector is not None:
         out["selector"] = selector
     return out
@@ -504,6 +513,8 @@ def render_structured_step(step: dict[str, Any] | None) -> str:
     if action == "wait":
         label = value_s or name
         if label:
+            if (step.get("wait_mode") or "").strip().lower() == "gone":
+                return f"等待【{label}】消失"
             return f"等待【{label}】出现"
         return "等待页面稳定"
     if action == "assert_text":
@@ -660,6 +671,14 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
         return {"action": "goto", "target_name": strip_ellipsis_in_label(m.group(1))}
 
     # wait（含「」写法）
+    # 032 US4：负向等待——等待【X】消失/隐藏/不再出现 → textGone
+    m = re.match(
+        r"^等待\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*(?:消失|隐藏|不再出现|不再显示)",
+        s,
+    )
+    if m:
+        label = strip_ellipsis_in_label(m.group(1))
+        return {"action": "wait", "target_name": label, "value": label, "wait_mode": "gone"}
     m = re.match(r"^等待\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*出现", s)
     if m:
         label = strip_ellipsis_in_label(m.group(1))

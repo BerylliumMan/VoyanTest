@@ -24,6 +24,11 @@ from app.db_models import AgentRun
 from app.runtime_config import resolve_prompt_for_agent
 from app.tz import now as tz_now
 from core.llm_wrapper import create_openai_client, generate_tool_call
+from core.mcp_args import (
+    annotate_uncertain,
+    uncertain_context_hint,
+    uncertain_note,
+)
 from core.ota_cursor import (
     OTA_CURSOR_SYSTEM_PROMPT,
     bridge_click_xy_act,
@@ -135,6 +140,7 @@ class AgentBridge:
         self._run_steps: list[dict] = []
         self._case_url: str = ""
         self._replay_logs: list[dict] | None = None
+        self._console_entries: list[str] = []  # 032 US2：console 错误证据（收尾采集）
         self._environment_id = environment_id
         self._reuse_browser_session = bool((goal or {}).get("reuse_browser_session"))
         self._screenshot_dir: str | None = None
@@ -148,6 +154,7 @@ class AgentBridge:
         # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
         try:
             if await self._try_replay_compiled_script(run, agent_id, run_id_str):
+                await self._collect_console_before_report(agent_id, run_id_str)
                 try:
                     await self._save_report(run, case_id)
                 except Exception:
@@ -162,6 +169,7 @@ class AgentBridge:
         # 编译先行（Phase A）：无可回放脚本时，先编译一段脚本直跑（失败不阻断，回落 OTA）
         try:
             if await self._try_compile_first(run, agent_id, run_id_str):
+                await self._collect_console_before_report(agent_id, run_id_str)
                 try:
                     await self._save_report(run, case_id)
                 except Exception:
@@ -213,6 +221,9 @@ class AgentBridge:
         except Exception:
             logger.exception("Bridge orchestrate failed for run #%d", run.id)
             await self._fail(run.id, "Bridge orchestrate internal error")
+
+        # 032 US2：收尾采集 console 错误（静默降级；并入报告）
+        await self._collect_console_before_report(agent_id, run_id_str)
 
         # 写入报告（TestRun + RunBatch）
         try:
@@ -272,14 +283,169 @@ class AgentBridge:
         last_key = sorted(self._screenshot_paths.keys())[-1]
         return self._screenshot_paths[last_key]
 
+    async def _collect_console_before_report(self, agent_id: str, run_id_str: str) -> None:
+        """032 US2：报告落库前采集 console 错误（act 通道一次；任何失败静默降级）。"""
+        try:
+            from app.config import get_settings
+
+            s = get_settings()
+            if not getattr(s, "exec_console_evidence", True):
+                return
+            res = await asyncio.wait_for(
+                self.agent_manager.send_act(
+                    agent_id, run_id_str, {"name": "console", "args": {}},
+                ),
+                timeout=30,
+            )
+            if not (isinstance(res, dict) and res.get("success")):
+                return
+            from core.console_evidence import dedupe_cap, parse_console_messages
+
+            text = str(res.get("text") or res.get("result") or "")
+            kept, _ = dedupe_cap(
+                parse_console_messages(text),
+                int(getattr(s, "exec_console_max_entries", 20) or 20),
+            )
+            self._console_entries = kept
+            if kept:
+                logger.info(
+                    "Bridge console 证据: %d 条（run #%s）", len(kept), run_id_str,
+                )
+        except Exception:
+            logger.debug("Bridge console 证据采集跳过", exc_info=True)
+
+    async def _resolve_coordinate_target(
+        self, agent_id: str, run_id_str: str, action: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """032 US5：click_xy/drag_xy 成功后回解命中元素（写入 args._resolved）。
+
+        任何失败静默降级（不阻塞、不改变动作成败）。
+        """
+        name = str(action.get("name") or action.get("action") or "").strip().lower()
+        if name not in ("click_xy", "drag_xy", "browser_mouse_click_xy"):
+            return
+        args = action.get("args")
+        if not isinstance(args, dict):
+            args = action
+        value = str(args.get("value") or "")
+        nums = [int(n) for n in re.findall(r"-?\d+", value)]
+        if len(nums) < 2:
+            return
+        try:
+            from core.coordinate_probe import probe_via_evaluate_act
+
+            async def _send_act(sub_action: dict[str, Any]) -> dict[str, Any]:
+                return await asyncio.wait_for(
+                    self.agent_manager.send_act(agent_id, run_id_str, sub_action),
+                    timeout=30,
+                )
+
+            resolved = await probe_via_evaluate_act(_send_act, nums[0], nums[1])
+            if resolved:
+                args["_resolved"] = resolved
+                result["_resolved"] = resolved
+                logger.info(
+                    "Bridge: 坐标回解 → %s/%s（run #%s）",
+                    resolved.get("role") or "?",
+                    str(resolved.get("name") or resolved.get("selector") or "")[:60],
+                    run_id_str,
+                )
+        except Exception:
+            logger.debug("Bridge 坐标回解跳过", exc_info=True)
+
+    async def _enrich_failure_evidence(
+        self, agent_id: str, run_id_str: str, action: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """032 US6/US7：动作失败时补充证据（不改变成败）。
+
+        - US6：断言/等待失败且客户端 caps 含 browser_find → find 定向查找，附命中上下文；
+        - US7：目标未找到类失败 → 隐藏元素诊断（hidden / not_in_dom）。
+        """
+        try:
+            from app.config import get_settings
+
+            s = get_settings()
+        except Exception:
+            s = None
+        name = str(action.get("name") or action.get("action") or "").strip().lower().replace("browser_", "")
+        args = action.get("args") if isinstance(action.get("args"), dict) else action
+        error = str(result.get("error") or "")
+
+        # US6：find 辅助（仅断言/等待失败，且能力可用）
+        if s is not None and bool(getattr(s, "exec_find_probe", True)) and name in ("assert_text", "wait"):
+            try:
+                caps = set(self.agent_manager.get_agent_caps(agent_id) or set())
+            except Exception:
+                caps = set()
+            if "browser_find" in caps:
+                token = str(args.get("value") or "").strip()
+                if token:
+                    try:
+                        res = await asyncio.wait_for(
+                            self.agent_manager.send_act(
+                                agent_id, run_id_str, {"name": "find", "args": {"value": token}},
+                            ),
+                            timeout=30,
+                        )
+                        text = str((res or {}).get("text") or "").strip()
+                        if text:
+                            result["error"] = (error + f" | find: {text[:200]}")[:600]
+                            error = result["error"]
+                            logger.info("Bridge find 辅助: %s（run #%s）", text[:80], run_id_str)
+                    except Exception:
+                        logger.debug("find 辅助跳过", exc_info=True)
+
+        # US7：隐藏元素诊断（仅目标未找到类失败）
+        if s is not None and bool(getattr(s, "exec_hidden_probe", True)) and re.search(
+            r"not found|no node|not visible|no element|元素不存在|未找到|不可见", error, re.I
+        ):
+            target = str(args.get("element_desc") or args.get("value") or "").strip()
+            if target:
+                try:
+                    async def _caller(tool: str, payload: dict) -> dict:
+                        return await asyncio.wait_for(
+                            self.agent_manager.send_act(
+                                agent_id, run_id_str,
+                                {"name": "evaluate", "args": {"value": payload.get("function")}},
+                            ),
+                            timeout=30,
+                        )
+
+                    from core.browser_probe import diagnose_missing
+
+                    diag = await diagnose_missing(_caller, target)
+                    if diag.get("note"):
+                        result["error"] = (error + f" | {diag['note']}")[:600]
+                        logger.info("Bridge 隐藏元素诊断: %s（run #%s）", diag["note"][:90], run_id_str)
+                except Exception:
+                    logger.debug("隐藏元素诊断跳过", exc_info=True)
+
     async def _capture_failure_screenshot(
         self, agent_id: str, run_id_str: str, name: str = "failure_final",
+        target: str | None = None,
     ) -> str | None:
-        """失败终止前强制 observe+截图，保证报告有现场图。"""
+        """失败终止前强制 observe+截图，保证报告有现场图。
+
+        032 US3：target（快照 ref/CSS）且开关开启时优先元素级截图+高亮；
+        客户端/工具不支持时自动回退整页（旧客户端忽略新字段）。
+        """
         try:
+            _element_mode = False
+            try:
+                from app.config import get_settings
+                _element_mode = (
+                    bool(getattr(get_settings(), "exec_element_screenshot", True))
+                    and bool(target)
+                )
+            except Exception:
+                _element_mode = bool(target)
             obs = await asyncio.wait_for(
                 self.agent_manager.send_observe(
                     agent_id, run_id_str, want_screenshot=True,
+                    screenshot_target=(target if _element_mode else None),
+                    screenshot_highlight=_element_mode,
                 ),
                 timeout=30,
             )
@@ -390,6 +556,9 @@ class AgentBridge:
                 msg = f"{lbl} {vals[0]}" if vals else lbl
                 if tc.error_message:
                     msg += f" | {tc.error_message}"
+                _note = uncertain_note(args)
+                if _note:
+                    msg += _note
                 # 027: 仅失败步骤保留截图证据，通过步骤不留图
                 ss_path = None
                 if tc.success != 1:
@@ -407,6 +576,19 @@ class AgentBridge:
 
         if self._replay_logs:
             logs = list(self._replay_logs)
+
+        # 032 US2：console 证据并入步骤日志（失败步骤合并 / 运行级汇总行）
+        if self._console_entries:
+            try:
+                from app.config import get_settings as _get_settings
+                from core.console_evidence import apply_console_evidence
+
+                apply_console_evidence(
+                    logs, self._console_entries,
+                    int(getattr(_get_settings(), "exec_console_max_entries", 20) or 20),
+                )
+            except Exception:
+                logger.debug("console 证据合并跳过", exc_info=True)
 
         last_shot = self._last_screenshot_path()
         # 无工具调用但失败时，写一条错误日志（挂上失败现场截图）
@@ -552,10 +734,16 @@ class AgentBridge:
             })
             return {"success": False, "executed": 0, "invalid": True}
 
+        try:
+            from app.config import get_settings as _gs_el_u
+            _el_ss = bool(getattr(_gs_el_u(), "exec_element_screenshot", True))
+        except Exception:
+            _el_ss = True
+
         async def _exec(sub_action: dict[str, Any]) -> dict[str, Any]:
             try:
                 return await asyncio.wait_for(
-                    self.agent_manager.send_act(agent_id, run_id_str, sub_action),
+                    self.agent_manager.send_act(agent_id, run_id_str, {**sub_action, "_element_screenshot": _el_ss}),
                     timeout=120,
                 )
             except asyncio.TimeoutError:
@@ -604,7 +792,21 @@ class AgentBridge:
         async def _probe(target: str):
             from core.browser_probe import probe_fallbacks
 
-            return await probe_fallbacks(_probe_caller, target)
+            locators, evidence = await probe_fallbacks(_probe_caller, target)
+            # 032 US7：0 匹配时诊断"存在但不可见 / 不在 DOM"（并入证据与失败文案）
+            if not locators:
+                try:
+                    from app.config import get_settings as _gs_h
+
+                    if bool(getattr(_gs_h(), "exec_hidden_probe", True)):
+                        from core.browser_probe import diagnose_missing
+
+                        diag = await diagnose_missing(_probe_caller, target)
+                        if diag.get("note"):
+                            evidence["diagnosis"] = diag["note"]
+                except Exception:
+                    logger.debug("隐藏元素诊断跳过", exc_info=True)
+            return locators, evidence
 
         _probe_arg = _probe if bool(getattr(s, "action_unit_probe", True)) else None
 
@@ -631,12 +833,16 @@ class AgentBridge:
             }
 
         # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
+        _unit_uncertain = bool(getattr(outcome, "uncertain", False))
         try:
             _failed = outcome.failed_action or {}
+            _failed_args = tool_args_from_action(_failed)
+            if _unit_uncertain:
+                _failed_args["_uncertain"] = True
             await crud_agent_run.create_tool_call(
                 self.db, run.id, turn,
                 str(_failed.get("action") or "unknown"),
-                tool_args_from_action(_failed),
+                _failed_args,
                 False,
                 str(outcome.error or "")[:500],
             )
@@ -656,10 +862,26 @@ class AgentBridge:
                 "请重新观察页面后继续（可改用单动作逐个处理该段）。"
             ),
         })
+        if _unit_uncertain:
+            logger.warning(
+                "Bridge unit uncertain（可能已生效）run #%d turn %d: %s",
+                run.id, turn, str(outcome.error)[:100],
+            )
+            _hint = uncertain_context_hint(
+                str((outcome.failed_action or {}).get("action") or "")
+            )
+            context_messages.append({"role": "user", "content": _hint})
+            try:
+                await crud_agent_run.create_message(
+                    self.db, run.id, turn, "user", _hint,
+                )
+            except Exception:
+                logger.debug("uncertain 提示消息写入跳过", exc_info=True)
         return {
             "success": False,
             "executed": outcome.executed_count,
             "error": str(outcome.error or ""),
+            "uncertain": _unit_uncertain,
         }
 
     async def _maybe_engine_done(
@@ -825,6 +1047,16 @@ class AgentBridge:
             return False
 
         logger.info("Bridge: compiled_script replay SUCCESS case=%s steps=%s", run.case_id, len(res))
+        # 032 US2：回放窗口 console 证据（客户端随结果回传；失败静默；开关关闭不采集）
+        try:
+            from app.config import get_settings as _gs_ce
+
+            if bool(getattr(_gs_ce(), "exec_console_evidence", True)):
+                self._console_entries = list(
+                    getattr(self.agent_manager, "_last_console_errors", []) or []
+                )
+        except Exception:
+            pass
         if persist_on_success and script_override and tc is not None:
             try:
                 from core.compiled_script import persist_compiled_script
@@ -1006,6 +1238,10 @@ class AgentBridge:
             "value": args.get("value"),
             "element_desc": args.get("element_desc"),
         }
+        # 032 US5：坐标动作回解结果入 journal（固化脚本优先语义定位）
+        _resolved = args.get("_resolved")
+        if isinstance(_resolved, dict) and _resolved:
+            entry["resolved"] = _resolved
         idx = pick_checklist_index(self._run_steps, self._journal_covered, entry)
         if idx is None:
             return
@@ -1021,6 +1257,10 @@ class AgentBridge:
                 action=name,
                 selector=args.get("selector"),
                 value=args.get("value"),
+                dom_attrs=(
+                    {"active": _resolved}
+                    if isinstance(_resolved, dict) and _resolved else None
+                ),
             )
         except Exception:
             logger.debug("Bridge replay record build skipped", exc_info=True)
@@ -1545,6 +1785,13 @@ class AgentBridge:
                 )
                 continue
 
+            # 032 US3：失败时客户端优先元素级截图（开关；send 时浅拷贝注入，不污染记录）
+            try:
+                from app.config import get_settings as _gs_el
+                _el_ss = bool(getattr(_gs_el(), "exec_element_screenshot", True))
+            except Exception:
+                _el_ss = True
+
             # ── Phase B：宏动作单元（一次往返推进一段机械动作）──
             if isinstance(action.get("unit"), list):
                 _unit = await self._execute_action_unit(
@@ -1569,7 +1816,7 @@ class AgentBridge:
             try:
                 _act_t0 = time.monotonic()
                 result = await asyncio.wait_for(
-                    self.agent_manager.send_act(agent_id, run_id_str, action),
+                    self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
                     timeout=120,
                 )
             except asyncio.TimeoutError:
@@ -1582,8 +1829,16 @@ class AgentBridge:
                 "Bridge turn %d: act %.1fs", turn, time.monotonic() - _act_t0,
             )
 
+            # 032：副作用动作 transport 级失败 → "可能已生效"，豁免本地重试与回退
+            _act_label = str(action.get("name", action.get("action", "")) or "")
+            if annotate_uncertain(_act_label, result):
+                logger.warning(
+                    "Bridge: act uncertain（可能已生效，跳过本地重试/回退）turn %d: %s",
+                    turn, str(result.get("error"))[:100],
+                )
+
             # Phase C：瞬时失败（元素未就绪/超时/被替换）本地重试，不计失败轮
-            if not result.get("success"):
+            if not result.get("success") and not result.get("_uncertain"):
                 from core.mcp_args import is_transient_action_error
 
                 if is_transient_action_error(result.get("error")):
@@ -1595,7 +1850,7 @@ class AgentBridge:
                         await asyncio.sleep(_delay)
                         try:
                             result = await asyncio.wait_for(
-                                self.agent_manager.send_act(agent_id, run_id_str, action),
+                                self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
                                 timeout=120,
                             )
                         except asyncio.TimeoutError:
@@ -1606,7 +1861,8 @@ class AgentBridge:
                             break
 
             # ── 3b. Act 失败恢复：Cursor click_xy 兜底 + stale ref 刷新 ──
-            if not result.get("success"):
+            # 032：uncertain 时跳过恢复重试（避免重复执行副作用动作）
+            if not result.get("success") and not result.get("_uncertain"):
                 error = result.get("error", "") or ""
                 from core.locator_candidates import (
                     actionable_candidates,
@@ -1690,7 +1946,7 @@ class AgentBridge:
                         ):
                             action = retry_action
                             result = await asyncio.wait_for(
-                                self.agent_manager.send_act(agent_id, run_id_str, action),
+                                self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
                                 timeout=120,
                             )
                             logger.info(
@@ -1701,6 +1957,10 @@ class AgentBridge:
                         logger.warning(
                             "Bridge stale-ref recovery failed (turn %d): %s", turn, exc,
                         )
+
+            # 032 US6/US7：失败补充证据（find 辅助 + 隐藏元素诊断；均静默降级、不改变成败）
+            if not result.get("success") and not result.get("_uncertain"):
+                await self._enrich_failure_evidence(agent_id, run_id_str, action, result)
 
             # 动作后确定性验证（028：与 nl_goal 同一 verifier，MCP 成功不等于页面已变化）
             _ver_name = str(action.get("name", action.get("action", "")) or "").lower().replace("browser_", "")
@@ -1742,6 +2002,10 @@ class AgentBridge:
             self._save_screenshot(result.get("screenshot_b64"), f"turn_{turn:02d}_act")
 
             # ── 4. 记录轮次 ──
+            # 032 US5：坐标动作成功后回解命中元素（语义信息入账；失败静默）
+            if result.get("success"):
+                await self._resolve_coordinate_target(agent_id, run_id_str, action, result)
+
             await self._record_turn(run.id, turn, snapshot, action, result)
 
             # ── 5. 更新上下文 ──
@@ -1753,6 +2017,15 @@ class AgentBridge:
             from core.mcp_args import build_tool_status
             status_text = build_tool_status(result)
             context_messages.append({"role": "tool", "content": status_text})
+            if result.get("_uncertain"):
+                _hint = uncertain_context_hint(str(action_name))
+                context_messages.append({"role": "user", "content": _hint})
+                try:
+                    await crud_agent_run.create_message(
+                        self.db, run.id, turn, "user", _hint,
+                    )
+                except Exception:
+                    logger.debug("uncertain 提示消息写入跳过", exc_info=True)
 
             from core.mcp_args import act_count_key
             _act_key = act_count_key(action)
@@ -2008,11 +2281,14 @@ class AgentBridge:
             str(action),
         )
 
-        # 工具调用记录
+        # 工具调用记录（032：uncertain 附加键随 args 入库，供报告标注）
+        _tool_args = dict(action.get("args", {}) or {})
+        if result.get("_uncertain"):
+            _tool_args["_uncertain"] = True
         await crud_agent_run.create_tool_call(
             self.db, run_id, turn,
             action.get("name", action.get("action", "unknown")),
-            action.get("args", {}),
+            _tool_args,
             result.get("success", False),
             result.get("error", ""),
         )

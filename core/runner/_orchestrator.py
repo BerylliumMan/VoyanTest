@@ -309,6 +309,19 @@ async def run_test_case_via_agent(
         ),
         "screenshot_path": None,
     }]
+    # 032 US2：console 证据（服务端本机 MCP；失败静默降级）
+    try:
+        from app.config import get_settings as _gs
+
+        _s = _gs()
+        if getattr(_s, "exec_console_evidence", True):
+            from core.console_evidence import apply_console_evidence, collect_console_via_mcp
+
+            _cap = int(getattr(_s, "exec_console_max_entries", 20) or 20)
+            _entries = await collect_console_via_mcp(mcp_manager, _cap)
+            logs = apply_console_evidence(logs, _entries, _cap)
+    except Exception:
+        logger.debug("console 证据采集跳过", exc_info=True)
     try:
         saved_run_id = await save_run_results(
             case_id, case_status, start_time, end_time,

@@ -48,6 +48,7 @@ ACTIONS (maps to Playwright MCP):
 - "hover" / "check": selector=ref.
 - "goto": Navigate. selector=null, value=URL.
 - "wait": Wait for text or seconds. selector=null, value=text or number.
+  For "等待【X】消失/隐藏/不再出现" (negative wait) add "wait_mode": "gone" (maps to textGone).
 - "press_key": Key or chord. selector=null, value=Enter|Escape|Control+A…
 - "scroll": Page or element scroll. selector=null|ref, value=px|"up"|"down".
 - "drag": Drag element to element. selector=startRef, value=endRef.

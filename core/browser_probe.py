@@ -113,12 +113,25 @@ COLLECT_FN = r"""() => {
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    """MCP evaluate 的返回常带 '### Result' 包裹/转义，宽松提取 JSON。"""
+    """MCP evaluate 的返回常带 '### Result' 包裹 + 双编码转义（返回字符串时），宽松提取。
+
+    实测格式（playwright-mcp 0.0.80）：
+        ### Result
+        "{\\"url\\":\\"...\\",\\"elements\\":[...]}"   ← 外层是引号字符串
+        ### Ran Playwright code ...
+    """
     raw = str(text or "")
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
+    m = re.search(r"###\s*Result\s*\n(.+?)(?:\n###|\Z)", raw, re.S)
+    payload = m.group(1).strip() if m else raw
+    if payload.startswith('"') and payload.endswith('"'):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = payload[1:-1]
+    m2 = re.search(r"\{.*\}", payload, re.S)
+    if not m2:
         return {}
-    candidate = m.group(0)
+    candidate = m2.group(0)
     for probe in (candidate, candidate.replace('\\"', '"').replace("\\n", " ")):
         try:
             data = json.loads(probe)
@@ -133,12 +146,57 @@ async def collect_elements(
     caller: Callable[[str, dict], Awaitable[dict]],
     *,
     max_elements: int = MAX_ELEMENTS,
+    include_hidden: bool = False,
 ) -> dict[str, Any]:
-    """通过 browser_evaluate 采集行动元素。返回 {url,title,count,elements:[...]}。"""
-    r = await caller("browser_evaluate", {"function": COLLECT_FN})
+    """通过 browser_evaluate 采集行动元素。返回 {url,title,count,elements:[...]}。
+
+    032 US7：include_hidden=True 时保留隐藏元素（用于"存在但不可见"诊断）。
+    """
+    fn = COLLECT_FN
+    if include_hidden:
+        fn = fn.replace(".filter((e) => e.visible)", ".filter((e) => true)")
+    r = await caller("browser_evaluate", {"function": fn})
     if not isinstance(r, dict) or not r.get("success"):
         return {"url": "", "title": "", "count": 0, "elements": []}
     return _extract_json(str(r.get("text") or ""))
+
+
+async def diagnose_missing(
+    caller: Callable[[str, dict], Awaitable[dict]],
+    target: str,
+) -> dict[str, Any]:
+    """032 US7：目标可见未命中时的诊断（hidden / not_in_dom / unknown）。
+
+    - hidden：目标存在于 DOM 但不可见（命中含隐藏元素的采集，且可见性为 false）
+    - not_in_dom：含隐藏元素在内都找不到目标
+    - unknown：探针本身失败（不做断言）
+    """
+    try:
+        fn = COLLECT_FN.replace(".filter((e) => e.visible)", ".filter((e) => true)")
+        r = await caller("browser_evaluate", {"function": fn})
+        if not isinstance(r, dict) or not r.get("success"):
+            return {"state": "unknown", "note": ""}
+        data = _extract_json(str(r.get("text") or ""))
+        if "elements" not in data:
+            return {"state": "unknown", "note": ""}
+        elements = data.get("elements") or []
+        matched = match_target(elements, target)
+        hidden = [m for m in matched if not m.get("visible", True)]
+        if hidden:
+            e = hidden[0]
+            loc = e.get("selector") or e.get("name") or target
+            return {
+                "state": "hidden",
+                "note": f"目标存在于 DOM 但不可见（hidden）：{loc}",
+            }
+        if matched:
+            return {
+                "state": "visible_only",
+                "note": "目标在 DOM 中存在且可见（可能被遮挡或不在视口内）",
+            }
+        return {"state": "not_in_dom", "note": "目标不在当前 DOM（含隐藏元素）中"}
+    except Exception:  # noqa: BLE001
+        return {"state": "unknown", "note": ""}
 
 
 def _norm(value: str | None) -> str:

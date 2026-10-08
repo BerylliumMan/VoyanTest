@@ -411,7 +411,7 @@ class PlaywrightMCPManager:
                 except Exception as exc:
                     logger.warning("Pre-click tab list failed: %s", exc)
 
-            args = self._build_mcp_args(action, selector, value)
+            args = self._build_mcp_args(action, selector, value, tool_call.get('wait_mode'))
             if element_desc and isinstance(args.get('element'), str) and not args['element']:
                 args['element'] = element_desc
             # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本跨 frame 兜底
@@ -451,10 +451,11 @@ class PlaywrightMCPManager:
             return {'success': False, 'error': str(exc)}
 
     @staticmethod
-    def _build_mcp_args(action: str, selector: str | None, value: str | None) -> dict:
+    def _build_mcp_args(action: str, selector: str | None, value: str | None,
+                        wait_mode: str | None = None) -> dict:
         """兼容包装——实际映射见 core.mcp_args.build_mcp_args（契约 C2）。"""
         from core.mcp_args import legacy_build_mcp_args
-        return legacy_build_mcp_args(action, selector, value)
+        return legacy_build_mcp_args(action, selector, value, wait_mode=wait_mode)
 
     # ------------------------------------------------------------------
     # DOM snapshot for LLM context
@@ -500,14 +501,20 @@ class PlaywrightMCPManager:
     # Screenshot (for failures)
     # ------------------------------------------------------------------
 
-    async def take_screenshot(self, path: str) -> Optional[str]:
-        """Take a screenshot and save to the given path."""
+    async def take_screenshot(self, path: str, element: str | None = None,
+                              target: str | None = None) -> Optional[str]:
+        """Take a screenshot and save to the given path.
+
+        032 US3：element/target 提供时走元素级截图（与 fullPage 互斥）。
+        """
         try:
-            result = await self.call_tool('browser_take_screenshot', {
-                'filename': path,
-                'fullPage': True,
-                'type': 'png',
-            })
+            args: dict = {'filename': path, 'type': 'png'}
+            if element or target:
+                args['element'] = element or ''
+                args['target'] = target or ''
+            else:
+                args['fullPage'] = True
+            result = await self.call_tool('browser_take_screenshot', args)
             if result['success'] and os.path.exists(path):
                 return path
             logger.warning("Screenshot failed: success=%s, path_exists=%s, error=%s", result.get('success'), os.path.exists(path), result.get('error', result.get('text', 'unknown')))

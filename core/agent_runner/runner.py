@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
@@ -381,10 +382,17 @@ class AgentRunner:
                      action_name, action.get("selector"), action.get("value"))
 
         result = await self._execute_action_once(action)
+        if result.get("success"):
+            await self._resolve_coordinate_target(action, result)
         if not result.get("success"):
-            from core.mcp_args import is_transient_action_error
+            from core.mcp_args import annotate_uncertain, is_transient_action_error
 
-            if is_transient_action_error(result.get("error")):
+            if annotate_uncertain(action, result):
+                logger.warning(
+                    "Runner: act uncertain（可能已生效，跳过本地重试）: %s",
+                    str(result.get("error"))[:100],
+                )
+            elif is_transient_action_error(result.get("error")):
                 for _delay in (0.6, 1.5):
                     logger.info(
                         "Runner: act 瞬时失败，本地重试（%.1fs 后）: %s",
@@ -395,6 +403,26 @@ class AgentRunner:
                     if result.get("success"):
                         break
         return result
+
+    async def _resolve_coordinate_target(
+        self, action: dict[str, Any], result: dict[str, Any],
+    ) -> None:
+        """032 US5：服务端坐标动作成功后回解命中元素（失败静默）。"""
+        name = str(action.get("action") or action.get("name") or "").strip().lower()
+        if name not in ("click_xy", "drag_xy", "browser_mouse_click_xy"):
+            return
+        try:
+            nums = [int(n) for n in re.findall(r"-?\d+", str(action.get("value") or ""))]
+            if len(nums) < 2 or self._mcp_manager is None:
+                return
+            from core.coordinate_probe import probe_via_mcp
+
+            resolved = await probe_via_mcp(self._mcp_manager.call_tool, nums[0], nums[1])
+            if resolved:
+                action["_resolved"] = resolved
+                result["_resolved"] = resolved
+        except Exception:
+            logger.debug("坐标回解跳过", exc_info=True)
 
     async def _execute_action_once(self, action: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -500,7 +528,21 @@ class AgentRunner:
         async def _probe(target: str):
             from core.browser_probe import probe_fallbacks
 
-            return await probe_fallbacks(_probe_caller, target)
+            locators, evidence = await probe_fallbacks(_probe_caller, target)
+            # 032 US7：0 匹配时诊断"存在但不可见 / 不在 DOM"
+            if not locators:
+                try:
+                    from app.config import get_settings as _gs_h
+
+                    if bool(getattr(_gs_h(), "exec_hidden_probe", True)):
+                        from core.browser_probe import diagnose_missing
+
+                        diag = await diagnose_missing(_probe_caller, target)
+                        if diag.get("note"):
+                            evidence["diagnosis"] = diag["note"]
+                except Exception:
+                    logger.debug("隐藏元素诊断跳过", exc_info=True)
+            return locators, evidence
 
         _probe_arg = _probe if self._auto_unit_probe() else None
         outcome = await run_unit(steps, _exec, on_step_ok=_on_ok, probe=_probe_arg)
@@ -512,13 +554,17 @@ class AgentRunner:
             )
             return {"success": True, "executed": outcome.executed_count}
         # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
+        _unit_uncertain = bool(getattr(outcome, "uncertain", False))
         if self._db is not None and self._run_id is not None:
             try:
                 _failed = outcome.failed_action or {}
+                _failed_args = tool_args_from_action(_failed)
+                if _unit_uncertain:
+                    _failed_args["_uncertain"] = True
                 await crud_agent_run.create_tool_call(
                     self._db, self._run_id, turn,
                     str(_failed.get("action") or "unknown"),
-                    tool_args_from_action(_failed),
+                    _failed_args,
                     False,
                     str(outcome.error or "")[:500],
                 )
@@ -535,7 +581,27 @@ class AgentRunner:
             f"（已完成 {outcome.executed_count} 步）：{str(outcome.error)[:160]}。"
             "请重新观察页面后继续（可改用单动作逐个处理该段）。",
         )
-        return {"success": False, "executed": outcome.executed_count, "error": str(outcome.error or "")}
+        if _unit_uncertain:
+            from core.mcp_args import uncertain_context_hint
+
+            logger.warning(
+                "unit uncertain（可能已生效）turn %d: %s", turn, str(outcome.error)[:100],
+            )
+            _hint = uncertain_context_hint(str((outcome.failed_action or {}).get("action") or ""))
+            self.context.add_turn("user", _hint)
+            if self._db is not None and self._run_id is not None:
+                try:
+                    await crud_agent_run.create_message(
+                        self._db, self._run_id, turn, "user", _hint,
+                    )
+                except Exception:
+                    logger.debug("uncertain 提示消息写入跳过", exc_info=True)
+        return {
+            "success": False,
+            "executed": outcome.executed_count,
+            "error": str(outcome.error or ""),
+            "uncertain": _unit_uncertain,
+        }
 
     # ── 主循环 ────────────────────────────────────────────────────────────
 
@@ -874,6 +940,7 @@ class AgentRunner:
             for key in (
                 "selector", "target", "candidate_ref", "snapshot_version",
                 "value", "element_desc", "key", "path", "url", "text",
+                "_resolved",
             )
             if action.get(key) is not None
         }

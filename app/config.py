@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     action_unit_auto: bool = True
     # 宏动作单元失败后允许 DOM 探针回退（确定性定位，不消耗模型轮次）
     action_unit_probe: bool = True
+    # 032 执行证据与可靠性增强：
+    # - 运行收尾采集 console error（含未捕获异常）写入报告
+    exec_console_evidence: bool = True
+    exec_console_max_entries: int = 20
+    # - 失败截图优先元素级（不支持时自动回退整页）
+    exec_element_screenshot: bool = True
+    # - 目标未找到时执行含隐藏元素诊断（区分「存在但不可见」/「不在 DOM」）
+    exec_hidden_probe: bool = True
+    # - browser_find 能力探测与使用（不可用时自动降级快照路径）
+    exec_find_probe: bool = True
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

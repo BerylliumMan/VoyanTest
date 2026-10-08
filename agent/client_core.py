@@ -720,6 +720,7 @@ class AgentClient:
         """
         if why:
             self._log_warning(f"Invalidating MCP session: {why}")
+        self._mcp_caps_cache = None  # 032 US6：会话重建后重探工具表
         try:
             await self._stop_mcp(close_exec_chrome=False)
         except Exception as exc:
@@ -1006,6 +1007,7 @@ class AgentClient:
         self._log_info("MCP subprocess ready (browser started)")
 
     async def _stop_mcp(self, *, close_exec_chrome: bool = True):
+        self._mcp_caps_cache = None  # 032 US6：MCP 停止后清空能力缓存
         if self._mcp_process:
             pid = self._mcp_process.pid
             # 1. Close stdin → MCP 检测到 EOF 后优雅退出，Playwright 自动关闭浏览器
@@ -1106,6 +1108,7 @@ class AgentClient:
         step_description: str = "",
         element_desc: str | None = None,
         timeout_ms: int = 30000,
+        wait_mode: str | None = None,
     ) -> dict:
         from core.blank_click import execute_blank_click, should_use_blank_click
         from core.mcp_tabs import (
@@ -1147,6 +1150,7 @@ class AgentClient:
 
         args = self._build_mcp_args(
             action, selector, value, element_desc=element_desc, timeout_ms=timeout_ms,
+            wait_mode=wait_mode,
         )
         # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本先跨 frame 即时检查
         if mcp_tool == "browser_wait_for" and (args.get("text") or "").strip():
@@ -1182,6 +1186,24 @@ class AgentClient:
     async def _mcp_tools_call(self, tool_name: str, arguments: dict) -> dict:
         """Call an MCP tool by exact name (e.g. browser_tabs)."""
         return await self._mcp_tools_call_once(tool_name, arguments, _retried=False)
+
+    async def _get_mcp_caps(self) -> list[str]:
+        """032 US6：探测 MCP 工具表（缓存非空结果；失败静默返回空）。"""
+        cached = getattr(self, "_mcp_caps_cache", None)
+        if cached:
+            return cached
+        try:
+            await self._mcp_send("tools/list", {})
+            resp = await self._mcp_recv(timeout=10)
+            tools = ((resp or {}).get("result") or {}).get("tools") or []
+            names = sorted(str(t.get("name")) for t in tools if isinstance(t, dict) and t.get("name"))
+            if names:
+                self._mcp_caps_cache = names
+                self._log_info(f"MCP caps: {len(names)} tools (browser_find={'browser_find' in names})")
+            return names
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("MCP caps 探测失败: %s", exc)
+            return []
 
     async def _mcp_tools_call_once(
         self, tool_name: str, arguments: dict, *, _retried: bool,
@@ -1248,15 +1270,43 @@ class AgentClient:
                 )
             return {"success": False, "error": f"MCP recv failed: {exc}"}
 
-    async def _mcp_screenshot_base64(self) -> Optional[str]:
+    async def _mcp_screenshot_base64(
+        self, element_target: str | None = None, highlight: bool = False,
+    ) -> Optional[str]:
         """Take a screenshot via MCP and return base64-encoded PNG.
 
         截图仅用于回传服务端落盘；客户端临时文件会尽量清理。
+        032 US3：element_target 时先尽力高亮，再元素级截图；任何失败回退整页。
         """
         tmp_name = f"_fail_{int(time.time() * 1000)}.png"
         tmp_paths: list[Path] = []
         try:
-            result = await self._mcp_call_tool("screenshot", "", tmp_name)
+            result: dict
+            if element_target:
+                try:
+                    if highlight:
+                        try:
+                            await self._mcp_call_tool("highlight", element_target, "")
+                        except Exception:
+                            pass
+                    result = await self._mcp_call_tool("screenshot", element_target, tmp_name)
+                    _content = result.get("_content") or []
+                    if not result.get("success") and not self._extract_screenshot_base64(_content):
+                        raise RuntimeError(
+                            result.get("error") or result.get("text") or "element screenshot failed"
+                        )
+                    if highlight:
+                        try:
+                            await self._mcp_call_tool("hide_highlight", "", "")
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    logger.warning(
+                        "Element screenshot failed, fallback to full page: %s", exc,
+                    )
+                    result = await self._mcp_call_tool("screenshot", "", tmp_name)
+            else:
+                result = await self._mcp_call_tool("screenshot", "", tmp_name)
             content = result.get("_content", []) or []
             # 记录 MCP 可能落盘的路径，便于回传后清理
             for c in content:
@@ -1334,11 +1384,12 @@ class AgentClient:
         value: str,
         element_desc: str | None = None,
         timeout_ms: int = 30000,
+        wait_mode: str | None = None,
     ) -> dict:
         from core.mcp_args import build_mcp_args
         return build_mcp_args(
             action, selector=selector, element_desc=element_desc,
-            value=value, timeout_ms=timeout_ms,
+            value=value, timeout_ms=timeout_ms, wait_mode=wait_mode,
         )
 
     # ---- messaging ----
@@ -1586,6 +1637,8 @@ class AgentClient:
         case_id = payload.get("case_id") or 0
         keep_browser = bool(payload.get("keep_browser"))
         t0 = _time.monotonic()
+        # 032 US2：console 错误证据（回放窗口内采集；随结果回传）
+        _console_errors: list[str] = []
         if not script.strip():
             from core.locator_candidates import snapshot_has_visible_overlay
             text = (
@@ -1674,6 +1727,28 @@ class AgentClient:
                             ctx_kwargs["no_viewport"] = True
                         context = await browser.new_context(**ctx_kwargs)
                     page = context.pages[0] if context.pages else await context.new_page()
+
+                # 032 US2：console 错误证据（console error + 未捕获异常；随结果回传）
+                try:
+                    def _vt_on_console(_m, _bucket=_console_errors):
+                        try:
+                            if (_m.type or "") == "error":
+                                _t = (_m.text or "").strip()
+                                if _t:
+                                    _bucket.append(f"[error] {_t[:300]}")
+                        except Exception:
+                            pass
+
+                    def _vt_on_pageerror(_e, _bucket=_console_errors):
+                        try:
+                            _bucket.append(f"[pageerror] {str(_e)[:300]}")
+                        except Exception:
+                            pass
+
+                    page.on("console", _vt_on_console)
+                    page.on("pageerror", _vt_on_pageerror)
+                except Exception:
+                    pass
 
                 script_nav = bool(
                     re.search(r"page\s*\.\s*goto\s*\(", script or "", re.I)
@@ -1783,6 +1858,7 @@ class AgentClient:
                     "success": True,
                     "error": None,
                     "duration_ms": int((_time.monotonic() - t0) * 1000),
+                    "console_errors": _console_errors[:50],
                 },
             )
         except Exception as exc:
@@ -1799,6 +1875,7 @@ class AgentClient:
                     "error": err_s,
                     "duration_ms": int((_time.monotonic() - t0) * 1000),
                     "trace_path": getattr(self, "_last_compiled_trace_path", None),
+                    "console_errors": _console_errors[:50],
                 },
             )
         finally:
@@ -2139,8 +2216,21 @@ class AgentClient:
 
             # 截图按需：默认不拍，失败举证走失败路径的独立截图
             want_shot = bool((msg.payload or {}).get("want_screenshot", False))
-            screenshot_b64 = await self._mcp_screenshot_base64() if want_shot else ""
+            shot_target = str((msg.payload or {}).get("screenshot_target") or "")
+            shot_highlight = bool((msg.payload or {}).get("screenshot_highlight", False))
+            if want_shot:
+                screenshot_b64 = await self._mcp_screenshot_base64(
+                    element_target=shot_target or None,
+                    highlight=shot_highlight,
+                )
+            else:
+                screenshot_b64 = ""
             result["screenshot_b64"] = screenshot_b64 or ""
+
+            # 032 US6：上报 MCP 工具能力（browser_find 等按连接探测一次）
+            caps = await self._get_mcp_caps()
+            if caps:
+                result["caps"] = caps
 
             result["success"] = True
         except asyncio.TimeoutError:
@@ -2173,6 +2263,8 @@ class AgentClient:
         )
         value = tc.get("value") if "value" in tc else p.get("value")
         timeout_ms = tc.get("timeout_ms") or p.get("timeout_ms") or 30000
+        # 032 US4：负向等待标记（等待【X】消失 → textGone）
+        wait_mode = tc.get("wait_mode") if "wait_mode" in tc else p.get("wait_mode")
         # send_act 可能把 URL 放在 url 字段
         if not value:
             value = tc.get("url") or p.get("url")
@@ -2215,20 +2307,33 @@ class AgentClient:
             mcp_result = await self._mcp_call_tool(
                 action, selector, value, step_description=step_description,
                 element_desc=element_desc, timeout_ms=timeout_ms,
+                wait_mode=wait_mode,
             )
             result["success"] = mcp_result.get("success", False)
             if not result["success"]:
                 result["error"] = mcp_result.get("error") or mcp_result.get("text", "MCP execution failed")
                 # 仅失败截图：成功轮截图走 WS 又大又慢，且报告只保留失败图
-                ss_b64 = await self._mcp_screenshot_base64()
+                # 032 US3：服务端开启时优先元素级截图（目标存在时）+ 高亮；失败回退整页
+                _el_mode = bool(p.get("element_screenshot")) and bool(selector)
+                ss_b64 = await self._mcp_screenshot_base64(
+                    element_target=(selector if _el_mode else None),
+                    highlight=_el_mode,
+                )
                 result["screenshot_b64"] = ss_b64 or ""
+            elif (action or "").lower() in ("console", "find"):
+                # 032 US2/US6：console 证据 / find 结果文本回传（成功路径默认不带 text）
+                result["text"] = str(mcp_result.get("text") or "")
         except Exception as e:
             result["error"] = str(e)
             result["success"] = False
             self._log_error(f"Act failed for run {run_id} (action={action}): {e}")
-            # 异常时同样尝试截图
+            # 异常时同样尝试截图（032 US3：元素级优先，失败回退整页）
             try:
-                ss_b64 = await self._mcp_screenshot_base64()
+                _el_mode = bool(p.get("element_screenshot")) and bool(selector)
+                ss_b64 = await self._mcp_screenshot_base64(
+                    element_target=(selector if _el_mode else None),
+                    highlight=_el_mode,
+                )
                 result["screenshot_b64"] = ss_b64 or ""
             except Exception:
                 pass

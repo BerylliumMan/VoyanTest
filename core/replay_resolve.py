@@ -213,6 +213,30 @@ def build_replay_from_step(
             replay["value"] = str(url)
         return {k: v for k, v in replay.items() if v is not None or k == "strategy"}
 
+    # 032 US5：坐标兜底动作——若已回解命中元素，优先语义定位（click_role/click_text；
+    # 回解是"实际点击到的元素"这一事实，优先于描述解析的猜测）
+    if action_l in ("click_xy", "drag_xy", "browser_mouse_click_xy"):
+        active = (dom_attrs or {}).get("active") if isinstance(dom_attrs, dict) else None
+        if isinstance(active, dict):
+            r_name = str(active.get("name") or "").strip()
+            r_role = str(active.get("role") or "").strip().lower()
+            r_css = str(active.get("selector") or "").strip()
+            if r_name and r_role in ("button", "link", "menuitem", "tab", "treeitem", "option", "checkbox", "radio"):
+                replay["strategy"] = "click_role"
+                replay["role"] = r_role
+                replay["name"] = r_name
+                replay["exact_text"] = r_name
+                return {k: v for k, v in replay.items() if v is not None or k == "strategy"}
+            if r_name:
+                replay["strategy"] = "click_text"
+                replay["exact_text"] = r_name
+                replay["value"] = r_name
+                return {k: v for k, v in replay.items() if v is not None or k == "strategy"}
+            if r_css:
+                replay["strategy"] = "css"
+                replay["css"] = r_css
+                return {k: v for k, v in replay.items() if v is not None or k == "strategy"}
+
     # Open combobox / placeholder click (no project-specific CSS)
     if looks_like_unit_open_step(desc, st):
         replay["strategy"] = "click_placeholder"

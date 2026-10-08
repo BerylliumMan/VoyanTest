@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 
 # 与 @playwright/mcp tab.ts targetLocator 一致的 ref 判定正则
 _REF_RE = re.compile(r"^(f\d+)?e\d+$")
@@ -45,6 +45,10 @@ TOOL_MAP = {
     "click_xy": "browser_mouse_click_xy",
     "move_mouse": "browser_mouse_move_xy",
     "drag_xy": "browser_mouse_drag_xy",
+    "console": "browser_console_messages",
+    "highlight": "browser_highlight",
+    "hide_highlight": "browser_hide_highlight",
+    "find": "browser_find",
 }
 
 ACTION_DESCRIPTIONS = {
@@ -100,6 +104,7 @@ def build_mcp_args(
     element_desc: Optional[str] = None,
     value: Optional[str] = None,
     timeout_ms: int = 30000,
+    wait_mode: Optional[str] = None,
 ) -> dict:
     """按 contracts C2 构造 MCP 工具参数。
 
@@ -191,8 +196,33 @@ def build_mcp_args(
     if action == "wait":
         if value and value.isdigit():
             return {"time": int(value)}
+        # 032 US4：负向等待（等待【X】消失）→ textGone；出现 → text（互斥）
+        if (wait_mode or "").strip().lower() == "gone":
+            return {"textGone": value or ""}
         return {"text": value or ""}
+    if action == "console":
+        # 032 US2：console 错误证据（收尾采集一次；error 级含更严重的 pageerror）
+        return {"level": "error", "all": True}
+    if action == "highlight":
+        # 032 US3：失败目标高亮（元素级截图前尽力而为）
+        return {"element": desc or "", "target": sel or ""}
+    if action == "hide_highlight":
+        return {}
+    if action == "find":
+        # 032 US6：快照定向查找（text 子串匹配；regex 形式以 /pattern/ 传入）
+        token = (value or "").strip()
+        if token.startswith("/") and token.endswith("/") and len(token) > 2:
+            return {"regex": token}
+        return {"text": token}
     if action == "screenshot":
+        if sel or desc:
+            # 032 US3：元素级截图（与 fullPage 互斥；target 支持 ref/CSS）
+            return {
+                "element": desc or "",
+                "target": sel or "",
+                "filename": value or f"screenshot_{int(time.time())}.png",
+                "type": "png",
+            }
         return {
             "filename": value or f"screenshot_{int(time.time())}.png",
             "fullPage": True,
@@ -217,9 +247,11 @@ def build_mcp_args(
     return {}
 
 
-def legacy_build_mcp_args(action: str, selector: Optional[str], value: Optional[str]) -> dict:
+def legacy_build_mcp_args(action: str, selector: Optional[str], value: Optional[str],
+                          wait_mode: Optional[str] = None) -> dict:
     """旧签名兼容包装（原 _build_mcp_args(action, selector, value)）。"""
-    return build_mcp_args(action, selector=selector, element_desc=None, value=value)
+    return build_mcp_args(action, selector=selector, element_desc=None, value=value,
+                          wait_mode=wait_mode)
 
 
 # browser_wait_for 只扫主 frame；iframe 内文本需 evaluate 遍历 frames 检查
@@ -318,3 +350,64 @@ def is_transient_action_error(msg: str | None) -> bool:
     if not msg:
         return False
     return bool(_TRANSIENT_ACTION_ERROR_RE.search(str(msg)))
+
+
+# ── 032-exec-evidence：副作用动作的"不确定"归类 ───────────────────────────────
+# 与 is_transient_action_error 的边界：后者覆盖"派发前"错误（元素未就绪等），
+# 动作必然未生效、可安全本地重试；本函数只认 transport 级不确定（WS 等待超时/
+# 连接中断/无回包）——此时动作可能已实际执行，重试存在重复副作用风险。
+SIDE_EFFECT_ACTIONS = frozenset({
+    "click", "double_click", "right_click", "fill", "press_key", "select",
+    "check", "drag", "drag_xy", "click_xy", "upload", "drop", "dialog",
+    "goto", "navigate", "hover",
+})
+
+_UNCERTAIN_FAILURE_RE = re.compile(
+    r"(act timeout|act 超时|connection (closed|lost|reset|refused)|"
+    r"disconnected|offline|not connected|no response|did not respond|"
+    r"broken pipe|websocket|连接(中断|关闭|丢失|失败)|无响应|未回包)",
+    re.I,
+)
+
+
+def is_uncertain_failure(action: Any, error: str | None) -> bool:
+    """副作用动作 + transport 级失败 → "可能已生效"（豁免本地重试，强制重观察对账）。"""
+    if not error:
+        return False
+    if isinstance(action, dict):
+        name = str(action.get("name") or action.get("action") or "")
+    else:
+        name = str(action or "")
+    name = name.strip().lower().replace("browser_", "")
+    if name not in SIDE_EFFECT_ACTIONS:
+        return False
+    return bool(_UNCERTAIN_FAILURE_RE.search(str(error)))
+
+
+UNCERTAIN_NOTE = "（可能已生效·不确定）"
+
+
+def annotate_uncertain(action: Any, result: dict[str, Any] | None) -> bool:
+    """副作用动作 transport 级失败 → result 标 `_uncertain`；返回是否 uncertain。"""
+    if not isinstance(result, dict) or result.get("success"):
+        return False
+    if result.get("_uncertain"):
+        return True
+    if is_uncertain_failure(action, result.get("error")):
+        result["_uncertain"] = True
+        return True
+    return False
+
+
+def uncertain_note(args: dict[str, Any] | None) -> str:
+    """报告步骤 message 的"可能已生效"标注后缀（无标注返回空串）。"""
+    return UNCERTAIN_NOTE if (args or {}).get("_uncertain") else ""
+
+
+def uncertain_context_hint(action_name: str) -> str:
+    """uncertain 后的重观察提示（注入下一轮上下文，防止重复执行副作用）。"""
+    return (
+        f"SYSTEM: 上一步动作「{action_name}」在派发后超时/中断——可能已生效。"
+        "请先观察当前页面状态对账：若预期效果已出现则按成功继续；"
+        "确未生效再显式重试一次。不要重复执行副作用动作。"
+    )
