@@ -145,13 +145,14 @@ _UI_STEP_CONTRACT = """
 【步骤结构化 — StructuredStep — 必须严格遵守】
 - **一步 = 一个浏览器动作**。禁止把「打开→填写→点击」写进同一步。
 - **steps 必须是对象数组**，禁止纯字符串步骤。字段：
-  - `action`（必填）：goto|click|fill|select|check|uncheck|wait|assert_text|assert_visible|hover|press_key|click_blank|icon_click
+  - `action`（必填）：goto|click|double_click|right_click|fill|select|check|uncheck|wait|assert_text|assert_visible|hover|press_key|click_blank|icon_click|upload|drop|dialog
   - `target_name`：**必须是素材中出现过的**可见文案 / accessible name / aria-label / title / tooltip
   - `target_role`（推荐）：button|link|textbox|combobox|option|menuitem|checkbox|radio|img|…
   - `value`：fill/select/wait/assert 的文案；也必须能在素材中找到依据（或为文档给出的示例输入）
   - `disambiguation` / `icon_hint` / `frame_hint` / `note`（可选）
 - action 用法（格式示例，**文案勿照抄到本批**）：
-  1) goto：`{"action":"goto","target_name":"<素材中的页面/菜单名>"}`
+  1) goto：`{"action":"goto","target_name":"<素材中的页面标题/导航原文>"}`——**必须是素材出现过的原文**
+     （如 Swag Labs / Products / Your Cart / Checkout: Your Information）；禁止自造「登录页」「首页」「商品列表页」「结算页」等概括名
   2) click：`{"action":"click","target_name":"<素材按钮文案>","target_role":"button"}`
   3) fill：`{"action":"fill","target_name":"<素材输入标签>","target_role":"textbox","value":"<素材或文档给出的值>"}`
   4) select：先 click 展开再 select；字段名与选项均须来自素材
@@ -159,6 +160,10 @@ _UI_STEP_CONTRACT = """
 """ + ASSERT_CHECK_RULE + """
 
   6) 纯图标无字：icon_click + icon_hint（位置+外观+用途），禁止 `target_name":"图标"`
+  7) upload / drop：`{"action":"upload","target_name":"<文件按钮或文件框>","value":"<文档给出的文件路径>"}`；
+     仅在素材明确提到上传/拖拽文件时使用
+  8) dialog：`{"action":"dialog","value":"accept"}`（接受）或 `{"action":"dialog","value":"dismiss"}`（拒绝）；
+     仅在素材明确提到浏览器原生弹窗时使用
 - **禁止**控件类型词进 target_name（按钮、下拉框、输入框…）
 - **禁止**省略号；看不清就跳过或改用 icon_hint
 - **禁止**一步多目标
@@ -193,8 +198,13 @@ TC_GENERATE_UI_PROMPT = """你是资深的 UI 自动化测试工程师。请为�
   ✗ 叙述句「在商品列表点击 Sauce Labs Backpack 的【Add to cart】按钮后徽标变为 1」
   ✗ 标题含【】/「」/$ 会被校验器整条丢弃  ✓「购物车徽标数量校验」✓「按价格从低到高排序」
 - 【首步 — 硬规则】第 1 步必须是**打开/登录/导航**（浏览器从零也能独立执行）：
-  需要登录的用例必须显式写出登录步骤（打开首页 → 在【Username】输入… → 在【Password】输入… → 点击【Login】），
-  不得假设"已经在某页面"；前置状态写进 precondition，步骤仍要完整。
+  需要登录的站点必须**逐字写出完整登录步骤**（打开首页 → 在【Username】输入… → 在【Password】输入… → 点击【Login】），
+  禁止用「打开【登录后页面】」代替登录（如直接「打开【Products】」却没有任何登录步骤）；
+  前置状态写进 precondition，步骤仍要完整。
+- 【打开类 — 硬规则】goto 步骤【】内必须是素材中的**页面标题或页面级导航原文**（站点/页面标题、菜单链接文字，如 Swag Labs / Products / Your Cart / Checkout: Your Information）；
+  禁止用按钮/输入框/商品名等控件与数据文案当 goto 目标（✗「打开【Add to cart】」「打开【Login】」）；
+  禁止自造「登录页」「首页」「商品列表页」「结算信息填写页」等概括名——素材没有页面标题时用站点标题原文；
+  从流程中段（如购物车/结算页）开始的用例必须补齐前序步骤（登录 → … → 到达该页面），不得直接「打开」登录后才可见的页面。
 - precondition 只能写素材支持的起始态（如已打开某菜单——该菜单名须在截图出现）。
 - steps 与 expected **等长**；中间步 expected 用 `""`；断言文案必须截图可见。
 - 测试项名称若含「按单位查询」等但截图无该控件：**跳过该测试项**，不要改写成假筛选。
