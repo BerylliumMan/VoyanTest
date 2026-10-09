@@ -19,12 +19,18 @@ vi.mock('axios', () => ({
 
 const mockedAxios = vi.mocked(axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> });
 
-/* Mock arco icons — they render SVGs that are noisy and not the test target */
+/* Mock arco icons — they render SVGs that are noisy and not the test target.
+   注意：列表必须覆盖 recordings 页面及其子组件用到的全部图标，
+   否则未列出者会是 undefined，React 渲染时直接崩（"Element type is invalid"）。 */
 vi.mock('@arco-design/web-react/icon', () => ({
   IconRecord: () => null,
   IconStop: () => null,
   IconSwap: () => null,
   IconRefresh: () => null,
+  IconSave: () => null,
+  IconHistory: () => null,
+  IconDesktop: () => null,
+  IconDelete: () => null,
 }));
 
 /* Mock i18n — provide only the keys the component reads during idle render */
