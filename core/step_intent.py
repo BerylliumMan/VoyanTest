@@ -322,6 +322,7 @@ def structured_to_intent(structured: dict | None) -> StepIntent | None:
 # Interactive actions that can use a recorded CSS/Playwright selector as MCP target.
 _SELECTOR_ACTIONS = frozenset({
     "click", "fill", "select", "hover", "check", "uncheck", "icon_click",
+    "upload", "drop",
 })
 # Accessibility refs look like e15 / f4e11 — not CSS.
 _AX_REF_RE = re.compile(r"^[a-zA-Z]*\d*e\d+$", re.IGNORECASE)
@@ -429,6 +430,12 @@ def derived_selector_candidates(structured: dict | None) -> list[str]:
         return []
     action = (structured.get("action") or "click").strip().lower()
     role = (structured.get("target_role") or "").strip().lower()
+    if action == "upload":
+        # 文件选择框没有稳定的可访问名；浏览器原生 input[type=file] 是最稳的兜底
+        return ['input[type="file"]']
+    if action == "drop":
+        # 拖放目标没有通用 CSS 兜底；仅用录制固化 selector（见 solidified_selector）
+        return []
     if action not in _SELECTOR_ACTIONS and action != "select":
         return []
     out: list[str] = []
@@ -963,6 +970,15 @@ def intent_to_tool_call(
             timeout_ms=timeout_ms,
             thinking=thinking,
         )
+    if action == "dialog":
+        # 原生弹窗不需要元素 ref，直接处理（accept / dismiss / accept:文本）
+        return PlaywrightMCPToolCall(
+            action="dialog",
+            selector=None,
+            value=intent.value,
+            timeout_ms=timeout_ms,
+            thinking=thinking or "native dialog handling",
+        )
     if action in ("click_blank", "click_outside", "click_page"):
         return PlaywrightMCPToolCall(
             action="click_blank",
@@ -1189,7 +1205,7 @@ async def resolve_tool_call_from_step(
     if prebuilt is not None:
         intent = prebuilt
         action = (intent.action or "").lower()
-        if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside"):
+        if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside", "dialog"):
             return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
         if action == "click_blank" or action == BLANK_CLICK_ACTION:
             return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
@@ -1342,7 +1358,7 @@ async def resolve_tool_call_from_step(
         )
 
     action = (intent.action or "").lower()
-    if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside"):
+    if action in ("wait", "assert_text", "goto", "press_key", "scroll", "screenshot", "click_blank", "click_outside", "dialog"):
         return intent_to_tool_call(intent, ref=None, timeout_ms=timeout_ms)
 
     # Icon-only: ignore bogus target_name=图标; LLM often marks these ambiguous —

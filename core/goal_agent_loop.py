@@ -261,6 +261,46 @@ def journal_entry_covers_checklist(
             return _evaluate_is_real_close_action(entry)
         return False
 
+    # 文件/弹窗类动作（描述优先编辑）：纯文字描述里的「选择框/文件名」等词
+    # 会被粗略意图词表误判为 select/click，这里先按文件/弹窗语义判定
+    if action in (
+        "upload",
+        "file_upload",
+        "browser_file_upload",
+        "drop",
+        "browser_drop",
+    ):
+        if is_click_checklist_step(desc):
+            return False  # 明确以「点击」开头 → 属于点击步骤
+        if not desc or re.search(
+            r"上传|附件|拖拽|拖入|拖放|拖到|拖进|选择框|上传框", desc
+        ):
+            return True
+        if re.search(r"文件|路径", desc) and not is_select_checklist_step(desc):
+            return True
+        if (
+            is_click_checklist_step(desc)
+            or is_fill_checklist_step(desc)
+            or is_select_checklist_step(desc)
+            or _OPEN_NAV_STEP_RE.search(desc)
+        ):
+            return False
+        return True
+
+    if action in ("dialog", "browser_handle_dialog"):
+        if not desc or re.search(
+            r"弹窗|对话框|提示框|确认框|\balert\b|\bconfirm\b", desc, re.I
+        ):
+            return True
+        if (
+            is_click_checklist_step(desc)
+            or is_fill_checklist_step(desc)
+            or is_select_checklist_step(desc)
+            or _OPEN_NAV_STEP_RE.search(desc)
+        ):
+            return False
+        return True
+
     if desc and _OPEN_NAV_STEP_RE.search(desc):
         return action in (
             "goto",
@@ -270,9 +310,19 @@ def journal_entry_covers_checklist(
             "browser_click",
         )
 
-    # wait/assert 只能覆盖等待/断言类步骤，且 value 必须对齐期望文本
+    # wait/assert 覆盖语义：词表识别为等待/断言时按期望文本对齐；自由文字描述
+    # （未被识别为明确交互意图）仅当断言值在描述中有字面依据才可覆盖
     if action in ("wait", "assert_text", "browser_wait_for"):
-        if not desc or not is_wait_assert_checklist_step(desc):
+        if not desc:
+            return False
+        if is_wait_assert_checklist_step(desc):
+            return _wait_value_covers_assert_step(entry, desc)
+        if (
+            is_click_checklist_step(desc)
+            or is_fill_checklist_step(desc)
+            or is_select_checklist_step(desc)
+            or _OPEN_NAV_STEP_RE.search(desc)
+        ):
             return False
         return _wait_value_covers_assert_step(entry, desc)
 

@@ -22,6 +22,12 @@ UI_ACTIONS = frozenset({
     "press_key",
     "click_blank",
     "icon_click",
+    # 描述优先编辑开放的引擎动作面（与 core/mcp_args.TOOL_MAP 对齐）
+    "double_click",
+    "right_click",
+    "upload",
+    "drop",
+    "dialog",
 })
 
 # Map legacy / alias action names → canonical
@@ -34,6 +40,17 @@ _ACTION_ALIASES = {
     "type": "fill",
     "navigate": "goto",
     "open": "goto",
+    "dblclick": "double_click",
+    "context_click": "right_click",
+    "contextmenu": "right_click",
+    "file_upload": "upload",
+    "upload_file": "upload",
+    "browser_file_upload": "upload",
+    "drag_drop": "drop",
+    "drop_file": "drop",
+    "browser_drop": "drop",
+    "handle_dialog": "dialog",
+    "browser_handle_dialog": "dialog",
 }
 
 _CTRL_TYPE_SUFFIX = (
@@ -524,6 +541,27 @@ def render_structured_step(step: dict[str, Any] | None) -> str:
         return f"断言【{name}】可见" if name else "断言元素可见"
     if action == "hover":
         return f"悬停【{name}】" if name else "悬停"
+    if action == "double_click":
+        return f"双击【{name}】{suffix}" if name else f"双击{suffix}"
+    if action == "right_click":
+        return f"右键点击【{name}】{suffix}" if name else f"右键点击{suffix}"
+    if action == "upload":
+        paths = value_s
+        if name and name != "文件":
+            return f"在【{name}】上传文件 {paths}".strip()
+        return f"上传文件 {paths}".strip()
+    if action == "drop":
+        if name:
+            return f"拖拽文件 {value_s} 到【{name}】".strip()
+        return f"拖拽文件 {value_s}".strip()
+    if action == "dialog":
+        low = value_s.lower()
+        if low.startswith("accept:"):
+            text = value_s.split(":", 1)[1].strip()
+            return f"接受弹窗并输入 {text}".strip()
+        if low in ("dismiss", "cancel", "false", "取消", "拒绝"):
+            return "拒绝弹窗"
+        return "接受弹窗"
     if action == "press_key":
         return f"按键 {value_s or name}".strip()
     if action == "click_blank":
@@ -553,6 +591,16 @@ def _strip_wrappers(value: str) -> str:
                 v = v[len(a): len(v) - len(b)].strip()
                 changed = True
     return v
+
+
+def _normalize_upload_paths(value: str) -> str:
+    """上传/拖拽文件路径：中文分隔符归一为逗号（引擎按逗号拆多文件）。"""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    v = re.sub(r"[，、；;]+", ",", v)
+    parts = [p.strip() for p in v.split(",") if p.strip()]
+    return ",".join(parts)
 
 
 def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
@@ -787,6 +835,34 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
     if m:
         return {"action": "hover", "target_name": strip_ellipsis_in_label(m.group(1))}
 
+    # 双击 / 右键点击（描述优先编辑新增）
+    m = re.match(
+        rf"^(?:双击|连续点击)\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*(?:[（(]([^）)]+)[）)])?\s*$",
+        s,
+    )
+    if m:
+        out: dict[str, Any] = {
+            "action": "double_click",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "button",
+        }
+        if m.group(2):
+            out["disambiguation"] = m.group(2).strip()
+        return out
+    m = re.match(
+        rf"^(?:右键点击|右键|右击)\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*(?:[（(]([^）)]+)[）)])?\s*$",
+        s,
+    )
+    if m:
+        out = {
+            "action": "right_click",
+            "target_name": strip_ellipsis_in_label(m.group(1)),
+            "target_role": "button",
+        }
+        if m.group(2):
+            out["disambiguation"] = m.group(2).strip()
+        return out
+
     # click with optional disambiguation / trailing control-type word
     m = re.match(
         rf"^点击\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*(?:[（(]([^）)]+)[）)])?\s*(?:{_CTRL_TYPE_SUFFIX})?\s*$",
@@ -842,8 +918,96 @@ def parse_instant_to_structured(step: str) -> Optional[dict[str, Any]]:
             "value": m.group(2).strip(),
         }
 
-    # 选择/上传 …文件
-    m = re.match(r"^(?:选择|上传)\s*(.+?文件.*?)\s*$", s)
+    # 上传文件 / 拖拽文件 / 原生弹窗（描述优先编辑新增；值为路径，逗号/顿号分隔多文件）
+    m = re.match(
+        r"^在\s*【([^】]+)】\s*(?:中)?\s*上传\s*(?:文件|附件)\s*[：:]?\s*(.+)$",
+        s,
+    )
+    if m:
+        paths = _normalize_upload_paths(_strip_wrappers(m.group(2).strip()))
+        if paths:
+            return {
+                "action": "upload",
+                "target_name": strip_ellipsis_in_label(m.group(1)),
+                "value": paths,
+            }
+    m = re.match(
+        r"^上传\s*(?:文件|附件)\s*[：:]?\s*(.+)$",
+        s,
+    )
+    if m:
+        paths = _normalize_upload_paths(_strip_wrappers(m.group(1).strip()))
+        if paths:
+            return {"action": "upload", "target_name": "文件", "value": paths}
+    # 无「文件」字样/仅名词的上传：形如路径才取值，否则保留 upload 意图由描述兜底
+    m = re.match(r"^上传\s*(.+)$", s)
+    if m:
+        rest = m.group(1).strip()
+        tail = re.sub(
+            r"^(?:文件|附件|图片|头像|截图|证书|文档|视频|压缩包)", "", rest
+        ).strip()
+        tail = tail.lstrip("：:").strip()
+        tail = _strip_wrappers(tail)
+        looks_like_path = bool(re.search(r"[/\\]", tail)) or bool(
+            re.search(r"\.\w{1,8}$", tail)
+        )
+        if looks_like_path:
+            return {
+                "action": "upload",
+                "target_name": "文件",
+                "value": _normalize_upload_paths(tail),
+            }
+        return {"action": "upload", "target_name": "文件", "value": None, "note": s}
+
+    m = re.match(
+        r"^(?:拖拽|拖动|拖放)\s*(?:文件\s*)?(.+?)\s*到\s*[【「『\"']([^】」』\"']+)[】」』\"']\s*$",
+        s,
+    )
+    if m:
+        paths = _normalize_upload_paths(_strip_wrappers(m.group(1).strip()))
+        if paths:
+            return {
+                "action": "drop",
+                "target_name": strip_ellipsis_in_label(m.group(2)),
+                "value": paths,
+            }
+    m = re.match(r"^(?:拖拽|拖动|拖放)\s*(?:文件\s*)?(.+?)\s*到\s*(.+?)\s*$", s)
+    if m:
+        paths = _normalize_upload_paths(_strip_wrappers(m.group(1).strip()))
+        target = re.sub(rf"{_CTRL_TYPE_SUFFIX}$", "", m.group(2).strip()).strip(" ：:的")
+        if paths and target and "【" not in m.group(2):
+            return {
+                "action": "drop",
+                "target_name": strip_ellipsis_in_label(target),
+                "value": paths,
+            }
+
+    # 原生弹窗：接受弹窗 / 拒绝弹窗 / 接受弹窗：输入文本
+    m = re.match(
+        r"^接受\s*(?:原生|浏览器|系统)?\s*(?:弹窗|对话框|提示框)\s*(?:[：:]\s*(.+))?$",
+        s,
+    )
+    if m:
+        text = (m.group(1) or "").strip()
+        return {
+            "action": "dialog",
+            "value": f"accept:{text}" if text else "accept",
+        }
+    m = re.match(
+        r"^拒绝\s*(?:原生|浏览器|系统)?\s*(?:弹窗|对话框|提示框)\s*$",
+        s,
+    )
+    if m:
+        return {"action": "dialog", "value": "dismiss"}
+    m = re.match(
+        r"^(?:关闭|取消)\s*(?:原生|浏览器|系统)\s*(?:弹窗|对话框|提示框)\s*$",
+        s,
+    )
+    if m:
+        return {"action": "dialog", "value": "dismiss"}
+
+    # 选择 …文件（下拉选文件类选项；上传请用「上传文件 路径」）
+    m = re.match(r"^选择\s*(.+?文件.*?)\s*$", s)
     if m:
         return {
             "action": "select",
@@ -914,6 +1078,14 @@ def structured_step_is_complete(step: dict[str, Any] | None) -> bool:
 
     if action in ("click", "hover", "check", "uncheck", "assert_visible"):
         return bool(name)
+    if action in ("double_click", "right_click"):
+        return bool(name)
+    if action == "upload":
+        return bool(value_s)
+    if action == "drop":
+        return bool(name and value_s)
+    if action == "dialog":
+        return bool(value_s)
     if action == "fill":
         return bool(name)  # value may be empty string intentionally
     if action == "select":
@@ -962,8 +1134,16 @@ def validate_structured_step_fields(
 
     if action in ("click", "hover", "check", "uncheck", "assert_visible") and not (name or "").strip():
         errors.append(f"步骤 {n} ({action}) 缺少 target_name")
+    if action in ("double_click", "right_click") and not (name or "").strip():
+        errors.append(f"步骤 {n} ({action}) 缺少 target_name")
     if action == "fill" and not (name or "").strip():
         errors.append(f"步骤 {n} (fill) 缺少 target_name")
+    if action == "upload" and not value_s:
+        errors.append(f"步骤 {n} (upload) 缺少文件路径 value")
+    if action == "drop" and not ((name or "").strip() and value_s):
+        errors.append(f"步骤 {n} (drop) 缺少 target_name 或文件路径 value")
+    if action == "dialog" and not value_s:
+        errors.append(f"步骤 {n} (dialog) 缺少 value(accept/dismiss)")
     if action == "select" and not ((name or "").strip() or value_s):
         errors.append(f"步骤 {n} (select) 缺少 target_name 或 value")
     if action == "goto" and not ((name or "").strip() or value_s):

@@ -73,3 +73,22 @@ async def test_synth_keeps_thinking_enabled_for_codegen():
 
     assert "async def test_case_5" in script
     assert "extra_body" not in captured
+
+
+def test_accept_rejects_url_with_cjk_bracket():
+    """描述里的「】」不得进入 URL 字面值（曾实测：goto 带上 】→ 404 才回落 OTA）。"""
+    from core.script_synthesize import _accept_synthesized_script
+
+    bad = (
+        "async def test_case_9(page):\n"
+        '    await page.goto("http://localhost:8030/upload.html】")\n'
+    )
+    with pytest.raises(ValueError) as ei:
+        _accept_synthesized_script(bad, case_id=9)
+    assert "CJK bracket" in str(ei.value)
+
+    good = (
+        "async def test_case_9(page):\n"
+        '    await page.goto("http://localhost:8030/upload.html")\n'
+    )
+    assert "async def" in _accept_synthesized_script(good, case_id=9)

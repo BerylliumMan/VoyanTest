@@ -554,6 +554,12 @@ def _accept_synthesized_script(
 ) -> str:
     """Reject unrunnable scripts so a broken locator never gets persisted."""
     problems = check_script_sanity(script)
+    # 描述里的【】「」等括号不得进入 URL 字面值（曾实现在 goto 带上「】」→ 404）
+    bad_url = re.search(r"https?://[^\s\"']*[【】「」]", script or "")
+    if bad_url:
+        problems = list(problems) + [
+            "URL contains CJK bracket: " + bad_url.group(0)[:80]
+        ]
     if problems and any("not valid Python" in p for p in problems):
         repaired = repair_unicode_lookalikes(script)
         if repaired != script:

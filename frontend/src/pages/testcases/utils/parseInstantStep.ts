@@ -29,6 +29,37 @@ function stripCtrlSuffix(name: string): string {
   return cleaned || name;
 }
 
+/** 去掉值外层成对的括号/引号（与后端 _strip_wrappers 对齐）。 */
+function stripWrappers(value: string): string {
+  let v = (value || '').trim();
+  const pairs: Array<[string, string]> = [
+    ['【', '】'], ['「', '」'], ['『', '』'], ['"', '"'], ["'", "'"], ['（', '）'], ['(', ')'],
+  ];
+  let changed = true;
+  while (changed && v) {
+    changed = false;
+    for (const [a, b] of pairs) {
+      if (v.startsWith(a) && v.endsWith(b) && v.length >= a.length + b.length) {
+        v = v.slice(a.length, v.length - b.length).trim();
+        changed = true;
+      }
+    }
+  }
+  return v;
+}
+
+/** 上传/拖拽路径：中文分隔符归一为逗号（引擎按逗号拆多文件）。 */
+function normalizePaths(value: string): string {
+  const v = (value || '').trim();
+  if (!v) return '';
+  return v
+    .replace(/[，、；;]+/g, ',')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .join(',');
+}
+
 function isCloseAllDialogs(s: string): boolean {
   const closeAll =
     /(?:把|将)?所有(?:的)?(?:对话框|弹窗|提示框)/.test(s) ||
@@ -228,6 +259,32 @@ export function parseInstantToStructured(step: string): StructuredStep | null {
   m = s.match(/^悬停\s*【([^】]+)】/);
   if (m) return { action: 'hover', target_name: stripEllipsis(m[1]) };
 
+  // 双击 / 右键点击（描述优先编辑新增）
+  m = s.match(
+    new RegExp(`^(?:双击|连续点击)\\s*[【「『"']([^】」』"']+)[】」』"']\\s*(?:[（(]([^）)]+)[）)])?\\s*$`),
+  );
+  if (m) {
+    const out: StructuredStep = {
+      action: 'double_click',
+      target_name: stripEllipsis(m[1]),
+      target_role: 'button',
+    };
+    if (m[2]) out.disambiguation = m[2].trim();
+    return out;
+  }
+  m = s.match(
+    new RegExp(`^(?:右键点击|右键|右击)\\s*[【「『"']([^】」』"']+)[】」』"']\\s*(?:[（(]([^）)]+)[）)])?\\s*$`),
+  );
+  if (m) {
+    const out: StructuredStep = {
+      action: 'right_click',
+      target_name: stripEllipsis(m[1]),
+      target_role: 'button',
+    };
+    if (m[2]) out.disambiguation = m[2].trim();
+    return out;
+  }
+
   m = s.match(
     new RegExp(`^点击\\s*【([^】]+)】\\s*(?:[（(]([^）)]+)[）)])?\\s*(?:${CTRL_TYPE})?\\s*$`),
   );
@@ -267,7 +324,67 @@ export function parseInstantToStructured(step: string): StructuredStep | null {
     };
   }
 
-  m = s.match(/^(?:选择|上传)\s*(.+?文件.*?)\s*$/);
+  // 上传文件 / 拖拽文件 / 原生弹窗（描述优先编辑新增）
+  m = s.match(/^在【([^】]+)】\s*(?:中)?\s*上传\s*(?:文件|附件)\s*[：:]?\s*(.+)$/);
+  if (m) {
+    const paths = normalizePaths(stripWrappers(m[2].trim()));
+    if (paths) {
+      return { action: 'upload', target_name: stripEllipsis(m[1]), value: paths };
+    }
+  }
+  m = s.match(/^上传\s*(?:文件|附件)\s*[：:]?\s*(.+)$/);
+  if (m) {
+    const paths = normalizePaths(stripWrappers(m[1].trim()));
+    if (paths) {
+      return { action: 'upload', target_name: '文件', value: paths };
+    }
+  }
+  m = s.match(/^上传\s*(.+)$/);
+  if (m) {
+    const rest = m[1].trim();
+    let tail = rest.replace(/^(?:文件|附件|图片|头像|截图|证书|文档|视频|压缩包)/, '').trim();
+    tail = tail.replace(/^[：:]+/, '').trim();
+    tail = stripWrappers(tail);
+    const looksLikePath = /[/\\]/.test(tail) || /\.\w{1,8}$/.test(tail);
+    if (looksLikePath) {
+      return { action: 'upload', target_name: '文件', value: normalizePaths(tail) };
+    }
+    return { action: 'upload', target_name: '文件', value: null, note: s };
+  }
+
+  m = s.match(/^(?:拖拽|拖动|拖放)\s*(?:文件\s*)?(.+?)\s*到\s*[【「『"']([^】」』"']+)[】」』"']\s*$/);
+  if (m) {
+    const paths = normalizePaths(stripWrappers(m[1].trim()));
+    if (paths) {
+      return { action: 'drop', target_name: stripEllipsis(m[2]), value: paths };
+    }
+  }
+  m = s.match(/^(?:拖拽|拖动|拖放)\s*(?:文件\s*)?(.+?)\s*到\s*(.+?)\s*$/);
+  if (m) {
+    const paths = normalizePaths(stripWrappers(m[1].trim()));
+    const target = m[2].trim().replace(/^[：:的]+|[：:的]+$/g, '').trim();
+    if (paths && target && !m[2].includes('【')) {
+      return { action: 'drop', target_name: stripEllipsis(target), value: paths };
+    }
+  }
+
+  // 原生弹窗：接受弹窗 / 拒绝弹窗 / 接受弹窗：输入文本
+  m = s.match(/^接受\s*(?:原生|浏览器|系统)?\s*(?:弹窗|对话框|提示框)\s*(?:[：:]\s*(.+))?$/);
+  if (m) {
+    const text = (m[1] || '').trim();
+    return { action: 'dialog', value: text ? `accept:${text}` : 'accept' };
+  }
+  m = s.match(/^拒绝\s*(?:原生|浏览器|系统)?\s*(?:弹窗|对话框|提示框)\s*$/);
+  if (m) {
+    return { action: 'dialog', value: 'dismiss' };
+  }
+  m = s.match(/^(?:关闭|取消)\s*(?:原生|浏览器|系统)\s*(?:弹窗|对话框|提示框)\s*$/);
+  if (m) {
+    return { action: 'dialog', value: 'dismiss' };
+  }
+
+  // 选择 …文件（下拉选文件类选项；上传请用「上传文件 路径」）
+  m = s.match(/^选择\s*(.+?文件.*?)\s*$/);
   if (m) {
     return { action: 'select', target_name: '文件', value: m[1].trim(), note: s };
   }
@@ -287,6 +404,10 @@ export function structuredStepIsComplete(step: StructuredStep | null | undefined
   if (action === 'click_blank') return true;
   if (action === 'wait' && (step.value || step.target_name || step.note)) return true;
   if (action === 'icon_click') return !!(step.icon_hint || step.target_name);
+  if (action === 'double_click' || action === 'right_click') return !!step.target_name;
+  if (action === 'upload') return !!step.value;
+  if (action === 'drop') return !!(step.target_name && step.value);
+  if (action === 'dialog') return !!step.value;
   if (['fill', 'select', 'press_key', 'assert_text'].includes(action)) {
     return !!(step.target_name || step.value);
   }
@@ -345,15 +466,8 @@ export function hydrateStructuredFromDescription(
   }
   const parsed = parseInstantToStructured(desc);
   if (!parsed) {
-    // 自由描述无法结构化时，把原文放进目标框，避免「预览有字、输入框全空」
-    const fallback = { action: 'click', target_name: desc };
-    if (!current) return fallback;
-    const mergedEmpty: Record<string, unknown> = { ...fallback, ...current };
-    if (mergedEmpty.target_name == null || mergedEmpty.target_name === '') {
-      mergedEmpty.target_name = desc;
-    }
-    if (!mergedEmpty.action) mergedEmpty.action = 'click';
-    return mergedEmpty;
+    // 描述优先：无法结构化时不再伪造 click 目标，交给引擎按描述执行
+    return current;
   }
   // Prefer existing non-empty fields; fill gaps from parse.
   const merged: Record<string, unknown> = { ...parsed, ...(current || {}) };
@@ -363,4 +477,34 @@ export function hydrateStructuredFromDescription(
   }
   if (!merged.action) merged.action = parsed.action || 'click';
   return merged;
+}
+
+/**
+ * 描述优先编辑：按描述重新派生结构化提示（严格模式）。
+ *
+ * 与 hydrate 的差别：用户改写描述后不再保留旧的动作语义；仅当动作 + 目标
+ * 与旧结构化一致时，保留固化 selector 与旧补充字段（消歧/图标/备注等）。
+ * 无法解析时返回 null —— 执行时由引擎按描述走 LLM 意图解析（绝不伪造动作）。
+ */
+export function deriveStructuredFromDescription(
+  description: string,
+  prev: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  const desc = (description || '').trim();
+  if (!desc) return null;
+  const parsed = parseInstantToStructured(desc);
+  if (!parsed) return null;
+  const out: Record<string, unknown> = { ...parsed };
+  const prevAction = String(prev?.action || '');
+  const prevName = String(prev?.target_name || '');
+  const sameTarget =
+    !!prev && prevAction === String(parsed.action) && prevName === String(parsed.target_name || '');
+  if (sameTarget) {
+    for (const k of ['selector', 'disambiguation', 'icon_hint', 'note', 'target_role', 'frame_hint', 'wait_mode'] as const) {
+      const cur = out[k];
+      const old = prev ? prev[k] : undefined;
+      if ((cur == null || cur === '') && old != null && old !== '') out[k] = old;
+    }
+  }
+  return out;
 }

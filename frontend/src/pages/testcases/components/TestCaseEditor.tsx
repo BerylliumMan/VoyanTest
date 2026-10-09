@@ -65,7 +65,7 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
     retry_max: 0,
     retry_delay: 1.0,
     cacheable: true,
-    structured_step: caseKind === 'ui' ? { action: 'click' } : null,
+    structured_step: null,
   }]);
   const removeStep = (idx: number) => setSteps(steps.filter((_, i) => i !== idx).map((s, i) => ({ ...s, step_order: i + 1 })));
   const updateStep = (idx: number, field: string, value: string | number | boolean | null | Record<string, unknown>) => {

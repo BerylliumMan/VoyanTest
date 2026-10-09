@@ -102,4 +102,16 @@ describe('StepList', () => {
     const pasteButtons = screen.getAllByLabelText('粘贴步骤');
     expect(pasteButtons.length).toBeGreaterThan(0);
   });
+
+  it('纯描述编辑：不渲染动作下拉框 / 高级面板 / 解析 chips', () => {
+    const props = makeProps();
+    render(<StepList {...props} />);
+    expect(screen.queryByText('高级')).not.toBeInTheDocument();
+    expect(screen.queryByText('收起高级')).not.toBeInTheDocument();
+    expect(screen.queryByText('动作')).not.toBeInTheDocument();
+    expect(screen.queryByText('目标')).not.toBeInTheDocument();
+    expect(screen.queryByText('消歧')).not.toBeInTheDocument();
+    /* 描述与预期结果仍保留 */
+    expect(screen.getAllByPlaceholderText('用自然语言描述测试步骤')).toHaveLength(3);
+  });
 });

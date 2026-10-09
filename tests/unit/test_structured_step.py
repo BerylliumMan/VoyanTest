@@ -155,3 +155,98 @@ def test_structured_to_intent_skips_incomplete():
 
 def test_sanitize_still_works():
     assert sanitize_ui_step("点击登录按钮") == "点击【登录】"
+
+
+# ── 描述优先编辑：上传/拖拽/弹窗/双击/右键 ────────────────────────────────
+
+
+def test_parse_upload_with_path():
+    st = parse_instant_to_structured("上传文件 /tmp/a.png")
+    assert st == {"action": "upload", "target_name": "文件", "value": "/tmp/a.png"}
+    assert structured_step_is_complete(st)
+    assert render_structured_step(st) == "上传文件 /tmp/a.png"
+
+
+def test_parse_upload_with_field_target():
+    st = parse_instant_to_structured("在【附件上传】上传文件 /tmp/a.png")
+    assert st["action"] == "upload"
+    assert st["target_name"] == "附件上传"
+    assert st["value"] == "/tmp/a.png"
+    assert render_structured_step(st) == "在【附件上传】上传文件 /tmp/a.png"
+
+
+def test_parse_upload_multiple_paths_chinese_sep():
+    st = parse_instant_to_structured("上传文件 /tmp/a.png、/tmp/b.png")
+    assert st["value"] == "/tmp/a.png,/tmp/b.png"
+
+
+def test_parse_upload_no_path_incomplete():
+    st = parse_instant_to_structured("上传头像文件")
+    assert st["action"] == "upload"
+    assert not st.get("value")
+    assert not structured_step_is_complete(st)
+
+
+def test_parse_drop_with_path():
+    st = parse_instant_to_structured("拖拽文件 /tmp/a.png 到【上传区】")
+    assert st["action"] == "drop"
+    assert st["target_name"] == "上传区"
+    assert st["value"] == "/tmp/a.png"
+    assert structured_step_is_complete(st)
+    assert render_structured_step(st) == "拖拽文件 /tmp/a.png 到【上传区】"
+
+
+def test_parse_dialog_accept_dismiss():
+    assert parse_instant_to_structured("接受弹窗")["value"] == "accept"
+    assert parse_instant_to_structured("接受弹窗：确认删除")["value"] == "accept:确认删除"
+    assert parse_instant_to_structured("拒绝弹窗")["value"] == "dismiss"
+    assert parse_instant_to_structured("关闭原生弹窗")["value"] == "dismiss"
+    # 泛化的「关闭弹窗」不劫持为原生弹窗（仍交给通用解析）
+    assert parse_instant_to_structured("关闭弹窗") is None
+
+
+def test_parse_double_and_right_click():
+    d = parse_instant_to_structured("双击【商品卡片】")
+    assert d["action"] == "double_click"
+    assert structured_step_is_complete(d)
+    r = parse_instant_to_structured("右键点击【行记录】")
+    assert r["action"] == "right_click"
+    assert structured_step_is_complete(r)
+
+
+def test_parse_select_file_still_select():
+    st = parse_instant_to_structured("选择头像文件")
+    assert st and st["action"] == "select"
+
+
+def test_coerce_alias_file_upload():
+    st = coerce_structured_step({"action": "browser_file_upload", "value": "/tmp/a.png"})
+    assert st and st["action"] == "upload"
+    assert st["value"] == "/tmp/a.png"
+
+
+def test_validate_upload_requires_path():
+    errs = validate_structured_step_fields({"action": "upload", "target_name": "文件"}, index=0)
+    assert any("文件路径" in e for e in errs)
+
+
+def test_selector_candidates_upload_file_input():
+    from core.step_intent import selector_tool_call_candidates
+
+    tcs = selector_tool_call_candidates(
+        {"action": "upload", "target_name": "文件", "value": "/tmp/a.png"}
+    )
+    assert tcs and tcs[0].action == "upload"
+    assert tcs[0].selector == 'input[type="file"]'
+    assert tcs[0].value == "/tmp/a.png"
+
+
+def test_intent_dialog_needs_no_ref():
+    from core.step_intent import intent_to_tool_call
+
+    intent = structured_to_intent({"action": "dialog", "value": "dismiss"})
+    assert intent is not None and intent.action == "dialog"
+    tc = intent_to_tool_call(intent, ref=None)
+    assert tc.action == "dialog"
+    assert tc.selector is None
+    assert tc.value == "dismiss"
