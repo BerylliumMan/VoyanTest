@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useHistory, useLocation } from 'react-router-dom';
-import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox, Input } from '@arco-design/web-react';
+import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox, Input, InputNumber } from '@arco-design/web-react';
 import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug, IconImport } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
@@ -65,6 +65,9 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const [batchRunIncludeInit, setBatchRunIncludeInit] = useState(true);
   // 031（US10）：批次内复用会话（共享 httpx client，cookie 可见；默认关闭）
   const [batchRunSessionReuse, setBatchRunSessionReuse] = useState(false);
+  // 033（US10）：批量运行器选项（用例间隔 / 首个失败即停止）
+  const [batchRunDelayMs, setBatchRunDelayMs] = useState<number | undefined>(undefined);
+  const [batchRunStopOnError, setBatchRunStopOnError] = useState(false);
   const [batchRunInitCaseIds, setBatchRunInitCaseIds] = useState<number[]>([]);
   const [batchRunLoading, setBatchRunLoading] = useState(false);
   const batchRunModeRef = useRef<'server' | 'client'>('server');
@@ -221,11 +224,16 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
         init_case_ids?: number[];
         init_policy: 'before_each';
         session_reuse?: boolean;
+        delay_ms?: number;
+        stop_on_error?: boolean;
       } = { case_ids: selectedRowKeys, init_policy: 'before_each' };
       if (selectedEnvironment) payload.environment_id = selectedEnvironment;
       if (batchRunIncludeInit && initCaseIds.length > 0) payload.init_case_ids = initCaseIds;
       // 031（US10）：开启后批次内共享 HTTP 客户端（登录一次，后续用例自动带 Cookie）
       if (batchRunSessionReuse) payload.session_reuse = true;
+      // 033（US10）：运行器选项
+      if (batchRunDelayMs && batchRunDelayMs > 0) payload.delay_ms = batchRunDelayMs;
+      if (batchRunStopOnError) payload.stop_on_error = true;
       await axios.post('/api/testcases/batch-run', payload);
       Message.success(t['run.triggered']);
       setBatchRunVisible(false);
@@ -523,6 +531,26 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
             <span className={styles.switchLabel}>{t['batch.session_reuse']}</span>
           </div>
           <div className={styles.initNoneText}>{t['batch.session_reuse.hint']}</div>
+          {/* 033（US10）：运行器选项（用例间隔 / 首个失败即停止） */}
+          <div className={styles.initSwitchRow} style={{ marginTop: 12 }}>
+            <span className={styles.switchLabel}>{t['batch.delay_ms']}</span>
+            <InputNumber
+              min={0}
+              max={60000}
+              value={batchRunDelayMs}
+              onChange={(v) => setBatchRunDelayMs(typeof v === 'number' ? v : undefined)}
+              style={{ width: 140, marginLeft: 8 }}
+              placeholder="0"
+            />
+          </div>
+          <div className={styles.initSwitchRow} style={{ marginTop: 12 }}>
+            <Switch
+              checked={batchRunStopOnError}
+              onChange={(v) => setBatchRunStopOnError(v)}
+            />
+            <span className={styles.switchLabel}>{t['batch.stop_on_error']}</span>
+          </div>
+          <div className={styles.initNoneText}>{t['batch.stop_on_error.hint']}</div>
         </Modal>
       </div>
     </>

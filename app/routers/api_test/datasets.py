@@ -99,6 +99,32 @@ async def delete_dataset(
     return {"deleted": dataset_id}
 
 
+@router.get("/datasets/{dataset_id}/export")
+async def export_dataset(
+    dataset_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """033（US10）：导出数据集为 CSV（与导入端点往返兼容；文件名带数据集名）。"""
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    obj = await crud_dataset.get_dataset(db, dataset_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    _ensure_project_access(user, obj.project_id)
+    text = crud_dataset.to_csv_dataset(obj.columns or [], obj.rows or [])
+    filename = quote(f"{obj.name or 'dataset'}.csv")
+    return Response(
+        content="\ufeff" + text,  # BOM：Excel 直接打开不乱码（导入端 utf-8-sig 兼容）
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+        },
+    )
+
+
 @router.post("/datasets/import")
 async def import_datasets(
     file: UploadFile = File(...),

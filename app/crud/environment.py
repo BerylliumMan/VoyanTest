@@ -53,6 +53,8 @@ async def create_environment(db: AsyncSession, project_id: int, env: models.Envi
         cookies=env.cookies or [],
         variables=env.variables or [],
         headers=env.headers or [],
+        services=getattr(env, "services", None) or {},
+        default_auth=getattr(env, "default_auth", None),
         is_default=(existing == 0),
     )
     db.add(db_env)
@@ -81,6 +83,13 @@ async def update_environment(db: AsyncSession, env_id: int, env: models.Environm
         # 2026-09-30 决策：仅按 ****** 语义合并（保留旧值），明文落库
         update_data["variables"] = _merge_masked_variables(
             db_env.variables or [], update_data["variables"] or []
+        )
+    if "default_auth" in update_data and update_data["default_auth"] is not None:
+        # 033（US3）：与 variables 同语义——secret 字段回传 ****** 保留原值
+        from app.security.secret_vars import merge_masked_auth
+
+        update_data["default_auth"] = merge_masked_auth(
+            db_env.default_auth, update_data["default_auth"]
         )
     for key, value in update_data.items():
         setattr(db_env, key, value)

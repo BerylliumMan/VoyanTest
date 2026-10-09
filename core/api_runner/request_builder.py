@@ -193,7 +193,131 @@ def _build_auth(
         else:
             _set_header(headers, key_name, key_value)
         return ("api_key", key_name, key_value, location)
+    if auth_type == "inherit":
+        # 033（US3）：未提前解析的 inherit（静态预览等路径）→ 视为无认证，不阻断渲染
+        return None
+    if auth_type == "oauth2":
+        # 033（US3）：执行层应在请求前获取令牌并写入 token_var（失败则不会走到这里）；
+        # 直接构建时（调试/预览）从作用域读取，缺失给可读错误。
+        cfg = auth.get("oauth2") or {}
+        token_var = str(cfg.get("token_var") or "access_token")
+        token = scope.lookup(token_var)
+        if not token:
+            from core.api_runner.oauth import OAuthTokenError
+
+            raise OAuthTokenError(f"OAuth2 令牌缺失（{token_var}）：执行层应在请求前获取")
+        _set_header(headers, "Authorization", f"Bearer {token}")
+        return ("oauth2", token_var)
     return None
+
+
+def resolve_auth_chain(
+    step_auth: Any,
+    *,
+    case_auth: Any = None,
+    scenario_auth: Any = None,
+    env_auth: Any = None,
+) -> dict:
+    """033（US3）认证 inherit 解析链：步骤 → 用例 → 场景 → 环境默认。
+
+    - 任一层"显式配置（非 inherit）"即生效并终止；``none`` 视为显式；
+    - 全链缺省/均为 inherit → ``{"type": "none"}``（与既有行为一致）。
+    """
+    for layer in (step_auth, case_auth, scenario_auth, env_auth):
+        if not isinstance(layer, dict):
+            continue
+        if str(layer.get("type") or "inherit") == "inherit":
+            continue
+        return dict(layer)
+    return {"type": "none"}
+
+
+def apply_request_overrides(step: dict, overrides: Any) -> dict:
+    """033（US7）：把 pre_script 记录的结构化覆盖应用到步骤副本（渲染前调用）。
+
+    - 覆盖值照常经过变量渲染与脱敏（此处只合并不渲染）；
+    - 原始 step 不被修改（返回新 dict）。
+    """
+    if not isinstance(overrides, dict) or not overrides:
+        return step
+    request = dict(step.get("request") or {})
+
+    if overrides.get("url"):
+        request["url"] = str(overrides["url"])
+    if overrides.get("method"):
+        request["method"] = str(overrides["method"]).upper()
+
+    headers = None
+    if overrides.get("headers") or overrides.get("remove_headers"):
+        headers = [dict(it) for it in (request.get("headers") or []) if isinstance(it, dict)]
+        for key, value in (overrides.get("headers") or {}).items():
+            for item in headers:
+                if str(item.get("key") or "").strip().lower() == str(key).strip().lower():
+                    item["value"] = str(value)
+                    item["enable"] = True
+                    break
+            else:
+                headers.append({"key": str(key), "value": str(value), "enable": True})
+        for key in overrides.get("remove_headers") or []:
+            headers = [
+                it for it in headers if str(it.get("key") or "").strip().lower() != str(key).strip().lower()
+            ]
+        request["headers"] = headers
+
+    if overrides.get("query") or overrides.get("remove_query"):
+        query = [dict(it) for it in (request.get("query") or []) if isinstance(it, dict)]
+        for key, value in (overrides.get("query") or {}).items():
+            for item in query:
+                if str(item.get("key") or "").strip().lower() == str(key).strip().lower():
+                    item["value"] = str(value)
+                    item["enable"] = True
+                    break
+            else:
+                query.append({"key": str(key), "value": str(value), "enable": True})
+        for key in overrides.get("remove_query") or []:
+            query = [
+                it for it in query if str(it.get("key") or "").strip().lower() != str(key).strip().lower()
+            ]
+        request["query"] = query
+
+    if "body" in overrides:
+        body = dict(request.get("body") or {})
+        if str(body.get("type") or "none") == "none":
+            body["type"] = "raw"
+        body["content"] = str(overrides["body"])
+        request["body"] = body
+
+    if overrides.get("auth"):
+        request["auth"] = dict(overrides["auth"])
+
+    return {**step, "request": request}
+
+
+def apply_auth_chain(
+    spec: dict,
+    *,
+    scenario_auth: Any = None,
+    env_default_auth: Any = None,
+) -> dict:
+    """033（US3）：把认证链解析结果写回各步骤（返回新 spec，不修改入参）。"""
+    case_auth = spec.get("auth") if isinstance(spec.get("auth"), dict) else None
+    steps = []
+    for step in spec.get("steps") or []:
+        if not isinstance(step, dict):
+            steps.append(step)
+            continue
+        request = step.get("request")
+        if not isinstance(request, dict):
+            steps.append(step)
+            continue
+        resolved = resolve_auth_chain(
+            request.get("auth"),
+            case_auth=case_auth,
+            scenario_auth=scenario_auth,
+            env_auth=env_default_auth,
+        )
+        steps.append({**step, "request": {**request, "auth": resolved}})
+    return {**spec, "steps": steps}
 
 
 def build_request(step: dict, scope: VariableScope) -> RenderedRequest:

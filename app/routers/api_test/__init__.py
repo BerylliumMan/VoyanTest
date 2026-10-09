@@ -8,6 +8,7 @@
   - datasets.py  数据集（US5）
   - scenarios.py 场景（场景页）
   - files.py     测试文件（031 US1：上传/列表/删除）
+  - inspect.py   用例体检（033 US1：静态规则，零出站）
 契约：specs/029-api-testing/contracts/api-test-contract.md
       specs/031-api-testing-enhancements/contracts/api-enhancements.md
 """
@@ -21,9 +22,11 @@ from app.routers.api_test import (
     files,
     generate,
     import_,
+    inspect as inspect_router,
     mocks,
     overview,
     scenarios,
+    snippets as snippets_router,
 )
 
 router = APIRouter(prefix="/api/api-test", tags=["api-test"])
@@ -37,6 +40,8 @@ router.include_router(overview.router)
 router.include_router(mocks.router)
 router.include_router(files.router)
 router.include_router(tokens_router.router)
+router.include_router(inspect_router.router)
+router.include_router(snippets_router.router)
 
 
 @router.get("/health")

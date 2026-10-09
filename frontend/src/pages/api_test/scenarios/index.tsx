@@ -24,6 +24,12 @@ import { apiDelete, apiGet, apiPost, apiPut } from '@/utils/apiRequest';
 import styles from '../definitions/style/index.module.less';
 import RequestEditor from '../definitions/components/RequestEditor';
 import ImportRequestModal, { PickedCase } from './ImportRequestModal';
+// 033（US6）：场景公共配置（认证 / 前置脚本）
+import {
+  serializeDefaultAuth,
+  toAuthForm,
+} from '../definitions/components/EnvVariablesModal';
+import { AuthConfig, AuthOAuth2Config } from '../definitions/types';
 import {
   ApiDefinition,
   ApiStep,
@@ -121,6 +127,9 @@ interface ScenarioItem {
   steps?: ScenarioStep[];
   share_cookie?: boolean;
   continue_on_failure?: boolean;
+  /** 033（US6）：场景级公共配置 */
+  auth?: AuthConfig | null;
+  pre_script?: string | null;
   step_count?: number;
   enabled_count?: number;
   cases?: Array<{ case_id: number; name?: string | null; enabled: boolean; order?: number; missing?: boolean }>;
@@ -159,6 +168,13 @@ const ApiScenariosPage: React.FC = () => {
   const [steps, setSteps] = useState<ScenarioStep[]>([]);
   const [shareCookie, setShareCookie] = useState(false);
   const [continueOnFailure, setContinueOnFailure] = useState(false);
+  // 033（US6）：场景公共配置（auth / pre_script）
+  const [scenarioAuth, setScenarioAuth] = useState<AuthConfig | null>(null);
+  const [scenarioPreScript, setScenarioPreScript] = useState('');
+  const [configVisible, setConfigVisible] = useState(false);
+  const [configForm] = Form.useForm();
+  const [configAuthType, setConfigAuthType] = useState<string>('none');
+  const [configAuthGrant, setConfigAuthGrant] = useState<string>('client_credentials');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [childEditorId, setChildEditorId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -226,6 +242,8 @@ const ApiScenariosPage: React.FC = () => {
     setSteps((scenario.steps || []).map((s, i) => asEditableStep(s, i)));
     setShareCookie(!!scenario.share_cookie);
     setContinueOnFailure(!!scenario.continue_on_failure);
+    setScenarioAuth(scenario.auth || null);
+    setScenarioPreScript(scenario.pre_script || '');
     setExpandedId(null);
   };
 
@@ -256,12 +274,39 @@ const ApiScenariosPage: React.FC = () => {
     setSteps([]);
     setShareCookie(false);
     setContinueOnFailure(false);
+    setScenarioAuth(null);
+    setScenarioPreScript('');
     setExpandedId(null);
   };
 
   const startEdit = () => {
     if (!selected) return;
     fillEditor(selected);
+  };
+
+  // 033（US6）：场景公共配置（认证 / 前置脚本）
+  const openConfig = () => {
+    configForm.resetFields();
+    setConfigAuthType(scenarioAuth?.type || 'none');
+    setConfigAuthGrant(scenarioAuth?.oauth2?.grant || 'client_credentials');
+    configForm.setFieldsValue({
+      pre_script: scenarioPreScript,
+      ...toAuthForm(scenarioAuth),
+    });
+    setConfigVisible(true);
+  };
+
+  const saveConfig = async () => {
+    let values: Record<string, unknown>;
+    try {
+      values = (await configForm.validate()) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    setScenarioAuth(serializeDefaultAuth(values));
+    setScenarioPreScript(String(values.pre_script || ''));
+    setConfigVisible(false);
+    Message.success('公共配置已更新（保存场景后生效）');
   };
 
   const handleSave = async () => {
@@ -282,6 +327,9 @@ const ApiScenariosPage: React.FC = () => {
       variables: variables.filter((v) => v.key.trim()),
       share_cookie: shareCookie,
       continue_on_failure: continueOnFailure,
+      // 033（US6）：公共配置
+      auth: scenarioAuth,
+      pre_script: scenarioPreScript || null,
       steps,
     };
     setSaving(true);
@@ -750,6 +798,9 @@ const ApiScenariosPage: React.FC = () => {
                       失败继续{' '}
                       <Switch checked={continueOnFailure} onChange={setContinueOnFailure} />
                     </span>
+                    <Button size="small" onClick={openConfig}>
+                      公共配置（认证/前置脚本）
+                    </Button>
                   </Space>
                 </Form.Item>
                 <Form.Item label={`场景步骤（${steps.length}）`}>
@@ -961,6 +1012,8 @@ const ApiScenariosPage: React.FC = () => {
                     <Space>
                       {selected.share_cookie ? <Tag color="arcoblue">共享 Cookie</Tag> : <Tag>不共享 Cookie</Tag>}
                       {selected.continue_on_failure ? <Tag color="orange">失败继续</Tag> : <Tag>失败即停</Tag>}
+                      {selected.auth ? <Tag color="purple">认证：{selected.auth.type}</Tag> : null}
+                      {selected.pre_script ? <Tag color="cyan">含前置脚本</Tag> : null}
                     </Space>
                   </div>
                   <div>
@@ -1037,6 +1090,88 @@ const ApiScenariosPage: React.FC = () => {
           </Spin>
         </Card>
       </div>
+
+      {/* 033（US6）：场景公共配置 Modal */}
+      <Modal
+        visible={configVisible}
+        title="场景公共配置（对所有用例生效）"
+        onOk={saveConfig}
+        onCancel={() => setConfigVisible(false)}
+        okText="确定"
+        cancelText="取消"
+        unmountOnExit
+      >
+        <Form form={configForm} layout="vertical">
+          <Form.Item label="认证类型" field="auth_type">
+            <Select
+              onChange={(v) => setConfigAuthType(String(v))}
+              options={[
+                { label: '不配置（none）', value: 'none' },
+                { label: 'Basic', value: 'basic' },
+                { label: 'Bearer Token', value: 'bearer' },
+                { label: 'API Key', value: 'api_key' },
+                { label: 'OAuth2', value: 'oauth2' },
+              ]}
+            />
+          </Form.Item>
+          {configAuthType === 'basic' && (
+            <>
+              <Form.Item label="用户名" field="auth_username"><Input /></Form.Item>
+              <Form.Item label="密码" field="auth_password"><Input.Password placeholder="保持 ****** 表示不修改原值" /></Form.Item>
+            </>
+          )}
+          {configAuthType === 'bearer' && (
+            <Form.Item label="Token" field="auth_token"><Input.Password placeholder="保持 ****** 表示不修改原值" /></Form.Item>
+          )}
+          {configAuthType === 'api_key' && (
+            <>
+              <Form.Item label="Key 名" field="auth_key_name"><Input placeholder="如 X-API-Key" /></Form.Item>
+              <Form.Item label="Key 值" field="auth_key_value"><Input.Password placeholder="保持 ****** 表示不修改原值" /></Form.Item>
+              <Form.Item label="传递位置" field="auth_in">
+                <Select options={[{ label: '请求头（header）', value: 'header' }, { label: '查询参数（query）', value: 'query' }]} />
+              </Form.Item>
+            </>
+          )}
+          {configAuthType === 'oauth2' && (
+            <>
+              <Form.Item label="授权流" field="auth_grant">
+                <Select
+                  onChange={(v) => setConfigAuthGrant(String(v))}
+                  options={[
+                    { label: 'client_credentials（客户端凭据）', value: 'client_credentials' },
+                    { label: 'password（密码）', value: 'password' },
+                    { label: 'refresh_token（刷新令牌）', value: 'refresh_token' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label="Token URL" field="auth_token_url" rules={[{ required: true, message: '请输入 Token URL' }]}>
+                <Input placeholder="https://idp.example.com/oauth/token" />
+              </Form.Item>
+              <Form.Item label="Client ID" field="auth_client_id" rules={[{ required: true, message: '请输入 Client ID' }]}>
+                <Input />
+              </Form.Item>
+              <Form.Item label="Client Secret" field="auth_client_secret"><Input.Password placeholder="保持 ****** 表示不修改原值" /></Form.Item>
+              <Form.Item label="Scope" field="auth_scope"><Input placeholder="可选" /></Form.Item>
+              {configAuthGrant === 'password' && (
+                <>
+                  <Form.Item label="用户名" field="auth_oauth_username"><Input /></Form.Item>
+                  <Form.Item label="密码" field="auth_oauth_password"><Input.Password /></Form.Item>
+                </>
+              )}
+              {configAuthGrant === 'refresh_token' && (
+                <Form.Item label="Refresh Token" field="auth_refresh_token"><Input.Password placeholder="保持 ****** 表示不修改原值" /></Form.Item>
+              )}
+            </>
+          )}
+          <Form.Item label="前置脚本（每用例执行前运行一次）" field="pre_script">
+            <Input.TextArea
+              rows={5}
+              placeholder={'stamp = "s6"\n# 变量写入用例作用域，可被步骤与认证引用'}
+              style={{ fontFamily: 'monospace' }}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <ImportRequestModal
         visible={importVisible}

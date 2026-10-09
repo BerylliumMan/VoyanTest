@@ -65,6 +65,10 @@ async def _load_api_environment(
                 "headers": env.headers or [],
                 # 031（US4）：多域名服务表
                 "services": dict(getattr(env, "services", None) or {}),
+                # 033（US3）：环境默认认证（inherit 链一层）
+                "default_auth": (
+                    env.default_auth if isinstance(getattr(env, "default_auth", None), dict) else None
+                ),
                 "decrypt_errors": decrypt_errors,
             }
     try:
@@ -205,6 +209,10 @@ async def run_api_case_server(
     seed_runtime: Optional[dict] = None,
     display_name: Optional[str] = None,
     project_id: int | None = None,
+    # 033（US3）：场景级认证（inherit 链一层；场景执行时由 run_scenario_batch 提供）
+    scenario_auth: Optional[dict] = None,
+    # 033（US6）：场景级前置脚本（每用例执行一次）
+    scenario_pre_script: Optional[str] = None,
 ) -> dict:
     """服务端执行一条接口用例并落库（test_runs + run_logs + report.json）。
 
@@ -312,6 +320,8 @@ async def run_api_case_server(
             dataset=dataset,
             seed_runtime=seed_runtime,
             platform_files=platform_files or None,
+            scenario_auth=scenario_auth,
+            scenario_pre_script=scenario_pre_script,
         )
     # T038：environment 作用域提取 → 用例成功后写回 environments.variables
     if (
@@ -581,6 +591,8 @@ async def _execute_scenario_steps(
     dataset_rows: dict[int, list[dict]],
     execution_control,
     scenario_id: int,
+    scenario_auth: Optional[dict] = None,
+    scenario_pre_script: Optional[str] = None,
     skip_rest: bool = False,
 ) -> bool:
     """执行一组步骤。返回是否应跳过后续步骤。runtime 就地更新。"""
@@ -622,7 +634,7 @@ async def _execute_scenario_steps(
                     children, session=session, batch_id=batch_id, environment_id=environment_id,
                     project_id=project_id, scenario_vars=scenario_vars, client=client, runtime=runtime,
                     continue_on_failure=continue_on_failure, dataset_rows=dataset_rows,
-                    execution_control=execution_control, scenario_id=scenario_id, skip_rest=skip_rest,
+                    execution_control=execution_control, scenario_id=scenario_id, scenario_auth=scenario_auth, scenario_pre_script=scenario_pre_script, skip_rest=skip_rest,
                 )
             continue
         if kind == "foreach":
@@ -644,7 +656,7 @@ async def _execute_scenario_steps(
                     children, session=session, batch_id=batch_id, environment_id=environment_id,
                     project_id=project_id, scenario_vars=scenario_vars, client=client, runtime=runtime,
                     continue_on_failure=continue_on_failure, dataset_rows=dataset_rows,
-                    execution_control=execution_control, scenario_id=scenario_id, skip_rest=skip_rest,
+                    execution_control=execution_control, scenario_id=scenario_id, scenario_auth=scenario_auth, scenario_pre_script=scenario_pre_script, skip_rest=skip_rest,
                 )
             continue
         if kind == "if":
@@ -661,7 +673,7 @@ async def _execute_scenario_steps(
                     environment_id=environment_id, project_id=project_id, scenario_vars=scenario_vars,
                     client=client, runtime=runtime, continue_on_failure=continue_on_failure,
                     dataset_rows=dataset_rows, execution_control=execution_control,
-                    scenario_id=scenario_id, skip_rest=skip_rest,
+                    scenario_id=scenario_id, scenario_auth=scenario_auth, scenario_pre_script=scenario_pre_script, skip_rest=skip_rest,
                 )
             else:
                 for child in _enabled_steps(step.get("children") or []):
@@ -676,6 +688,8 @@ async def _execute_scenario_steps(
             result = await run_api_case_server(
                 case_id, db=session, batch_id=batch_id, environment_id=environment_id,
                 case_variables=scenario_vars, client=client, seed_runtime=runtime, display_name=label,
+                scenario_auth=scenario_auth,
+                scenario_pre_script=scenario_pre_script,
             )
         else:
             label = str(step.get("name") or ("自定义请求" if kind == "request" else "接口请求"))
@@ -683,6 +697,8 @@ async def _execute_scenario_steps(
                 None, db=session, batch_id=batch_id, environment_id=environment_id,
                 project_id=project_id, spec_override=scenario_step_to_spec(step),
                 case_variables=scenario_vars, client=client, seed_runtime=runtime, display_name=label,
+                scenario_auth=scenario_auth,
+                scenario_pre_script=scenario_pre_script,
             )
         runtime.clear()
         runtime.update(result.get("runtime") or {})
@@ -743,6 +759,10 @@ async def run_scenario_batch(
                 await session.commit()
 
             runtime: dict[str, str] = {}
+            scenario_auth = (
+                scenario.auth if isinstance(getattr(scenario, "auth", None), dict) else None
+            )
+            scenario_pre_script = getattr(scenario, "pre_script", None)
             await _execute_scenario_steps(
                 steps,
                 session=session,
@@ -756,6 +776,8 @@ async def run_scenario_batch(
                 dataset_rows=dataset_rows,
                 execution_control=execution_control,
                 scenario_id=scenario_id,
+                scenario_auth=scenario_auth,
+                scenario_pre_script=scenario_pre_script,
             )
     except Exception:
         logger.exception("场景执行异常 scenario=%s batch=%s", scenario_id, batch_id)

@@ -407,6 +407,27 @@ async def cmd_api_run(args) -> None:
                     _json.dump(detail, f, ensure_ascii=False, indent=2)
                 print(f"JSON 报告已保存: {out_path}")
 
+        # 033（US2）：JUnit XML 报告（--reporter-junit [PATH]）
+        junit_path = getattr(args, "reporter_junit", None)
+        if junit_path:
+            try:
+                exp = await client.get(
+                    f"/api/reports/batches/{batch_id}/export",
+                    params={"format": "junit"},
+                )
+            except httpx.HTTPError as exc:
+                print(f"警告: JUnit 报告拉取失败（{exc}）", file=sys.stderr)
+            else:
+                if exp.status_code < 400:
+                    with open(junit_path, "wb") as f:
+                        f.write(exp.content)
+                    print(f"JUnit 报告已保存: {junit_path}")
+                else:
+                    print(
+                        f"警告: JUnit 报告导出失败 HTTP {exp.status_code}（跳过）",
+                        file=sys.stderr,
+                    )
+
     sys.exit(map_statuses_to_exit_code(statuses))
 
 
@@ -461,6 +482,14 @@ async def _main() -> None:
     _ = p_api_run.add_argument("--token", type=str, default=None, help="CI 令牌 vt_…（或 VOYAN_TOKEN）")
     _ = p_api_run.add_argument("--report", choices=["json", "html"], default=None, help="导出报告格式")
     _ = p_api_run.add_argument("--out", type=str, default=None, help="报告输出路径")
+    _ = p_api_run.add_argument(
+        "--reporter-junit",
+        nargs="?",
+        const="voyantest-junit.xml",
+        default=None,
+        metavar="PATH",
+        help="导出 JUnit XML 报告（缺省文件名 voyantest-junit.xml；033 US2）",
+    )
     _ = p_api_run.add_argument("--timeout", type=float, default=600.0, help="等待超时秒数（默认 600）")
     _ = p_api_run.add_argument("--fail-fast", action="store_true", default=False, help="用例首个迭代失败即停")
 

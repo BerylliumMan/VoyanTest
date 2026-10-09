@@ -45,6 +45,8 @@ async def create_scheduled_task(
     enabled: bool,
     description: str = "",
     next_run_at=None,
+    # 033（US6）：调度环境绑定（api_case/api_scenario）
+    environment_id: int | None = None,
 ) -> db_models.ScheduledTask:
     """创建定时任务。
 
@@ -57,6 +59,7 @@ async def create_scheduled_task(
         target_id=target_id,
         enabled=enabled,
         description=description or "",
+        environment_id=environment_id,
         next_run_at=next_run_at,
     )
     db.add(db_schedule)
@@ -79,6 +82,8 @@ async def update_scheduled_task(
     enabled: bool | None = None,
     description: str | None = None,
     next_run_at=None,
+    # 033（US6）：调度环境绑定（None = 不修改）
+    environment_id: int | None = None,
 ) -> db_models.ScheduledTask | None:
     """部分更新定时任务（仅更新非 None 字段），自动刷新 updated_at。
 
@@ -101,6 +106,9 @@ async def update_scheduled_task(
     for key, value in update_fields.items():
         if value is not None:
             setattr(db_schedule, key, value)
+    # 033（US6）：环境绑定（None=不修改；0=清除；>0=设置）
+    if environment_id is not None:
+        db_schedule.environment_id = None if environment_id == 0 else environment_id
 
     db_schedule.updated_at = tz_now()
     try:

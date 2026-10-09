@@ -40,6 +40,8 @@ class Environment(Base):
     headers = Column(JSON, default=list)
     # 多域名服务表（031 US4）：{"auth": "http://a:8000", "gateway": "http://b:8080"}
     services = Column(JSON, default=dict)
+    # 环境默认认证（033 US3）：auth 同构 JSON（无 inherit）；步骤/场景未显式配置时生效
+    default_auth = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
 
 

@@ -471,12 +471,19 @@ class ScriptResult:
 
     ``variables`` 仅含脚本**新写入**的变量（写回作用域）；``error`` 为可读原因；
     ``output`` 为 print 输出（受 64KB 上限约束，供「试跑」展示）。
+    ``tests``（033 US4）：post_script 命名断言结果 [{name, ok, message}]（收集式）。
+    ``request_overrides``（033 US7）：pre_script 请求改写（结构化记录，渲染前应用）。
+    ``set_cookies`` / ``delete_cookies``（033 US8）：脚本 cookie 写回记录。
     """
 
     ok: bool
     variables: dict = field(default_factory=dict)
     error: str = ""
     output: str = ""
+    tests: list = field(default_factory=list)
+    request_overrides: dict = field(default_factory=dict)
+    set_cookies: list = field(default_factory=list)
+    delete_cookies: list = field(default_factory=list)
 
 
 def run_script(
@@ -485,6 +492,9 @@ def run_script(
     *,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
     seed: int = 0,
+    with_checks: bool = False,
+    with_request_overrides: bool = False,
+    with_cookies: bool = False,
 ) -> ScriptResult:
     """执行一段脚本（前置/后置共用）。
 
@@ -531,6 +541,25 @@ def run_script(
     env["__bounded"] = _BoundedIterator
     env["print"] = _capture_print
     injected |= {"__bounded", "print"}
+    # 033（US4）：命名断言（check 系列）仅在显式开启时注入（post_script / 试跑）
+    check_results: list[dict] = []
+    if with_checks:
+        _helpers = _make_check_helpers(check_results)
+        env.update(_helpers)
+        injected |= set(_helpers)
+    # 033（US7）：请求改写函数（pre_script；结构化记录，渲染前由执行层应用）
+    request_overrides: dict = {}
+    if with_request_overrides:
+        _over_helpers = _make_override_helpers(request_overrides)
+        env.update(_over_helpers)
+        injected |= set(_over_helpers)
+    # 033（US8）：cookie 读写函数（post_script；受 api_post_script_cookies 开关控制）
+    set_cookies: list[dict] = []
+    delete_cookies: list[dict] = []
+    if with_cookies:
+        _ck_helpers = _make_cookie_helpers(set_cookies, delete_cookies, context or {})
+        env.update(_ck_helpers)
+        injected |= set(_ck_helpers)
     # 只读上下文（vars 快照 + 响应相关），不允许直接被脚本改（改的是新名字）
     read_context = dict(context or {})
     env.update(read_context)
@@ -569,7 +598,230 @@ def run_script(
             ok=False,
             error=f"脚本输出超过上限 {MAX_OUTPUT_BYTES // 1024}KB（实际约 {total // 1024}KB）",
         )
-    return ScriptResult(ok=True, variables=new_vars, output=output)
+    return ScriptResult(
+        ok=True,
+        variables=new_vars,
+        output=output,
+        tests=check_results,
+        request_overrides=request_overrides,
+        set_cookies=set_cookies,
+        delete_cookies=delete_cookies,
+    )
+
+
+def _make_cookie_helpers(
+    set_store: list[dict], del_store: list[dict], context: dict
+) -> dict[str, Callable[..., Any]]:
+    """033（US8）：cookie 读写白名单函数（读响应/会话；写操作只记录结构化条目）。"""
+    raw_headers = context.get("headers") if isinstance(context.get("headers"), dict) else {}
+    response_headers = {str(k).lower(): v for k, v in (raw_headers or {}).items()}
+    session = context.get("cookies") if isinstance(context.get("cookies"), dict) else {}
+
+    def _parse_set_cookie(raw: Any, name: str) -> Any:
+        first = str(raw or "").split(";")[0]
+        if "=" in first:
+            k, v = first.split("=", 1)
+            if k.strip() == name:
+                return v.strip()
+        return None
+
+    def get_response_cookie(name: Any) -> Any:
+        target = str(name)
+        raw = response_headers.get("set-cookie")
+        if raw is None:
+            return None
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                got = _parse_set_cookie(item, target)
+                if got is not None:
+                    return got
+            return None
+        return _parse_set_cookie(raw, target)
+
+    def get_cookie(name: Any) -> Any:
+        value = session.get(str(name))
+        return None if value is None else str(value)
+
+    def set_cookie(name: Any, value: Any, domain: Any = None, path: Any = "/") -> None:
+        n = str(name or "").strip()
+        if not n:
+            raise _SandboxRejected("cookie 名称不能为空")
+        item: dict[str, Any] = {"name": n, "value": str(value)}
+        if domain:
+            item["domain"] = str(domain)
+        if path and str(path) != "/":
+            item["path"] = str(path)
+        set_store.append(item)
+
+    def delete_cookie(name: Any, domain: Any = None, path: Any = "/") -> None:
+        n = str(name or "").strip()
+        if not n:
+            raise _SandboxRejected("cookie 名称不能为空")
+        item: dict[str, Any] = {"name": n}
+        if domain:
+            item["domain"] = str(domain)
+        if path and str(path) != "/":
+            item["path"] = str(path)
+        del_store.append(item)
+
+    return {
+        "get_response_cookie": get_response_cookie,
+        "get_cookie": get_cookie,
+        "set_cookie": set_cookie,
+        "delete_cookie": delete_cookie,
+    }
+
+
+_ALLOWED_OVERRIDE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+_ALLOWED_OVERRIDE_AUTH_TYPES = {"none", "basic", "bearer", "api_key", "oauth2"}
+
+
+def _make_override_helpers(store: dict) -> dict[str, Callable[..., Any]]:
+    """033（US7）：请求改写白名单函数（只记录结构化覆盖，不注入任意对象）。"""
+
+    def set_request_url(url: Any) -> None:
+        store["url"] = str(url)
+
+    def set_request_method(method: Any) -> None:
+        text = str(method or "").strip().upper()
+        if text not in _ALLOWED_OVERRIDE_METHODS:
+            raise _SandboxRejected(f"method 非法: {method!r}")
+        store["method"] = text
+
+    def set_request_header(key: Any, value: Any) -> None:
+        k = str(key or "").strip()
+        if not k:
+            raise _SandboxRejected("请求头名不能为空")
+        store.setdefault("headers", {})[k] = str(value)
+
+    def remove_request_header(key: Any) -> None:
+        k = str(key or "").strip()
+        if k:
+            store.setdefault("remove_headers", []).append(k)
+
+    def set_request_query(key: Any, value: Any) -> None:
+        k = str(key or "").strip()
+        if not k:
+            raise _SandboxRejected("查询参数名不能为空")
+        store.setdefault("query", {})[k] = str(value)
+
+    def remove_request_query(key: Any) -> None:
+        k = str(key or "").strip()
+        if k:
+            store.setdefault("remove_query", []).append(k)
+
+    def set_request_body(body: Any) -> None:
+        if isinstance(body, dict):
+            store["body"] = _json_mod.dumps(body, ensure_ascii=False, default=str)
+        else:
+            store["body"] = str(body)
+
+    def set_request_auth(auth_type: Any, **fields: Any) -> None:
+        text = str(auth_type or "").strip()
+        if text not in _ALLOWED_OVERRIDE_AUTH_TYPES:
+            raise _SandboxRejected(f"auth 类型非法: {auth_type!r}")
+        store["auth"] = {"type": text, **{str(k): v for k, v in fields.items()}}
+
+    return {
+        "set_request_url": set_request_url,
+        "set_request_method": set_request_method,
+        "set_request_header": set_request_header,
+        "remove_request_header": remove_request_header,
+        "set_request_query": set_request_query,
+        "remove_request_query": remove_request_query,
+        "set_request_body": set_request_body,
+        "set_request_auth": set_request_auth,
+    }
+
+
+MAX_CHECK_RESULTS = 200
+_CHECK_NAME_MAX = 200
+_CHECK_MSG_MAX = 500
+
+
+def _make_check_helpers(collector: list[dict]) -> dict[str, Callable[..., Any]]:
+    """033（US4）：命名断言 helper 工厂（收集式、不中断；超上限抛 _SandboxRejected）。"""
+
+    def _record(name: Any, ok: bool, message: Any = "") -> bool:
+        if len(collector) >= MAX_CHECK_RESULTS:
+            raise _SandboxRejected(f"check 数量超过上限 {MAX_CHECK_RESULTS}")
+        collector.append(
+            {
+                "name": str(name)[:_CHECK_NAME_MAX],
+                "ok": bool(ok),
+                "message": "" if ok else str(message)[:_CHECK_MSG_MAX],
+            }
+        )
+        return bool(ok)
+
+    def check(name: Any, condition: Any) -> bool:
+        ok = bool(condition)
+        return _record(name, ok, "" if ok else f"条件为假: {condition!r}")
+
+    def check_eq(name: Any, actual: Any, expected: Any) -> bool:
+        ok = actual == expected
+        return _record(name, ok, "" if ok else f"实际 {actual!r} != 期望 {expected!r}")
+
+    def check_ne(name: Any, actual: Any, expected: Any) -> bool:
+        ok = actual != expected
+        return _record(name, ok, "" if ok else f"实际 {actual!r} == 期望（不应相等）{expected!r}")
+
+    def check_in(name: Any, item: Any, container: Any) -> bool:
+        try:
+            ok = item in container
+        except Exception as exc:  # noqa: BLE001 - 容器不支持 in → 断言失败
+            return _record(name, False, f"包含判断失败: {exc}")
+        return _record(name, ok, "" if ok else f"{item!r} 不在 {container!r}")
+
+    def check_not_in(name: Any, item: Any, container: Any) -> bool:
+        try:
+            ok = item not in container
+        except Exception as exc:  # noqa: BLE001
+            return _record(name, False, f"包含判断失败: {exc}")
+        return _record(name, ok, "" if ok else f"{item!r} 不应包含在 {container!r}")
+
+    def check_match(name: Any, text: Any, pattern: Any) -> bool:
+        try:
+            ok = _re.search(str(pattern), str(text)) is not None
+        except _re.error as exc:
+            return _record(name, False, f"正则非法: {exc}")
+        return _record(name, ok, "" if ok else f"未匹配 正则 {pattern!r} 于 {str(text)[:120]!r}")
+
+    def check_len(name: Any, obj: Any, n: Any) -> bool:
+        try:
+            length = len(obj)
+        except Exception as exc:  # noqa: BLE001
+            return _record(name, False, f"长度判断失败: {exc}")
+        ok = length == n
+        return _record(name, ok, "" if ok else f"长度 {length} != {n}")
+
+    def check_true(name: Any, cond: Any) -> bool:
+        ok = bool(cond)
+        return _record(name, ok, "" if ok else f"条件不为真: {cond!r}")
+
+    def check_false(name: Any, cond: Any) -> bool:
+        ok = not bool(cond)
+        return _record(name, ok, "" if ok else f"条件不为假: {cond!r}")
+
+    def check_close(name: Any, a: Any, b: Any, tol: Any = 1e-6) -> bool:
+        try:
+            ok = abs(float(a) - float(b)) <= abs(float(tol))
+        except (TypeError, ValueError) as exc:
+            return _record(name, False, f"数值近似判断失败: {exc}")
+        return _record(name, ok, "" if ok else f"|{a} - {b}| > {tol}")
+
+    return {
+        "check": check,
+        "check_eq": check_eq,
+        "check_ne": check_ne,
+        "check_in": check_in,
+        "check_not_in": check_not_in,
+        "check_match": check_match,
+        "check_len": check_len,
+        "check_true": check_true,
+        "check_false": check_false,
+        "check_close": check_close,
+    }
 
 
 def _evaluate_safely(expr: str, context: dict, timeout_ms: int) -> ExpressionResult:

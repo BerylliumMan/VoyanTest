@@ -14,6 +14,8 @@ interface ScheduleInfo {
   task_type: string;
   target_id: number;
   description: string;
+  /** 033（US6）：正式环境绑定字段（0/空 = 未绑定） */
+  environment_id?: number | null;
 }
 
 function ScheduleManagement() {
@@ -77,8 +79,12 @@ function ScheduleManagement() {
         enabled: schedule.enabled,
       });
       setTaskType(schedule.task_type || '');
-      const matched = /^environment_id=(\d+)/.exec(schedule.description || '');
-      setEnvId(matched ? Number(matched[1]) : undefined);
+      // 033（US6）：环境优先取正式字段；兼容旧数据的 description 约定
+      const legacy = /^environment_id=(\d+)/.exec(schedule.description || '');
+      setEnvId(
+        (schedule.environment_id as number | undefined) ??
+          (legacy ? Number(legacy[1]) : undefined)
+      );
       if (
         (schedule.task_type === 'api_scenario' || schedule.task_type === 'api_case') &&
         schedule.target_id
@@ -96,8 +102,12 @@ function ScheduleManagement() {
   const handleScheduleSubmit = async () => {
     const values = await scheduleForm.validate();
     if (values.task_type === 'api_scenario' || values.task_type === 'api_case') {
-      // 031（US8）：环境写进 description（服务端执行器按 environment_id=<id> 解析）
-      values.description = envId ? `environment_id=${envId}` : '';
+      // 033（US6）：环境走正式字段（编辑时 0 = 清除绑定；创建时不带则留空）
+      if (editingSchedule) {
+        values.environment_id = envId ?? 0;
+      } else if (envId) {
+        values.environment_id = envId;
+      }
     }
     try {
       if (editingSchedule) {
@@ -274,7 +284,7 @@ function ScheduleManagement() {
               />
             </Form.Item>
           ) : null}
-          <Form.Item field="description" label={t['description']} style={taskType === 'api_scenario' ? { display: 'none' } : undefined}>
+          <Form.Item field="description" label={t['description']}>
             <Input.TextArea placeholder={t['description']} />
           </Form.Item>
           <Form.Item field="enabled" label={t['schedule.enabled']} triggerPropName="checked">

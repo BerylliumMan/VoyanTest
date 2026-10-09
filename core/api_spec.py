@@ -17,7 +17,9 @@ ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 ALLOWED_BODY_TYPES = {"none", "json", "form", "form_data", "raw", "binary", "multipart"}
 # 031（US1）：multipart 语义的规范类型是既有 form_data（UI 早已如此映射）；
 # "multipart" 仅作兼容别名，归一化时折叠为 "form_data"。
-ALLOWED_AUTH_TYPES = {"none", "basic", "bearer", "api_key"}
+ALLOWED_AUTH_TYPES = {"none", "basic", "bearer", "api_key", "oauth2", "inherit"}
+# 033（US3）：OAuth2 支持的服务端授权流（authorization code/PKCE 涉及浏览器回调，明确排除）
+ALLOWED_OAUTH2_GRANTS = {"client_credentials", "password", "refresh_token"}
 ALLOWED_ASSERTION_TYPES = {
     # 031（US6）：表达式断言（沙箱求值，结果须为 bool）
     "expression",
@@ -408,6 +410,35 @@ def validate_api_spec(spec: Any) -> list[str]:
             atype = str(auth.get("type") or "none")
             if atype not in ALLOWED_AUTH_TYPES:
                 problems.append(f"{where}.request.auth.type 非法: {atype!r}")
+            elif atype == "oauth2":
+                # 033（US3）：按 grant 校验必填项（可读中文）
+                oauth2 = auth.get("oauth2")
+                if not isinstance(oauth2, dict):
+                    problems.append(f"{where}.request.auth.oauth2 必须是对象")
+                else:
+                    grant = str(oauth2.get("grant") or "client_credentials")
+                    if grant not in ALLOWED_OAUTH2_GRANTS:
+                        problems.append(
+                            f"{where}.request.auth.oauth2.grant 非法: {grant!r}"
+                            f"（应为 {'/'.join(sorted(ALLOWED_OAUTH2_GRANTS))}）"
+                        )
+                    if not str(oauth2.get("token_url") or "").strip():
+                        problems.append(f"{where}.request.auth.oauth2 缺少 token_url")
+                    if not str(oauth2.get("client_id") or "").strip():
+                        problems.append(f"{where}.request.auth.oauth2 缺少 client_id")
+                    if grant == "password" and (
+                        not str(oauth2.get("username") or "").strip()
+                        or not str(oauth2.get("password") or "").strip()
+                    ):
+                        problems.append(
+                            f"{where}.request.auth.oauth2 grant=password 时缺少 username/password"
+                        )
+                    if grant == "refresh_token" and not str(
+                        oauth2.get("refresh_token") or ""
+                    ).strip():
+                        problems.append(
+                            f"{where}.request.auth.oauth2 grant=refresh_token 时缺少 refresh_token"
+                        )
         timeout = req.get("timeout_ms", DEFAULT_TIMEOUT_MS)
         try:
             timeout_i = int(timeout)
@@ -459,6 +490,7 @@ __all__ = [
     "ALLOWED_METHODS",
     "ALLOWED_BODY_TYPES",
     "ALLOWED_AUTH_TYPES",
+    "ALLOWED_OAUTH2_GRANTS",
     "DEFAULT_TIMEOUT_MS",
     "MAX_TIMEOUT_MS",
 ]

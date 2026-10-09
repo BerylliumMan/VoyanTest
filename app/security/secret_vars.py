@@ -145,3 +145,39 @@ async def backfill_secret_variables(db) -> int:
             pass
         return 0
     return changed
+
+
+# ── 033（US3）：环境默认认证（default_auth）的 secret 字段掩码/合并 ─────────────
+# 与 variables 同语义（2026-09-30 决策）：明文落库、仅显示打码、`******` 回传不覆盖原值。
+
+AUTH_SECRET_KEYS = {"client_secret", "password", "refresh_token", "token", "key_value"}
+
+
+def mask_auth_secrets(auth: Any) -> Any:
+    """返回打码副本（递归一层嵌套，如 oauth2.client_secret → ******）。"""
+    if not isinstance(auth, dict):
+        return auth
+    out: dict[str, Any] = {}
+    for key, value in auth.items():
+        if isinstance(value, dict):
+            out[key] = mask_auth_secrets(value)
+        elif key in AUTH_SECRET_KEYS and value not in (None, "", MASK):
+            out[key] = MASK
+        else:
+            out[key] = value
+    return out
+
+
+def merge_masked_auth(old: Any, new: Any) -> Any:
+    """写入合并：新值 == "******" 且旧值非空 → 保留旧值（递归一层）。"""
+    if not isinstance(new, dict) or not isinstance(old, dict):
+        return new
+    out: dict[str, Any] = {}
+    for key, value in new.items():
+        if isinstance(value, dict) and isinstance(old.get(key), dict):
+            out[key] = merge_masked_auth(old[key], value)
+        elif key in AUTH_SECRET_KEYS and value == MASK and old.get(key) not in (None, ""):
+            out[key] = old[key]
+        else:
+            out[key] = value
+    return out

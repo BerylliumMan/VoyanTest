@@ -163,6 +163,8 @@ async def create_scenario(
                 "steps": payload.get("steps"),
                 "share_cookie": payload.get("share_cookie", False),
                 "continue_on_failure": payload.get("continue_on_failure", False),
+                "auth": payload.get("auth"),
+                "pre_script": payload.get("pre_script"),
             },
         )
     except ScenarioValidationError as exc:
@@ -188,6 +190,9 @@ async def scenario_detail(
     item = _summarize(obj)
     item["environment_name"] = await _environment_name(db, obj.environment_id)
     item["variables"] = obj.variables or []
+    # 033（US3/US6）：场景级公共配置
+    item["auth"] = obj.auth if isinstance(getattr(obj, "auth", None), dict) else None
+    item["pre_script"] = getattr(obj, "pre_script", None)
     resolved = await _resolve_steps(db, obj.steps or [])
     item["steps"] = resolved
     item["cases"] = [s for s in resolved if s.get("type") == "case"]
@@ -218,6 +223,8 @@ async def update_scenario(
             "steps",
             "share_cookie",
             "continue_on_failure",
+            "auth",
+            "pre_script",
         )
         if k in payload
     }

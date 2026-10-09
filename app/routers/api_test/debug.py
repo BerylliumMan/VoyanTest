@@ -78,8 +78,20 @@ async def debug_api_request(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="请求体必须是对象")
     step = payload.get("step")
+    dry_run = bool(payload.get("dry_run"))
     if not isinstance(step, dict) or not isinstance(step.get("request"), dict):
-        raise HTTPException(status_code=400, detail="step.request 缺失")
+        # 033（US5）：预览允许只带多步骤 api_spec（缺 step 时取首步作为锚点）
+        spec_payload = payload.get("api_spec")
+        spec_steps = spec_payload.get("steps") if isinstance(spec_payload, dict) else None
+        if (
+            dry_run
+            and isinstance(spec_steps, list)
+            and spec_steps
+            and isinstance(spec_steps[0], dict)
+        ):
+            step = spec_steps[0]
+        else:
+            raise HTTPException(status_code=400, detail="step.request 缺失")
     environment, environment_project_id = await _load_environment(
         db, payload.get("environment_id")
     )
@@ -87,7 +99,6 @@ async def debug_api_request(
         _ensure_project_access(user, environment_project_id)
 
     case_variables = payload.get("case_variables") or []
-    dry_run = bool(payload.get("dry_run"))
     # 031（US9）：调试单请求的数据驱动参数（覆盖用例绑定语义）
     # 注意：本端点 payload 是 **dict**（不是 Pydantic 模型）——属性访问会 500（实测踩过）
     spec = {"schema_version": 1, "fail_policy": "fail_fast", "steps": [step]}
@@ -102,7 +113,9 @@ async def debug_api_request(
         spec["fail_policy"] = "fail_fast" if fail_fast else "continue"
 
     if dry_run:
-        return await _render_only(spec, environment, case_variables)
+        # 033（US5）：优先使用完整 api_spec（编辑器发送时携带），支持多步骤预览
+        preview_spec = payload.get("api_spec") if isinstance(payload.get("api_spec"), dict) else spec
+        return await _render_only(preview_spec, environment, case_variables)
 
     from core.api_runner.runner import run_api_case
 
@@ -251,66 +264,190 @@ def _extracted_payload(extracted: list) -> list[dict]:
     return out
 
 
+def _walk_strings(value: Any, path: str):
+    """递归收集 (路径, 字符串)（033 US5：unresolved 精确定位）。"""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _walk_strings(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _walk_strings(v, f"{path}[{i}]")
+
+
+def _scope_of(name: str, scope) -> str:
+    """变量来源分类（与 lookup 优先级一致）。"""
+    if name.startswith("$"):
+        return "builtin"
+    for layer, label in (
+        (scope.runtime, "runtime"),
+        (scope.step, "step"),
+        (scope.case, "case"),
+        (scope.dataset, "dataset"),
+        (scope.services, "services"),
+        (scope.env, "environment"),
+    ):
+        if name in layer:
+            return label
+    if name in ("baseUrl", "base_url", "BASE_URL") and scope.base_url:
+        return "baseUrl"
+    return "unknown"
+
+
+def _auth_plan(spec: dict, environment: dict) -> dict:
+    """033（US5）：预览将使用的认证与来源（不含 secret）。
+
+    解析顺序与执行一致：步骤 → 用例（api_spec.auth）→ 环境默认；inherit 逐层下落。
+    """
+    steps = spec.get("steps") or []
+    step_auth = None
+    if steps and isinstance(steps[0], dict):
+        step_auth = ((steps[0].get("request") or {}).get("auth")) or None
+    case_auth = spec.get("auth") if isinstance(spec.get("auth"), dict) else None
+    env_auth = (environment or {}).get("default_auth") if isinstance(environment, dict) else None
+
+    for layer, source in ((step_auth, "step"), (case_auth, "case"), (env_auth, "environment")):
+        if not isinstance(layer, dict):
+            continue
+        if str(layer.get("type") or "inherit") == "inherit":
+            continue
+        plan: dict = {"type": str(layer.get("type") or "none"), "source": source}
+        if plan["type"] == "oauth2":
+            plan["token_var"] = str((layer.get("oauth2") or {}).get("token_var") or "access_token")
+        return plan
+    return {"type": "none", "source": "none"}
+
+
 async def _render_only(
     spec: dict, environment: dict | None, case_variables: list[dict]
 ) -> dict:
-    """dry_run：只渲染请求，验证变量是否齐全（不发网络请求）。"""
-    from core.api_runner.request_builder import build_request
+    """dry_run（033 US5 扩展）：渲染**全部步骤** + 变量解析轨迹 + unresolved + auth_plan。
+
+    零出站；``rendered`` 保持第一步对象（向后兼容），新增 ``rendered_steps`` 全量数组。
+    """
+    from core.api_runner.request_builder import apply_auth_chain, build_request
     from core.api_runner.variables import (
         UndefinedVariableError,
         VariableError,
         VariableScope,
+        _builtin as _builtin_value,
+        _VAR_RE,
+        is_secret_name,
+        secret_keys,
         variables_to_map,
     )
 
     env = environment or {}
+    raw_spec = spec if isinstance(spec, dict) else {}
+    # auth_plan 必须在链解析前计算（保留"来源层"信息）
+    auth_plan = _auth_plan(raw_spec, env)
+    spec = apply_auth_chain(raw_spec, env_default_auth=env.get("default_auth"))
+    # 用例级变量：spec.variables 打底，显式 case_variables 覆盖（与执行器口径一致）
+    case_map = variables_to_map(spec.get("variables"))
+    case_map.update(variables_to_map(case_variables))
     scope = VariableScope(
-        case_variables=variables_to_map(case_variables),
+        case_variables=case_map,
         # 031（US4）：多域名服务名同样参与渲染与「可用变量」提示
         services=dict(env.get("services") or {}),
         env_variables=variables_to_map(env.get("variables")),
         base_url=env.get("base_url") or "",
     )
-    try:
-        rendered = build_request(spec["steps"][0], scope)
-    except UndefinedVariableError as exc:
+    secret_names = secret_keys(spec.get("variables")) | secret_keys(env.get("variables"))
+
+    steps = [s for s in (spec.get("steps") or []) if isinstance(s, dict)]
+    if not steps:
         return {
             "rendered": {},
+            "rendered_steps": [],
+            "variables_trace": [],
+            "unresolved": [],
+            "auth_plan": auth_plan,
             "response": None,
             "assertions": [],
             "extracted": [],
-            "error": str(exc),
+            "error": "没有可预览的步骤",
         }
-    except VariableError as exc:
-        return {
-            "rendered": {},
-            "response": None,
-            "assertions": [],
-            "extracted": [],
-            "error": str(exc),
-        }
-    except Exception as exc:
-        logger.warning("接口调试 dry_run 渲染失败: %s", exc, exc_info=True)
-        return {
-            "rendered": {},
-            "response": None,
-            "assertions": [],
-            "extracted": [],
-            "error": f"请求渲染失败: {exc}",
-        }
-    return {
-        "rendered": _rendered_payload(
-            {
-                "method": rendered.method,
-                "url": rendered.url,
-                "headers": rendered.headers,
-                "body": rendered.content,
+
+    unresolved: list[dict] = []
+    seen_unresolved: set = set()
+    trace: dict[str, dict] = {}
+    rendered_steps: list[dict] = []
+    first_rendered: dict | None = None
+    first_error: str | None = None
+
+    for idx, st in enumerate(steps):
+        scope.step = variables_to_map(st.get("variables"))
+        # ① 扫描：unresolved 精确定位 + 变量轨迹
+        for path, text in _walk_strings(st, ""):
+            if "{{" not in text:
+                continue
+            for m in _VAR_RE.finditer(text):
+                name = m.group(1).strip()
+                if not name:
+                    continue
+                builtin_value = None
+                if name.startswith("$"):
+                    builtin_value = _builtin_value(name)
+                value = builtin_value if builtin_value is not None else scope.lookup(name)
+                if name not in trace:
+                    is_secret = bool(name in secret_names or is_secret_name(name))
+                    trace[name] = {
+                        "name": name,
+                        "scope": _scope_of(name, scope),
+                        "value": "******" if is_secret else ("" if value is None else str(value)),
+                        "secret": is_secret,
+                    }
+                if value is None:
+                    key = (name, idx, path)
+                    if key not in seen_unresolved:
+                        seen_unresolved.add(key)
+                        unresolved.append({"name": name, "step_index": idx, "field": path})
+        # ② oauth2 步骤：预览用占位令牌（不触发真实取令牌）
+        auth = (st.get("request") or {}).get("auth") or {}
+        if str(auth.get("type") or "") == "oauth2":
+            token_var = str((auth.get("oauth2") or {}).get("token_var") or "access_token")
+            scope.set_runtime(token_var, "（运行期获取）")
+        # ③ 渲染
+        try:
+            rendered = build_request(st, scope)
+            item = {
+                "step_index": idx,
+                **_rendered_payload(
+                    {
+                        "method": rendered.method,
+                        "url": rendered.url,
+                        "headers": rendered.headers,
+                        "body": rendered.content,
+                    }
+                ),
             }
-        ),
+            rendered_steps.append(item)
+            if first_rendered is None:
+                first_rendered = item
+        except UndefinedVariableError as exc:
+            rendered_steps.append({"step_index": idx, "error": str(exc)})
+            first_error = first_error or str(exc)
+        except VariableError as exc:
+            rendered_steps.append({"step_index": idx, "error": str(exc)})
+            first_error = first_error or str(exc)
+        except Exception as exc:  # noqa: BLE001 - 预览绝不 500
+            logger.warning("接口调试 dry_run 渲染失败: %s", exc, exc_info=True)
+            rendered_steps.append({"step_index": idx, "error": f"请求渲染失败: {exc}"})
+            first_error = first_error or f"请求渲染失败: {exc}"
+
+    # 轨迹里可能出现步骤内新增变量：以最终扫描为准（保序）
+    trace_list = list(trace.values())
+    return {
+        "rendered": {k: v for k, v in (first_rendered or {}).items() if k != "step_index"},
+        "rendered_steps": rendered_steps,
+        "variables_trace": trace_list,
+        "unresolved": unresolved,
+        "auth_plan": auth_plan,
         "response": None,
         "assertions": [],
         "extracted": [],
-        "error": None,
+        "error": first_error,
     }
 
 
@@ -381,12 +518,26 @@ async def debug_script(
         from app.config import get_settings
 
         timeout = int(get_settings().api_script_timeout_ms)
-    out = run_script(payload.script, context, timeout_ms=timeout)
+    out = run_script(
+        payload.script,
+        context,
+        timeout_ms=timeout,
+        with_checks=True,
+        with_request_overrides=True,
+        with_cookies=True,
+    )
     return {
         "ok": out.ok,
         "variables": out.variables,
         "output": out.output,
         "error": out.error,
+        # 033（US4）：命名断言试跑结果 [{name, ok, message}]
+        "tests": out.tests,
+        # 033（US7）：请求改写试跑结果（结构化覆盖记录）
+        "request_overrides": out.request_overrides,
+        # 033（US8）：cookie 读写试跑结果
+        "set_cookies": out.set_cookies,
+        "delete_cookies": out.delete_cookies,
     }
 
 

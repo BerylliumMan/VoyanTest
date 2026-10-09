@@ -368,6 +368,33 @@ export interface Environment {
   headers?: EnvHeaderItem[];
   /** 031（US4）多域名服务地址：{服务名: 绝对 URL} */
   services?: Record<string, string>;
+  /** 033（US3）环境默认认证（secret 字段后端回显打码） */
+  default_auth?: AuthConfig | null;
+}
+
+/** 033（US3）：认证配置（api_spec.request.auth / environments.default_auth 同构） */
+export interface AuthOAuth2Config {
+  grant?: 'client_credentials' | 'password' | 'refresh_token';
+  token_url?: string;
+  client_id?: string;
+  client_secret?: string;
+  scope?: string;
+  username?: string;
+  password?: string;
+  refresh_token?: string;
+  client_auth?: 'body' | 'basic';
+  token_var?: string;
+}
+
+export interface AuthConfig {
+  type: 'none' | 'basic' | 'bearer' | 'api_key' | 'oauth2';
+  username?: string;
+  password?: string;
+  token?: string;
+  key_name?: string;
+  key_value?: string;
+  in_?: 'header' | 'query';
+  oauth2?: AuthOAuth2Config;
 }
 
 /** 模块 */
@@ -576,3 +603,40 @@ export const ASSERTION_TEMPLATES: AssertionTemplate[] = [
     }),
   },
 ];
+
+/** 033（US1）：用例体检结论（契约 C1，服务端 inspect_api_spec 产出的镜像） */
+export interface InspectionFinding {
+  level: 'error' | 'warning';
+  code: string;
+  message: string;
+  /** 0 基步骤序号；-1 = 用例级（非步骤） */
+  step_index: number;
+  field: string;
+  hint?: string | null;
+}
+
+/** 033（US5）：请求预览（dry_run 扩展） */
+export interface PreviewStep {
+  step_index: number;
+  method?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  body_preview?: string;
+  error?: string;
+}
+
+export interface VariableTraceItem {
+  name: string;
+  scope: string;
+  value: string;
+  secret: boolean;
+}
+
+export interface PreviewData {
+  rendered?: Record<string, unknown>;
+  rendered_steps?: PreviewStep[];
+  variables_trace?: VariableTraceItem[];
+  unresolved?: Array<{ name: string; step_index: number; field: string }>;
+  auth_plan?: { type: string; source: string; token_var?: string };
+  error?: string | null;
+}

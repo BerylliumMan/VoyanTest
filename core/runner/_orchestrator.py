@@ -540,6 +540,9 @@ async def run_batch_test_cases(
     api_spec_patch: dict | None = None,
     # 031（US10）：批次内复用同一 httpx.AsyncClient（cookie jar 共享）
     session_reuse: bool = False,
+    # 033（US10）：用例间隔（毫秒）与首个失败即停止
+    delay_ms: int = 0,
+    stop_on_error: bool = False,
 ):
     """Execute multiple test cases sequentially in a single browser.
 
@@ -749,6 +752,11 @@ async def run_batch_test_cases(
                     )
                     await batch_db.commit()
                     break
+                # 033（US10）：用例间隔（首例前不等待；不影响暂停/停止检查）
+                if delay_ms and idx > 0:
+                    import asyncio as _asyncio_delay
+
+                    await _asyncio_delay.sleep(delay_ms / 1000)
                 try:
                     if case_kinds.get(case_id) == "api":
                         result = await run_api_case_server(
@@ -792,6 +800,16 @@ async def run_batch_test_cases(
                         )
                         await _abort_remaining_from(
                             idx + 1, f"因初始化用例 {case_id} 失败而跳过",
+                        )
+                        break
+                    # 033（US10）：首个失败即停止（剩余标记跳过）
+                    if stop_on_error and not is_init and status == "failed":
+                        logger.info(
+                            "stop_on_error: case %s failed — aborting remaining batch %s",
+                            case_id, batch_id,
+                        )
+                        await _abort_remaining_from(
+                            idx + 1, "因前序用例失败而停止（stop_on_error）",
                         )
                         break
                 except Exception as exc:  # noqa: BLE001 - 见下方注释

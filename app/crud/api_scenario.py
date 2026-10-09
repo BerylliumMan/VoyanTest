@@ -251,6 +251,9 @@ async def create_scenario(db: AsyncSession, data: dict) -> db_models.ApiScenario
         steps=steps,
         share_cookie=bool(data.get("share_cookie", False)),
         continue_on_failure=bool(data.get("continue_on_failure", False)),
+        # 033（US3/US6）：场景级公共配置
+        auth=data.get("auth") if isinstance(data.get("auth"), dict) else None,
+        pre_script=data.get("pre_script"),
     )
     db.add(obj)
     await db.commit()
@@ -277,6 +280,10 @@ async def update_scenario(
         obj.share_cookie = bool(data.get("share_cookie"))
     if "continue_on_failure" in data:
         obj.continue_on_failure = bool(data.get("continue_on_failure"))
+    if "auth" in data:
+        obj.auth = data.get("auth") if isinstance(data.get("auth"), dict) else None
+    if "pre_script" in data:
+        obj.pre_script = data.get("pre_script")
     if "steps" in data:
         steps = normalize_scenario_steps(data.get("steps"))
         await validate_scenario_steps(db, obj.project_id, steps)

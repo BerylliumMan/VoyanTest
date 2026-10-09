@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     exec_hidden_probe: bool = True
     # - browser_find 能力探测与使用（不可用时自动降级快照路径）
     exec_find_probe: bool = True
+    # 033 接口测试成熟度增强：
+    # - 发送前体检 Inspections（关闭=入口隐藏，/inspect 端点返回 disabled）
+    api_inspections_enabled: bool = True
+    # - OAuth2 令牌缓存提前过期缓冲（秒）
+    api_oauth_token_buffer_s: int = 60
+    # - 批量执行用例间间隔上限（毫秒）
+    api_batch_delay_max_ms: int = 60000
+    # - 允许 post_script cookie 读写函数（关闭=函数未注入）
+    api_post_script_cookies: bool = True
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

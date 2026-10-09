@@ -33,6 +33,31 @@ def _validate_env_items(items, field_name: str) -> None:
             raise HTTPException(status_code=400, detail=f"{field_name}[{i}] 缺少 key")
 
 
+_AUTH_TYPES = {"none", "basic", "bearer", "api_key", "oauth2"}
+
+
+def _validate_default_auth(auth) -> None:
+    """033（US3）：环境默认认证结构校验（400 可读错误；None 允许 = 不配置）。"""
+    if auth is None:
+        return
+    if not isinstance(auth, dict):
+        raise HTTPException(status_code=400, detail="default_auth 必须是对象")
+    atype = str(auth.get("type") or "none")
+    if atype not in _AUTH_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"default_auth.type 非法: {atype!r}（应为 {'/'.join(sorted(_AUTH_TYPES))}）",
+        )
+    if atype == "oauth2":
+        oauth2 = auth.get("oauth2")
+        if not isinstance(oauth2, dict):
+            raise HTTPException(status_code=400, detail="default_auth.oauth2 必须是对象")
+        if not str(oauth2.get("token_url") or "").strip():
+            raise HTTPException(status_code=400, detail="default_auth.oauth2 缺少 token_url")
+        if not str(oauth2.get("client_id") or "").strip():
+            raise HTTPException(status_code=400, detail="default_auth.oauth2 缺少 client_id")
+
+
 @router.get("/projects/{project_id}/environments", response_model=List[models.Environment])
 async def list_environments(
     project_id: int, db: AsyncSession = Depends(get_async_db),
@@ -69,6 +94,7 @@ async def create_environment(
 
     _validate_env_items(env.variables, "variables")
     _validate_env_items(env.headers, "headers")
+    _validate_default_auth(getattr(env, "default_auth", None))
 
     try:
         return await crud.create_environment(db, project_id, env)
@@ -96,6 +122,7 @@ async def update_environment(
 
     _validate_env_items(env.variables, "variables")
     _validate_env_items(env.headers, "headers")
+    _validate_default_auth(getattr(env, "default_auth", None))
 
     try:
         result = await crud.update_environment(db, env_id, env)

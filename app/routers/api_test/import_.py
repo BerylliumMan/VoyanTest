@@ -93,6 +93,29 @@ async def _fetch_url(url: str, username: str | None = None, password: str | None
     return raw
 
 
+@router.post("/import-curl")
+async def import_curl(
+    payload: dict,
+    user=Depends(get_current_user),
+) -> dict:
+    """033（US11）：粘贴 cURL 命令 → 编辑器步骤（零出站；不落库）。
+
+    请求：``{"curl": "curl -X POST ..."}``；响应：``{"step": {...}}``。
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是对象")
+    text = payload.get("curl")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="缺少 curl 文本")
+    from app.parsers.api_doc.curl import CurlParseError, parse_curl
+
+    try:
+        step = parse_curl(text)
+    except CurlParseError as exc:
+        raise HTTPException(status_code=400, detail=f"cURL 解析失败: {exc}") from exc
+    return {"step": step}
+
+
 @router.post("/import")
 async def import_api_document(
     request: Request,

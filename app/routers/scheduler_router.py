@@ -57,6 +57,8 @@ async def _sync_scheduler(row) -> None:
                 int(row.target_id),
                 enabled=True,
                 description=row.description or "",
+                # 033（US6）：正式环境字段
+                environment_id=getattr(row, "environment_id", None),
             )
         else:
             await scheduler.remove_task(str(row.id))
@@ -133,6 +135,7 @@ async def create_schedule(
             enabled=schedule.enabled,
             description=schedule.description or "",
             next_run_at=next_run,
+            environment_id=schedule.environment_id,
         )
         await _sync_scheduler(created)
         return created
@@ -175,6 +178,7 @@ async def update_schedule(
             enabled=update_data.get("enabled"),
             description=update_data.get("description"),
             next_run_at=next_run_at,
+            environment_id=update_data.get("environment_id"),
         )
         if result is None:
             raise HTTPException(status_code=404, detail="Schedule not found")

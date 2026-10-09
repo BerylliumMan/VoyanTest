@@ -221,6 +221,18 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
 
     from core.runner._persistence import build_batch_execution_queue
     total = len(build_batch_execution_queue(case_ids, init_case_ids, init_policy))
+
+    # 033（US10）：用例间隔与首个失败即停止——**必须先于批次创建校验**，
+    # 否则 400 会留下 running 但 0 run 的孤儿批次（2026-10-09 页面实测发现）
+    from app.config import get_settings as _get_settings_batch
+    from app.routers.testcase.execution._schemas import validate_delay_ms
+
+    try:
+        delay_ms = validate_delay_ms(req.delay_ms, _get_settings_batch().api_batch_delay_max_ms)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    stop_on_error = bool(req.stop_on_error)
+
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total, triggered_by=getattr(user, 'username', None))
     from app.routers.testcase import execution as _exec
     batch_id = batch.id
@@ -246,6 +258,9 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
                 api_spec_patch=api_spec_patch,
                 # 031（US10）：批次内复用会话（共享 httpx client）
                 session_reuse=bool(req.session_reuse),
+                # 033（US10）：运行器选项
+                delay_ms=delay_ms,
+                stop_on_error=stop_on_error,
             )
         finally:
             if user_id:

@@ -79,6 +79,9 @@ class ScheduledTask(Base):
     cron_expression = Column(String(100), nullable=False)
     task_type = Column(String(50), nullable=False)  # testcase, module, project
     target_id = Column(Integer, nullable=False)
+    # 调度环境绑定（033 US6）：api_case/api_scenario/api_import 触发时优先读取；
+    # 兼容旧数据 description=environment_id=<id> 约定
+    environment_id = Column(Integer, nullable=True)
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)

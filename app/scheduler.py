@@ -15,6 +15,24 @@ from croniter import croniter
 logger = logging.getLogger(__name__)
 
 
+def task_environment_id(task) -> Optional[int]:
+    """033（US6）：调度任务执行环境解析——``environment_id`` 列优先，
+    兼容旧数据 ``description="environment_id=<id>"`` 约定。"""
+    env_id = getattr(task, "environment_id", None)
+    if env_id:
+        try:
+            return int(env_id)
+        except (TypeError, ValueError):
+            return None
+    desc = str(getattr(task, "description", "") or "").strip()
+    if desc.startswith("environment_id="):
+        try:
+            return int(desc.split("=", 1)[1].strip())
+        except ValueError:
+            return None
+    return None
+
+
 @dataclass
 class ScheduledTask:
     """定时任务定义"""
@@ -25,6 +43,8 @@ class ScheduledTask:
     target_id: int
     enabled: bool = True
     description: str = ""
+    # 033（US6）：调度环境绑定（api_case/api_scenario 执行时使用；兼容旧 description 约定）
+    environment_id: Optional[int] = None
     last_run: Optional[datetime] = None
     next_run: Optional[datetime] = None
     run_count: int = 0
@@ -77,6 +97,7 @@ class TaskScheduler:
                         target_id=t.target_id,
                         enabled=t.enabled,
                         description=t.description or "",
+                        environment_id=getattr(t, "environment_id", None),
                         last_run=t.last_run_at,
                         next_run=t.next_run_at,
                         run_count=t.run_count or 0,
@@ -100,7 +121,7 @@ class TaskScheduler:
 
     async def add_task(self, task_id: str, name: str, cron_expression: str,
                  task_type: str, target_id: int, enabled: bool = True,
-                 description: str = "") -> ScheduledTask:
+                 description: str = "", environment_id: Optional[int] = None) -> ScheduledTask:
         """
         添加定时任务
 
@@ -124,6 +145,7 @@ class TaskScheduler:
             target_id=target_id,
             enabled=enabled,
             description=description or "",
+            environment_id=environment_id,
         )
         task.next_run = task.calculate_next_run()
         async with self._lock:

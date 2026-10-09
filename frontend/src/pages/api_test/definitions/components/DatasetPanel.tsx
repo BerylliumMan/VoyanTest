@@ -327,11 +327,22 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
     },
     {
       title: '操作',
-      width: 170,
+      width: 230,
       render: (_: unknown, record: Dataset) => (
         <Space>
           <Button type="text" size="small" icon={<IconEdit />} onClick={() => startEdit(record)}>
             编辑
+          </Button>
+          {/* 033（US10）：导出 CSV（与导入端点往返兼容） */}
+          <Button
+            type="text"
+            size="small"
+            icon={<IconUpload style={{ transform: 'rotate(180deg)' }} />}
+            onClick={() => {
+              window.open(`/api/api-test/datasets/${record.id}/export`, '_blank');
+            }}
+          >
+            导出
           </Button>
           <Popconfirm title="确认删除该数据集？" onOk={() => handleDelete(record.id)}>
             <Button type="text" size="small" status="danger" icon={<IconDelete />}>

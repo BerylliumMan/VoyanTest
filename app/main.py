@@ -377,6 +377,23 @@ async def _run_startup_init():
             "ALTER TABLE environments ADD COLUMN IF NOT EXISTS services JSONB DEFAULT '{}'::jsonb NOT NULL",
             "environments.services 迁移",
         )
+        # ── 033-api-test-maturity：接口测试成熟度增强（4 列，全部可空、零迁移）──
+        await _ddl(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS default_auth JSONB",
+            "environments.default_auth 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_scenarios ADD COLUMN IF NOT EXISTS auth JSONB",
+            "api_scenarios.auth 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_scenarios ADD COLUMN IF NOT EXISTS pre_script TEXT",
+            "api_scenarios.pre_script 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS environment_id INTEGER",
+            "scheduled_tasks.environment_id 迁移",
+        )
         await _ddl(
             "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS parent_batch_id INTEGER",
             "run_batches.parent_batch_id 迁移",
@@ -823,15 +840,11 @@ async def lifespan(app: FastAPI):
                     if not tc:
                         logger.error("定时任务用例不存在: %s", target_id)
                         return
-                    # 环境沿用既有约定：任务描述里的 environment_id=<id>
+                    # 033（US6）：环境取 environment_id 列（兼容旧 description 约定）
                     # （实测缺环境会让接口用例拿不到 baseUrl → 全部失败）
-                    desc = str(getattr(task, "description", "") or "").strip()
-                    env_id = None
-                    if desc.startswith("environment_id="):
-                        try:
-                            env_id = int(desc.split("=", 1)[1].strip())
-                        except ValueError:
-                            env_id = None
+                    from app.scheduler import task_environment_id
+
+                    env_id = task_environment_id(task)
                     batch = await crud.create_run_batch(
                         db, project_id=tc.project_id, total_cases=1,
                         triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
@@ -857,13 +870,10 @@ async def lifespan(app: FastAPI):
                     if not enabled:
                         logger.warning("定时任务场景没有启用步骤: %s", target_id)
                         return
-                    env_override = None
-                    desc = str(getattr(task, "description", "") or "").strip()
-                    if desc.startswith("environment_id="):
-                        try:
-                            env_override = int(desc.split("=", 1)[1].strip())
-                        except ValueError:
-                            env_override = None
+                    # 033（US6）：环境取 environment_id 列（兼容旧 description 约定）
+                    from app.scheduler import task_environment_id
+
+                    env_override = task_environment_id(task)
                     batch = await crud.create_run_batch(
                         db,
                         project_id=scenario.project_id,

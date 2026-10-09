@@ -268,6 +268,9 @@ class EnvironmentBase(BaseModel):
     headers: Any = Field(default_factory=list)
     # 031（US4）多域名：{"auth": "http://a:8000"} —— 值必须为空或绝对 URL
     services: dict[str, str] = Field(default_factory=dict)
+    # 033（US3）环境默认认证：{"type": "oauth2", "oauth2": {...}} 或 basic/bearer/api_key/none
+    # 类型用 Any：结构校验在 router 层（400 可读错误）；secret 字段 GET 回显打码
+    default_auth: Any = None
 
     @field_validator("services")
     @classmethod
@@ -291,6 +294,8 @@ class EnvironmentCreate(EnvironmentBase):
 class EnvironmentUpdate(BaseModel):
     # 031（US4）多域名服务表（未提供 = 不修改；校验规则与创建一致）
     services: Optional[dict[str, str]] = None
+    # 033（US3）环境默认认证（未提供 = 不修改；****** 回传保留原值）
+    default_auth: Optional[Any] = None
 
     @field_validator("services")
     @classmethod
@@ -348,6 +353,17 @@ class Environment(EnvironmentBase):
             out.append(item)
         return out
 
+    @field_validator("default_auth", mode="before")
+    @classmethod
+    def _mask_default_auth(cls, v):
+        """033（US3）：环境默认认证 GET 回显——secret 字段打码（client_secret/password/
+        refresh_token/token/key_value，递归一层到 oauth2 子对象）。"""
+        if v is None:
+            return None
+        from app.security.secret_vars import mask_auth_secrets
+
+        return mask_auth_secrets(v)
+
     model_config = {"from_attributes": True}
 
 class ScheduleBase(BaseModel):
@@ -357,6 +373,8 @@ class ScheduleBase(BaseModel):
     target_id: int
     description: Optional[str] = ""
     enabled: bool = True
+    # 033（US6）：调度环境绑定（api_case/api_scenario；0 = 清除）
+    environment_id: Optional[int] = None
 
 class ScheduleCreate(ScheduleBase):
     pass
@@ -368,6 +386,7 @@ class ScheduleUpdate(BaseModel):
     target_id: Optional[int] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
+    environment_id: Optional[int] = None
 
 class Schedule(ScheduleBase):
     id: int

@@ -24,6 +24,7 @@ import {
   IconCopy,
   IconDelete,
   IconEdit,
+  IconExclamationCircle,
   IconFolder,
   IconFolderAdd,
   IconImport,
@@ -48,8 +49,12 @@ import {
   DebugResponse,
   Environment,
   HTTP_METHODS,
+  InspectionFinding,
   Module,
+  PreviewData,
+  PreviewStep,
   Project,
+  VariableTraceItem,
   createStep,
 } from './types';
 import DefinitionDrawer from './components/DefinitionDrawer';
@@ -177,6 +182,22 @@ const buildModuleTree = (flat: Module[]): Module[] => {
   return roots;
 };
 
+/** 033（US5）：变量来源展示名 */
+const SCOPE_LABELS: Record<string, string> = {
+  runtime: '运行时',
+  step: '步骤',
+  case: '用例',
+  dataset: '数据集',
+  services: '服务',
+  environment: '环境',
+  baseUrl: 'baseUrl',
+  builtin: '内置',
+  unknown: '未知',
+  step_explicit: '步骤',
+  case_explicit: '用例',
+  none: '无',
+};
+
 const ApiTestPage: React.FC = () => {
   const history = useHistory();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -194,6 +215,19 @@ const ApiTestPage: React.FC = () => {
   const [response, setResponse] = useState<DebugResponse | null>(null);
   const [sending, setSending] = useState(false);
   const [dryRun, setDryRun] = useState(false);
+  // 033（US1）：用例体检（静态、零出站；结果仅提示不阻断）
+  const [inspectionVisible, setInspectionVisible] = useState(false);
+  const [inspectionLoading, setInspectionLoading] = useState(false);
+  const [inspectionFindings, setInspectionFindings] = useState<InspectionFinding[]>([]);
+  const [inspectionDisabled, setInspectionDisabled] = useState(false);
+  // 033（US5）：请求预览（全步骤渲染 + 变量轨迹，零出站）
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
+  // 033（US11）：粘贴导入 cURL
+  const [curlVisible, setCurlVisible] = useState(false);
+  const [curlText, setCurlText] = useState('');
+  const [curlLoading, setCurlLoading] = useState(false);
   const [historyVisible, setHistoryVisible] = useState(false);
 
   const [drawerVisible, setDrawerVisible] = useState(false);
@@ -913,6 +947,82 @@ const ApiTestPage: React.FC = () => {
     }
   };
 
+  // ---- 033（US11）：粘贴导入 cURL（零出站，解析为编辑器步骤） ----
+  const handleImportCurl = async () => {
+    if (!curlText.trim()) {
+      Message.warning('请粘贴 cURL 命令');
+      return;
+    }
+    setCurlLoading(true);
+    try {
+      const data = await apiPost<{ step: Record<string, unknown> }>(
+        '/api/api-test/import-curl',
+        { curl: curlText }
+      );
+      const base = createStep();
+      const parsed = (data.step || {}) as Record<string, unknown>;
+      const parsedReq = (parsed.request || {}) as Record<string, unknown>;
+      setStep({
+        ...base,
+        ...(parsed as object),
+        request: { ...base.request, ...parsedReq },
+      } as typeof base);
+      setCurlVisible(false);
+      setCurlText('');
+      Message.success('已解析并填入请求编辑器');
+    } catch {
+      /* apiRequest 已弹错误 */
+    } finally {
+      setCurlLoading(false);
+    }
+  };
+
+  // ---- 033（US1）：用例体检（静态、零出站；不阻断保存/执行） ----
+  const handleInspect = async () => {
+    if (!projectId) {
+      Message.warning('请先选择项目');
+      return;
+    }
+    setInspectionLoading(true);
+    try {
+      const data = await apiPost<{ findings: InspectionFinding[]; disabled: boolean }>(
+        '/api/api-test/inspect',
+        { spec: apiSpec, environment_id: environmentId ?? undefined }
+      );
+      setInspectionFindings(data.findings || []);
+      setInspectionDisabled(!!data.disabled);
+      setInspectionVisible(true);
+    } catch {
+      /* apiRequest 已弹错误 */
+    } finally {
+      setInspectionLoading(false);
+    }
+  };
+
+  // ---- 033（US5）：请求预览（零出站；服务端 dry_run 扩展） ----
+  const handlePreview = async () => {
+    if (!projectId) {
+      Message.warning('请先选择项目');
+      return;
+    }
+    setPreviewLoading(true);
+    try {
+      const data = await apiPost<PreviewData>('/api/api-test/debug', {
+        environment_id: environmentId ?? undefined,
+        case_variables: [],
+        step,
+        api_spec: apiSpec,
+        dry_run: true,
+      });
+      setPreviewData(data);
+      setPreviewVisible(true);
+    } catch {
+      /* apiRequest 已弹错误 */
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   // ---- 发送 / 校验 ----
   const handleSend = async () => {
     if (!projectId) {
@@ -1001,6 +1111,22 @@ const ApiTestPage: React.FC = () => {
             Mock
           </Button>
           <Button
+            icon={<IconExclamationCircle />}
+            onClick={handleInspect}
+            loading={inspectionLoading}
+            disabled={!projectId}
+          >
+            体检
+          </Button>
+          <Button
+            icon={<IconHistory />}
+            onClick={handlePreview}
+            loading={previewLoading}
+            disabled={!projectId}
+          >
+            预览
+          </Button>
+          <Button
             type="primary"
             icon={<IconPlayArrow />}
             onClick={handleRunCase}
@@ -1022,6 +1148,13 @@ const ApiTestPage: React.FC = () => {
             disabled={!projectId}
           >
             导入文档
+          </Button>
+          <Button
+            icon={<IconSwap />}
+            onClick={() => setCurlVisible(true)}
+            disabled={!projectId}
+          >
+            cURL 导入
           </Button>
           <Button
             type="outline"
@@ -1356,6 +1489,158 @@ const ApiTestPage: React.FC = () => {
           ]}
         />
       </Drawer>
+
+      {/* 033（US1）：用例体检结果（静态、零出站、不阻断） */}
+      <Drawer
+        width={440}
+        title="用例体检"
+        visible={inspectionVisible}
+        onCancel={() => setInspectionVisible(false)}
+        footer={null}
+      >
+        {inspectionFindings.length === 0 ? (
+          <Empty
+            description={
+              inspectionDisabled ? '体检功能已在系统设置中关闭' : '未发现问题（静态体检通过）'
+            }
+          />
+        ) : (
+          <div>
+            {inspectionFindings.map((f, i) => (
+              <div key={`${f.code}-${i}`} className={styles.findingItem}>
+                <Tag color={f.level === 'error' ? 'red' : 'orange'} size="small">
+                  {f.level === 'error' ? '错误' : '警告'}
+                </Tag>
+                <div className={styles.findingBody}>
+                  <div>{f.message}</div>
+                  {f.step_index >= 0 ? (
+                    <div className={styles.findingField}>
+                      步骤 {f.step_index + 1} · {f.field}
+                    </div>
+                  ) : (
+                    f.field && <div className={styles.findingField}>{f.field}</div>
+                  )}
+                  {f.hint && <div className={styles.findingHint}>建议：{f.hint}</div>}
+                </div>
+              </div>
+            ))}
+            <div className={styles.findingNote}>
+              静态体检不阻断保存与执行；保存时的硬校验仍以编辑器校验为准。
+            </div>
+          </div>
+        )}
+      </Drawer>
+
+      {/* 033（US5）：请求预览（全步骤 + 变量轨迹；零出站） */}
+      <Drawer
+        width={560}
+        title="请求预览"
+        visible={previewVisible}
+        onCancel={() => setPreviewVisible(false)}
+        footer={null}
+      >
+        {previewData && (
+          <div>
+            <div className={styles.findingItem}>
+              <Tag color="arcoblue" size="small">认证</Tag>
+              <div className={styles.findingBody}>
+                {previewData.auth_plan?.type || 'none'}
+                {previewData.auth_plan?.source
+                  ? `（来源：${SCOPE_LABELS[previewData.auth_plan.source] || previewData.auth_plan.source}）`
+                  : ''}
+                {previewData.auth_plan?.token_var
+                  ? ` · 令牌变量 ${previewData.auth_plan.token_var}`
+                  : ''}
+              </div>
+            </div>
+
+            {(previewData.unresolved || []).map((u, i) => (
+              <div key={`u-${i}`} className={styles.findingItem}>
+                <Tag color="red" size="small">未解析</Tag>
+                <div className={styles.findingBody}>
+                  {'{{'}
+                  {u.name}
+                  {'}}'}（步骤 {u.step_index + 1} · {u.field}）
+                </div>
+              </div>
+            ))}
+
+            <div className={styles.envSectionTitle}>步骤渲染（{previewData.rendered_steps?.length || 0}）</div>
+            {(previewData.rendered_steps || []).map((s: PreviewStep) => (
+              <div key={s.step_index} className={styles.findingItem}>
+                {s.error ? (
+                  <Tag color="red" size="small">错误</Tag>
+                ) : (
+                  <Tag color="green" size="small">步骤 {s.step_index + 1}</Tag>
+                )}
+                <div className={styles.findingBody}>
+                  {s.error ? (
+                    <div>{s.error}</div>
+                  ) : (
+                    <>
+                      <div>
+                        <b>{s.method}</b> {s.url}
+                      </div>
+                      <div className={styles.findingField}>
+                        请求头 {Object.keys(s.headers || {}).length} 个
+                        {s.body_preview ? ` · 体：${s.body_preview.slice(0, 160)}` : ''}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            <div className={styles.envSectionTitle}>变量解析轨迹</div>
+            <Table
+              size="small"
+              pagination={false}
+              data={previewData.variables_trace || []}
+              rowKey="name"
+              columns={[
+                { title: '变量', dataIndex: 'name', width: 150 },
+                {
+                  title: '来源',
+                  width: 90,
+                  render: (_: unknown, t: VariableTraceItem) => (
+                    <Tag size="small">{SCOPE_LABELS[t.scope] || t.scope}</Tag>
+                  ),
+                },
+                {
+                  title: '值（secret 打码）',
+                  render: (_: unknown, t: VariableTraceItem) => (t.secret ? '******' : t.value),
+                },
+              ]}
+            />
+            <div className={styles.findingNote}>
+              预览零出站（不发送任何请求）；OAuth2 步骤展示占位令牌（真实令牌仅在执行期获取）。
+            </div>
+          </div>
+        )}
+      </Drawer>
+
+      {/* 033（US11）：粘贴导入 cURL */}
+      <Modal
+        title="粘贴 cURL 导入"
+        visible={curlVisible}
+        onOk={handleImportCurl}
+        confirmLoading={curlLoading}
+        onCancel={() => setCurlVisible(false)}
+        okText="解析并填入"
+        cancelText="取消"
+        unmountOnExit
+      >
+        <Input.TextArea
+          rows={8}
+          value={curlText}
+          onChange={setCurlText}
+          placeholder={"curl -X POST 'https://api.example.com/orders' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"a\": 1}'"}
+          style={{ fontFamily: 'monospace' }}
+        />
+        <div className={styles.findingNote}>
+          支持 -X / -H / -d / --data-raw / --json / -F（含 @文件）/ -u / --url 等；解析后仅填入编辑器，不落库。
+        </div>
+      </Modal>
 
       <Modal
         title="保存为用例"

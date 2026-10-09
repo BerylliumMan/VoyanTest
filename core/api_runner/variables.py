@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import random
 import re
+import string
 import uuid
 from datetime import date
 from typing import Any, Iterable, Optional
@@ -71,6 +72,31 @@ def _builtin(name: str) -> Optional[str]:
         return str(random.randint(0, 999999))
     if name == "$date":
         return date.today().isoformat()
+    # 033（US9）：动态变量扩充（每次引用独立生成，与既有变量同口径）
+    if name == "$randomAlphaNumeric":
+        alphabet = string.ascii_letters + string.digits
+        return "".join(random.choice(alphabet) for _ in range(10))
+    if name == "$randomPassword":
+        lower = string.ascii_lowercase
+        upper = string.ascii_uppercase
+        digits = string.digits
+        all_chars = lower + upper + digits
+        chars = [
+            random.choice(lower),
+            random.choice(upper),
+            random.choice(digits),
+            *[random.choice(all_chars) for _ in range(9)],
+        ]
+        random.shuffle(chars)
+        return "".join(chars)
+    if name == "$randomBoolean":
+        return "true" if random.random() < 0.5 else "false"
+    if name == "$randomColor":
+        return "#" + "".join(random.choice("0123456789abcdef") for _ in range(6))
+    if name == "$randomIPv4":
+        return ".".join(str(random.randint(0, 255)) for _ in range(4))
+    if name == "$randomSemver":
+        return f"{random.randint(0, 9)}.{random.randint(0, 99)}.{random.randint(0, 999)}"
     return None
 
 

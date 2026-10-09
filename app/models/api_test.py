@@ -109,6 +109,9 @@ class ApiScenario(Base):
     environment_id = Column(Integer, ForeignKey("environments.id"), nullable=True, index=True)
     variables = Column(JSON, default=list, nullable=False)
     steps = Column(JSON, default=list, nullable=False)
+    # 场景级公共配置（033 US6）：认证（inherit 链一层）与前置脚本（每用例执行前一次）
+    auth = Column(JSON, nullable=True)
+    pre_script = Column(Text, nullable=True)
     # 默认关闭，避免改变旧场景：整段共用 Cookie；失败后继续后续步骤
     share_cookie = Column(Boolean, default=False, nullable=False)
     continue_on_failure = Column(Boolean, default=False, nullable=False)

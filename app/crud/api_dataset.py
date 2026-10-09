@@ -104,6 +104,23 @@ def parse_csv_dataset(content: bytes) -> dict:
     return {"columns": columns, "rows": rows}
 
 
+def to_csv_dataset(columns: list, rows: list) -> str:
+    """033（US10）：数据集 → CSV 文本（与 ``parse_csv_dataset`` 往返兼容）。
+
+    - 表头 = columns；行按列取值（缺失补空串）；
+    - ``\\r\\n`` 行结束（Excel 友好）；值中的逗号/引号/换行由 csv 模块转义。
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    cols = [str(c) for c in (columns or [])]
+    writer.writerow(cols)
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        writer.writerow(["" if row.get(c) is None else str(row.get(c)) for c in cols])
+    return buffer.getvalue()
+
+
 async def list_datasets(
     db: AsyncSession,
     project_id: int,

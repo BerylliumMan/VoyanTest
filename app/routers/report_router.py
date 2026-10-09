@@ -11,7 +11,7 @@ import logging
 import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
@@ -381,25 +381,9 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
             except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                 logger.warning("无法加载批次报告 JSON 文件: %s", run.report_path, exc_info=True)
 
-        # fallback: 从 run_logs 加载步骤（AI Agent 执行路径）
+        # fallback: 从 run_logs 加载步骤（AI Agent / 客户端执行路径不写 report.json）
         if not steps_loaded:
-            try:
-                from sqlalchemy import select as _sl
-                from app.db_models import RunLog
-                r = await db.execute(
-                    _sl(RunLog).where(RunLog.run_id == run.id).order_by(RunLog.id)
-                )
-                for lg in r.scalars().all():
-                    is_success = lg.level in ("info", "success", "passed")
-                    run_info["steps"].append({
-                        "step_number": lg.step_id or len(run_info["steps"]) + 1,
-                        "success": is_success,
-                        "level": lg.level,
-                        "description": lg.message,
-                        "screenshot_path": lg.screenshot_path,
-                    })
-            except Exception:
-                logger.warning("无法从 run_logs 加载步骤: run=%d", run.id, exc_info=True)
+            run_info["steps"] = await _fallback_steps_from_run_logs(db, run.id)
 
         runs_data.append(run_info)
 
@@ -420,6 +404,30 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
         "parent_batch_name": parent_batch_name,
         "runs": runs_data,
     }
+
+
+async def _fallback_steps_from_run_logs(db: AsyncSession, run_id: int) -> list[dict]:
+    """从 run_logs 加载步骤（AI/客户端执行路径不写 report.json 时的回退口径）。"""
+    steps: list[dict] = []
+    try:
+        from sqlalchemy import select as _sl
+        from app.db_models import RunLog
+
+        r = await db.execute(_sl(RunLog).where(RunLog.run_id == run_id).order_by(RunLog.id))
+        for lg in r.scalars().all():
+            is_success = lg.level in ("info", "success", "passed")
+            steps.append(
+                {
+                    "step_number": lg.step_id or len(steps) + 1,
+                    "success": is_success,
+                    "level": lg.level,
+                    "description": lg.message,
+                    "screenshot_path": lg.screenshot_path,
+                }
+            )
+    except Exception:
+        logger.warning("无法从 run_logs 加载步骤: run=%d", run_id, exc_info=True)
+    return steps
 
 
 async def _get_batch_for_user(batch_id: int, user, db: AsyncSession):
@@ -520,12 +528,35 @@ async def update_batch(batch_id: int, body: BatchUpdate, admin=Depends(require_a
 
 
 @router.get("/batches/{batch_id}/export")
-async def export_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> HTMLResponse:
-    """导出批次报告为可离线打开的静态 HTML 文件。"""
+async def export_batch(
+    batch_id: int,
+    format: str = "html",
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """导出批次报告：``format=html``（默认，离线HTML）/ ``format=junit``（JUnit XML，033 US2）。"""
     try:
         detail = await ReportService.export_batch_report(db, batch_id, user)
     except BatchNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    if str(format).lower() == "junit":
+        from app.services.junit_report import build_junit_xml
+
+        # 导出服务仅从 report.json 取步骤（UI/客户端执行路径无该文件）——
+        # JUnit 场景补 run_logs 回退，保证失败步骤可被映射为 <error>
+        runs = detail.get("runs") or []
+        for run_info in runs:
+            if not run_info.get("steps"):
+                run_info["steps"] = await _fallback_steps_from_run_logs(db, run_info.get("run_id"))
+        xml = await asyncio.to_thread(build_junit_xml, detail, runs)
+        return Response(
+            content=xml,
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="voyantest-batch-{batch_id}.xml"',
+            },
+        )
 
     html = await asyncio.to_thread(render_batch_report_html, detail)
     filename = f"batch_{batch_id}_{tz_now().strftime('%Y%m%d_%H%M%S')}.html"

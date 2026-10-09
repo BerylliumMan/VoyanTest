@@ -36,6 +36,8 @@ from core.api_runner.iteration import (
 )
 from core.api_runner.request_builder import (
     RenderedRequest,
+    apply_auth_chain,
+    apply_request_overrides,
     build_request,
     parse_platform_ref,
 )
@@ -287,6 +289,54 @@ def _resolve_script_timeout(step: dict) -> int:
         return 2000
 
 
+def _client_jar_cookies(client) -> dict:
+    """033（US8）：会话 jar 快照（供脚本 get_cookie 读取）。"""
+    try:
+        return {c.name: c.value for c in client.cookies.jar}
+    except Exception:  # noqa: BLE001 - 非 httpx 客户端（桥接）无 jar 语义
+        return {}
+
+
+def _apply_script_cookies(client, post_out, url: str) -> tuple[int, int]:
+    """033（US8）：把脚本 set/delete_cookie 应用到客户端会话 jar（不中断主流程）。"""
+    from urllib.parse import urlparse
+
+    host = urlparse(str(url or "")).hostname or ""
+    cookies = getattr(client, "cookies", None)
+    if cookies is None:
+        return 0, 0
+    set_n = del_n = 0
+    for item in getattr(post_out, "set_cookies", []) or []:
+        try:
+            raw_domain = str(item.get("domain") or "").strip()
+            # 显式域名 → 点前缀（子域匹配）；未指定 → 空域（运行期 jar 内广播）
+            domain = ("." + raw_domain.lstrip(".")) if raw_domain else ""
+            cookies.set(
+                str(item.get("name")),
+                str(item.get("value", "")),
+                domain=domain,
+                path=str(item.get("path") or "/"),
+            )
+            set_n += 1
+        except Exception:  # noqa: BLE001 - 单个失败不影响其他
+            pass
+    for item in getattr(post_out, "delete_cookies", []) or []:
+        try:
+            raw_domain = str(item.get("domain") or "").strip()
+            domain = ("." + raw_domain.lstrip(".")) if raw_domain else ""
+            cookies.delete(
+                str(item.get("name")),
+                domain=domain,
+                path=str(item.get("path") or "/"),
+            )
+        except (KeyError, TypeError, AttributeError):
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+        del_n += 1
+    return set_n, del_n
+
+
 def _response_script_context(resp, duration_ms: int) -> dict:
     """后置脚本的响应上下文（031 US3）：status_code/duration_ms/headers/body/body_text。"""
     body = None
@@ -509,6 +559,31 @@ async def _run_pre_steps(pre_steps: Any, scope: VariableScope, warnings: list[st
     await _run_hook_steps(pre_steps, scope, warnings, label="前置", write_runtime=False)
 
 
+async def _prepare_oauth_step(step: dict, auth: dict, scope: VariableScope) -> dict:
+    """033（US3）：OAuth2 → 渲染配置、获取令牌（缓存/锁）、写回 token_var 并换 bearer。
+
+    失败抛 ``OAuthTokenError``（调用方转可读步骤失败）。
+    """
+    from app.config import get_settings
+    from core.api_runner import oauth as oauth_mod
+    from core.api_runner.oauth import OAuthTokenError
+
+    cfg: dict[str, Any] = {}
+    try:
+        for key, value in (auth.get("oauth2") or {}).items():
+            cfg[key] = render(value, scope) if isinstance(value, str) else value
+    except Exception as exc:  # noqa: BLE001 - 渲染失败归入令牌获取失败（可读）
+        raise OAuthTokenError(f"配置渲染失败: {exc}") from None
+
+    token = await oauth_mod.fetch_token(
+        cfg, buffer_s=int(getattr(get_settings(), "api_oauth_token_buffer_s", 60))
+    )
+    token_var = str(cfg.get("token_var") or "access_token")
+    scope.set_runtime(token_var, token)
+    request = {**(step.get("request") or {}), "auth": {"type": "bearer", "token": token}}
+    return {**step, "request": request}
+
+
 async def _run_step(
     client: httpx.AsyncClient,
     step: dict,
@@ -527,6 +602,7 @@ async def _run_step(
 
     warnings: list[str] = []
     script_errors: list[dict] = []
+    post_cookie_note = ""
     try:
         await _run_pre_steps(step.get("pre"), scope, warnings)
     except Exception as exc:  # 防御：前置动作异常不得炸整步
@@ -541,6 +617,7 @@ async def _run_step(
             pre_script,
             {"vars": scope.visible_map()},
             timeout_ms=_resolve_script_timeout(step),
+            with_request_overrides=True,
         )
         if not pre_out.ok:
             script_errors.append({"phase": "pre", "message": pre_out.error})
@@ -553,6 +630,27 @@ async def _run_step(
             )
         for key, value in pre_out.variables.items():
             scope.step[str(key)] = "" if value is None else str(value)
+
+        # 033（US7）：请求改写（渲染前应用到步骤副本；原始 spec 不落库修改）
+        if pre_out.request_overrides:
+            step = apply_request_overrides(step, pre_out.request_overrides)
+
+    # 033（US3）：OAuth2 令牌获取（在渲染前定型；失败给出可读步骤失败）
+    step_auth = (step.get("request") or {}).get("auth") or {}
+    if str(step_auth.get("type") or "") == "oauth2":
+        from core.api_runner.oauth import OAuthTokenError
+
+        try:
+            step = await _prepare_oauth_step(step, step_auth, scope)
+        except OAuthTokenError as exc:
+            message = f"获取 OAuth2 令牌失败: {exc}"
+            return _failed_step(
+                step,
+                step_number,
+                message,
+                description=f"{method} {raw_url} → {message}",
+                script_errors=script_errors,
+            )
 
     try:
         req = build_request(step, scope)
@@ -673,10 +771,22 @@ async def _run_step(
     if post_script.strip():
         from core.script_sandbox import run_script
 
+        try:
+            from app.config import get_settings as _get_settings_post
+
+            _cookies_enabled = bool(_get_settings_post().api_post_script_cookies)
+        except Exception:  # noqa: BLE001 - core 独立运行（无 app 配置）时默认开启
+            _cookies_enabled = True
         post_out = run_script(
             post_script,
-            {"vars": scope.visible_map(), **_response_script_context(resp, duration_ms)},
+            {
+                "vars": scope.visible_map(),
+                "cookies": _client_jar_cookies(client),
+                **_response_script_context(resp, duration_ms),
+            },
             timeout_ms=_resolve_script_timeout(step),
+            with_checks=True,
+            with_cookies=_cookies_enabled,
         )
         if not post_out.ok:
             script_errors.append({"phase": "post", "message": post_out.error})
@@ -695,10 +805,35 @@ async def _run_step(
         for key, value in post_out.variables.items():
             scope.set_variable(str(key), value)
 
+        # 033（US8）：脚本 Cookie 写回会话 jar（仅共享会话批次影响后续用例；不中断）
+        if post_out.set_cookies or post_out.delete_cookies:
+            _set_n, _del_n = _apply_script_cookies(client, post_out, req.url)
+            post_cookie_note = (
+                f" · 脚本会话 Cookie +{_set_n}/-{_del_n}（仅共享会话批次影响后续用例）"
+            )
+
+        # 033（US4）：脚本命名断言（收集式）并入本步骤断言（与结构化断言同权）
+        if post_out.tests:
+            for t in post_out.tests:
+                assertion_dicts.append(
+                    {
+                        "name": str(t.get("name") or "脚本断言"),
+                        "type": "script",
+                        "condition": "check",
+                        "expected": "",
+                        "actual": "",
+                        "passed": bool(t.get("ok")),
+                        "error": "" if t.get("ok") else str(t.get("message") or "断言失败"),
+                        "source": "post_script",
+                    }
+                )
+            passed_count = sum(1 for a in assertion_dicts if a["passed"])
+            total_count = len(assertion_dicts)
+
     base_desc = (
         f"{method} {req.url} → {resp.status_code} ({duration_ms}ms) | "
         f"断言 {passed_count}/{total_count} 通过"
-    )
+    ) + post_cookie_note
     if extract_error:
         return _failed_step(
             step, step_number, extract_error,
@@ -755,6 +890,8 @@ async def run_api_case(
     step_limit: Optional[int] = None,
     seed_runtime: Optional[dict] = None,
     platform_files: Optional[dict[int, str]] = None,  # 031：platform://<id> → 服务端绝对路径
+    scenario_auth: Optional[dict] = None,  # 033（US3）：场景级认证（inherit 链一层）
+    scenario_pre_script: Optional[str] = None,  # 033（US6）：场景级前置脚本（每用例一次）
 ) -> ApiRunResult:
     """执行一条接口用例，返回完整结果（永不抛异常）。
 
@@ -773,6 +910,13 @@ async def run_api_case(
             error=f"api_spec 非法: {exc}",
             duration_ms=_elapsed_ms(started),
         )
+
+    # 033（US3）：认证 inherit 链解析（步骤 → 用例 → 场景 → 环境默认）在渲染前定型
+    spec = apply_auth_chain(
+        spec,
+        scenario_auth=scenario_auth,
+        env_default_auth=(environment or {}).get("default_auth"),
+    )
 
     dataset_mode = str(spec.get("dataset_mode") or "sequential")
     notes = dataset_mode_notes(dataset_mode)
@@ -823,9 +967,37 @@ async def run_api_case(
                     )
                 continue
             scope = _build_scope(spec, environment, case_variables, row, seed_runtime)
+            iteration_failed = False
+
+            # 033（US6）：场景级前置脚本（每用例/每迭代执行一次；变量写入用例作用域）
+            if scenario_pre_script and str(scenario_pre_script).strip() and steps:
+                from core.script_sandbox import run_script as _run_scenario_script
+
+                pres = _run_scenario_script(
+                    scenario_pre_script,
+                    {"vars": scope.visible_map()},
+                    timeout_ms=_resolve_script_timeout({}),
+                )
+                if not pres.ok:
+                    failed = True
+                    iteration_failed = True
+                    _err = f"场景前置脚本失败: {pres.error}"
+                    results.append(
+                        tag_iteration(
+                            _failed_step(steps[0], 1, _err, description=_err), iteration, multi
+                        )
+                    )
+                    for _st in steps[1:]:
+                        results.append(
+                            tag_iteration(_skipped_step(_st, "场景前置脚本失败"), iteration, multi)
+                        )
+                    final_scope = scope
+                    continue
+                for _k, _v in pres.variables.items():
+                    scope.set_variable(str(_k), _v)
+
             # 环境公共请求头（渲染后注入每步；步骤头覆盖同名）——每迭代独立渲染
             env_headers = _render_header_items((environment or {}).get("headers"), scope)
-            iteration_failed = False
             for index, step in enumerate(steps):
                 if step_limit is not None and index >= step_limit:
                     step_result = _skipped_step(step, SKIPPED_REASON_STEP_LIMIT)
