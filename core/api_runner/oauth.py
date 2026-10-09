@@ -67,11 +67,13 @@ async def fetch_token(cfg: dict, *, buffer_s: int = 60, timeout_s: float = 15.0)
     fp = _fingerprint(cfg)
     cached = _cache.get(fp)
     if cached and time.monotonic() < cached[0]:
+        logger.debug("OAuth2 令牌缓存命中: client_id=%s grant=%s", fp[1], fp[3])
         return cached[1]
 
     async with _get_lock(fp):
         cached = _cache.get(fp)  # 双重检查（并发等待者不重复请求）
         if cached and time.monotonic() < cached[0]:
+            logger.debug("OAuth2 令牌缓存命中（锁内）: client_id=%s grant=%s", fp[1], fp[3])
             return cached[1]
 
         token, expires_in = await _request_token(cfg, token_url, timeout_s)
@@ -79,6 +81,10 @@ async def fetch_token(cfg: dict, *, buffer_s: int = 60, timeout_s: float = 15.0)
         valid_window = ttl - max(0, int(buffer_s))
         if valid_window > 0:
             _cache[fp] = (time.monotonic() + valid_window, token)
+        logger.info(
+            "OAuth2 令牌已获取（缓存未命中）: client_id=%s grant=%s token_url=%s expires_in=%s",
+            fp[1], fp[3], fp[0], expires_in,
+        )
         return token
 
 

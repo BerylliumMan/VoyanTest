@@ -3,6 +3,7 @@
 契约见 ``specs/033-api-test-maturity/contracts/api-maturity.md`` §C2：
 - ``testsuite`` = 每个用例；``testcase`` = 每条断言（无断言回退"步骤名"）；
 - 断言失败 → ``<failure type message>``；脚本/执行错误 → ``<error>``；
+- 未执行步骤（中止/跳过）→ ``<skipped/>``（2026-10-09 真实链路实测校正）；
 - 运行级错误（未被 error testcase 代表时）→ ``<system-err>``；
 - XML 1.0 非法字符清洗；``time`` 保留 3 位小数。
 """
@@ -15,6 +16,22 @@ from typing import Any, Optional
 
 # XML 1.0 非法字符（控制符；保留 \t \n \r）
 _ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# 未执行步骤的已知中止文案（stop_on_error / 初始化失败 / 用户停止 / 批次取消）
+_SKIP_HINTS = (
+    "stop_on_error",
+    "因前序用例失败",
+    "因初始化用例",
+    "而跳过",
+    "用户停止执行",
+    "已取消",
+)
+
+
+def _is_skipped_step(step: dict) -> bool:
+    """未执行步骤判定：错误/描述文案命中已知中止短语（无断言、非执行错误）。"""
+    text = f"{step.get('error') or ''} {step.get('description') or ''}"
+    return any(hint in text for hint in _SKIP_HINTS)
 
 
 def _clean(value: Any) -> str:
@@ -46,7 +63,7 @@ def build_junit_xml(batch: dict, runs: list[dict]) -> str:
     root = ET.Element("testsuites")
     root.set("name", _clean(batch.get("name") or f"批次 #{batch.get('id')}"))
 
-    total_tests = total_failures = total_errors = 0
+    total_tests = total_failures = total_errors = total_skipped = 0
     total_time = 0.0
 
     for run in runs:
@@ -61,7 +78,7 @@ def build_junit_xml(batch: dict, runs: list[dict]) -> str:
         if start_time:
             suite.set("timestamp", _clean(start_time))
 
-        suite_tests = suite_failures = suite_errors = 0
+        suite_tests = suite_failures = suite_errors = suite_skipped = 0
         has_error_testcase = False
         steps = run.get("steps") or []
         run_failed = str(run.get("status") or "") in ("failed", "error")
@@ -90,6 +107,14 @@ def build_junit_xml(batch: dict, runs: list[dict]) -> str:
                             f"expected: {a.get('expected')}\nactual: {a.get('actual')}"
                         )
                         suite_failures += 1
+            elif _is_skipped_step(step):
+                # 未执行步骤（stop_on_error/初始化失败/用户停止）→ <skipped/>，不计 errors
+                tc = ET.SubElement(suite, "testcase")
+                tc.set("name", _clean(_step_testcase_name(step, n)))
+                tc.set("classname", _clean(suite_name))
+                ET.SubElement(tc, "skipped")
+                suite_tests += 1
+                suite_skipped += 1
             elif (step.get("success") is False and step.get("error")) or (
                 run_failed
                 and (step.get("success") is False or step.get("level") == "error")
@@ -135,14 +160,19 @@ def build_junit_xml(batch: dict, runs: list[dict]) -> str:
         suite.set("tests", str(suite_tests))
         suite.set("failures", str(suite_failures))
         suite.set("errors", str(suite_errors))
+        if suite_skipped:
+            suite.set("skipped", str(suite_skipped))
         suite.set("time", suite_time)
 
         total_tests += suite_tests
         total_failures += suite_failures
         total_errors += suite_errors
+        total_skipped += suite_skipped
 
     root.set("tests", str(total_tests))
     root.set("failures", str(total_failures))
     root.set("errors", str(total_errors))
+    if total_skipped:
+        root.set("skipped", str(total_skipped))
     root.set("time", "0" if not runs else _fmt_time(total_time))
     return ET.tostring(root, encoding="unicode")

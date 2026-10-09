@@ -221,3 +221,57 @@ def test_suite_counts_are_consistent():
     a, b = root.findall("testsuite")
     assert (a.get("tests"), a.get("failures"), a.get("errors")) == ("2", "1", "0")
     assert (b.get("tests"), b.get("failures"), b.get("errors")) == ("1", "0", "1")
+
+
+def test_aborted_steps_map_to_skipped_not_error():
+    """未执行步骤（stop_on_error / 初始化失败）→ <skipped/>，不计入 errors。"""
+    import xml.etree.ElementTree as ET
+
+    from app.services.junit_report import build_junit_xml
+
+    batch = {"id": 1, "name": "批次"}
+    runs = [
+        {
+            "run_id": 10, "case_name": "A", "status": "failed", "duration": 0.5,
+            "steps": [
+                {"step_number": 1, "name": "登录", "success": False, "error": "断言失败: 期望 200，实际 401",
+                 "assertions": [{"type": "status_code", "passed": False, "error": "期望 200，实际 401"}]},
+            ],
+        },
+        {
+            "run_id": 11, "case_name": "B", "status": "failed", "duration": 0.1,
+            "steps": [
+                {"step_number": 1, "description": "因前序用例失败而停止（stop_on_error）", "success": False},
+            ],
+        },
+        {
+            "run_id": 12, "case_name": "C", "status": "failed", "duration": 0.1,
+            "steps": [
+                {"step_number": 1, "description": "因初始化用例 5 失败而跳过", "success": False},
+            ],
+        },
+    ]
+    root = ET.fromstring(build_junit_xml(batch, runs))
+    assert root.get("failures") == "1"
+    assert root.get("errors") == "0"
+    assert root.get("skipped") == "2"
+    skipped = [tc.get("name") for tc in root.iter("testcase") if tc.find("skipped") is not None]
+    assert len(skipped) == 2
+
+
+def test_real_execution_error_still_maps_to_error():
+    """真实执行错误（非中止文案）仍映射 <error>（不误伤）。"""
+    import xml.etree.ElementTree as ET
+
+    from app.services.junit_report import build_junit_xml
+
+    runs = [
+        {
+            "run_id": 10, "case_name": "A", "status": "failed", "duration": 0.5,
+            "steps": [
+                {"step_number": 1, "name": "启动", "success": False, "error": "浏览器启动失败: timeout"},
+            ],
+        },
+    ]
+    root = ET.fromstring(build_junit_xml({"id": 1}, runs))
+    assert root.get("errors") == "1" and root.get("skipped") is None
