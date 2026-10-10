@@ -13,6 +13,7 @@ import NProgress from 'nprogress';
 import Navbar from './components/NavBar';
 import Footer from './components/Footer';
 import useRoute, { generatePermission, IRoute } from '@/routes';
+import axios from 'axios';
 import { getIconFromKey, getFlattenRoutes } from './layout-utils';
 import useLocale from './utils/useLocale';
 import getUrlParams from './utils/getUrlParams';
@@ -43,7 +44,24 @@ function PageLayout() {
     }
   }, [userInfo]);
 
-  const [routes, defaultRoute] = useRoute(generatePermission(userInfo?.role ?? ''));
+  const [routesAll, defaultRouteAll] = useRoute(generatePermission(userInfo?.role ?? ''));
+  // 034：chat_enabled=false → 菜单隐藏（/api/chat/status 轻量查询，失败保持显示）
+  const [chatEnabled, setChatEnabled] = useState<boolean>(true);
+  useEffect(() => {
+    axios
+      .get('/api/chat/status')
+      .then((r) => setChatEnabled(r.data?.enabled !== false))
+      .catch(() => undefined);
+  }, []);
+  const routes = useMemo(
+    () => (chatEnabled ? routesAll : routesAll.filter((r) => r.key !== 'chat')),
+    [routesAll, chatEnabled],
+  );
+  const defaultRoute = useMemo(() => {
+    if (defaultRouteAll !== 'chat' || chatEnabled) return defaultRouteAll;
+    const first = routes.find((r) => !r.ignore && r.key !== 'chat');
+    return first?.children?.[0]?.key || first?.key || 'dashboard';
+  }, [defaultRouteAll, routes, chatEnabled]);
   const defaultSelectedKeys = [currentComponent || defaultRoute];
   const paths = (currentComponent || defaultRoute).split('/');
   const defaultOpenKeys = paths.slice(0, paths.length - 1);

@@ -121,8 +121,27 @@ def is_wait_assert_checklist_step(description: str | None) -> bool:
     return bool(_WAIT_ASSERT_STEP_RE.search(desc))
 
 
+def _step_wants_absence(desc: str) -> bool:
+    """步骤语义是否为「不存在/不包含/消失」类负向断言（034）。
+
+    先剔除引号/【】中的期望文本——文本内容里的「不存在」是断言对象，
+    不是断言极性（例：断言页面包含【这段文字绝对不存在】是**正向**断言）。
+    """
+    stripped = re.sub(r"[「【\"'][^」】\"']*[」】\"']", " ", desc or "")
+    return bool(re.search(
+        r"消失|不包含|不存在|不可见|不显示|不出现|不应(?:包含|存在|可见|出现)"
+        r"|not\s*(?:contain|exist|be\s*visible|appear)",
+        stripped, re.I,
+    ))
+
+
 def _wait_value_covers_assert_step(entry: dict[str, Any], desc: str) -> bool:
-    """wait/assert 的 value 必须对应步骤里的期望文本；纯秒数等待不得冒充文本断言。"""
+    """wait/assert 的 value 必须对应步骤里的期望文本；纯秒数等待不得冒充文本断言。
+
+    034 极性守卫：`wait(wait_mode=gone)` 不得覆盖正向断言（「断言页面包含【x】」），
+    反之「等待【x】消失」也不得被正向等待覆盖——否则模型可反转断言语义骗过完成判定
+    （实测：case 670 第二次运行时 wait(gone) 冒充「断言包含」导致假通过）。
+    """
     value = str(entry.get("value") or "").strip()
     if not value:
         return False
@@ -138,11 +157,18 @@ def _wait_value_covers_assert_step(entry: dict[str, Any], desc: str) -> bool:
             return False
         return bool(re.search(r"等待|wait", desc, re.I))
     # 文本等待：value 须出现在步骤描述中（或步骤摘出的引号/【】片段等于 value）
-    if value in desc:
+    if value in desc or any(
+        value == m.group(1).strip() or m.group(1).strip() in value
+        for m in re.finditer(r"[「【\"']([^」】\"']+)[」】\"']", desc)
+    ):
+        action = (entry.get("action") or "").strip().lower()
+        if action in ("wait", "browser_wait_for"):
+            wait_mode = str(entry.get("wait_mode") or "").strip().lower()
+            gone = wait_mode in ("gone", "textgone", "disappear", "hidden")
+            wants_absence = _step_wants_absence(desc)
+            if gone != wants_absence:
+                return False
         return True
-    for m in re.finditer(r"[「【\"']([^」】\"']+)[」】\"']", desc):
-        if value == m.group(1).strip() or m.group(1).strip() in value:
-            return True
     return False
 
 

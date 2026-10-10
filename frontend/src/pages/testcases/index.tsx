@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useHistory, useLocation } from 'react-router-dom';
 import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox, Input, InputNumber } from '@arco-design/web-react';
-import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug, IconImport } from '@arco-design/web-react/icon';
+import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug, IconImport, IconMessage } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
@@ -188,6 +188,27 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     );
     setVisible(true);
   };
+
+  // 034（US6）：/testcases/{kind}?case_id= → 直接打开编辑弹窗（对话引用 chip 跳转）
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const cid = Number(params.get('case_id'));
+    if (!Number.isFinite(cid) || cid <= 0) return;
+    window.history.replaceState({}, '', window.location.pathname);
+    axios
+      .get(`/api/testcases/${cid}`)
+      .then((res) => {
+        const tc = res.data;
+        const kind = tc.case_kind || 'ui';
+        if (kind !== caseKind) {
+          window.location.replace(`/testcases/${kind === 'functional' ? 'functional' : 'ui'}?case_id=${cid}`);
+          return;
+        }
+        openEdit(tc);
+      })
+      .catch(() => Message.error('用例不存在或无权访问'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const handleSubmit = async () => { try { const values = await form.validate(); const payload = { project_id: selectedProject, module_id: values.module_id || null, name: values.name, description: values.description, case_kind: caseKind, steps: steps.filter((s) => s.description.trim() || !!(s.structured_step && (s.structured_step as any).target_name)).map((s) => ({ step_order: s.step_order, description: s.description || '步骤', parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0, learned_locator: s.learned_locator ?? null, structured_step: s.structured_step ?? null, healed_selector: s.healed_selector, cacheable: s.cacheable !== false })) }; if (editingCase) { const { case_kind: _ck, ...updatePayload } = payload; await axios.put(`/api/testcases/${editingCase.id}`, updatePayload); Message.success(t['update.success']); } else { await axios.post('/api/testcases/', payload); Message.success(t['create.success']); } setVisible(false); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; if (err.response?.data?.detail) Message.error(err.response.data.detail); } };
   const handleDelete = async (id: number) => { try { await axios.delete(`/api/testcases/${id}`); Message.success(t['deleted']); fetchData(); } catch (err: unknown) { const e = err as { response?: { data?: { detail?: string } } }; Message.error(e?.response?.data?.detail || '操作失败'); } };
   const handleBatchDelete = async () => { if (selectedRowKeys.length === 0) return; try { await Promise.all(selectedRowKeys.map((id) => axios.delete(`/api/testcases/${id}`))); Message.success(t['delete.batch'].replace('{count}', String(selectedRowKeys.length))); setSelectedRowKeys([]); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
@@ -339,6 +360,10 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
           <Button type="text" size="mini" icon={record.is_init ? <IconStarFill className={styles.initIcon} /> : <IconStar />}
             onClick={() => handleToggleInit(record.id, !record.is_init)}
             aria-label={record.is_init ? '取消初始化' : '标记为初始化'}
+          />
+          <Button type="text" size="mini" icon={<IconMessage />}
+            onClick={() => { window.location.href = `/chat?case_id=${record.id}`; }}
+            aria-label="在对话中打开" title="在对话中打开"
           />
           <Button type="text" size="mini" icon={<IconEdit />} onClick={() => openEdit(record)} aria-label="编辑用例" />
           <Popconfirm title={t['confirm.delete.item']} onOk={() => handleDelete(record.id)}>

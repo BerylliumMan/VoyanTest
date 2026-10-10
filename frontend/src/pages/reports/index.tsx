@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space, Select,
 } from '@arco-design/web-react';
-import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete } from '@arco-design/web-react/icon';
+import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete, IconMessage } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
@@ -260,6 +260,17 @@ const Reports: React.FC = () => {
     await refreshBatchDetail(batchId);
   };
 
+  // 034：/reports?batch_id= 直达批次详情（对话运行卡片跳转）
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const bid = Number(params.get('batch_id'));
+    if (Number.isFinite(bid) && bid > 0) {
+      openBatchDetail(bid);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleCloseDetail = () => {
     setDetailVisible(false);
     setPollingBatchId(null);
@@ -383,6 +394,17 @@ const Reports: React.FC = () => {
         }
         footer={
           <Space>
+            {detail && (
+              <Button
+                icon={<IconMessage />}
+                onClick={() => {
+                  const bid = detail.id;
+                  window.location.href = `/chat?batch_id=${bid}&prompt=${encodeURIComponent(`请分析批次 #${bid} 的失败原因`)}`;
+                }}
+              >
+                在对话中分析
+              </Button>
+            )}
             {detail?.status === 'running' && (
               <>
                 <Button onClick={() => handleBatchControl(detail.id, 'pause')}>{t['batch.pause']}</Button>

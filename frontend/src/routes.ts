@@ -42,6 +42,10 @@ export const routes: IRoute[] = [
     ],
   },
   {
+    name: 'menu.chat',
+    key: 'chat',
+  },
+  {
     name: '分析详情',
     key: 'gen-history-detail',
     path: '/gen-history-detail/:id',

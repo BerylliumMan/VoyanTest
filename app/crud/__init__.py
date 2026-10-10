@@ -97,6 +97,11 @@ from app.crud.gen import (
     get_gen_test_case,
     update_gen_test_case,
     delete_gen_test_case,
+    # 034 对话工作台：草稿行级 raw 操作
+    get_gen_test_case_by_id,
+    update_gen_test_case_raw,
+    create_gen_test_case_raw,
+    delete_gen_test_case_raw,
 )
 from app.crud.user import (
     list_users,

@@ -227,11 +227,35 @@ async def search_test_cases(
     items = items_result.scalars().all()
     return {"total_items": total, "items": items}
 
-async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCaseUpdate) -> db_models.TestCase | None:
-    """更新测试用例（单事务）"""
+async def update_test_case(
+    db: AsyncSession,
+    case_id: int,
+    case: models.TestCaseUpdate,
+    *,
+    revision_user_id: int | None = None,
+    revision_source: str = "page",
+    revision_conversation_id: int | None = None,
+    revision_summary: str | None = None,
+) -> db_models.TestCase | None:
+    """更新测试用例（单事务）
+
+    034：``revision_user_id`` 非空时写一条 CaseRevision（before/after 快照；FR-015）。
+    """
     db_case = await get_test_case(db, case_id)
     if not db_case:
         return None
+
+    # 034：变更留痕快照（在改写前捕获）
+    _before_snapshot = None
+    if revision_user_id is not None:
+        _before_snapshot = {
+            "name": db_case.name,
+            "priority": db_case.priority,
+            "steps": [
+                {"description": s.description or "", "expected": s.parsed_result or ""}
+                for s in sorted(db_case.steps or [], key=lambda x: x.step_order)
+            ],
+        }
 
     # 更新基本信息
     db_case.name = case.name
@@ -306,6 +330,27 @@ async def update_test_case(db: AsyncSession, case_id: int, case: models.TestCase
 
     await db.commit()
     await db.refresh(db_case)
+
+    # 034：写变更记录（FR-015；source=chat/page）
+    if revision_user_id is not None and _before_snapshot is not None:
+        db.add(db_models.CaseRevision(
+            case_id=case_id,
+            user_id=revision_user_id,
+            source=revision_source,
+            conversation_id=revision_conversation_id,
+            before_snapshot=_before_snapshot,
+            after_snapshot={
+                "name": db_case.name,
+                "priority": db_case.priority,
+                "steps": [
+                    {"description": s.description or "", "expected": s.parsed_result or ""}
+                    for s in sorted(db_case.steps or [], key=lambda x: x.step_order)
+                ],
+            },
+            summary=revision_summary,
+        ))
+        await db.commit()
+        await db.refresh(db_case)
     return db_case
 
 async def update_test_case_is_init(db: AsyncSession, case_id: int, is_init: bool) -> db_models.TestCase | None:

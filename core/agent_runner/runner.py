@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # Backward-compatible alias
 OTA_SYSTEM_PROMPT = OTA_CURSOR_SYSTEM_PROMPT
 
+# 034：「拒绝 done」同一原因的连续上限（与客户端 bridge 同口径，避免空口 done 或空转）
+_REFUSE_DONE_LIMIT = 5
+
 
 # ── ToolRegistry ──────────────────────────────────────────────────────────────
 
@@ -235,6 +238,8 @@ class AgentRunner:
         self.turns_used: int = 0
         self._force_next_screenshot: bool = False
         self._consecutive_act_failures: int = 0
+        # 034 修复：空口 done 拒绝计数（与客户端 bridge 同口径门禁）
+        self._refuse_done_same: int = 0
         # 成功动作日志（供 run 结束后合成固化脚本；见 _collect_journal_entry）
         self.journal: list[dict[str, Any]] = []
         self._last_candidates: tuple = ()
@@ -689,12 +694,57 @@ class AgentRunner:
                     start_time=start_time,
                 )
 
-            thinking_text = action.get("thinking", "")
+            thinking_text = action.get("thinking") or ""
             logger.info("Thinking: %s", thinking_text[:120])
 
             # 检查 LLM 是否声明目标已达成
             if action.get("action") == "done":
                 summary = action.get("value", "")
+                # 034 修复：服务端路径补充与客户端 bridge 同口径的**覆盖门禁**——
+                # 有用例步骤时必须 journal 全覆盖，禁止"空口 done"直接判过
+                # （实测 case 670：模型把正向断言反转为负向等待后 done，整条假通过）
+                if self._run_steps and len(self._journal_covered) < len(self._run_steps):
+                    _missed = [
+                        int(s.get("step_order") or i + 1)
+                        for i, s in enumerate(self._run_steps)
+                        if int(s.get("step_order") or i + 1) not in self._journal_covered
+                    ]
+                    # 断言步骤：按当前快照做确定性验证（命中即覆盖，避免空转）
+                    _auto = self._cover_assertions_from_snapshot(
+                        _missed, (observation or {}).get("snapshot") or "",
+                    )
+                    if _auto:
+                        logger.info(
+                            "AgentRunner auto-covered assertion steps %s from snapshot (turn %d)",
+                            _auto, turn,
+                        )
+                        _missed = [o for o in _missed if o not in _auto]
+                    if _missed:
+                        self._refuse_done_same += 1
+                        if self._refuse_done_same >= _REFUSE_DONE_LIMIT:
+                            return self._make_result(
+                                "failed", turn,
+                                error=(
+                                    f"剩余步骤无法完成：{_missed}"
+                                    f"（连续 {self._refuse_done_same} 轮 done 被拒且无进展）"
+                                ),
+                                start_time=start_time,
+                            )
+                        logger.info(
+                            "AgentRunner refusing premature done: uncovered steps %s "
+                            "(covered %s/%s, turn %d, refuse=%d)",
+                            _missed, len(self._journal_covered), len(self._run_steps),
+                            turn, self._refuse_done_same,
+                        )
+                        self.context.add_turn(
+                            "assistant",
+                            (
+                                "SYSTEM: 完成声明被拒——以下步骤尚无成功动作覆盖："
+                                f"{_missed}。不得 done，请继续真实执行（断言步骤需真正执行断言动作）。"
+                            ),
+                            tool_calls=[action],
+                        )
+                        continue
                 logger.info("Agent 声明目标已达成: %s", summary)
                 self.context.add_turn(
                     "assistant", f"目标已达成: {summary}",
@@ -874,12 +924,59 @@ class AgentRunner:
 
     # ── 辅助方法 ───────────────────────────────────────────────────────────
 
+    # 034：断言步骤快照确定性覆盖（与 bridge._cover_assertion_steps_from_snapshot 同口径）
+    _ASSERT_STEP_RE = re.compile(r"^\s*断言")
+    _QUOTED_TEXT_RE = re.compile(r"[「【\"']([^」】\"']+)[」】\"']")
+
+    def _cover_assertions_from_snapshot(self, missed: list[int], snapshot: str) -> list[int]:
+        """断言步骤：快照中验证到期望文本即记为已覆盖；负向断言不经此自动覆盖。"""
+        if not missed or not snapshot:
+            return []
+        from core.goal_agent_loop import _step_wants_absence
+
+        hay = re.sub(r"\s+", " ", snapshot).lower()
+        covered: list[int] = []
+        for order in missed:
+            rec = next(
+                (
+                    s for s in (self._run_steps or [])
+                    if int(s.get("step_order") or 0) == int(order)
+                ),
+                None,
+            )
+            if not rec:
+                continue
+            desc = str(rec.get("description") or "")
+            if not self._ASSERT_STEP_RE.match(desc) or _step_wants_absence(desc):
+                continue
+            candidates = [m.strip() for m in self._QUOTED_TEXT_RE.findall(desc) if m.strip()]
+            expected = str(rec.get("parsed_result") or "").strip()
+            if expected and expected not in candidates:
+                candidates.append(expected)
+            for needle in candidates:
+                n = re.sub(r"\s+", " ", str(needle)).strip().lower()
+                if not n:
+                    continue
+                if len(n) <= 2:
+                    # 短期望（如徽标数字「1」）：词边界匹配，避免子串假命中
+                    if re.search(rf"(?<!\w){re.escape(n)}(?!\w)", hay):
+                        self._journal_covered.add(int(order))
+                        covered.append(int(order))
+                        break
+                elif n in hay:
+                    self._journal_covered.add(int(order))
+                    covered.append(int(order))
+                    break
+        return covered
+
     def _collect_journal_entry(self, action: dict[str, Any], turn: int) -> None:
         """把一次成功动作记入 journal（供 run 结束后合成固化脚本）。
 
         与 AgentBridge._collect_journal_entry 形一致；服务端 OTA 没有 checklist 映射，
         ``checklist_index`` 由合成侧按 steps 兜底推断。
         """
+        # 034：有真实进展 → 重置「拒绝 done」计数（与 bridge 同口径）
+        self._refuse_done_same = 0
         name = str(action.get("action") or action.get("name") or "")
         if not name:
             return
@@ -896,6 +993,9 @@ class AgentRunner:
                 or action.get("target")
                 or nested.get("element_desc")
             ),
+            # 034 修复：断言极性覆盖判定需要 wait_mode（text/gone）；
+            # 此前缺失导致 wait(gone) 可冒充「断言页面包含【x】」（假通过）
+            "wait_mode": action.get("wait_mode") or nested.get("wait_mode"),
         }
         self.journal.append(entry)
         # Phase B(auto)：维护覆盖集合（清单步号）

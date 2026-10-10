@@ -149,6 +149,8 @@ class AgentBridge:
         self._active_agent_id: str | None = None
         self._active_run_id_str: str | None = None
         self._batch_id: int | None = existing_batch_id
+        # _fail 已同步置败的预创建 TestRun（_save_report 复用之，防重复 run）
+        self._synced_test_run_ids: list[int] = []
 
         # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
         # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
@@ -618,6 +620,9 @@ class AgentBridge:
                     })
 
         # 调用 save_run_results 创建 TestRun
+        # 若 _fail 已同步置败预创建的 TestRun（027 兜底），复用同一行避免重复 run
+        _synced = getattr(self, "_synced_test_run_ids", None) or []
+        _reuse_run_id = _synced[0] if len(_synced) == 1 else None
         saved_run_id = await save_run_results(
             case_id=case_id,
             status=run_status_map,
@@ -628,6 +633,7 @@ class AgentBridge:
             log_path=None,
             logs=logs,
             batch_id=batch.id,
+            run_id=_reuse_run_id,
         )
         # 2026-09-30 修复：客户端执行的报告此前 execution_mode 落到列默认值 "server"（实际跑在客户端）。
         # 与 029 接口客户端执行同一约定：client:<agent>。
@@ -1228,7 +1234,7 @@ class AgentBridge:
             # 断言步骤无法映射覆盖（case 551 曾因此每轮重复断言、24 轮空转）
             args = {
                 key: action.get(key)
-                for key in ("selector", "value", "element_desc")
+                for key in ("selector", "value", "element_desc", "wait_mode")
                 if action.get(key) is not None
             }
         entry: dict = {
@@ -1239,6 +1245,8 @@ class AgentBridge:
             "selector": args.get("selector"),
             "value": args.get("value"),
             "element_desc": args.get("element_desc"),
+            # 034 修复：断言极性覆盖判定需要 wait_mode（text/gone）
+            "wait_mode": args.get("wait_mode") or action.get("wait_mode"),
         }
         # 032 US5：坐标动作回解结果入 journal（固化脚本优先语义定位）
         _resolved = args.get("_resolved")
@@ -1377,6 +1385,11 @@ class AgentBridge:
                     {"c": row.case_id, "b": row.bid},
                 )
                 tr_ids = [r[0] for r in res.fetchall()]
+                # 记录已置败的预创建 TestRun：后续 _save_report 复用同一行，
+                # 否则 reuse 查询（pending/running）落空会再建一条重复 run
+                # （2026-10-10 实测：客户端批量导航失败 → 1 用例 2 条 run）
+                if tr_ids:
+                    self._synced_test_run_ids = list(tr_ids)
                 # 失败现场截图：取最后一张（最接近终止时刻）
                 last_shot = None
                 if self._screenshot_paths:

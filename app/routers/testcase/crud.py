@@ -283,7 +283,12 @@ async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depen
 
     try:
         _validate_api_case_spec(case)
-        return await crud.update_test_case(db, case_id, case)
+        return await crud.update_test_case(
+            db, case_id, case,
+            # 034：页面编辑同样留痕（FR-015；source=page）
+            revision_user_id=user.id,
+            revision_source="page",
+        )
     except HTTPException:
         raise  # 031（US9）：api_spec 校验 422 直接透传，不被 500 吞掉
     except Exception as e:

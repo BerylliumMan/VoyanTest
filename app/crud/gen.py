@@ -377,3 +377,86 @@ async def delete_gen_test_case(
     record.test_cases_count = max(0, (record.test_cases_count or 1) - 1)
     await db.commit()
     return True
+
+
+# ----------------------------
+# 034 对话工作台：草稿行级 raw 操作（对话内增删改）
+# ----------------------------
+
+async def get_gen_test_case_by_id(
+    db: AsyncSession,
+    row_id: int,
+) -> db_models.GenTestCase | None:
+    """按主键取单条草稿行（对话补丁按 draft_id=行主键 定位）。"""
+    result = await db.execute(
+        select(db_models.GenTestCase).where(db_models.GenTestCase.id == row_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def update_gen_test_case_raw(
+    db: AsyncSession,
+    row_id: int,
+    fields: dict,
+) -> db_models.GenTestCase | None:
+    """按主键部分更新草稿行（仅写入给定字段；含 structured_steps）。"""
+    tc = await get_gen_test_case_by_id(db, row_id)
+    if tc is None:
+        return None
+    for key, value in fields.items():
+        if hasattr(tc, key):
+            setattr(tc, key, value)
+    await db.commit()
+    await db.refresh(tc)
+    return tc
+
+
+async def create_gen_test_case_raw(
+    db: AsyncSession,
+    session_id: str,
+    *,
+    test_case_id: str,
+    module: str = "",
+    title: str = "",
+    preconditions: str = "",
+    test_steps: str = "",
+    expected_result: str = "",
+    priority: str = "中",
+    structured_steps: list | None = None,
+) -> db_models.GenTestCase:
+    """新建草稿行并把 session.test_cases_count +1（对话内 add 补丁）。"""
+    record = db_models.GenTestCase(
+        session_id=session_id,
+        test_case_id=test_case_id,
+        module=module or None,
+        title=title or "未命名",
+        preconditions=preconditions or None,
+        test_steps=test_steps or None,
+        expected_result=expected_result or None,
+        priority=priority or "中",
+        structured_steps=structured_steps if isinstance(structured_steps, list) else None,
+    )
+    db.add(record)
+    session = await get_gen_session(db, session_id)
+    if session is not None:
+        session.test_cases_count = (session.test_cases_count or 0) + 1
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+async def delete_gen_test_case_raw(
+    db: AsyncSession,
+    row_id: int,
+) -> bool:
+    """按主键删除草稿行并把 session.test_cases_count 减 1（下限 0）。"""
+    tc = await get_gen_test_case_by_id(db, row_id)
+    if tc is None:
+        return False
+    session_id = tc.session_id
+    await db.delete(tc)
+    session = await get_gen_session(db, session_id)
+    if session is not None:
+        session.test_cases_count = max(0, (session.test_cases_count or 1) - 1)
+    await db.commit()
+    return True

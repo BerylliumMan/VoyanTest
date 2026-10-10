@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     api_batch_delay_max_ms: int = 60000
     # - 允许 post_script cookie 读写函数（关闭=函数未注入）
     api_post_script_cookies: bool = True
+    # 034 智能体对话工作台：
+    # - 总开关（关闭=对话端点 403 + 前端菜单隐藏；既有链路零影响）
+    chat_enabled: bool = True
+    # - 上下文字符预算：超出触发历史摘要压缩（关键引用不参与压缩）
+    chat_context_max_chars: int = 24000
+    # - 摘要后保留最近 N 条消息原文
+    chat_summary_keep_messages: int = 12
+    # - 单对话并行执行上限（生成类同对话串行，不受此限）
+    chat_max_parallel_runs: int = 3
+    # - 证据汇总 console 条目上限
+    chat_evidence_console_max: int = 20
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

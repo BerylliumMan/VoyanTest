@@ -81,3 +81,8 @@ from app.models.skill import Skill  # noqa: F401
 from app.models.agent_run import (  # noqa: F401
     AgentRun, AgentMessage, AgentToolCall, AgentRunSnapshot,
 )
+
+# 034 chat workbench: conversations / messages / case revisions
+from app.models.chat import (  # noqa: F401
+    ChatConversation, ChatMessage, CaseRevision,
+)

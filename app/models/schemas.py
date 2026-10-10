@@ -469,7 +469,7 @@ class AuditLogPage(BaseModel):
 
 class AgentDefinitionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    agent_type: str = Field(..., pattern=r"^(generation|execution|recording)$")
+    agent_type: str = Field(..., pattern=r"^(generation|execution|recording|assistant)$")
     description: str = ""
     skills: list[str] = Field(default_factory=list)
     llm_config: dict = Field(default_factory=dict)
@@ -484,7 +484,7 @@ class AgentDefinitionCreate(BaseModel):
 
 class AgentDefinitionUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    agent_type: Optional[str] = Field(default=None, pattern=r"^(generation|execution|recording)$")
+    agent_type: Optional[str] = Field(default=None, pattern=r"^(generation|execution|recording|assistant)$")
     description: Optional[str] = None
     skills: Optional[list[str]] = None
     llm_config: Optional[dict] = None

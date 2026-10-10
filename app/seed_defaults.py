@@ -245,9 +245,28 @@ DEFAULT_AGENTS: list[dict] = [
         "thinking_config": {},
         "system_prompt": "你是流程手册用例生成专家。流程：(1) fp_extract_flow 从图文手册抽取操作流程，desc 须逐步可执行并含【控件文案】；(2) tc_generate_flow 为每个流程生成 1 条主路径 UI 用例，steps 必须是 StructuredStep 对象数组（action/target_name/value），按手册编号逐步展开、禁止并步/跳步，须对照截图红框。禁止 target_name 含省略号或控件类型词；禁止关闭所有对话框并步（拆成 wait+click 关闭）。纯图标用 icon_click+icon_hint。expected 与 steps 等长；严禁空编号。",
         "prompt_overrides": {}
+    },
+    {
+        "name": "测试助手",
+        "agent_type": "assistant",
+        "description": "对话工作台助手 — 多轮对话内完成用例生成、修改与执行编排",
+        "skills": [],
+        "llm_config": {},
+        "is_active": 1,
+        "tools": [],
+        "goal": "在对话中编排完成测试用例的生成、修改与执行",
+        "constraints": [],
+        "thinking_config": {},
+        "system_prompt": "",
+        "prompt_overrides": {}
     }
 ]
 
+
+def _chat_assistant_prompt() -> str:
+    """对话工作台系统提示词（034）：唯一文本源在 core/chat/prompts.py。"""
+    from core.chat.prompts import CHAT_ASSISTANT_PROMPT
+    return CHAT_ASSISTANT_PROMPT
 
 def get_seed_prompts() -> dict[str, dict]:
     """All skill prompt templates to seed (key → metadata + content)."""
@@ -326,6 +345,13 @@ def get_seed_prompts() -> dict[str, dict]:
                 "接口测试用例生成的 LLM 增强段；硬规则：参数值必须具体、断言必须可判定，"
                 "违反即丢弃草案（与 app/gen/api/llm_cases.py 同口径）"
             ),
+        },
+        "chat_assistant": {
+            "name": "对话工作台助手",
+            "category": "assistant",
+            "content": _chat_assistant_prompt(),
+            "variables": [],
+            "description": "对话编排：领域限定 + 动作契约（generate/revise_drafts/edit_case/run_case/explain/set_refs）",
         },
     }
 
@@ -415,6 +441,8 @@ _UI_GEN_PROMPT_KEYS = frozenset({"tc_generate_ui"})
 _FUNC_GEN_PROMPT_KEYS = frozenset({"fp_extract", "tc_generate"})
 # Execution prompts that fix dropdown getByText('…下拉框') regressions.
 _EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate"})
+# 034 chat workbench: product-owned assistant orchestration prompt.
+_CHAT_PROMPT_KEYS = frozenset({"chat_assistant"})
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
 _UI_AGENT_NAME = "UI自动化用例生成助手"
 _FUNC_AGENT_NAME = "功能用例生成助手"
@@ -516,6 +544,7 @@ async def seed_defaults(db: AsyncSession) -> None:
         | _UI_GEN_PROMPT_KEYS
         | _FUNC_GEN_PROMPT_KEYS
         | _EXEC_PROMPT_KEYS
+        | _CHAT_PROMPT_KEYS
     )
     non_owned_keys = set(get_seed_prompts()) - owned_keys
     n_drafts = await sync_prompt_templates_from_seed(

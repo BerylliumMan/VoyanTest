@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .routers import project_router, testcase_router, module_router, report_router, config_router, environment_router, scheduler_router, agent_router
 from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router, agent_definition_router, agent_run_router, suite_router
 from .routers import api_test as api_test_router
+from .routers import chat as chat_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -1084,6 +1085,7 @@ app.include_router(setup_router.router)
 app.include_router(agent_definition_router.router)
 app.include_router(agent_run_router.router)
 app.include_router(api_test_router.router)
+app.include_router(chat_router.router)
 from app.routers.api_test.mocks import public_router as api_mock_public_router
 app.include_router(api_mock_public_router)
 
@@ -1118,6 +1120,11 @@ async def _agent_run_websocket(websocket: WebSocket, run_id: int):
 
 
 app.websocket("/ws/agent-runs/{run_id}")(_agent_run_websocket)
+
+# 034 对话工作台实时通道（仅推送；cookie 鉴权 + 会话所有权校验）
+from app.routers.chat.ws import chat_conversation_ws  # noqa: E402
+
+app.websocket("/ws/conversations/{conversation_id}")(chat_conversation_ws)
 
 
 _SPA_INDEX = os.path.join(_root, "app", "static", "index.html")
