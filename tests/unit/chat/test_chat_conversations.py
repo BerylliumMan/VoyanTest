@@ -54,11 +54,15 @@ async def test_message_pagination_and_get(chat_db):
 @pytest.mark.asyncio
 async def test_update_message_and_cards(chat_db):
     c = await crud.create_conversation(chat_db, user_id=1)
-    m = await crud.create_message(chat_db, conversation_id=c.id, role="assistant", content="R1")
-    m2 = await crud.update_message(chat_db, m, content="R2", cards=[{"type": "run", "batch_id": 1}])
-    assert m2.content == "R2" and m2.cards[0]["batch_id"] == 1
+    m = await crud.create_message(chat_db, conversation_id=c.id, role="assistant", content="R1",
+                                  thinking="先确认用户要什么，再给出方案。")
+    assert m.thinking.startswith("先确认")
+    m2 = await crud.update_message(chat_db, m, content="R2", thinking="改为解释执行结果。",
+                                   cards=[{"type": "run", "batch_id": 1}])
+    assert m2.content == "R2" and m2.thinking == "改为解释执行结果。" and m2.cards[0]["batch_id"] == 1
     m3 = await crud.update_message_cards(chat_db, m2, [{"type": "run", "batch_id": 1, "status": "done"}])
     assert m3.cards[0]["status"] == "done"
+    assert m3.thinking == "改为解释执行结果。"  # 卡片更新不动思考
 
 
 @pytest.mark.asyncio
@@ -75,3 +79,13 @@ async def test_case_revisions_append_only(chat_db):
     assert len(rows) == 2 and rows[0].source == "page" and rows[1].source == "chat"
     assert rows[1].id == r1.id
     assert (await crud.list_case_revisions(chat_db, 999)) == []
+
+
+def test_chat_fk_ondelete_cascade():
+    """删除对话必须级联消息（SET NULL 保留修订审计）——模型级外键语义。"""
+    from app.models.chat import CaseRevision, ChatMessage
+
+    fk_msg = list(ChatMessage.__table__.c.conversation_id.foreign_keys)[0]
+    assert fk_msg.ondelete == "CASCADE"
+    fk_rev = list(CaseRevision.__table__.c.conversation_id.foreign_keys)[0]
+    assert fk_rev.ondelete == "SET NULL"

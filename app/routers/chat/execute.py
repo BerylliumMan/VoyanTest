@@ -25,6 +25,7 @@ class RunCasesRequest(BaseModel):
     case_ids: list[int]
     mode: str = "server"
     agent_id: Optional[int] = None
+    environment_id: Optional[int] = None
 
 
 @router.post("/conversations/{conversation_id}/run")
@@ -49,6 +50,7 @@ async def run_cases_endpoint(
     card, err, _task_id = await chat_run.start_run(
         db, conversation=conv, case_ids=payload.case_ids,
         mode=payload.mode, agent_id=payload.agent_id, user_id=user.id,
+        environment_id=payload.environment_id,
     )
     if card is None:
         raise HTTPException(400, err)

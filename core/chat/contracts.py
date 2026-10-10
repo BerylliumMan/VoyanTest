@@ -74,6 +74,7 @@ def parse_decision(raw: str) -> tuple[dict | None, str]:
         suggestions = []
     return {
         "reply": (reply or "").strip(),
+        "thinking": str(obj.get("thinking") or "").strip()[:8000],
         "actions": actions[:MAX_ACTIONS_PER_TURN],
         "suggestions": [str(s).strip()[:100] for s in suggestions if isinstance(s, str) and str(s).strip()][:3],
     }, ""
@@ -176,15 +177,26 @@ def validate_action(action) -> tuple[dict | None, str]:
         clean = [c for c in case_ids if isinstance(c, int)]
         if not clean:
             return None, "run_case case_ids 非法"
-        mode = action.get("mode") or "server"
-        if mode not in ("server", "client"):
+        mode = action.get("mode")
+        if mode is not None and mode not in ("server", "client"):
             return None, "run_case.mode 必须为 server|client"
         agent_id = action.get("agent_id")
         if agent_id is not None and not isinstance(agent_id, int):
             agent_id = None
         if mode == "client" and agent_id is None:
-            return None, "客户端形态需要 agent_id"
-        return {"type": "run_case", "case_ids": clean[:20], "mode": mode, "agent_id": agent_id}, ""
+            return None, "run_case mode=client 需要 agent_id"
+        env_id = action.get("environment_id")
+        if env_id is not None:
+            try:
+                env_id = int(env_id)
+            except (TypeError, ValueError):
+                return None, "run_case.environment_id 必须为正整数"
+            if env_id <= 0:
+                return None, "run_case.environment_id 必须为正整数"
+        return {
+            "type": "run_case", "case_ids": clean[:20], "mode": mode,
+            "agent_id": agent_id, "environment_id": env_id,
+        }, ""
 
     if t == "explain":
         batch_id = action.get("batch_id")

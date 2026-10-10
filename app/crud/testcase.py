@@ -107,7 +107,7 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
 
 
 def _case_kind_filter(case_kind: str | None):
-    if case_kind in ("functional", "ui"):
+    if case_kind in ("functional", "ui", "api"):
         return [db_models.TestCase.case_kind == case_kind]
     return []
 

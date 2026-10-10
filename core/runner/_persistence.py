@@ -159,11 +159,12 @@ async def mark_run_failed(
 
     如果提供了 batch_id，还会调用 ``crud.update_batch_counters`` 更新
     批次计数。异常会 rollback 并记录日志，不向调用方抛出。
+    会话若被先前的 flush 失败污染（PendingRollbackError），回滚后重试一次。
     """
     from app import db_models
     from app.tz import now as tz_now
 
-    try:
+    async def _apply() -> None:
         _now = end_time or tz_now()
         _start = start_time or _now
         stmt = (
@@ -190,12 +191,20 @@ async def mark_run_failed(
             except SQLAlchemyError:
                 logger.exception("Failed to update batch counters")
                 await db.rollback()
+
+    try:
+        await _apply()
     except SQLAlchemyError:
         logger.exception("Failed to mark run %s as failed", run_id)
         try:
             await db.rollback()
-        except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
-            pass
+            await _apply()  # 回滚恢复会话后重试一次（污染会话场景）
+        except Exception:  # noqa: BLE001 - 重试仍失败时不再抛错
+            logger.debug("retry mark_run_failed failed run=%s", run_id, exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
+                pass
 
 
 async def update_run_on_completion(

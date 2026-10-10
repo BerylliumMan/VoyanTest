@@ -21,6 +21,10 @@ class ChatConversation(Base):
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     # 对话助手 Agent（assistant 类型；默认取活跃「测试助手」）
     assistant_agent_id = Column(Integer, ForeignKey("agent_definitions.id"), nullable=True)
+    # 执行上下文（对话页顶部选择：工作类型 / 执行环境 / 客户端；执行动作默认使用）
+    case_kind = Column(String(16), nullable=True, default="ui")  # ui | api
+    environment_id = Column(Integer, nullable=True)  # environments.id
+    agent_id = Column(Integer, nullable=True)  # agents.id（在线客户端；空 = 服务端形态）
     # active / archived
     status = Column(String(16), nullable=False, default="active")
     # 当前有效引用集：[{type: project|environment|agent|case|batch, id, label}]
@@ -42,10 +46,15 @@ class ChatMessage(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     conversation_id = Column(
-        Integer, ForeignKey("chat_conversations.id"), nullable=False, index=True
+        Integer,
+        ForeignKey("chat_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     role = Column(String(16), nullable=False)  # user | assistant
     content = Column(Text, nullable=True)
+    # 模型的思考过程（决策 JSON 的 thinking 字段；默认折叠展示，不参与上下文注入）
+    thinking = Column(Text, nullable=True)
     # [{type: draft_set|diff|run|evidence, payload…, status…}]（契约见 contracts C3-C5）
     cards = Column(JSON, nullable=True)
     # 该轮使用的引用（快照，含 label）
@@ -68,7 +77,10 @@ class CaseRevision(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     source = Column(String(16), nullable=False, default="chat")  # chat | page
     conversation_id = Column(
-        Integer, ForeignKey("chat_conversations.id"), nullable=True, index=True
+        Integer,
+        ForeignKey("chat_conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     before_snapshot = Column(JSON, nullable=False)
     after_snapshot = Column(JSON, nullable=False)

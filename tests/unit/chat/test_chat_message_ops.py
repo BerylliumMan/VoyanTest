@@ -9,6 +9,7 @@ from tests.unit.chat.conftest import FakeConversation
 async def test_handle_user_message_happy_path(chat_store, fake_llm_factory):
     conv = FakeConversation()
     llm = fake_llm_factory({
+        "thinking": "用户在打招呼，我应介绍职责范围并给出可操作的引导；不需要执行动作。",
         "reply": "你好！我可以帮你生成、修改与执行用例。",
         "actions": [],
         "suggestions": ["生成一条 UI 用例"],
@@ -18,6 +19,8 @@ async def test_handle_user_message_happy_path(chat_store, fake_llm_factory):
     )
     assert user_msg.role == "user" and user_msg.content == "你好"
     assert assistant.role == "assistant" and "用例" in assistant.content
+    assert "介绍职责" in assistant.thinking  # 思考过程随助手消息落库
+    assert orch.serialize_message(assistant)["thinking"] == assistant.thinking  # API 输出含 thinking
     assert len(chat_store["messages"]) == 2
 
 
@@ -102,17 +105,19 @@ async def test_regenerate_replaces_in_place_and_keeps_later(chat_store, fake_llm
     conv = FakeConversation()
     _, a1 = await orch.handle_user_message(
         None, conversation=conv, user_id=7, content="hi",
-        llm_call=fake_llm_factory({"reply": "第一版", "actions": []}),
+        llm_call=fake_llm_factory({"thinking": "第一版思考", "reply": "第一版", "actions": []}),
     )
+    assert a1.thinking == "第一版思考"
     await orch.handle_user_message(
         None, conversation=conv, user_id=7, content="继续",
         llm_call=fake_llm_factory({"reply": "后续", "actions": []}),
     )
-    llm3 = fake_llm_factory({"reply": "第二版", "actions": []})
+    llm3 = fake_llm_factory({"thinking": "第二版思考", "reply": "第二版", "actions": []})
     updated, err = await orch.regenerate_message(
         None, conversation=conv, message_id=a1.id, user_id=7, llm_call=llm3,
     )
     assert err == "" and updated.content == "第二版" and updated.id == a1.id
+    assert updated.thinking == "第二版思考"  # 重新生成时思考同步替换
     # 后续消息不受影响
     assert any(m.content == "后续" for m in chat_store["messages"])
     # 重新生成使用该条之前的历史（含第一轮用户消息）

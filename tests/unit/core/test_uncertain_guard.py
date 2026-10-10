@@ -127,7 +127,8 @@ def test_annotate_uncertain_marks_result():
 
 
 def test_uncertain_note_and_hint_helpers():
-    from core.agent_bridge import uncertain_context_hint, uncertain_note
+    from core.agent_bridge import uncertain_context_hint
+    from core.mcp_args import uncertain_note
 
     assert uncertain_note({"_uncertain": True})
     assert uncertain_note({}) == ""

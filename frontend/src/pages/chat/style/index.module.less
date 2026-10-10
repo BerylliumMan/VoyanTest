@@ -228,3 +228,64 @@
   font-size: 12px;
   color: var(--color-text-3, #86909c);
 }
+
+// 思考过程（默认折叠）：assistant 消息上方的灰底可展开区块
+.thinking {
+  margin-bottom: 6px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+  font-size: 12px;
+  overflow: hidden;
+
+  summary {
+    list-style: none; // 收起默认三角，改用自绘箭头
+    cursor: pointer;
+    user-select: none;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .thinkingSummary {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+    color: #86909c;
+
+    &::before {
+      content: '▸';
+      font-size: 10px;
+      transition: transform 0.15s;
+    }
+  }
+
+  &[open] .thinkingSummary::before {
+    transform: rotate(90deg);
+  }
+
+  .thinkingBody {
+    padding: 0 10px 8px 24px;
+    color: #4e5969;
+    white-space: pre-wrap;
+    line-height: 1.7;
+  }
+}
+
+// 执行上下文选择条（项目 / 用例类型 / 环境 / 客户端）
+.ctxBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0f1f3;
+  background: #fafbfc;
+}
+
+.ctxLabel {
+  font-size: 12px;
+  color: #86909c;
+}

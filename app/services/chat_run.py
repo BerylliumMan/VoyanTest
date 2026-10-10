@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from app import crud
@@ -19,6 +20,8 @@ from core.chat.orchestrator import ActionOutcome, register_action_handler, seria
 logger = logging.getLogger(__name__)
 
 _TERMINAL_BATCH_STATUS = ("passed", "failed", "partial", "cancelled")
+_ENV_PROBE_TIMEOUT_S = 3.0
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 # ----------------------------
@@ -75,6 +78,27 @@ def card_status_from_batch(batch_status: str) -> str:
     }.get(batch_status, "running")
 
 
+def format_activity(tool_call) -> str:
+    """最近一个工具调用 → 卡片一行活动提示（纯函数，可单测）。"""
+    turn = int(getattr(tool_call, "turn_number", 0) or 0)
+    name = str(getattr(tool_call, "tool_name", "") or "").strip() or "动作"
+    text = f"第 {turn} 轮 · {name}"
+    try:
+        ok = bool(int(getattr(tool_call, "success", 1) or 0))
+    except (TypeError, ValueError):
+        ok = bool(getattr(tool_call, "success", 1))
+    if not ok:
+        detail = ""
+        for line in _ANSI_RE.sub("", str(getattr(tool_call, "error_message", "") or "")).splitlines():
+            line = line.strip()
+            if not line or line.startswith("###"):
+                continue
+            detail = line[:80]
+            break
+        text += "（失败" + (f"：{detail}" if detail else "") + "）"
+    return text
+
+
 # ----------------------------
 # 卡片读写
 # ----------------------------
@@ -113,18 +137,57 @@ async def _load_user(db, user_id: int):
     return await db.get(db_models.User, user_id)
 
 
-async def _pick_environment(db, project_id: int) -> Optional[int]:
-    """服务端形态默认环境：项目第一个环境（没有则建默认）。"""
+async def _pick_environment(db, project_id: int):
+    """服务端形态默认环境：与用例页口径一致 —— 优先生效 ``is_default``，否则第一个环境。
+
+    返回 Environment 对象（可能为 None）。
+    """
     try:
         envs = await crud.get_environments(db, project_id)
-        if envs:
-            return envs[0].id
-        await crud.ensure_default_environment(db, project_id)
-        envs = await crud.get_environments(db, project_id)
-        return envs[0].id if envs else None
+        if not envs:
+            await crud.ensure_default_environment(db, project_id)
+            envs = await crud.get_environments(db, project_id)
+        if not envs:
+            return None
+        default_env = next((e for e in envs if getattr(e, "is_default", False)), None)
+        return default_env or envs[0]
     except Exception:
         logger.debug("pick environment failed", exc_info=True)
         return None
+
+
+async def _resolve_environment(db, project_id: int, environment_id: Optional[int]):
+    """解析本次执行环境：用户/模型显式指定优先（校验同项目），否则用默认。
+
+    返回 ``(env | None, err)``。
+    """
+    if environment_id:
+        from app import db_models
+
+        env = await db.get(db_models.Environment, int(environment_id))
+        if env is None:
+            return None, f"环境 #{environment_id} 不存在"
+        if int(env.project_id) != int(project_id):
+            return None, f"环境 #{environment_id} 不属于当前对话绑定的项目"
+        return env, ""
+    return await _pick_environment(db, project_id), ""
+
+
+async def _probe_env_reachable(url: str) -> Optional[bool]:
+    """环境 base_url 可达性预检（软失败）：True/False，无 url 或异常探测返回 None。"""
+    url = (url or "").strip()
+    if not url:
+        return None
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(
+            timeout=_ENV_PROBE_TIMEOUT_S, verify=False, follow_redirects=False,
+        ) as client:
+            await client.get(url)
+        return True
+    except Exception:
+        return False
 
 
 async def _invoke_batch(
@@ -168,6 +231,45 @@ async def _active_run_count(db, conversation_id: int) -> int:
     return n
 
 
+async def _client_agent_online(db, name: str) -> bool:
+    """客户端 Agent 是否在线（与 /api/agents 同口径：WS last_seen 或心跳 120s 内）。
+
+    检查失败（如无 DB 会话）时不误报，返回 True。
+    """
+    if not name:
+        return True
+    try:
+        from agent.manager import agent_manager
+
+        from app import db_models
+        from app.tz import now as tz_now
+
+        now = tz_now()
+        session = agent_manager.sessions.get(name)
+        if session is not None and session.agent.last_seen is not None:
+            ls = session.agent.last_seen
+            if ls.tzinfo is None:
+                ls = ls.replace(tzinfo=now.tzinfo)
+            if (now - ls).total_seconds() < 120:
+                return True
+        if db is not None:
+            from sqlalchemy import select as _select
+
+            row = (
+                await db.execute(_select(db_models.Agent).where(db_models.Agent.name == name))
+            ).scalars().first()
+            if row is not None and row.last_heartbeat is not None:
+                hb = row.last_heartbeat
+                if hb.tzinfo is None:
+                    hb = hb.replace(tzinfo=now.tzinfo)
+                if (now - hb).total_seconds() < 120:
+                    return True
+        return False
+    except Exception:
+        logger.debug("client online check failed name=%s", name, exc_info=True)
+        return True
+
+
 async def start_run(
     db,
     *,
@@ -176,8 +278,12 @@ async def start_run(
     mode: str,
     agent_id: Optional[int],
     user_id: int,
+    environment_id: Optional[int] = None,
 ) -> tuple[Optional[dict], str, Optional[str]]:
-    """发起对话内执行；返回 (card, error, task_id)。"""
+    """发起对话内执行；返回 (card, error, task_id)。
+
+    ``environment_id``：显式指定执行环境（须属于对话绑定项目）；缺省用项目默认环境。
+    """
     project_id = getattr(conversation, "project_id", None)
     if project_id is None:
         return None, "对话未绑定项目", None
@@ -199,6 +305,14 @@ async def start_run(
     if not cases:
         return None, "没有可执行的用例", None
 
+    # 形态与用例类型对齐：客户端形态仅用于 UI 用例；接口用例只在服务端执行
+    kinds = {(getattr(c, "case_kind", None) or "ui") for c in cases}
+    if mode == "client" and "ui" not in kinds:
+        mode = "server"
+        agent_id = None
+    elif mode == "client" and "api" in kinds:
+        return None, "接口用例只支持服务端形态执行（可把顶部「客户端」切换为服务端，或只选择 UI 用例）", None
+
     agent_name = None
     if mode == "client":
         if not agent_id:
@@ -210,7 +324,25 @@ async def start_run(
             return None, f"客户端 Agent #{agent_id} 不存在", None
         agent_name = agent.name
 
-    environment_id = await _pick_environment(db, project_id)
+    agent_warning = ""
+    if mode == "client" and agent_name and not await _client_agent_online(db, agent_name):
+        agent_warning = (
+            f"客户端「{agent_name}」当前未连接（超过 2 分钟无心跳），执行可能无法开始；"
+            "请确认该客户端已启动并连接平台。"
+        )
+
+    env, env_err = await _resolve_environment(db, project_id, environment_id)
+    if env_err:
+        return None, env_err, None
+    env_id = int(env.id) if env is not None else None
+    env_warning = ""
+    if env is not None and (env.base_url or "").strip():
+        reachable = await _probe_env_reachable(env.base_url)
+        if reachable is False:
+            env_warning = (
+                f"目标环境「{env.name}」地址 {(env.base_url or '').strip()} 当前不可达（连接失败），"
+                "执行可能在开始阶段失败；可在对话中说「用 <环境名> 环境执行」指定其他环境。"
+            )
 
     user = await _load_user(db, user_id)
     if user is None:
@@ -219,7 +351,7 @@ async def start_run(
     try:
         batch_id = await _invoke_batch(
             db, user=user, case_ids=[c.id for c in cases], mode=mode,
-            agent_name=agent_name, environment_id=environment_id,
+            agent_name=agent_name, environment_id=env_id,
         )
     except Exception as exc:
         logger.exception("chat run invoke failed")
@@ -238,6 +370,11 @@ async def start_run(
         "progress": {"total": len(cases), "done": 0},
         "result": None,
         "failures": [],
+        "environment_id": env_id,
+        "environment_name": getattr(env, "name", None) if env is not None else None,
+        "environment_url": (getattr(env, "base_url", "") or "").strip() or None if env is not None else None,
+        "env_warning": env_warning or None,
+        "agent_warning": agent_warning or None,
     }
     asyncio.create_task(_watch_run(conversation.id, batch_id))
     return card, "", str(batch_id)
@@ -299,9 +436,44 @@ async def _collect_evidence(db, batch_id: int, case_ids: list[int]) -> list[dict
     return failures
 
 
+async def _current_activity(db, batch_id: int) -> Optional[str]:
+    """批次关联 agent_run 的最近工具调用 → 一行活性提示（失败返回 None，不影响主流程）。"""
+    from sqlalchemy import select as _select
+
+    from app import db_models
+
+    try:
+        run = (
+            await db.execute(
+                _select(db_models.AgentRun)
+                .where(db_models.AgentRun.goal.op("->>")("batch_id") == str(batch_id))
+                .order_by(db_models.AgentRun.id.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if run is None:
+            return None
+        tool_call = (
+            await db.execute(
+                _select(db_models.AgentToolCall)
+                .where(db_models.AgentToolCall.run_id == run.id)
+                .order_by(db_models.AgentToolCall.id.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if tool_call is None:
+            turns = int(getattr(run, "turns_used", 0) or 0)
+            return f"第 {turns} 轮" if turns else None
+        return format_activity(tool_call)
+    except Exception:
+        logger.debug("current activity lookup failed batch=%s", batch_id, exc_info=True)
+        return None
+
+
 async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int = 900) -> None:
     from app.database import AsyncSessionLocal
 
+    consecutive_errors = 0
     for _ in range(max_iterations):
         await asyncio.sleep(2.0)
         try:
@@ -333,6 +505,15 @@ async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int
                         "failed": int(batch.failed or 0),
                     },
                 }
+                # 卡片活性反馈：已用时长（运行中 + 终态都给）
+                created = getattr(batch, "created_at", None)
+                if created is not None:
+                    try:
+                        from app.tz import now as tz_now
+
+                        card["elapsed_s"] = max(0, int((tz_now() - created).total_seconds()))
+                    except Exception:
+                        pass
                 if status in _TERMINAL_BATCH_STATUS:
                     card["failures"] = await _collect_evidence(db, batch_id, card.get("case_ids") or [])
                     await _write_run_card(db, msg, card)
@@ -341,14 +522,23 @@ async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int
                         "status": "done" if card["status"] == "done" else card["status"],
                     })
                     return
+                # 运行中：附带最近动作，避免长时间「执行中」无反馈
+                activity = await _current_activity(db, batch_id)
+                if activity:
+                    card["current"] = activity
                 await _write_run_card(db, msg, card)
                 await emit(conversation_id, {
                     "type": "task.updated", "task_id": str(batch_id), "kind": "run",
                     "status": "running", "progress": done,
                 })
+            consecutive_errors = 0
         except Exception:
-            logger.debug("watch run failed batch=%s", batch_id, exc_info=True)
-            return
+            consecutive_errors += 1
+            logger.debug(
+                "watch run failed batch=%s consecutive=%s", batch_id, consecutive_errors, exc_info=True,
+            )
+            if consecutive_errors >= 15:
+                return
 
 
 # ----------------------------
@@ -357,14 +547,31 @@ async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int
 
 @register_action_handler("run_case")
 async def run_case_handler(db, conversation, action: dict, ctx: dict) -> ActionOutcome:
+    """执行用例：默认使用对话顶部选择的「环境 / 客户端」，仅当本条消息显式指定时才覆盖。"""
+    conv_agent_id = getattr(conversation, "agent_id", None)
+    conv_env_id = getattr(conversation, "environment_id", None)
+    agent_id = action.get("agent_id") or conv_agent_id
+    mode = action.get("mode") or ("client" if agent_id else "server")
+    if mode == "server":
+        agent_id = action.get("agent_id") or None
+    environment_id = action.get("environment_id") or conv_env_id
     card, err, task_id = await start_run(
         db, conversation=conversation, case_ids=action["case_ids"],
-        mode=action.get("mode") or "server", agent_id=action.get("agent_id"),
-        user_id=ctx.get("user_id"),
+        mode=mode, agent_id=agent_id,
+        user_id=ctx.get("user_id"), environment_id=environment_id,
     )
     if card is None:
         return ActionOutcome(ok=False, note=f"（执行未发起：{err}）")
-    return ActionOutcome(card=card, task_id=task_id, note="执行已发起，进度与结果会实时回显。")
+    env_name = card.get("environment_name")
+    note = (
+        f"执行已发起（环境：{env_name}），进度与结果会实时回显。"
+        if env_name else "执行已发起，进度与结果会实时回显。"
+    )
+    if card.get("env_warning"):
+        note += f"注意：{card['env_warning']}"
+    if card.get("agent_warning"):
+        note += f"注意：{card['agent_warning']}"
+    return ActionOutcome(card=card, task_id=task_id, note=note)
 
 
 async def cancel_run(db, *, conversation, batch_id: int, user_id: int) -> tuple[Optional[dict], str]:

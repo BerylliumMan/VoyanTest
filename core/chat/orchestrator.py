@@ -55,6 +55,7 @@ def serialize_message(msg) -> dict:
         "conversation_id": msg.conversation_id,
         "role": msg.role,
         "content": msg.content,
+        "thinking": getattr(msg, "thinking", None),
         "cards": msg.cards or [],
         "refs": msg.refs or [],
         "actions": msg.actions or [],
@@ -166,13 +167,67 @@ async def _audit(db, user_id: int, conversation_id: int, action: dict, outcome: 
         logger.debug("chat audit failed", exc_info=True)
 
 
+async def _conversation_settings_block(db, conversation) -> Optional[str]:
+    """【当前对话设置】注入块：工作类型 / 默认执行环境 / 默认客户端（对话页选择）。"""
+    try:
+        parts = []
+        kind = (getattr(conversation, "case_kind", None) or "ui").lower()
+        if kind == "api":
+            parts.append("工作类型：接口用例（本对话执行接口用例；接口用例的生成请在「接口测试」页完成）")
+        else:
+            parts.append("工作类型：UI 自动化用例")
+        env_id = getattr(conversation, "environment_id", None)
+        if env_id:
+            try:
+                from app import db_models
+
+                env = await db.get(db_models.Environment, int(env_id))
+                if env is not None:
+                    url = (getattr(env, "base_url", "") or "").strip()
+                    parts.append(f"默认执行环境：# {env.id} {env.name}" + (f"（{url}）" if url else ""))
+            except Exception:
+                logger.debug("settings env lookup failed", exc_info=True)
+        agent_id = getattr(conversation, "agent_id", None)
+        if agent_id:
+            try:
+                from app import db_models
+
+                ag = await db.get(db_models.Agent, int(agent_id))
+                if ag is not None:
+                    parts.append(f"默认执行客户端：{ag.name}（客户端形态运行）")
+            except Exception:
+                logger.debug("settings agent lookup failed", exc_info=True)
+        else:
+            parts.append("默认执行客户端：服务端")
+        parts.append(
+            "执行类动作默认使用上述环境与客户端，不要询问也不要自行更换；"
+            "仅当用户在本条消息中明确要求更换时才在动作里显式传 environment_id / agent_id / mode。"
+        )
+        return "【当前对话设置】" + "；".join(parts)
+    except Exception:
+        logger.debug("build settings block failed", exc_info=True)
+        return None
+
+
 async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None) -> list[dict]:
     summary, inject_messages = await _maybe_update_summary(db, conversation, messages, llm)
     draft_digest = _active_draft_digest(inject_messages)
     system_prompt = await resolve_system_prompt(db, conversation, agent_id=agent_id)
     project_name = None
+    environments = None
     if getattr(conversation, "project_id", None):
         project_name = await _project_name(db, conversation.project_id)
+        try:
+            from app.crud import get_environments
+
+            envs = await get_environments(db, conversation.project_id)
+            environments = [
+                {"id": e.id, "name": e.name, "base_url": e.base_url}
+                for e in (envs or [])
+            ]
+        except Exception:
+            logger.debug("load chat environments failed", exc_info=True)
+    settings_block = await _conversation_settings_block(db, conversation)
     return context.build_llm_messages(
         system_prompt=system_prompt,
         summary=summary,
@@ -180,6 +235,8 @@ async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None)
         refs=getattr(conversation, "refs", None),
         project_name=project_name,
         draft_digest=draft_digest,
+        environments=environments,
+        settings_block=settings_block,
     )
 
 
@@ -235,6 +292,70 @@ def _compose_reply(reply: str, notes: list, cards: list) -> str:
 
 # ----------------------------
 # 主入口
+async def _stream_llm(
+    conversation,
+    llm_messages: list[dict],
+    *,
+    agent_id: int | None,
+    target_message_id: int | None = None,
+) -> str:
+    """流式决策调用：实时推送 thinking / reply 增量（WS），返回完整文本。
+
+    - thinking 通道：优先使用网关 reasoning 增量（真实思考）；网关不回推理时退回
+      决策 JSON 的 thinking 字段增量（部分 JSON 提取）；
+    - reply 通道：决策 JSON 的 reply 字段增量（部分 JSON 提取）；
+    - 推送是尽力而为（WS 未连接则自然丢弃），失败不影响正常取回完整文本。
+    """
+    from app.gen.model_client import call_model
+
+    from core.chat import stream as chat_stream
+
+    conv_id = conversation.id
+    partial = chat_stream.PartialDecisionStream()
+    emitted = {"thinking": 0, "reply": 0}
+    flags = {"reasoning": False}
+
+    async def push(channel: str, text: str) -> None:
+        if not text:
+            return
+        await emit(conv_id, {
+            "type": "message.stream",
+            "conversation_id": conv_id,
+            "channel": channel,
+            "delta": text,
+            "target_message_id": target_message_id,
+        })
+
+    async def on_reasoning(chunk: str) -> None:
+        flags["reasoning"] = True
+        await push("thinking", chunk)
+
+    async def on_content(chunk: str) -> None:
+        partial.feed(chunk)
+        if not flags["reasoning"]:
+            cur = partial.get("thinking")
+            if len(cur) > emitted["thinking"]:
+                await push("thinking", cur[emitted["thinking"]:])
+                emitted["thinking"] = len(cur)
+        cur = partial.get("reply")
+        if len(cur) > emitted["reply"]:
+            await push("reply", cur[emitted["reply"]:])
+            emitted["reply"] = len(cur)
+
+    await emit(conv_id, {
+        "type": "message.stream_start",
+        "conversation_id": conv_id,
+        "target_message_id": target_message_id,
+    })
+    return await call_model(
+        llm_messages,
+        agent_type="assistant",
+        agent_id=agent_id,
+        stream_callback=on_content,
+        reasoning_callback=on_reasoning,
+    )
+
+
 # ----------------------------
 
 async def handle_user_message(
@@ -254,7 +375,11 @@ async def handle_user_message(
     from app.gen.model_client import call_model
 
     agent_id = getattr(conversation, "assistant_agent_id", None)
-    llm = llm_call or (lambda messages: call_model(messages, agent_type="assistant", agent_id=agent_id))
+
+    async def _default_llm(messages):
+        return await call_model(messages, agent_type="assistant", agent_id=agent_id)
+
+    llm = llm_call or _default_llm
 
     # 1) 历史（先取，避免包含刚落的用户消息）
     history = await chat_crud.list_messages_after(db, conversation.id)
@@ -280,9 +405,16 @@ async def handle_user_message(
     messages = list(history) + [user_msg]
     llm_messages = await _build_llm_messages(db, conversation, messages, llm, agent_id=agent_id)
 
-    # 4) LLM 决策
+    # 4) LLM 决策（生产路径走流式：thinking/reply 实时推送；测试注入 llm_call 时走阻塞路径）
     try:
-        raw = await llm(llm_messages)
+        if llm_call is not None:
+            raw = await llm(llm_messages)
+        else:
+            try:
+                raw = await _stream_llm(conversation, llm_messages, agent_id=agent_id)
+            except Exception:
+                logger.warning("chat stream llm failed, fallback to blocking call", exc_info=True)
+                raw = await llm(llm_messages)
     except Exception as exc:
         logger.warning("chat llm call failed: %s", exc)
         assistant_msg = await chat_crud.create_message(
@@ -322,7 +454,8 @@ async def handle_user_message(
         reply = (reply + f"\n（失效引用已剔除：{'、'.join(dropped_refs[:3])}）").strip()
     assistant_msg = await chat_crud.create_message(
         db, conversation_id=conversation.id, role="assistant",
-        content=reply, cards=cards or None, actions=actions_log or None, task_id=task_id,
+        content=reply, thinking=decision.get("thinking") or None,
+        cards=cards or None, actions=actions_log or None, task_id=task_id,
     )
     await emit(conversation.id, {"type": "message.created", "message": serialize_message(assistant_msg)})
     return user_msg, assistant_msg
@@ -348,12 +481,25 @@ async def regenerate_message(
     if msg.role != "assistant":
         return None, "只能重新生成助手消息"
     agent_id = getattr(conversation, "assistant_agent_id", None)
-    llm = llm_call or (lambda messages: call_model(messages, agent_type="assistant", agent_id=agent_id))
+
+    async def _default_llm(messages):
+        return await call_model(messages, agent_type="assistant", agent_id=agent_id)
+
+    llm = llm_call or _default_llm
 
     history = [m for m in await chat_crud.list_messages_after(db, conversation.id) if m.id < msg.id]
     llm_messages = await _build_llm_messages(db, conversation, history, llm, agent_id=agent_id)
     try:
-        raw = await llm(llm_messages)
+        if llm_call is not None:
+            raw = await llm(llm_messages)
+        else:
+            try:
+                raw = await _stream_llm(
+                    conversation, llm_messages, agent_id=agent_id, target_message_id=msg.id,
+                )
+            except Exception:
+                logger.warning("chat stream regenerate failed, fallback to blocking call", exc_info=True)
+                raw = await llm(llm_messages)
     except Exception as exc:
         return None, f"模型调用失败：{exc}"
     decision, err = contracts.parse_decision(raw)
@@ -362,7 +508,8 @@ async def regenerate_message(
     cards, actions_log, notes, task_id = await _execute_decision(db, conversation, user_id, decision, llm)
     reply = _compose_reply(decision["reply"], notes, cards)
     updated = await chat_crud.update_message(
-        db, msg, content=reply, cards=cards or None, actions=actions_log or None,
+        db, msg, content=reply, thinking=decision.get("thinking") or None,
+        cards=cards or None, actions=actions_log or None,
     )
     if task_id:
         updated.task_id = task_id

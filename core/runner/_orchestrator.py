@@ -252,7 +252,7 @@ async def run_test_case_via_agent(
     run = await create_agent_run(db, AgentRunCreate(
         agent_definition_id=agent_def.id,
         case_id=case_id,
-        goal={"goal": goal_text, "case_id": case_id},
+        goal={"goal": goal_text, "case_id": case_id, "batch_id": batch_id},
     ))
     await update_agent_run_status(db, run.id, "running")
 
@@ -278,6 +278,12 @@ async def run_test_case_via_agent(
         ota_result = await runner.run()
     except Exception as exc:  # noqa: BLE001
         logger.exception("AgentRunner 执行异常 (case_id=%s)", case_id)
+        # 会话可能因中途落库失败（flush 异常）被污染，先回滚再落状态，
+        # 否则 update_agent_run_status / mark_run_failed 会连锁失败、run 卡在 pending。
+        try:
+            await db.rollback()
+        except Exception:
+            logger.debug("rollback after runner exception failed", exc_info=True)
         ota_result = {
             "status": "error",
             "turns_used": 0,
@@ -286,12 +292,19 @@ async def run_test_case_via_agent(
         }
 
     final_status = ota_result.get("status", "failed")
-    await update_agent_run_status(
-        db, run.id, final_status,
-        result=ota_result,
-        turns_used=ota_result.get("turns_used", 0),
-        error=ota_result.get("error"),
-    )
+    try:
+        await update_agent_run_status(
+            db, run.id, final_status,
+            result=ota_result,
+            turns_used=ota_result.get("turns_used", 0),
+            error=ota_result.get("error"),
+        )
+    except Exception:  # noqa: BLE001 - 落状态失败不能阻断用例失败结论
+        logger.exception("update_agent_run_status failed (case_id=%s)", case_id)
+        try:
+            await db.rollback()
+        except Exception:
+            logger.debug("rollback after status update failure failed", exc_info=True)
 
     case_status = (
         "passed"
@@ -299,7 +312,7 @@ async def run_test_case_via_agent(
         else "failed"
     )
     end_time = tz_now()
-    logs = [{
+    summary_row = {
         "step_id": None,
         "level": "INFO" if case_status == "passed" else "ERROR",
         "message": (
@@ -308,7 +321,22 @@ async def run_test_case_via_agent(
             + (f", error={ota_result.get('error')}" if ota_result.get("error") else "")
         ),
         "screenshot_path": None,
-    }]
+    }
+    # 034 迭代（2026-10-10）：报告步骤 = 每动作行（与客户端 AgentBridge 同口径）；
+    # 无工具调用（如异常早退）时回退摘要行；失败但无失败步骤行时补挂错误摘要。
+    logs: list[dict] = []
+    try:
+        from core.step_logs import build_step_logs_from_tool_calls
+
+        logs = await build_step_logs_from_tool_calls(db, run.id)
+    except Exception:
+        logger.debug("构建步骤日志失败，回退摘要行", exc_info=True)
+    if not logs:
+        logs = [summary_row]
+    elif case_status != "passed" and not any(
+        str(l.get("level") or "").lower() in ("error", "critical") for l in logs
+    ):
+        logs.append(summary_row)
     # 032 US2：console 证据（服务端本机 MCP；失败静默降级）
     try:
         from app.config import get_settings as _gs
@@ -816,6 +844,10 @@ async def run_batch_test_cases(
                     # Broad catch: OTA / API / DB 任一未处理异常都要落到预创建 TestRun
                     label = "init-case" if is_init else "case"
                     logger.exception("Batch %s %s failed with exception", label, case_id)
+                    try:
+                        await batch_db.rollback()  # 会话可能已被中途落库失败污染
+                    except Exception:
+                        logger.debug("rollback before failure record failed", exc_info=True)
                     await _record_batch_case_failure(
                         batch_db, _rid, batch_id,
                         message=f"Batch {label} executor exception: {exc}",

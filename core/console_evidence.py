@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,9 @@ MAX_ENTRY_CHARS = 300
 # 解析时跳过的结构性行（playwright-mcp 输出包装）
 _SKIP_PREFIXES = ("###", "total messages", "total:", "console messages", "no console messages")
 
+# "Returning 0 messages for level \"error\"" 这类零命中计数行不是证据（2026-10-10 实测污染步骤视图）
+_ZERO_COUNT_RE = re.compile(r"^returning\s+0\s+messages?\b", re.IGNORECASE)
+
 
 def parse_console_messages(text: str | None) -> list[str]:
     """把 browser_console_messages 输出解析为条目列表（容错，不抛异常）。"""
@@ -26,6 +30,8 @@ def parse_console_messages(text: str | None) -> list[str]:
         if not s:
             continue
         if s.lower().startswith(_SKIP_PREFIXES):
+            continue
+        if _ZERO_COUNT_RE.match(s):
             continue
         out.append(s[:MAX_ENTRY_CHARS])
     return out

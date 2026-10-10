@@ -1023,6 +1023,8 @@ class AgentRunner:
         """
         if self._db is None or self._run_id is None:
             return
+        action = action or {}
+        result = result or {}
         snapshot_str = str(snapshot)
         snapshot_preview = snapshot_str[:2000] + ("..." if len(snapshot_str) > 2000 else "")
         await crud_agent_run.create_message(
@@ -1046,7 +1048,7 @@ class AgentRunner:
         }
         await crud_agent_run.create_tool_call(
             self._db, self._run_id, turn,
-            action.get("name", action.get("action", "unknown")),
+            str(action.get("name") or action.get("action") or "unknown"),
             tool_args,
             result.get("success", False),
             result.get("error", ""),

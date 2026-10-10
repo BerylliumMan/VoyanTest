@@ -27,7 +27,6 @@ from core.llm_wrapper import create_openai_client, generate_tool_call
 from core.mcp_args import (
     annotate_uncertain,
     uncertain_context_hint,
-    uncertain_note,
 )
 from core.ota_cursor import (
     OTA_CURSOR_SYSTEM_PROMPT,
@@ -538,43 +537,21 @@ class AgentBridge:
             except Exception:
                 logger.exception("Bridge batch notify failed batch=%s", self._batch_id)
 
-        # 从 agent_tool_calls 构建步骤日志
+        # 从 agent_tool_calls 构建步骤日志（渲染口径统一在 core/step_logs.py）
         logs: list[dict] = []
         try:
-            from sqlalchemy import select
-            from app.db_models import AgentToolCall
-            r = await self.db.execute(
-                select(AgentToolCall).where(
-                    AgentToolCall.run_id == run.id
-                ).order_by(AgentToolCall.turn_number)
+            from core.step_logs import build_step_logs_from_tool_calls
+
+            def _resolve_ss(turn_number: int):
+                return (
+                    self._screenshot_paths.get(f"turn_{turn_number:02d}_observe")
+                    or self._screenshot_paths.get(f"turn_{turn_number:02d}_act")
+                    or self._last_screenshot_path()
+                )
+
+            logs = await build_step_logs_from_tool_calls(
+                self.db, run.id, resolve_screenshot=_resolve_ss
             )
-            for tc in r.scalars().all():
-                level = "info" if tc.success == 1 else "error"
-                tool = tc.tool_name or ""
-                args = tc.tool_args or {}
-                _LABELS = {"browser_navigate":"导航到","browser_click":"点击","browser_type":"输入",
-                           "browser_snapshot":"查看页面","browser_take_screenshot":"截图",
-                           "browser_wait_for":"等待","browser_select_option":"选择"}
-                lbl = _LABELS.get(tool, tool)
-                vals = [v for v in [args.get("url"), args.get("value"), args.get("selector"), args.get("element"), args.get("text")] if v]
-                msg = f"{lbl} {vals[0]}" if vals else lbl
-                if tc.error_message:
-                    msg += f" | {tc.error_message}"
-                _note = uncertain_note(args)
-                if _note:
-                    msg += _note
-                # 027: 仅失败步骤保留截图证据，通过步骤不留图
-                ss_path = None
-                if tc.success != 1:
-                    ss_path = self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_observe") \
-                        or self._screenshot_paths.get(f"turn_{tc.turn_number:02d}_act") \
-                        or self._last_screenshot_path()
-                logs.append({
-                    "step_id": None,
-                    "level": level,
-                    "message": msg,
-                    "screenshot_path": ss_path,
-                })
         except Exception as _tce:
             logger.warning("Could not load tool calls for run %d: %s", run.id, _tce)
 
@@ -2302,7 +2279,7 @@ class AgentBridge:
             _tool_args["_uncertain"] = True
         await crud_agent_run.create_tool_call(
             self.db, run_id, turn,
-            action.get("name", action.get("action", "unknown")),
+            str(action.get("name") or action.get("action") or "unknown"),
             _tool_args,
             result.get("success", False),
             result.get("error", ""),

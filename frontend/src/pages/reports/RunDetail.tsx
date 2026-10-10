@@ -17,6 +17,7 @@ const STATUS_COLORS: Record<string, string> = {
   passed: 'green',
   failed: 'red',
   skipped: 'orange',
+  info: 'gray',
 };
 
 const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
@@ -27,7 +28,8 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
     running: t['running'],
     passed: t['passed'],
     failed: t['failed'],
-    skipped: 'Skipped',
+    skipped: t['skipped'],
+    info: t['info'],
   };
 
   const getStatusTag = (s: string) => (
@@ -69,6 +71,7 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
                     <span className={styles['step-description']}>{step.original_description || step.description}</span>
                     {step.status && getStatusTag(
                       step.status === 'skipped' ? 'skipped' :
+                      step.status === 'info' ? 'info' :
                       step.success ? 'passed' : 'failed'
                     )}
                   </div>

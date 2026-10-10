@@ -7,6 +7,17 @@ from app.services import chat_run
 from tests.unit.chat.conftest import FakeConversation, FakeMessage
 
 
+class Env:
+    """轻量环境对象（替代 ORM Environment）。"""
+
+    def __init__(self, id=17, name="默认环境", base_url="http://ok.example", project_id=30):
+        self.id = id
+        self.name = name
+        self.base_url = base_url
+        self.project_id = project_id
+        self.is_default = False
+
+
 # ----------------------------
 # 纯函数
 # ----------------------------
@@ -49,11 +60,93 @@ def test_split_log_segments_and_merged_run_log():
 
 def test_card_status_from_batch_mapping():
     assert chat_run.card_status_from_batch("running") == "running"
+    assert chat_run.card_status_from_batch("paused") == "paused"
     assert chat_run.card_status_from_batch("passed") == "done"
     assert chat_run.card_status_from_batch("partial") == "done"
     assert chat_run.card_status_from_batch("failed") == "failed"
     assert chat_run.card_status_from_batch("cancelled") == "canceled"
     assert chat_run.card_status_from_batch("unknown") == "running"
+
+
+# ----------------------------
+# 环境解析 / 活性提示（卡片体验修复）
+# ----------------------------
+
+def test_format_activity_success_and_failure():
+    class TC:
+        turn_number = 3
+        tool_name = "goto"
+        success = 1
+        error_message = ""
+
+    assert chat_run.format_activity(TC()) == "第 3 轮 · goto"
+
+    class TC2:
+        turn_number = 2
+        tool_name = "click"
+        success = 0
+        error_message = "\x1b[2m### Error\nError: net::ERR_CONNECTION_REFUSED at http://x\x1b[22m"
+
+    text = chat_run.format_activity(TC2())
+    assert "第 2 轮 · click" in text
+    assert "ERR_CONNECTION_REFUSED" in text
+    assert "###" not in text
+    assert "\x1b" not in text
+
+
+def test_validate_action_run_case_environment_id():
+    from core.chat.contracts import validate_action
+
+    norm, err = validate_action({"type": "run_case", "case_ids": [1], "environment_id": 35})
+    assert err == "" and norm["environment_id"] == 35
+    norm, err = validate_action({"type": "run_case", "case_ids": [1]})
+    assert err == "" and norm["environment_id"] is None
+    assert norm["mode"] is None  # 未指定形态 → 由对话设置决定
+    _, err = validate_action({"type": "run_case", "case_ids": [1], "environment_id": "abc"})
+    assert "environment_id" in err
+    _, err = validate_action({"type": "run_case", "case_ids": [1], "environment_id": -1})
+    assert "environment_id" in err
+    _, err = validate_action({"type": "run_case", "case_ids": [1], "mode": "client"})
+    assert "agent_id" in err  # 显式客户端形态必须带 agent_id
+    norm, err = validate_action({"type": "run_case", "case_ids": [1], "mode": "client", "agent_id": 3})
+    assert err == "" and norm["mode"] == "client" and norm["agent_id"] == 3
+
+
+@pytest.mark.asyncio
+async def test_pick_environment_prefers_default(monkeypatch):
+    envs = [Env(1, "a", "http://a"), Env(2, "b", "http://b")]
+    envs[1].is_default = True
+
+    async def get_envs(db, pid):
+        return envs
+
+    monkeypatch.setattr(chat_run.crud, "get_environments", get_envs)
+    got = await chat_run._pick_environment(None, 30)
+    assert got is envs[1]
+
+
+@pytest.mark.asyncio
+async def test_resolve_environment_guards(monkeypatch):
+    class DB:
+        def __init__(self, env):
+            self.env = env
+
+        async def get(self, model, id):
+            return self.env
+
+    # 环境不存在
+    got, err = await chat_run._resolve_environment(DB(None), 30, 35)
+    assert got is None and "不存在" in err
+
+    # 环境不属于当前项目
+    foreign = Env(35, "x", "http://x", project_id=99)
+    got, err = await chat_run._resolve_environment(DB(foreign), 30, 35)
+    assert got is None and "不属于" in err
+
+    # 显式指定命中
+    mine = Env(35, "034-smoke-local", "http://127.0.0.1:8002/login", project_id=30)
+    got, err = await chat_run._resolve_environment(DB(mine), 30, 35)
+    assert err == "" and got is mine
 
 
 # ----------------------------
@@ -145,8 +238,13 @@ async def test_start_run_happy_path_builds_card(monkeypatch):
     async def get_tc(db, cid):
         return Case(cid, f"用例{cid}")
 
-    async def pick_env(db, pid):
-        return 17
+    async def resolve_env(db, pid, eid=None):
+        assert eid is None
+        return Env(17, "默认环境", "http://ok.example", project_id=30), ""
+
+    async def probe(url):
+        assert url == "http://ok.example"
+        return True
 
     class User:
         id = 7
@@ -163,7 +261,8 @@ async def test_start_run_happy_path_builds_card(monkeypatch):
 
     monkeypatch.setattr(chat_run, "_active_run_count", active)
     monkeypatch.setattr(chat_run.crud, "get_test_case", get_tc)
-    monkeypatch.setattr(chat_run, "_pick_environment", pick_env)
+    monkeypatch.setattr(chat_run, "_resolve_environment", resolve_env)
+    monkeypatch.setattr(chat_run, "_probe_env_reachable", probe)
     monkeypatch.setattr(chat_run, "_load_user", load_user)
     monkeypatch.setattr(chat_run, "_invoke_batch", invoke)
     monkeypatch.setattr(chat_run, "_watch_run", fake_watch)
@@ -176,6 +275,199 @@ async def test_start_run_happy_path_builds_card(monkeypatch):
     assert card["batch_id"] == 456 and card["status"] == "running"
     assert card["progress"] == {"total": 2, "done": 0}
     assert card["case_titles"] == ["用例11", "用例12"]
+    assert card["environment_id"] == 17 and card["environment_name"] == "默认环境"
+    assert card["environment_url"] == "http://ok.example"
+    assert card["env_warning"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_run_explicit_env_and_unreachable_warning(monkeypatch):
+    conv = FakeConversation(project_id=30)
+    calls = {}
+
+    class Case:
+        id = 11
+        project_id = 30
+        name = "用例11"
+
+    async def active(db, cid):
+        return 0
+
+    async def get_tc(db, cid):
+        return Case()
+
+    async def resolve_env(db, pid, eid=None):
+        calls["eid"] = eid
+        return Env(35, "034-smoke-local", "http://127.0.0.1:9", project_id=30), ""
+
+    async def probe(url):
+        calls["probe"] = url
+        return False
+
+    class User:
+        id = 7
+
+    async def load_user(db, uid):
+        return User()
+
+    async def invoke(db, *, user, case_ids, mode, agent_name, environment_id):
+        calls["invoke_env"] = environment_id
+        return 456
+
+    async def fake_watch(cid, bid, **kw):
+        return None
+
+    monkeypatch.setattr(chat_run, "_active_run_count", active)
+    monkeypatch.setattr(chat_run.crud, "get_test_case", get_tc)
+    monkeypatch.setattr(chat_run, "_resolve_environment", resolve_env)
+    monkeypatch.setattr(chat_run, "_probe_env_reachable", probe)
+    monkeypatch.setattr(chat_run, "_load_user", load_user)
+    monkeypatch.setattr(chat_run, "_invoke_batch", invoke)
+    monkeypatch.setattr(chat_run, "_watch_run", fake_watch)
+    monkeypatch.setattr(chat_run.asyncio, "create_task", lambda coro: coro.close())
+
+    card, err, _ = await chat_run.start_run(
+        None, conversation=conv, case_ids=[11], mode="server", agent_id=None,
+        user_id=7, environment_id=35,
+    )
+    assert err == ""
+    assert calls["eid"] == 35 and calls["invoke_env"] == 35
+    assert calls["probe"] == "http://127.0.0.1:9"
+    assert card["environment_id"] == 35 and card["environment_name"] == "034-smoke-local"
+    assert "不可达" in card["env_warning"]
+
+
+@pytest.mark.asyncio
+async def test_start_run_rejects_unknown_environment(monkeypatch):
+    conv = FakeConversation(project_id=30)
+
+    async def active(db, cid):
+        return 0
+
+    class Case:
+        id = 11
+        project_id = 30
+        name = "用例11"
+
+    async def get_tc(db, cid):
+        return Case()
+
+    async def resolve_env(db, pid, eid=None):
+        return None, f"环境 #{eid} 不存在"
+
+    monkeypatch.setattr(chat_run, "_active_run_count", active)
+    monkeypatch.setattr(chat_run.crud, "get_test_case", get_tc)
+    monkeypatch.setattr(chat_run, "_resolve_environment", resolve_env)
+
+    card, err, _ = await chat_run.start_run(
+        None, conversation=conv, case_ids=[11], mode="server", agent_id=None,
+        user_id=7, environment_id=999,
+    )
+    assert card is None and "不存在" in err
+
+
+@pytest.mark.asyncio
+async def test_run_case_handler_note_includes_env(monkeypatch):
+    async def fake_start(db, **kw):
+        return {
+            "type": "run", "batch_id": 1, "environment_name": "envA",
+            "env_warning": "目标环境不可达",
+        }, "", "1"
+
+    monkeypatch.setattr(chat_run, "start_run", fake_start)
+    outcome = await chat_run.run_case_handler(
+        None, FakeConversation(project_id=30), {"case_ids": [1]}, {"user_id": 7},
+    )
+    assert outcome.ok and "envA" in outcome.note and "不可达" in outcome.note
+
+
+@pytest.mark.asyncio
+async def test_run_case_handler_uses_conversation_context(monkeypatch):
+    """执行默认使用对话选择的环境与客户端；动作显式指定时覆盖。"""
+    calls = {}
+
+    async def fake_start(db, **kw):
+        calls.clear()
+        calls.update(kw)
+        return {"type": "run", "batch_id": 9, "environment_name": "e1", "env_warning": None}, "", "9"
+
+    monkeypatch.setattr(chat_run, "start_run", fake_start)
+
+    # 1) 对话选了环境 35 + 客户端 26：动作什么都没说 → 用对话选择，形态自动 client
+    conv = FakeConversation(project_id=30, environment_id=35, agent_id=26)
+    outcome = await chat_run.run_case_handler(None, conv, {"case_ids": [1], "mode": None, "agent_id": None, "environment_id": None}, {"user_id": 7})
+    assert outcome.ok
+    assert calls["environment_id"] == 35 and calls["agent_id"] == 26 and calls["mode"] == "client"
+
+    # 2) 对话选了客户端，但用户明确要求服务端 → 形态 server、不带 agent
+    conv2 = FakeConversation(project_id=30, environment_id=35, agent_id=26)
+    outcome = await chat_run.run_case_handler(None, conv2, {"case_ids": [1], "mode": "server", "agent_id": None, "environment_id": None}, {"user_id": 7})
+    assert outcome.ok and calls["mode"] == "server" and calls["agent_id"] is None
+
+    # 3) 动作显式指定环境 → 覆盖对话选择
+    conv3 = FakeConversation(project_id=30, environment_id=35, agent_id=None)
+    outcome = await chat_run.run_case_handler(None, conv3, {"case_ids": [1], "mode": None, "agent_id": None, "environment_id": 17}, {"user_id": 7})
+    assert outcome.ok and calls["environment_id"] == 17 and calls["mode"] == "server"
+
+
+@pytest.mark.asyncio
+async def test_start_run_api_case_forces_server(monkeypatch):
+    """接口用例 + 客户端选择 → 自动回退服务端；UI+接口混合 + 客户端 → 明确拒绝。"""
+    conv = FakeConversation(project_id=30)
+
+    class ApiCase:
+        id = 501
+        project_id = 30
+        name = "接口用例"
+        case_kind = "api"
+
+    class UiCase:
+        id = 502
+        project_id = 30
+        name = "UI 用例"
+        case_kind = "ui"
+
+    async def active(db, cid):
+        return 0
+
+    async def get_tc(db, cid):
+        return {501: ApiCase(), 502: UiCase()}[cid]
+
+    async def resolve_env(db, pid, eid=None):
+        return Env(17, "默认环境", None, project_id=30), ""
+
+    class User:
+        id = 7
+
+    async def load_user(db, uid):
+        return User()
+
+    calls = {}
+
+    async def invoke(db, *, user, case_ids, mode, agent_name, environment_id):
+        calls.update(mode=mode, agent_name=agent_name)
+        return 456
+
+    async def watch(cid, bid, **kw):
+        return None
+
+    monkeypatch.setattr(chat_run, "_active_run_count", active)
+    monkeypatch.setattr(chat_run.crud, "get_test_case", get_tc)
+    monkeypatch.setattr(chat_run, "_resolve_environment", resolve_env)
+    monkeypatch.setattr(chat_run, "_load_user", load_user)
+    monkeypatch.setattr(chat_run, "_invoke_batch", invoke)
+    monkeypatch.setattr(chat_run, "_watch_run", watch)
+    monkeypatch.setattr(chat_run.asyncio, "create_task", lambda coro: coro.close())
+
+    card, err, _ = await chat_run.start_run(
+        None, conversation=conv, case_ids=[501], mode="client", agent_id=26, user_id=7,
+    )
+    assert err == "" and calls["mode"] == "server" and card["agent_name"] is None
+
+    card2, err2, _ = await chat_run.start_run(
+        None, conversation=conv, case_ids=[501, 502], mode="client", agent_id=26, user_id=7,
+    )
+    assert card2 is None and "服务端" in err2
 
 
 # ----------------------------
@@ -252,6 +544,81 @@ async def test_watch_run_updates_card_until_terminal(monkeypatch):
     assert len(writes) >= 2
     assert writes[-1]["status"] == "done"
     assert writes[-1]["result"] == {"passed": 1, "failed": 0}
+
+
+@pytest.mark.asyncio
+async def test_watch_run_survives_transient_db_error(monkeypatch):
+    """单次轮询异常不应终止 watcher（应继续轮询直至终态）。"""
+    conv_id = 3
+    batch_id = 457
+    msg = FakeMessage(conversation_id=conv_id, role="assistant", cards=[
+        {"type": "run", "batch_id": batch_id, "status": "running", "case_ids": [11],
+         "progress": {"total": 1, "done": 0}},
+    ])
+    writes = []
+
+    class Batch:
+        id = batch_id
+
+        def __init__(self):
+            self.status = "running"
+            self.total_cases = 1
+            self.passed = 0
+            self.failed = 0
+
+    batch = Batch()
+    state = {"i": 0}
+
+    async def fake_sleep(sec):
+        state["i"] += 1
+        if state["i"] == 3:
+            batch.status = "failed"
+            batch.failed = 1
+
+    async def get_batch(db, bid):
+        if state["i"] == 1:
+            raise RuntimeError("db hiccup")
+        return batch
+
+    async def find_card(db, cid, bid):
+        return msg, msg.cards[0]
+
+    async def write_card(db, m, card):
+        writes.append(card)
+        m.cards = [card]
+        return m
+
+    async def noop_emit(cid, ev):
+        return None
+
+    async def collect(db, bid, cids):
+        return []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSessionLocal:
+        def __call__(self):
+            return FakeSession()
+
+    import app.database as db_mod
+
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", FakeSessionLocal())
+    monkeypatch.setattr(chat_run.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(chat_run.crud, "get_run_batch", get_batch)
+    monkeypatch.setattr(chat_run, "_find_run_card_message", find_card)
+    monkeypatch.setattr(chat_run, "_write_run_card", write_card)
+    monkeypatch.setattr(chat_run, "_collect_evidence", collect)
+    monkeypatch.setattr(chat_run, "emit", noop_emit)
+    monkeypatch.setattr(chat_run, "logger", chat_run.logger)
+
+    await chat_run._watch_run(conv_id, batch_id, max_iterations=10)
+    assert writes, "首次异常后 watcher 应继续轮询"
+    assert writes[-1]["status"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -83,6 +83,24 @@ def build_refs_block(refs) -> str:
     return "【当前引用】\n" + "\n".join(lines)
 
 
+def build_environments_block(environments) -> str:
+    """项目执行环境清单（对话内指定环境执行用；仅渲染 id/名称/地址）。"""
+    lines = []
+    for e in environments or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            eid = int(e.get("id"))
+        except (TypeError, ValueError):
+            continue
+        name = str(e.get("name") or "").strip() or f"环境#{eid}"
+        url = str(e.get("base_url") or "").strip()[:60]
+        lines.append(f"- 环境#{eid} {name}" + (f"（{url}）" if url else ""))
+    if not lines:
+        return ""
+    return "【项目环境 — 用户指定环境执行时 environment_id 只能取自本列表】\n" + "\n".join(lines)
+
+
 def build_llm_messages(
     *,
     system_prompt: str,
@@ -91,12 +109,19 @@ def build_llm_messages(
     refs=None,
     project_name: str | None = None,
     draft_digest: str | None = None,
+    environments=None,
+    settings_block: str | None = None,
 ) -> list[dict]:
     """组装发给 LLM 的 messages（system 注入上下文块 + 历史消息）。"""
     system = system_prompt or ""
     ctx_parts = []
     if project_name:
         ctx_parts.append(f"【项目上下文】{project_name}")
+    if settings_block:
+        ctx_parts.append(settings_block)
+    env_block = build_environments_block(environments)
+    if env_block:
+        ctx_parts.append(env_block)
     refs_block = build_refs_block(refs)
     if refs_block:
         ctx_parts.append(refs_block)

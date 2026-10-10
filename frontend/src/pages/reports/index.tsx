@@ -31,6 +31,7 @@ interface BatchDetail {
 const STATUS_COLORS: Record<string, string> = {
   pending: 'blue', running: 'blue', paused: 'orangered', passed: 'green',
   failed: 'red', skipped: 'orange', cancelled: 'gray', partial: 'orange',
+  info: 'gray',
 };
 
 const Reports: React.FC = () => {
@@ -43,7 +44,8 @@ const Reports: React.FC = () => {
     passed: t['passed'],
     failed: t['failed'],
     cancelled: t['cancelled'],
-    skipped: 'Skipped',
+    skipped: t['skipped'],
+    info: t['info'],
   };
 
   const getStatusTag = (s: string, animated?: boolean) => (
@@ -495,7 +497,7 @@ const Reports: React.FC = () => {
                                   {step.original_description || step.description}
                                 </span>
                                 {step.status
-                                  ? getStatusTag(step.status === 'skipped' ? 'skipped' : step.success ? 'passed' : 'failed')
+                                  ? getStatusTag(step.status === 'skipped' ? 'skipped' : step.status === 'info' ? 'info' : step.success ? 'passed' : 'failed')
                                   : step.success !== undefined
                                     ? getStatusTag(step.success ? 'passed' : 'failed')
                                     : isRunning

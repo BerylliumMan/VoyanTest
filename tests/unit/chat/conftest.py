@@ -20,18 +20,23 @@ class FakeConversation:
         self.refs = kw.get("refs")
         self.summary = kw.get("summary")
         self.summarized_until_message_id = kw.get("summarized_until_message_id")
+        # 执行上下文（对话页选择）
+        self.case_kind = kw.get("case_kind", "ui")
+        self.environment_id = kw.get("environment_id", None)
+        self.agent_id = kw.get("agent_id", None)
 
 
 class FakeMessage:
     _seq = 0
 
-    def __init__(self, conversation_id=1, role="user", content="", cards=None, refs=None,
+    def __init__(self, conversation_id=1, role="user", content="", thinking=None, cards=None, refs=None,
                  actions=None, task_id=None):
         FakeMessage._seq += 1
         self.id = FakeMessage._seq
         self.conversation_id = conversation_id
         self.role = role
         self.content = content
+        self.thinking = thinking
         self.cards = cards
         self.refs = refs
         self.actions = actions
@@ -74,10 +79,10 @@ def chat_store(monkeypatch):
     async def list_messages_after(db, conversation_id, *, after_id=0, limit=500):
         return [m for m in store["messages"] if m.conversation_id == conversation_id and m.id > after_id]
 
-    async def create_message(db, *, conversation_id, role, content=None, cards=None, refs=None,
-                             actions=None, task_id=None):
-        m = FakeMessage(conversation_id=conversation_id, role=role, content=content, cards=cards,
-                        refs=refs, actions=actions, task_id=task_id)
+    async def create_message(db, *, conversation_id, role, content=None, thinking=None, cards=None,
+                             refs=None, actions=None, task_id=None):
+        m = FakeMessage(conversation_id=conversation_id, role=role, content=content, thinking=thinking,
+                        cards=cards, refs=refs, actions=actions, task_id=task_id)
         store["messages"].append(m)
         store["created"].append(m)
         return m
@@ -97,9 +102,11 @@ def chat_store(monkeypatch):
     async def delete_message(db, message):
         store["messages"].remove(message)
 
-    async def update_message(db, message, *, content=None, cards=None, actions=None):
+    async def update_message(db, message, *, content=None, thinking=None, cards=None, actions=None):
         if content is not None:
             message.content = content
+        if thinking is not None:
+            message.thinking = thinking
         if cards is not None:
             message.cards = cards
         if actions is not None:

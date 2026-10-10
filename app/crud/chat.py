@@ -25,6 +25,9 @@ async def create_conversation(
     assistant_agent_id: Optional[int] = None,
     title: str = "新对话",
     refs: Optional[list] = None,
+    case_kind: Optional[str] = None,
+    environment_id: Optional[int] = None,
+    agent_id: Optional[int] = None,
 ) -> db_models.ChatConversation:
     record = db_models.ChatConversation(
         title=(title or "新对话")[:200],
@@ -33,6 +36,9 @@ async def create_conversation(
         assistant_agent_id=assistant_agent_id,
         status="active",
         refs=refs or None,
+        case_kind=(case_kind or "ui"),
+        environment_id=environment_id,
+        agent_id=agent_id,
     )
     db.add(record)
     await db.commit()
@@ -85,6 +91,7 @@ async def update_conversation(
     allowed = {
         "title", "project_id", "assistant_agent_id", "status",
         "refs", "summary", "summarized_until_message_id",
+        "case_kind", "environment_id", "agent_id",
     }
     for key, value in fields.items():
         if key not in allowed:
@@ -115,6 +122,7 @@ async def create_message(
     conversation_id: int,
     role: str,
     content: Optional[str] = None,
+    thinking: Optional[str] = None,
     cards: Optional[list] = None,
     refs: Optional[list] = None,
     actions: Optional[list] = None,
@@ -124,6 +132,7 @@ async def create_message(
         conversation_id=conversation_id,
         role=role,
         content=content,
+        thinking=thinking,
         cards=cards or None,
         refs=refs or None,
         actions=actions or None,
@@ -215,12 +224,15 @@ async def update_message(
     message: db_models.ChatMessage,
     *,
     content: Optional[str] = None,
+    thinking: Optional[str] = None,
     cards: Optional[list] = None,
     actions: Optional[list] = None,
 ) -> db_models.ChatMessage:
     """助手消息整条替换（重新生成用）：仅写入显式给出的字段。"""
     if content is not None:
         message.content = content
+    if thinking is not None:
+        message.thinking = thinking
     if cards is not None:
         message.cards = cards
     if actions is not None:

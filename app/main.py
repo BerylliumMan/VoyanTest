@@ -415,6 +415,57 @@ async def _run_startup_init():
             "ALTER TABLE gen_sessions ADD COLUMN IF NOT EXISTS case_kind VARCHAR(32) DEFAULT 'ui'",
             "gen_sessions.case_kind 迁移",
         )
+        # ── 034-chat-case-workbench：对话外键级联（删除对话级联删除消息；修订记录 SET NULL 保留审计）──
+        await _ddl(
+            "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS thinking TEXT",
+            "chat_messages.thinking 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS case_kind VARCHAR(16) DEFAULT 'ui'",
+            "chat_conversations.case_kind 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS environment_id INTEGER",
+            "chat_conversations.environment_id 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS agent_id INTEGER",
+            "chat_conversations.agent_id 迁移",
+        )
+        await _ddl(
+            """
+            DO $$
+            DECLARE
+                act "char";
+            BEGIN
+                IF to_regclass('chat_messages') IS NOT NULL THEN
+                    SELECT confdeltype INTO act FROM pg_constraint
+                        WHERE conname = 'chat_messages_conversation_id_fkey';
+                    IF act IS DISTINCT FROM 'c' THEN
+                        ALTER TABLE chat_messages
+                            DROP CONSTRAINT IF EXISTS chat_messages_conversation_id_fkey;
+                        ALTER TABLE chat_messages
+                            ADD CONSTRAINT chat_messages_conversation_id_fkey
+                            FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id)
+                            ON DELETE CASCADE;
+                    END IF;
+                END IF;
+                IF to_regclass('case_revisions') IS NOT NULL THEN
+                    SELECT confdeltype INTO act FROM pg_constraint
+                        WHERE conname = 'case_revisions_conversation_id_fkey';
+                    IF act IS DISTINCT FROM 'n' THEN
+                        ALTER TABLE case_revisions
+                            DROP CONSTRAINT IF EXISTS case_revisions_conversation_id_fkey;
+                        ALTER TABLE case_revisions
+                            ADD CONSTRAINT case_revisions_conversation_id_fkey
+                            FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id)
+                            ON DELETE SET NULL;
+                    END IF;
+                END IF;
+            END $$;
+            """,
+            "034-chat FK 级联",
+        )
         await _ddl(
             """
             CREATE TABLE IF NOT EXISTS schema_patches (

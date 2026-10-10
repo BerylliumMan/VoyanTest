@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user, get_user_project_filter
 from app.config import get_settings
 from app.crud import chat as chat_crud
+from app.crud import get_environments
 from app.database import get_async_db
 from core.chat import orchestrator
 
@@ -55,6 +56,9 @@ class ConversationCreate(BaseModel):
     project_id: int
     assistant_agent_id: Optional[int] = None
     refs: Optional[list] = None
+    case_kind: Optional[str] = None  # ui | api（默认 ui）
+    environment_id: Optional[int] = None
+    agent_id: Optional[int] = None
 
 
 class ConversationPatch(BaseModel):
@@ -63,6 +67,10 @@ class ConversationPatch(BaseModel):
     status: Optional[str] = None
     assistant_agent_id: Optional[int] = None
     refs: Optional[list] = None
+    case_kind: Optional[str] = None
+    # -1 = 清空（回到项目默认环境 / 服务端形态）
+    environment_id: Optional[int] = None
+    agent_id: Optional[int] = None
 
 
 class MessageSend(BaseModel):
@@ -80,9 +88,50 @@ def serialize_conversation(c) -> dict:
         "status": c.status,
         "refs": c.refs or [],
         "summary": c.summary,
+        "case_kind": getattr(c, "case_kind", None) or "ui",
+        "environment_id": getattr(c, "environment_id", None),
+        "agent_id": getattr(c, "agent_id", None),
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
     }
+
+
+async def _validate_context_fields(
+    db: AsyncSession, *, project_id: Optional[int],
+    environment_id: Optional[int], agent_id: Optional[int],
+    user=None,
+) -> None:
+    """校验执行上下文选择：环境须属于项目且有权限；客户端 Agent 须存在。"""
+    if environment_id:
+        from app import db_models
+
+        env = await db.get(db_models.Environment, int(environment_id))
+        if env is None:
+            raise HTTPException(400, f"执行环境 #{environment_id} 不存在")
+        if project_id is not None and int(env.project_id) != int(project_id):
+            raise HTTPException(400, "执行环境不属于当前项目")
+        if user is not None:
+            _ensure_project_access(user, env.project_id)
+    if agent_id:
+        from app import db_models
+
+        agent = await db.get(db_models.Agent, int(agent_id))
+        if agent is None:
+            raise HTTPException(400, f"客户端 Agent #{agent_id} 不存在")
+
+
+async def _default_environment_id(db: AsyncSession, project_id: Optional[int]) -> Optional[int]:
+    """项目默认环境 id（is_default 优先，否则第一个；无环境返回 None）。"""
+    if not project_id:
+        return None
+    try:
+        envs = await get_environments(db, project_id)
+        if not envs:
+            return None
+        default_env = next((e for e in envs if getattr(e, "is_default", False)), None)
+        return int((default_env or envs[0]).id)
+    except Exception:
+        return None
 
 
 # ----------------------------
@@ -121,11 +170,25 @@ async def create_conversation(
         default_agent = await get_active_by_type(db, "assistant")
         assistant_agent_id = default_agent.id if default_agent else None
 
+    case_kind = (payload.case_kind or "ui").lower()
+    if case_kind not in ("ui", "api"):
+        raise HTTPException(400, "case_kind 必须为 ui|api")
+    environment_id = payload.environment_id
+    if environment_id is None:
+        environment_id = await _default_environment_id(db, payload.project_id)
+    await _validate_context_fields(
+        db, project_id=payload.project_id, environment_id=environment_id,
+        agent_id=payload.agent_id, user=user,
+    )
+
     conv = await chat_crud.create_conversation(
         db, user_id=user.id, project_id=payload.project_id,
         assistant_agent_id=assistant_agent_id,
         title=(payload.title or "新对话"),
         refs=refs,
+        case_kind=case_kind,
+        environment_id=environment_id,
+        agent_id=payload.agent_id,
     )
     return serialize_conversation(conv)
 
@@ -187,6 +250,38 @@ async def patch_conversation(
         if problems and not valid:
             raise HTTPException(403, "；".join(problems[:3]))
         fields["refs"] = valid or None
+    if payload.case_kind is not None:
+        kind = payload.case_kind.lower()
+        if kind not in ("ui", "api"):
+            raise HTTPException(400, "case_kind 必须为 ui|api")
+        fields["case_kind"] = kind
+    if payload.environment_id is not None:
+        if payload.environment_id == -1:
+            fields["environment_id"] = None
+        else:
+            await _validate_context_fields(
+                db, project_id=fields.get("project_id", conv.project_id),
+                environment_id=payload.environment_id, agent_id=None, user=user,
+            )
+            fields["environment_id"] = payload.environment_id
+    if payload.agent_id is not None:
+        if payload.agent_id == -1:
+            fields["agent_id"] = None
+        else:
+            await _validate_context_fields(
+                db, project_id=None, environment_id=None,
+                agent_id=payload.agent_id, user=user,
+            )
+            fields["agent_id"] = payload.agent_id
+    # 切换项目后：原环境若不属于新项目则清空（回到新项目默认环境）
+    if "project_id" in fields and "environment_id" not in fields:
+        current_env = getattr(conv, "environment_id", None)
+        if current_env:
+            from app import db_models
+
+            env = await db.get(db_models.Environment, int(current_env))
+            if env is None or int(env.project_id) != int(fields["project_id"]):
+                fields["environment_id"] = await _default_environment_id(db, fields["project_id"])
     if fields:
         conv = await chat_crud.update_conversation(db, conv, **fields)
     return serialize_conversation(conv)

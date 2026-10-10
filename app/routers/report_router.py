@@ -241,14 +241,7 @@ async def get_run_detail(run_id: int, user=Depends(get_current_user), db: AsyncS
             r = await db.execute(
                 _sl(RunLog).where(RunLog.run_id == run.id).order_by(RunLog.id)
             )
-            for lg in r.scalars().all():
-                response["steps"].append({
-                    "step_number": lg.step_id or len(response["steps"]) + 1,
-                    "success": lg.level in ("info", "success", "passed"),
-                    "level": lg.level,
-                    "description": lg.message,
-                    "screenshot_path": lg.screenshot_path,
-                })
+            response["steps"] = _steps_from_run_log_rows(r.scalars().all())
         except Exception:
             logger.warning("无法从 run_logs 加载步骤: run=%d", run.id, exc_info=True)
 
@@ -406,6 +399,37 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
     }
 
 
+def _steps_from_run_log_rows(rows) -> list[dict]:
+    """run_logs → 步骤行（2026-10-10 修复）。
+
+    - 大小写不敏感：库中 level 为 "INFO"/"ERROR"（大写）与 "warning"（小写）混用，
+      此前 ``lg.level in ("info", ...)`` 把 INFO 摘要行渲染成"失败步骤"（用户实测：
+      批次 483 详情"两个步骤都失败但结果通过"）；
+    - warning 等运行级信息（console 证据汇总行）→ status="info" 信息徽标，
+      不再误显示为失败。
+    """
+    steps: list[dict] = []
+    for lg in rows:
+        lv = str(lg.level or "").strip().lower()
+        if lv in ("info", "success", "passed"):
+            success, status = True, None
+        elif lv in ("error", "critical", "failed"):
+            success, status = False, None
+        else:
+            success, status = None, "info"
+        steps.append(
+            {
+                "step_number": lg.step_id or len(steps) + 1,
+                "success": success,
+                "status": status,
+                "level": lg.level,
+                "description": lg.message,
+                "screenshot_path": lg.screenshot_path,
+            }
+        )
+    return steps
+
+
 async def _fallback_steps_from_run_logs(db: AsyncSession, run_id: int) -> list[dict]:
     """从 run_logs 加载步骤（AI/客户端执行路径不写 report.json 时的回退口径）。"""
     steps: list[dict] = []
@@ -414,17 +438,7 @@ async def _fallback_steps_from_run_logs(db: AsyncSession, run_id: int) -> list[d
         from app.db_models import RunLog
 
         r = await db.execute(_sl(RunLog).where(RunLog.run_id == run_id).order_by(RunLog.id))
-        for lg in r.scalars().all():
-            is_success = lg.level in ("info", "success", "passed")
-            steps.append(
-                {
-                    "step_number": lg.step_id or len(steps) + 1,
-                    "success": is_success,
-                    "level": lg.level,
-                    "description": lg.message,
-                    "screenshot_path": lg.screenshot_path,
-                }
-            )
+        steps = _steps_from_run_log_rows(r.scalars().all())
     except Exception:
         logger.warning("无法从 run_logs 加载步骤: run=%d", run_id, exc_info=True)
     return steps

@@ -8,6 +8,7 @@ import {
   Modal,
   Popconfirm,
   Progress,
+  Radio,
   Select,
   Spin,
   Tag,
@@ -20,6 +21,7 @@ import {
   IconList,
   IconPlus,
   IconRefresh,
+  IconRobot,
   IconSend,
   IconUpload,
 } from '@arco-design/web-react/icon';
@@ -35,6 +37,9 @@ interface Conversation {
   assistant_agent_id: number | null;
   status: string;
   refs?: Array<Record<string, unknown>>;
+  case_kind?: string | null;
+  environment_id?: number | null;
+  agent_id?: number | null;
   updated_at?: string | null;
 }
 
@@ -56,6 +61,7 @@ interface ChatMessage {
   id: number;
   role: 'user' | 'assistant';
   content: string;
+  thinking?: string | null;
   cards: CardPayload[];
   actions: Array<Record<string, unknown>>;
   refs?: Array<Record<string, unknown>>;
@@ -75,6 +81,14 @@ const DRAFT_STATUS_TAG: Record<string, { color: string; text: string }> = {
   failed: { color: 'red', text: '生成失败' },
 };
 
+// 失败截图链接：统一为站点绝对路径（相对路径在不同路由深度下解析位置不一致）
+const screenshotHref = (raw: unknown): string => {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  return '/' + s.replace(/^\/+/, '');
+};
+
 const ChatPage: React.FC = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -92,6 +106,13 @@ const ChatPage: React.FC = () => {
   const [chatEnabled, setChatEnabled] = useState<boolean>(true);
   const [refPickerVisible, setRefPickerVisible] = useState(false);
   const [refSearch, setRefSearch] = useState('');
+  // 流式输出：thinking/reply 增量；targetId 为被「重新生成」的消息 id（null = 新一轮回复）
+  const [stream, setStream] = useState<{ targetId: number | null; thinking: string; reply: string } | null>(null);
+  const [streamOpen, setStreamOpen] = useState(true);
+  const streamReplyStartedRef = useRef(false);
+  // 执行上下文：项目环境列表 / 客户端 Agent 列表
+  const [envs, setEnvs] = useState<Array<{ id: number; name: string; is_default?: boolean }>>([]);
+  const [agents, setAgents] = useState<Array<{ id: number; name: string; status?: string }>>([]);
   const [refOptions, setRefOptions] = useState<Array<{ id: number; name: string }>>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -117,6 +138,41 @@ const ChatPage: React.FC = () => {
     }
   }, []);
 
+  // 更新对话执行上下文（项目/类型/环境/客户端）；-1 表示清空（默认环境/服务端）
+  const patchConversation = useCallback(async (fields: Record<string, unknown>) => {
+    if (activeId == null) return;
+    try {
+      const r = await axios.patch(`/api/chat/conversations/${activeId}`, fields);
+      const updated = r.data as Conversation;
+      setConversations((prev) => prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)));
+      if (fields.project_id != null) {
+        Message.success('项目已切换');
+      }
+    } catch (e: any) {
+      Message.error(e?.response?.data?.detail || '设置更新失败');
+    }
+  }, [activeId]);
+
+  // 环境列表：跟随当前对话项目
+  const activeConvForEnvs = conversations.find((c) => c.id === activeId);
+  const activeProjectId = activeConvForEnvs?.project_id ?? null;
+  useEffect(() => {
+    if (activeProjectId == null) {
+      setEnvs([]);
+      return;
+    }
+    axios.get(`/api/projects/${activeProjectId}/environments`)
+      .then((r) => setEnvs(r.data || []))
+      .catch(() => setEnvs([]));
+  }, [activeProjectId]);
+
+  // 客户端 Agent 列表（含在线状态）
+  useEffect(() => {
+    axios.get('/api/agents')
+      .then((r) => setAgents(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setAgents([]));
+  }, []);
+
   useEffect(() => {
     axios.get('/api/projects/').then((r) => setProjects(r.data || [])).catch(() => undefined);
     axios.get('/api/chat/status').then((r) => setChatEnabled(r.data?.enabled !== false)).catch(() => undefined);
@@ -130,7 +186,45 @@ const ChatPage: React.FC = () => {
   useEffect(() => {
     if (activeId == null) return;
     loadMessages(activeId);
+    setStream(null);
   }, [activeId, loadMessages]);
+
+  // 流式：reply 开始输出时自动折叠「思考」；流式期间保持滚动到底部
+  useEffect(() => {
+    if (!stream) {
+      streamReplyStartedRef.current = false;
+      return;
+    }
+    if (stream.reply && !streamReplyStartedRef.current) {
+      streamReplyStartedRef.current = true;
+      setStreamOpen(false);
+    }
+    bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+  }, [stream]);
+
+  // 静默刷新（不触发加载态）：运行中卡片的 WS 兜底对账
+  const refreshMessagesQuiet = useCallback(async (cid: number) => {
+    try {
+      const r = await axios.get(`/api/chat/conversations/${cid}/messages`, { params: { limit: 200 } });
+      setMessages(r.data.items || []);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // 存在「运行中/生成中」卡片时，每 5s 静默对账一次（WS 断线/丢事件时卡片仍会收敛）
+  useEffect(() => {
+    if (activeId == null) return undefined;
+    const hasActive = messages.some((m) => (m.cards || []).some((c) => {
+      const t = String(c.type || '');
+      const s = String(c.status || '');
+      return (t === 'run' && (s === 'running' || s === 'paused'))
+        || (t === 'draft_set' && (s === 'generating' || s === 'queued'));
+    }));
+    if (!hasActive) return undefined;
+    const timer = window.setInterval(() => { refreshMessagesQuiet(activeId); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeId, messages, refreshMessagesQuiet]);
 
   // WS：实时消息与卡片更新；断线重连后 REST 补偿
   useEffect(() => {
@@ -143,6 +237,7 @@ const ChatPage: React.FC = () => {
         const data = JSON.parse(ev.data);
         if (data.type === 'message.created' || data.type === 'message.updated') {
           const msg = data.message as ChatMessage;
+          if (msg.role === 'assistant') setStream(null); // 终稿落库 → 结束流式预览
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === msg.id);
             if (idx >= 0) {
@@ -154,6 +249,26 @@ const ChatPage: React.FC = () => {
           });
         } else if (data.type === 'message.deleted') {
           setMessages((prev) => prev.filter((m) => m.id !== data.message_id));
+        } else if (data.type === 'message.stream_start') {
+          streamReplyStartedRef.current = false;
+          setStream({ targetId: (data.target_message_id as number) ?? null, thinking: '', reply: '' });
+          setStreamOpen(true);
+        } else if (data.type === 'message.stream') {
+          const channel = String(data.channel || '');
+          const delta = String(data.delta || '');
+          if (!delta) return;
+          setStream((prev) => {
+            if (!prev) {
+              return {
+                targetId: (data.target_message_id as number) ?? null,
+                thinking: channel === 'thinking' ? delta : '',
+                reply: channel === 'reply' ? delta : '',
+              };
+            }
+            return channel === 'thinking'
+              ? { ...prev, thinking: prev.thinking + delta }
+              : { ...prev, reply: prev.reply + delta };
+          });
         }
       } catch {
         /* ignore */
@@ -424,7 +539,13 @@ const ChatPage: React.FC = () => {
     }
     try {
       const r = await axios.get('/api/testcases/search', {
-        params: { project_id: conv.project_id, q, page: 1, size: 20 },
+        params: {
+          project_id: conv.project_id,
+          q,
+          page: 1,
+          size: 20,
+          case_kind: conv.case_kind === 'api' ? 'api' : 'ui',
+        },
       });
       setRefOptions(r.data.items || []);
     } catch {
@@ -581,6 +702,11 @@ const ChatPage: React.FC = () => {
       const result = (card.result as { passed?: number; failed?: number } | null) || null;
       const failures = (card.failures as Array<Record<string, any>>) || [];
       const caseTitles = (card.case_titles as string[]) || [];
+      const envName = (card.environment_name as string) || '';
+      const envUrl = (card.environment_url as string) || '';
+      const envWarning = (card.env_warning as string) || '';
+      const elapsed = typeof card.elapsed_s === 'number' ? (card.elapsed_s as number) : undefined;
+      const current = (card.current as string) || '';
       return (
         <div className={styles.card} key={idx}>
           <div className={styles.cardHeader}>
@@ -589,13 +715,24 @@ const ChatPage: React.FC = () => {
               <Tag size="small" color={card.mode === 'client' ? 'purple' : 'arcoblue'}>
                 {card.mode === 'client' ? `客户端 ${card.agent_name || ''}` : '服务端'}
               </Tag>
+              {envName ? (
+                <span title={envUrl}>
+                  <Tag size="small" color="gray">环境 {envName}</Tag>
+                </span>
+              ) : null}
               <Tag size="small" color={tag.color}>{tag.text}</Tag>
             </div>
             <Text type="secondary" style={{ fontSize: 12 }}>
               {(progress.done ?? 0)}/{progress.total ?? caseTitles.length} 用例
+              {status === 'running' && elapsed != null ? ` · 已用 ${elapsed}s` : ''}
               {result ? ` · 通过 ${result.passed ?? 0} · 失败 ${result.failed ?? 0}` : ''}
             </Text>
           </div>
+          {envWarning ? (
+            <div style={{ fontSize: 12, color: '#d97706', marginBottom: 6, lineHeight: 1.6 }}>
+              ⚠ {envWarning}
+            </div>
+          ) : null}
           {status === 'running' && (
             <Progress
               percent={progress.total ? Math.round(((progress.done ?? 0) / progress.total) * 100) : 0}
@@ -603,6 +740,9 @@ const ChatPage: React.FC = () => {
               style={{ marginBottom: 8 }}
             />
           )}
+          {status === 'running' && current ? (
+            <div className={styles.draftSteps} style={{ marginBottom: 6 }}>当前：{current}</div>
+          ) : null}
           {caseTitles.length > 0 && (
             <div className={styles.draftSteps}>{caseTitles.map((t) => `· ${t}`).join('\n')}</div>
           )}
@@ -612,11 +752,11 @@ const ChatPage: React.FC = () => {
                 <div className={styles.changeItem} key={i}>
                   <Text style={{ fontSize: 13 }}>{String(f.case_title || '')}</Text>
                   <div className={styles.draftSteps}>
-                    失败步骤：{String(f.step || '（未记录）')}
+                    失败步骤：{String(f.step || '（未记录）').slice(0, 500)}
                     {(f.console as string[])?.length ? `\n${(f.console as string[]).join('\n')}` : ''}
                   </div>
                   {f.screenshot_url ? (
-                    <a href={String(f.screenshot_url)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+                    <a href={screenshotHref(f.screenshot_url)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
                       查看失败截图
                     </a>
                   ) : null}
@@ -670,7 +810,7 @@ const ChatPage: React.FC = () => {
                 <div className={styles.draftSteps}>{((c.console as string[]) || []).slice(0, 3).join('\n')}</div>
               )}
               {c.screenshot_url ? (
-                <a href={String(c.screenshot_url)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+                <a href={screenshotHref(c.screenshot_url)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
                   查看失败截图
                 </a>
               ) : null}
@@ -758,14 +898,103 @@ const ChatPage: React.FC = () => {
           </div>
         ) : (
           <>
+            {/* 执行上下文选择：项目 → 用例类型 → 环境 → 客户端（执行默认使用所选环境与客户端） */}
+            <div className={styles.ctxBar}>
+              <span className={styles.ctxLabel}>项目</span>
+              <Select
+                size="small"
+                style={{ width: 150 }}
+                value={activeConv?.project_id ?? undefined}
+                placeholder="选择项目"
+                options={projects.map((p) => ({ label: p.name, value: p.id }))}
+                onChange={(v) => patchConversation({ project_id: v })}
+              />
+              <span className={styles.ctxLabel}>用例类型</span>
+              <Radio.Group
+                type="button"
+                size="small"
+                value={(activeConv?.case_kind as string) || 'ui'}
+                onChange={(v) => patchConversation({ case_kind: v })}
+              >
+                <Radio value="ui">UI 用例</Radio>
+                <Radio value="api">接口用例</Radio>
+              </Radio.Group>
+              <span className={styles.ctxLabel}>环境</span>
+              <Select
+                size="small"
+                style={{ width: 190 }}
+                value={(activeConv?.environment_id as number) ?? undefined}
+                placeholder="默认环境"
+                options={envs.map((e) => ({
+                  label: `${e.name}${e.is_default ? '（默认）' : ''}`,
+                  value: e.id,
+                }))}
+                onChange={(v) => patchConversation({ environment_id: v })}
+                allowClear
+                onClear={() => patchConversation({ environment_id: -1 })}
+              />
+              <span className={styles.ctxLabel}>客户端</span>
+              <Select
+                size="small"
+                style={{ width: 190 }}
+                value={(activeConv?.agent_id as number) ?? 0}
+                options={[
+                  { label: '服务端', value: 0 },
+                  ...agents.map((a) => ({
+                    label: `${a.name}${a.status === 'online' ? '' : '（离线）'}`,
+                    value: a.id,
+                  })),
+                ]}
+                onChange={(v) => patchConversation({ agent_id: v === 0 ? -1 : v })}
+              />
+            </div>
             <div className={styles.messages}>
               {loadingMsgs && <Spin style={{ display: 'block', margin: '12px auto' }} />}
               {messages.map((m) => (
                 <div className={`${styles.msgRow} ${m.role === 'user' ? styles.user : ''}`} key={m.id}>
                   <div style={{ maxWidth: '76%' }}>
-                    <div className={`${styles.bubble} ${m.role === 'user' ? styles.userBubble : styles.assistantBubble}`}>
-                      {m.content}
-                    </div>
+                    {(() => {
+                      const live = stream && stream.targetId === m.id ? stream : null;
+                      const thinkingText = live ? live.thinking : (m.role === 'assistant' ? m.thinking : null);
+                      const showThinking = m.role === 'assistant' && (thinkingText || (live && !live.reply));
+                      return (
+                        <>
+                          {showThinking ? (
+                            <details
+                              className={styles.thinking}
+                              {...(live
+                                ? {
+                                    open: streamOpen,
+                                    onToggle: (e: React.SyntheticEvent<HTMLDetailsElement>) =>
+                                      setStreamOpen(e.currentTarget.open),
+                                  }
+                                : {})}
+                            >
+                              <summary className={styles.thinkingSummary}>
+                                <IconRobot />
+                                {live ? (live.reply ? '思考过程' : '思考中…') : '思考过程'}
+                              </summary>
+                              <div className={styles.thinkingBody}>
+                                {thinkingText}
+                                {live && !live.reply ? <span className={styles.cursor}>▍</span> : null}
+                              </div>
+                            </details>
+                          ) : null}
+                          {live ? (
+                            live.reply ? (
+                              <div className={`${styles.bubble} ${styles.assistantBubble}`}>
+                                {live.reply}
+                                <span className={styles.cursor}>▍</span>
+                              </div>
+                            ) : null
+                          ) : (
+                            <div className={`${styles.bubble} ${m.role === 'user' ? styles.userBubble : styles.assistantBubble}`}>
+                              {m.content}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                     {m.role === 'user' && (m.refs || []).filter((r: any) => r && r.type !== 'file').length > 0 && (
                       <div className={styles.msgTools} style={{ justifyContent: 'flex-end' }}>
                         {(m.refs || [])
@@ -799,6 +1028,34 @@ const ChatPage: React.FC = () => {
                   </div>
                 </div>
               ))}
+              {stream && stream.targetId == null && (
+                <div className={styles.msgRow}>
+                  <div style={{ maxWidth: '76%' }}>
+                    {(stream.thinking || !stream.reply) && (
+                      <details
+                        className={styles.thinking}
+                        open={streamOpen}
+                        onToggle={(e: React.SyntheticEvent<HTMLDetailsElement>) => setStreamOpen(e.currentTarget.open)}
+                      >
+                        <summary className={styles.thinkingSummary}>
+                          <IconRobot />
+                          {stream.reply ? '思考过程' : '思考中…'}
+                        </summary>
+                        <div className={styles.thinkingBody}>
+                          {stream.thinking}
+                          {!stream.reply ? <span className={styles.cursor}>▍</span> : null}
+                        </div>
+                      </details>
+                    )}
+                    {stream.reply ? (
+                      <div className={`${styles.bubble} ${styles.assistantBubble}`}>
+                        {stream.reply}
+                        <span className={styles.cursor}>▍</span>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              )}
               <div ref={bottomRef} />
             </div>
 

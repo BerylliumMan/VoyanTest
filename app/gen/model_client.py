@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import re
 import logging
@@ -179,11 +180,16 @@ async def call_model(
     messages: list,
     temperature: float | None = None,
     stream_callback=None,
+    reasoning_callback=None,
     agent_type: str | None = None,
     agent_id: int | None = None,
     enable_thinking: bool | None = None,
 ) -> str:
-    """Call the AI model using uitest-work's AI config / AgentDefinition overrides."""
+    """Call the AI model using uitest-work's AI config / AgentDefinition overrides.
+
+    ``stream_callback``：流式内容增量回调（同步或 async 均可）；``reasoning_callback``：思考增量回调
+    （reasoning_content / reasoning 字段，存在时逐增量回调）。
+    """
     config = await _load_ai_config(agent_type=agent_type, agent_id=agent_id)
 
     api_url = config['api_base'].rstrip('/')
@@ -233,12 +239,25 @@ async def call_model(
                                     break
                                 try:
                                     data = json.loads(data_str)
-                                    chunk = data.get('choices', [{}])[0].get('delta', {}).get('content', '')
-                                    if chunk:
-                                        full_content.append(chunk)
-                                        stream_callback(chunk)
                                 except json.JSONDecodeError:
                                     continue
+                                choices = data.get('choices') or []
+                                delta = (choices[0].get('delta') or {}) if choices else {}
+                                chunk = delta.get('content') or ''
+                                reasoning = (
+                                    delta.get('reasoning_content')
+                                    or delta.get('reasoning')
+                                    or ''
+                                )
+                                if reasoning and reasoning_callback:
+                                    result = reasoning_callback(reasoning)
+                                    if inspect.isawaitable(result):
+                                        await result
+                                if chunk:
+                                    full_content.append(chunk)
+                                    result = stream_callback(chunk)
+                                    if inspect.isawaitable(result):
+                                        await result
                 return _strip_br(''.join(full_content))
             except Exception as exc:
                 if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
