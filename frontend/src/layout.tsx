@@ -273,9 +273,13 @@ function PageLayout() {
                       <Route exact path="/">
                         <Redirect to="/dashboard" />
                       </Route>
-                      <Route path="*">
-                        <Redirect to="/dashboard" />
-                      </Route>
+                      {/* 用户信息加载完成前不做兜底重定向：否则硬加载 admin 专属页
+                          （如 /settings、/audit-logs）会因角色未知被过滤而误跳仪表盘 */}
+                      {userInfo?.role && (
+                        <Route path="*">
+                          <Redirect to="/dashboard" />
+                        </Route>
+                      )}
                     </Switch>
                   </CSSTransition>
                 </TransitionGroup>

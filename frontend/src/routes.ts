@@ -1,5 +1,5 @@
 import auth, { AuthParams, UserPermission } from '@/utils/authentication';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 
 export type IRoute = AuthParams & {
   name: string;
@@ -24,6 +24,10 @@ export const routes: IRoute[] = [
     key: 'dashboard',
   },
   {
+    name: 'menu.chat',
+    key: 'chat',
+  },
+  {
     name: 'menu.projects',
     key: 'projects',
   },
@@ -40,10 +44,6 @@ export const routes: IRoute[] = [
         key: 'gen-history',
       },
     ],
-  },
-  {
-    name: 'menu.chat',
-    key: 'chat',
   },
   {
     name: '分析详情',
@@ -88,33 +88,6 @@ export const routes: IRoute[] = [
     ignore: true,
   },
   {
-    name: 'menu.reports',
-    key: 'reports',
-  },
-  {
-    name: 'menu.agents',
-    key: 'agents',
-  },
-  {
-    name: '客户端详情',
-    key: 'agent-detail',
-    path: '/agents/:id',
-    ignore: true,
-  },
-  {
-    name: 'menu.agent_definitions',
-    key: 'agent_definitions',
-  },
-  {
-    name: 'menu.audit_logs',
-    key: 'audit-logs',
-    requiredPermissions: [{ resource: 'menu.audit_logs', actions: ['admin'] }],
-  },
-  {
-    name: 'menu.recordings',
-    key: 'recordings',
-  },
-  {
     name: 'menu.api_test',
     key: 'api_test',
     children: [
@@ -140,6 +113,33 @@ export const routes: IRoute[] = [
     path: '/api_test',
     exact: true,
     ignore: true,
+  },
+  {
+    name: 'menu.reports',
+    key: 'reports',
+  },
+  {
+    name: 'menu.agents',
+    key: 'agents',
+  },
+  {
+    name: '客户端详情',
+    key: 'agent-detail',
+    path: '/agents/:id',
+    ignore: true,
+  },
+  {
+    name: 'menu.agent_definitions',
+    key: 'agent_definitions',
+  },
+  {
+    name: 'menu.audit_logs',
+    key: 'audit-logs',
+    requiredPermissions: [{ resource: 'menu.audit_logs', actions: ['admin'] }],
+  },
+  {
+    name: 'menu.recordings',
+    key: 'recordings',
   },
   {
     name: 'menu.agent_runs',
@@ -217,12 +217,15 @@ const useRoute = (userPermission: UserPermission): [IRoute[], string] => {
     return arr;
   };
 
-  const [permissionRoute, setPermissionRoute] = useState(routes);
-
-  useEffect(() => {
-    const newRoutes = filterRoute(routes);
-    setPermissionRoute(newRoutes);
-  }, [JSON.stringify(userPermission)]);
+  // 之前用 useState + useEffect 过滤：userInfo 到达的瞬间存在一拍「角色已生效、
+  // 权限路由尚未重算」的竞态 —— 兜底 Redirect（path="*"）会在这一拍把硬加载的
+  // admin 专属页（/settings、/audit-logs）误跳仪表盘（2026-10-10 实测定位）。
+  // 改为 useMemo 同步派生，消除竞态。
+  const permissionRoute = useMemo(
+    () => filterRoute(routes),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [JSON.stringify(userPermission)]
+  );
 
   const defaultRoute = useMemo(() => {
     const first = permissionRoute.find(r => !r.ignore);
