@@ -120,3 +120,19 @@ def test_active_draft_digest_picks_latest_unimported():
     digest = _active_draft_digest([m1, m2])
     assert digest is not None and "new" in digest and "draft_id=1" in digest and "登录失败" in digest
     assert _active_draft_digest([m1]) is None  # 已导入的不算
+
+
+@pytest.mark.asyncio
+async def test_settings_block_functional_kind():
+    """工作类型=功能用例：注入块说明手工语义（不可自动执行）。"""
+    conv = FakeConversation(case_kind="functional")
+    block = await orch._conversation_settings_block(None, conv)
+    assert block is not None
+    assert "功能用例" in block and "手工" in block and "run_case" in block
+
+
+@pytest.mark.asyncio
+async def test_settings_block_ui_default():
+    conv = FakeConversation(case_kind="ui")
+    block = await orch._conversation_settings_block(None, conv)
+    assert "UI 自动化用例" in block

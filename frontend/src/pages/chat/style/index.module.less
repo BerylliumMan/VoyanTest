@@ -1,6 +1,8 @@
 .page {
   display: flex;
-  height: calc(100vh - 60px);
+  /* 视口高度扣除页面框架：60 顶栏 + 18 内容上边距 + 24 面包屑 + 16 面包屑下边距 + 40 页脚。
+     此前用 calc(100vh - 60px) 未计面包屑/页脚，1920×1080 下整页出现滚动条（2026-10-14 实测修复）。 */
+  height: calc(100vh - 158px);
   background: var(--color-bg-2, #fff);
   overflow: hidden;
 }

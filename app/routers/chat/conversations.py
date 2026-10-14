@@ -57,7 +57,7 @@ class ConversationCreate(BaseModel):
     project_id: int
     assistant_agent_id: Optional[int] = None
     refs: Optional[list] = None
-    case_kind: Optional[str] = None  # ui | api（默认 ui）
+    case_kind: Optional[str] = None  # ui | functional | api（默认 ui）
     environment_id: Optional[int] = None
     agent_id: Optional[int] = None
 
@@ -248,8 +248,8 @@ async def create_conversation(
         assistant_agent_id = default_agent.id if default_agent else None
 
     case_kind = (payload.case_kind or "ui").lower()
-    if case_kind not in ("ui", "api"):
-        raise HTTPException(400, "case_kind 必须为 ui|api")
+    if case_kind not in ("ui", "functional", "api"):
+        raise HTTPException(400, "case_kind 必须为 ui|functional|api")
     environment_id = payload.environment_id
     if environment_id is None:
         environment_id = await _default_environment_id(db, payload.project_id)
@@ -335,8 +335,8 @@ async def patch_conversation(
         fields["refs"] = valid or None
     if payload.case_kind is not None:
         kind = payload.case_kind.lower()
-        if kind not in ("ui", "api"):
-            raise HTTPException(400, "case_kind 必须为 ui|api")
+        if kind not in ("ui", "functional", "api"):
+            raise HTTPException(400, "case_kind 必须为 ui|functional|api")
         fields["case_kind"] = kind
     if payload.environment_id is not None:
         if payload.environment_id == -1:

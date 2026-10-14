@@ -22,7 +22,7 @@ class ChatConversation(Base):
     # 对话助手 Agent（assistant 类型；默认取活跃「测试助手」）
     assistant_agent_id = Column(Integer, ForeignKey("agent_definitions.id"), nullable=True)
     # 执行上下文（对话页顶部选择：工作类型 / 执行环境 / 客户端；执行动作默认使用）
-    case_kind = Column(String(16), nullable=True, default="ui")  # ui | api
+    case_kind = Column(String(16), nullable=True, default="ui")  # ui | functional | api
     environment_id = Column(Integer, nullable=True)  # environments.id
     agent_id = Column(Integer, nullable=True)  # agents.id（在线客户端；空 = 服务端形态）
     # active / archived

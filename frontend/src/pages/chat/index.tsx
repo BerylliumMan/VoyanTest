@@ -117,6 +117,14 @@ const ChatPage: React.FC = () => {
   const [pcClient, setPcClient] = useState<{ agent_id?: number | null; agent_name?: string | null } | null>(null);
   const [refOptions, setRefOptions] = useState<Array<{ id: number; name: string }>>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const msgListRef = useRef<HTMLDivElement | null>(null);
+  // 滚动只作用于消息容器自身：scrollIntoView 会连带滚动外层容器，把顶部
+  // 执行上下文栏（项目/用例类型/环境）滚出可视区（2026-10-14 实测修复）
+  const scrollMsgListToBottom = useCallback((smooth: boolean) => {
+    const el = msgListRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+  }, []);
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -222,7 +230,7 @@ const ChatPage: React.FC = () => {
       streamReplyStartedRef.current = true;
       setStreamOpen(false);
     }
-    bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+    scrollMsgListToBottom(false);
   }, [stream]);
 
   // 静默刷新（不触发加载态）：运行中卡片的 WS 兜底对账
@@ -330,7 +338,7 @@ const ChatPage: React.FC = () => {
   }, [activeId, loadMessages]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    scrollMsgListToBottom(true);
   }, [messages.length]);
 
   // US6：/chat?case_id= 或 ?batch_id= → 新建对话（绑定项目 + 注入引用 + 预填指令）
@@ -580,7 +588,8 @@ const ChatPage: React.FC = () => {
           q,
           page: 1,
           size: 20,
-          case_kind: conv.case_kind === 'api' ? 'api' : 'ui',
+          case_kind:
+            conv.case_kind === 'api' ? 'api' : conv.case_kind === 'functional' ? 'functional' : 'ui',
         },
       });
       setRefOptions(r.data.items || []);
@@ -1041,6 +1050,7 @@ const ChatPage: React.FC = () => {
                 onChange={(v) => patchConversation({ case_kind: v })}
               >
                 <Radio value="ui">UI 用例</Radio>
+                <Radio value="functional">功能用例</Radio>
                 <Radio value="api">接口用例</Radio>
               </Radio.Group>
               <span className={styles.ctxLabel}>环境</span>
@@ -1072,7 +1082,7 @@ const ChatPage: React.FC = () => {
                 onChange={(v) => patchConversation({ agent_id: v === 0 ? -1 : v })}
               />
             </div>
-            <div className={styles.messages}>
+            <div className={styles.messages} ref={msgListRef}>
               {loadingMsgs && <Spin style={{ display: 'block', margin: '12px auto' }} />}
               {messages.map((m) => (
                 <div className={`${styles.msgRow} ${m.role === 'user' ? styles.user : ''}`} key={m.id}>

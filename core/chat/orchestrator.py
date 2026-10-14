@@ -189,6 +189,11 @@ async def _conversation_settings_block(db, conversation) -> Optional[str]:
         kind = (getattr(conversation, "case_kind", None) or "ui").lower()
         if kind == "api":
             parts.append("工作类型：接口用例（本对话执行接口用例；接口用例的生成请在「接口测试」页完成）")
+        elif kind == "functional":
+            parts.append(
+                "工作类型：功能用例（本对话生成/修改功能用例；功能用例为手工用例、不支持自动执行——"
+                "用户要求执行功能用例时不要输出 run_case，改为说明其只能手工执行或建议改用 UI 自动化用例）"
+            )
         else:
             parts.append("工作类型：UI 自动化用例")
         env_id = getattr(conversation, "environment_id", None)

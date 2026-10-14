@@ -321,6 +321,15 @@ async def start_run(
     if not cases:
         return None, "没有可执行的用例", None
 
+    # 功能用例为手工用例：不支持自动执行（与页面语义一致，给出可操作提示）
+    func_ids = [c.id for c in cases if (getattr(c, "case_kind", None) or "ui") == "functional"]
+    if func_ids:
+        ids = "、".join(f"#{i}" for i in func_ids[:5])
+        return None, (
+            f"功能用例（{ids}）为手工用例，暂不支持自动执行；"
+            "可在对话中修改或补充其步骤，或改用 UI 自动化用例执行"
+        ), None
+
     # 形态与用例类型对齐：客户端形态仅用于 UI 用例；接口用例只在服务端执行
     kinds = {(getattr(c, "case_kind", None) or "ui") for c in cases}
     if mode == "client" and "ui" not in kinds:

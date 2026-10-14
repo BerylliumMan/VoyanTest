@@ -661,3 +661,31 @@ async def test_cancel_run_reuses_stop(monkeypatch):
     # 已结束 → 拒绝
     result2, err2 = await chat_run.cancel_run(None, conversation=conv, batch_id=456, user_id=7)
     assert result2 is None and "已结束" in err2
+
+
+@pytest.mark.asyncio
+async def test_start_run_rejects_functional_case(monkeypatch):
+    """功能用例为手工用例：对话内执行明确拒绝并给出可操作提示。"""
+    conv = FakeConversation(project_id=30)
+
+    class FuncCase:
+        id = 601
+        project_id = 30
+        name = "功能用例-购物车"
+
+        case_kind = "functional"
+
+    async def active(db, cid):
+        return 0
+
+    async def get_tc(db, cid):
+        return FuncCase()
+
+    monkeypatch.setattr(chat_run, "_active_run_count", active)
+    monkeypatch.setattr(chat_run.crud, "get_test_case", get_tc)
+
+    card, err, task_id = await chat_run.start_run(
+        None, conversation=conv, case_ids=[601], mode="client", agent_id=26, user_id=7,
+    )
+    assert card is None and task_id is None
+    assert "功能用例" in err and "手工" in err and "#601" in err
