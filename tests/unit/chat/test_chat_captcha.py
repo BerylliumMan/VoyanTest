@@ -371,10 +371,11 @@ async def test_loop_prompt_includes_page_text_excerpt(monkeypatch, patch_candida
         seen_prompts.append(messages[1]["content"])
         return json.dumps({"thinking": "完成", "action": "done", "summary": "ok"}, ensure_ascii=False)
 
-    base = dict(url="http://site.local", goal="登录", username="admin", password="x")
+    base = dict(url="http://site.local", goal="登录", username="admin", password="x", vision=False)
     await run_exploration(BrowseConfig(**base), llm=_llm, browser=browser)
     assert seen_prompts, "llm 未被调用"
     p = seen_prompts[-1]
+    assert isinstance(p, str)  # vision=False → 纯文本提示
     assert "页面文本（节选" in p
     assert "保存成功" in p and "工作台" in p and "客户2号" in p
     # 交互元素（按钮）不进入文本节选（由候选列表承载）

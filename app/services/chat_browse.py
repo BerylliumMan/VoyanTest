@@ -271,6 +271,7 @@ async def _run_browse_task(
             url=url, goal=goal, username=username, password=password,
             max_steps=max_steps, timeout_s=timeout_s,
             captcha_enabled=bool(getattr(settings, "chat_browse_captcha_enabled", True)),
+            vision=bool(getattr(settings, "chat_browse_vision", True)),
         )
 
         # 浏览器后端：会话选中客户端 → 客户端浏览器（用户机器上，可见）；

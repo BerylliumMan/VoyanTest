@@ -65,3 +65,25 @@ def test_snapshot_lines_mark_hidden_and_disabled_candidates():
     assert candidates[0].visible is False
     assert candidates[1].enabled is False
     assert snapshot_has_visible_overlay('- dialog "提示" [ref=e3]') is True
+
+
+def test_extract_keeps_role_for_unnamed_elements():
+    """无名称元素保留控件角色（2026-10-14：`- textbox [ref=e13]` 曾退化为 unknown，
+    无标注表格表单页全部元素丢角色，模型无法识别输入框）。"""
+    snap = (
+        "### Snapshot\n"
+        "- generic [active] [ref=e1]:\n"
+        "  - textbox [ref=e13]\n"
+        "  - cell \"用户名：\" [ref=e11]\n"
+        "  - button \"登录\" [ref=e26] [cursor=pointer]\n"
+        "  - img [ref=e22] [cursor=pointer]\n"
+        "  - checkbox [checked] [ref=e30]\n"
+        "  - link [ref=e31]\n"
+    )
+    got = {c.ref: (c.role, c.name) for c in extract_candidates(snap)}
+    assert got["e13"] == ("textbox", "")
+    assert got["e26"] == ("button", "登录")
+    assert got["e22"][0] == "img"
+    assert got["e30"][0] == "checkbox"
+    assert got["e31"][0] == "link"
+    assert got["e1"][0] == "generic"

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     chat_browse_timeout_s: int = 300
     # - 探索/登录时的图形验证码自动识别（ddddocr；关闭=引擎拒绝 solve_captcha 动作）
     chat_browse_captcha_enabled: bool = True
+    # - 探索视觉（每轮决策附当前页面截图；deepseek-v4.1-flash 等多模态模型可直接读图，
+    #   判断布局/遮挡/验证码。关闭=纯文本快照；模型不支持图片时自动降级）
+    chat_browse_vision: bool = True
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

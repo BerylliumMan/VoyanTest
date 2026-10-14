@@ -15,6 +15,13 @@ _ROLE_NAME_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*[-*]?\s*([a-z][\w-]*)\s+['\"]([^'\"]*)['\"]",
     re.IGNORECASE,
 )
+# 无名称元素的角色识别（如 `- textbox [ref=e13]`：交互控件常无可访问名——
+# 此前只认「角色 + 引号名称」，把这类元素标成 unknown、丢失控件角色，模型无法识别
+# 输入框/按钮（2026-10-14 实测：无标注表格表单页全部元素退化为 unknown）
+_ROLE_ONLY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*[-*]?\s*([a-z][\w-]*)\s*(?:\[|:|\s*$)",
+    re.IGNORECASE,
+)
 _HIDDEN_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:aria-hidden\s*[=:]\s*['\"]?true|\bhidden\b)", re.IGNORECASE
 )
@@ -87,8 +94,13 @@ def extract_candidates(snapshot: str, *, frame_path: tuple[str, ...] = ()) -> tu
         if ref_match is None:
             continue
         role_name = _ROLE_NAME_RE.search(line)
-        role = role_name.group(1) if role_name else "unknown"
-        name = role_name.group(2).strip() if role_name else ""
+        if role_name is not None:
+            role = role_name.group(1)
+            name = role_name.group(2).strip()
+        else:
+            role_only = _ROLE_ONLY_RE.search(line)
+            role = role_only.group(1) if role_only is not None else "unknown"
+            name = ""
         candidates.append(
             LocatorCandidate(
                 ref=ref_match.group(1),

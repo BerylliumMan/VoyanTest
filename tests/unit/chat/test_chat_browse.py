@@ -6,12 +6,19 @@
 """
 import base64
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
 
 from core.chat import browse
 from core.chat.browse import BrowseConfig, build_report_materials, run_exploration
+
+# 1×1 透明 PNG（截图假实现写入用）
+_PNG_1PX = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
+    "h6FO1AAAAABJRU5ErkJggg=="
+)
 
 
 # ----------------------------
@@ -54,6 +61,13 @@ class FakeBrowser:
 
     async def screenshot(self, path):
         self.screenshots.append(path)
+        # 写一张真实小 PNG（视觉帧读取用）；1x1 透明像素即可
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(base64.b64decode(_PNG_1PX))
+        except Exception:
+            pass
         return path
 
     async def console(self, limit=20):
@@ -420,3 +434,66 @@ def test_redact_decision_secrets_reply_and_thinking():
     # 无凭据动作 → 原样返回
     d2 = redact_decision_secrets({"reply": "普通回复", "actions": []})
     assert d2["reply"] == "普通回复"
+
+
+# ----------------------------
+# 视觉：每轮决策附带当前页面截图（2026-10-14）
+# ----------------------------
+
+def test_frame_to_data_url(tmp_path):
+    path = os.path.join(tmp_path, "s.png")
+    with open(path, "wb") as fh:
+        fh.write(base64.b64decode(_PNG_1PX))
+    url = browse.frame_to_data_url(path)
+    assert url and url.startswith("data:image/jpeg;base64,")
+    assert browse.frame_to_data_url(os.path.join(tmp_path, "missing.png")) is None
+
+
+@pytest.mark.asyncio
+async def test_vision_frame_attached_each_round(patch_candidates, tmp_path):
+    patch_candidates([_candidate("e2")])
+    browser = FakeBrowser()
+    contents: list = []
+
+    async def llm(messages):
+        contents.append(messages[1]["content"])
+        return json.dumps({"thinking": "完成", "action": "done", "summary": "ok"}, ensure_ascii=False)
+
+    report = await run_exploration(_cfg(), llm=llm, browser=browser, screenshot_dir=str(tmp_path))
+    assert report["ok"] is True and contents
+    assert isinstance(contents[0], list) and len(contents[0]) >= 2
+    assert contents[0][0]["type"] == "text" and contents[0][1]["type"] == "image_url"
+    assert str(contents[0][1]["image_url"]["url"]).startswith("data:image/jpeg;base64,")
+
+
+@pytest.mark.asyncio
+async def test_vision_disabled_text_only(patch_candidates, tmp_path):
+    patch_candidates([_candidate("e2")])
+    browser = FakeBrowser()
+    seen: list = []
+
+    async def llm(messages):
+        seen.append(messages[1]["content"])
+        return json.dumps({"thinking": "完成", "action": "done", "summary": "ok"}, ensure_ascii=False)
+
+    await run_exploration(_cfg(vision=False), llm=llm, browser=browser, screenshot_dir=str(tmp_path))
+    assert isinstance(seen[0], str) and "候选" in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_vision_image_error_falls_back_text_only(patch_candidates, tmp_path):
+    """换到不支持图片的模型时：首轮带图失败 → 纯文本降级重试一次，其余轮次关闭视觉。"""
+    patch_candidates([_candidate("e2")])
+    browser = FakeBrowser()
+    contents: list = []
+
+    async def llm(messages):
+        content = messages[1]["content"]
+        contents.append(content)
+        if isinstance(content, list):
+            raise RuntimeError("image_url unsupported by this model")
+        return json.dumps({"thinking": "完成", "action": "done", "summary": "ok"}, ensure_ascii=False)
+
+    report = await run_exploration(_cfg(), llm=llm, browser=browser, screenshot_dir=str(tmp_path))
+    assert report["ok"] is True and report["stopped_reason"] == "done"
+    assert isinstance(contents[0], list) and isinstance(contents[1], str)

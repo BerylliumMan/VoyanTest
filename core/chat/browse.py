@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -60,6 +61,10 @@ class BrowseConfig:
     max_steps: int = _DEFAULT_MAX_STEPS
     timeout_s: int = _DEFAULT_TIMEOUT_S
     captcha_enabled: bool = True
+    # 视觉：每轮决策附当前页面截图（模型可直接读到布局/弹窗/验证码；2026-10-14 实测
+    # deepseek-v4.1-flash 多模态可用）。关闭后退回纯文本快照。
+    vision: bool = True
+    vision_max_width: int = 1152
 
 
 EXPLORER_SYSTEM_PROMPT = """你是 VoyanTest 的「网页探索器」：在真实浏览器里以纯 GUI 黑盒方式操作网页，产出可供测试用例生成使用的观察报告。
@@ -70,6 +75,9 @@ A. 探索性目标（如「查看主要功能」）：自行规划浏览路径�
 B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设置页」「测试设置页留空保存的校验提示」）：严格按描述顺序逐步操作；其中「测试/验证/观察」类要求，在安全准则内执行代表性操作并观察真实结果（提示文案、跳转、校验状态、数据变化），把观察到的真实行为记录为功能点（note/features）；描述执行完成后，再补充观察当前页面与相关入口；未按描述验证到的点，在 summary 中如实说明（不要脑补结果）。
 
 【行为准则 — 严格遵守】
+0.（视觉，若随消息附有页面截图）截图展示的是当前页面真实渲染结果：可用于判断布局、
+   弹窗/遮挡、加载是否完成、图形验证码等内容；但元素动作仍必须使用【候选元素】列表中的 ref，
+   截图不作为元素定位依据（截图与快照冲突时，以快照候选为准）。
 1. 只能操作【候选元素】列表中真实存在的元素（用其 ref）；禁止编造元素、禁止猜测选择器；
 2. 禁止用 JS 注入或修改 URL 来改变页面状态；goto 只允许回到起始地址或站内已访问过的地址；
 3. 禁止破坏性操作：点击名称含「退出/注销/删除/移除/清空/支付/付款/下单/结算/购买」的元素一律不做，改为记录并跳过；
@@ -83,6 +91,8 @@ B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设�
    输入框为空）：「必须先重新填写账号与密码，再 solve_captcha（refresh=true），最后点击登录」——
    禁止只改验证码就直接提交。算术型验证码（图片是「1+2=?」这类）系统会自动计算答案，同样用 solve_captcha；
    若系统识别失败（步骤会显示失败原因），先 refresh=true 重试；仍失败则用 note 记录该情况并继续其他步骤；
+   若附有页面截图且验证码清晰可读：也可以直接用 fill 把读到的字符填进验证码输入框（截图可直接读图）；
+   不确定或读不清时优先 solve_captcha（本地识别确定性更高）；
 6. 浏览策略：优先点击顶部导航 / 侧边菜单等入口，逐个访问主要功能页面；每到一个新页面，用 note 记录「页面标题：主要功能点」；
 7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；动作（点击/提交/跳转）完成后系统会自动给出
    最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
@@ -465,6 +475,31 @@ def _cand_label(ref: str | None, candidates) -> Optional[str]:
     return f"{cand.role}:{label}" if label else cand.role
 
 
+def frame_to_data_url(path: str, max_width: int = 1152, quality: int = 72) -> Optional[str]:
+    """截图文件 → data URL（JPEG 压缩降 token；PIL 不可用时原样 base64 兜底）。"""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        import io as _io
+
+        from PIL import Image
+
+        im = Image.open(_io.BytesIO(raw)).convert("RGB")
+        if im.width > max_width:
+            im = im.resize((max_width, int(im.height * max_width / im.width)), Image.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, format="JPEG", quality=quality)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        mime = "image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+        return f"data:{mime};base64," + base64.b64encode(raw).decode()
+
+
 def _masked_value(action: dict, cfg: BrowseConfig) -> Optional[str]:
     value = action.get("value")
     if value is None:
@@ -641,6 +676,22 @@ async def run_exploration(
             "page_text": _snapshot_text_excerpt(snapshot or ""),
         }
 
+    vision_state = {"on": bool(cfg.vision)}
+
+    async def _vision_frame() -> Optional[str]:
+        """当前页面截图 → data URL（视觉决策用）；失败静默返回 None。"""
+        if screenshot_dir:
+            path = os.path.join(screenshot_dir, "_live_frame.png")
+        else:
+            path = os.path.join(tempfile.gettempdir(), f"vt_browse_live_{os.getpid()}.png")
+        try:
+            shot = await browser.screenshot(path)
+        except Exception:
+            return None
+        if not shot:
+            return None
+        return frame_to_data_url(str(shot), max_width=int(cfg.vision_max_width or 1152))
+
     try:
         if owns_browser:
             browser = ServerBrowser()
@@ -692,21 +743,48 @@ async def run_exploration(
                 journal=journal, visited=pages,
                 page_text=obs.get("page_text") or "",
             )
-            try:
-                raw = await asyncio.wait_for(
+            frame = await _vision_frame() if vision_state["on"] else None
+            user_content = prompt
+            if frame:
+                user_content = [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": frame}},
+                ]
+
+            async def _call_llm(content):
+                return await asyncio.wait_for(
                     llm([
                         {"role": "system", "content": EXPLORER_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": content},
                     ]),
                     timeout=max(20, int(deadline - time.time())),
                 )
+
+            try:
+                raw = await _call_llm(user_content)
             except asyncio.TimeoutError:
                 stopped = "timeout"
                 break
             except Exception as exc:
-                report["error"] = f"探索模型调用失败: {str(exc)[:160]}"
-                stopped = "error"
-                break
+                if frame is not None:
+                    # 网关/模型不支持图片（换过模型）→ 纯文本降级重试一次，其余轮次关闭视觉
+                    logger.warning(
+                        "browse vision call failed, fallback to text-only: %s", str(exc)[:200]
+                    )
+                    vision_state["on"] = False
+                    try:
+                        raw = await _call_llm(prompt)
+                    except asyncio.TimeoutError:
+                        stopped = "timeout"
+                        break
+                    except Exception as exc2:
+                        report["error"] = f"探索模型调用失败: {str(exc2)[:160]}"
+                        stopped = "error"
+                        break
+                else:
+                    report["error"] = f"探索模型调用失败: {str(exc)[:160]}"
+                    stopped = "error"
+                    break
 
             decision = parse_decision(raw)
             if decision is None:
