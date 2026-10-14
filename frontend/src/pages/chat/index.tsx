@@ -80,6 +80,7 @@ const DRAFT_STATUS_TAG: Record<string, { color: string; text: string }> = {
   partial: { color: 'orange', text: '部分导入' },
   imported: { color: 'gray', text: '已导入' },
   failed: { color: 'red', text: '生成失败' },
+  cancelled: { color: 'gray', text: '已停止' },
 };
 
 // 失败截图链接：统一为站点绝对路径（相对路径在不同路由深度下解析位置不一致）
@@ -607,6 +608,22 @@ const ChatPage: React.FC = () => {
     }
   };
 
+  // 停止进行中的任务（浏览器探索 / 用例生成）
+  const stopTask = async (kind: 'browse' | 'generate', key?: string | null) => {
+    if (activeId == null) return;
+    try {
+      const r = await axios.post(`/api/chat/conversations/${activeId}/stop`, {
+        kind,
+        key: key || undefined,
+      });
+      if ((r.data?.total || 0) > 0) Message.success('已停止');
+      else Message.info('没有进行中的任务');
+      await refreshMessagesQuiet(activeId);
+    } catch (e: any) {
+      Message.error(e?.response?.data?.detail || '停止失败');
+    }
+  };
+
   const renderCard = (card: CardPayload, idx: number, mid: number) => {
     if (card.type === 'draft_set') {
       const status = card.status || 'draft';
@@ -627,7 +644,12 @@ const ChatPage: React.FC = () => {
             <Text type="secondary" style={{ fontSize: 12 }}>{items.length} 条</Text>
           </div>
           {status === 'generating' && (
-            <Progress percent={card.progress || 0} size="small" style={{ marginBottom: 8 }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <Progress percent={card.progress || 0} size="small" style={{ flex: 1, marginBottom: 0 }} />
+              <Button size="small" onClick={() => stopTask('generate', card.gen_session_id as string)}>
+                停止
+              </Button>
+            </div>
           )}
           {status === 'failed' && (
             <Text type="error" style={{ fontSize: 12 }}>{card.error || '生成失败'}</Text>
@@ -677,6 +699,7 @@ const ChatPage: React.FC = () => {
         running: { color: 'arcoblue', text: '探索中' },
         done: { color: 'green', text: '已完成' },
         failed: { color: 'red', text: '失败' },
+        stopped: { color: 'gray', text: '已停止' },
       };
       const tag = tagMap[status] || { color: 'gray', text: status };
       const pages = (card.pages as Array<Record<string, any>>) || [];
@@ -718,7 +741,14 @@ const ChatPage: React.FC = () => {
               ))}
             </div>
           )}
-          {status === 'running' && <Text type="secondary" style={{ fontSize: 12 }}>探索在后台进行，完成后会自动基于观察结果生成用例草稿</Text>}
+          {status === 'running' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>探索在后台进行，完成后会自动基于观察结果生成用例草稿</Text>
+              <Button size="small" onClick={() => stopTask('browse', card.browse_id as string)}>
+                停止探索
+              </Button>
+            </div>
+          )}
           {card.summary ? <div className={styles.browseSummary}>{card.summary as string}</div> : null}
           {features.length > 0 && (
             <div className={styles.browseFeatures}>

@@ -250,12 +250,17 @@ async def _watch_generation(conversation_id: int, session_id: str, *, max_iterat
                 if status == "completed":
                     tcs = await crud.list_gen_test_cases(db, session_id)
                     card = {**card, "status": "draft", "progress": 100, "items": [_draft_item(tc) for tc in tcs]}
+                elif status == "cancelled":
+                    # 用户「停止」：卡片标记为已停止（区别于生成失败）
+                    card = {**card, "status": "cancelled", "error": None}
                 else:
                     card = {**card, "status": "failed", "error": (record.error_message or status)[:500]}
                 await _write_card(db, msg, card)
                 await emit(conversation_id, {
                     "type": "task.updated", "task_id": session_id, "kind": "generate",
-                    "status": "done" if status == "completed" else "failed",
+                    "status": "done" if status == "completed" else (
+                        "cancelled" if status == "cancelled" else "failed"
+                    ),
                 })
                 return
         except Exception:

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # 后台任务强引用（防 GC）
 _TASKS: set[asyncio.Task] = set()
+# 进行中的探索任务索引：browse_id -> (conversation_id, task)——供「停止」按对话定位
+_TASK_INDEX: dict[str, tuple[int, asyncio.Task]] = {}
 
 
 def _reports_root() -> str:
@@ -162,6 +164,7 @@ async def _run_browse_task(
         cfg = BrowseConfig(
             url=url, goal=goal, username=username, password=password,
             max_steps=max_steps, timeout_s=timeout_s,
+            captcha_enabled=bool(getattr(settings, "chat_browse_captcha_enabled", True)),
         )
 
         # 浏览器后端：会话选中客户端 → 客户端浏览器（用户机器上，可见）；
@@ -301,6 +304,60 @@ def _step_label(step: dict) -> str:
     return seg[:200]
 
 
+async def _mark_browse_stopped(conversation_id: int, browse_id: str) -> None:
+    """回写卡片：停止状态（先写卡片再取消任务，避免卡片停在 running）。"""
+    from app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        msg = await _wait_card_message(db, conversation_id, browse_id)
+        if msg is None:
+            return
+        _m, card = await _find_card_message(db, conversation_id, browse_id)
+        if card is None or card.get("status") != "running":
+            return
+        new_card = dict(card)
+        new_card["status"] = "stopped"
+        new_card["stopped_reason"] = "stopped"
+        base = str(new_card.get("summary") or "").strip()
+        new_card["summary"] = (base + "（探索已手动停止）").strip()
+        await _write_card(db, msg, new_card)
+
+
+async def stop_browse_tasks(
+    conversation_id: int,
+    browse_id: Optional[str] = None,
+    *,
+    card_writer=None,
+) -> list[str]:
+    """停止进行中的探索任务（取消 asyncio 任务 + 回写卡片 stopped）。
+
+    返回被停止的 browse_id 列表；``card_writer`` 可注入（测试用）。
+    """
+    writer = card_writer or _mark_browse_stopped
+    stopped: list[str] = []
+    for bid, (cid, task) in list(_TASK_INDEX.items()):
+        if cid != conversation_id:
+            continue
+        if browse_id and bid != browse_id:
+            continue
+        if task.done():
+            _TASK_INDEX.pop(bid, None)
+            continue
+        try:
+            await writer(conversation_id, bid)
+        except Exception:
+            logger.debug("mark browse stopped failed bid=%s", bid, exc_info=True)
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=3)
+        except Exception:
+            logger.debug("wait browse cancel failed bid=%s", bid, exc_info=True)
+        _TASK_INDEX.pop(bid, None)
+        _TASKS.discard(task)
+        stopped.append(bid)
+    return stopped
+
+
 @register_action_handler("browse_generate")
 async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> ActionOutcome:
     """浏览器探索生成：启动后台探索任务，返回 running 卡片。"""
@@ -356,7 +413,15 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
         assistant_agent_id=getattr(conversation, "assistant_agent_id", None),
     ))
     _TASKS.add(task)
-    task.add_done_callback(_TASKS.discard)
+    _TASK_INDEX[browse_id] = (conversation.id, task)
+
+    def _cleanup(_t: asyncio.Task) -> None:
+        _TASKS.discard(_t)
+        cur = _TASK_INDEX.get(browse_id)
+        if cur is not None and cur[1] is _t:
+            _TASK_INDEX.pop(browse_id, None)
+
+    task.add_done_callback(_cleanup)
 
     cred_note = "（使用你提供的账号登录）" if card["has_credentials"] else ""
     return ActionOutcome(

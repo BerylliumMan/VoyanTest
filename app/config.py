@@ -59,9 +59,12 @@ class Settings(BaseSettings):
     # - 证据汇总 console 条目上限
     chat_evidence_console_max: int = 20
     # - 浏览器探索生成（browse_generate）：开关 / 步数上限 / 总体超时（秒）
+    #   步数上限 22：描述驱动测试 + 验证码/登录重试等重流程需要更大预算（2026-10-14 实测）
     chat_browse_enabled: bool = True
-    chat_browse_max_steps: int = 14
+    chat_browse_max_steps: int = 22
     chat_browse_timeout_s: int = 300
+    # - 探索/登录时的图形验证码自动识别（ddddocr；关闭=引擎拒绝 solve_captcha 动作）
+    chat_browse_captcha_enabled: bool = True
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

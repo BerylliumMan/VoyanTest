@@ -439,6 +439,36 @@ async def send_message(
     }
 
 
+class ConversationStop(BaseModel):
+    kind: Optional[str] = None  # browse | generate；缺省=停止全部进行中任务
+    key: Optional[str] = None   # browse_id 或 gen_session_id（可选，精确停止单个任务）
+
+
+@router.post("/conversations/{conversation_id}/stop")
+async def stop_conversation(
+    conversation_id: int,
+    payload: ConversationStop,
+    db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+) -> dict:
+    """停止对话内进行中的任务（浏览器探索 / 用例生成）。"""
+    _ensure_enabled()
+    conv = await _get_owned(db, conversation_id, user)
+    if payload.kind not in (None, "browse", "generate"):
+        raise HTTPException(400, "kind 必须为 browse|generate")
+    from app.services import chat_tasks
+
+    stopped = await chat_tasks.stop_conversation_tasks(
+        db, conversation=conv, user_id=user.id, kind=payload.kind, key=payload.key,
+    )
+    total = len(stopped["browse"]) + len(stopped["generate"])
+    return {
+        "stopped": stopped,
+        "total": total,
+        "message": "已停止" if total else "没有进行中的任务",
+    }
+
+
 @router.post("/conversations/{conversation_id}/messages/{message_id}/regenerate")
 async def regenerate_message(
     conversation_id: int,

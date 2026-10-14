@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-ACTION_WHITELIST = ("goto", "click", "fill", "press", "select", "wait", "done")
+ACTION_WHITELIST = ("goto", "click", "fill", "press", "select", "wait", "solve_captcha", "done")
 
 # 破坏性点击关键词（按可访问名拦截；登录/提交表单不在此列）
 _DANGEROUS_RE = re.compile(
@@ -47,7 +47,7 @@ _PASSWORD_PLACEHOLDER = "<<PASSWORD>>"
 
 _MAX_CANDIDATES_IN_PROMPT = 80
 _MAX_SHOTS = 6
-_DEFAULT_MAX_STEPS = 14
+_DEFAULT_MAX_STEPS = 22
 _DEFAULT_TIMEOUT_S = 300
 
 
@@ -59,6 +59,7 @@ class BrowseConfig:
     password: str = ""
     max_steps: int = _DEFAULT_MAX_STEPS
     timeout_s: int = _DEFAULT_TIMEOUT_S
+    captcha_enabled: bool = True
 
 
 EXPLORER_SYSTEM_PROMPT = """你是 VoyanTest 的「网页探索器」：在真实浏览器里以纯 GUI 黑盒方式操作网页，产出可供测试用例生成使用的观察报告。
@@ -66,7 +67,7 @@ EXPLORER_SYSTEM_PROMPT = """你是 VoyanTest 的「网页探索器」：在真�
 【目标理解】
 【目标】可能是两种之一：
 A. 探索性目标（如「查看主要功能」）：自行规划浏览路径，优先访问主要功能页面；
-B. 操作性描述（如「点登录，输入账号密码，进入设置页」）：严格按描述顺序逐步操作；描述执行完成后，再补充观察当前页面与相关入口，总结功能点。
+B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设置页」「测试设置页留空保存的校验提示」）：严格按描述顺序逐步操作；其中「测试/验证/观察」类要求，在安全准则内执行代表性操作并观察真实结果（提示文案、跳转、校验状态、数据变化），把观察到的真实行为记录为功能点（note/features）；描述执行完成后，再补充观察当前页面与相关入口；未按描述验证到的点，在 summary 中如实说明（不要脑补结果）。
 
 【行为准则 — 严格遵守】
 1. 只能操作【候选元素】列表中真实存在的元素（用其 ref）；禁止编造元素、禁止猜测选择器；
@@ -74,18 +75,27 @@ B. 操作性描述（如「点登录，输入账号密码，进入设置页」�
 3. 禁止破坏性操作：点击名称含「退出/注销/删除/移除/清空/支付/付款/下单/结算/购买」的元素一律不做，改为记录并跳过；
 4. 需要登录时：在登录表单里用 <<USERNAME>> 填账号、<<PASSWORD>> 填密码（占位符原样输出，系统会替换；绝不输出真实凭据），然后点击登录按钮，并确认登录成功（地址变化 / 出现导航菜单 / 出现用户名）；
 5. 登录失败只重试一次（核对表单后），仍失败就如实收尾（summary 说明失败原因）；
+5b.（图形验证码）登录表单含验证码（输入框占位/标签含「验证码」，旁边有验证码图片）时：
+   按 账号 → 密码 → 验证码 → 登录 的顺序操作；验证码一步输出 solve_captcha（ref=验证码输入框的 ref；
+   系统会自动识别并填写，不需要 value，不要询问用户、不要猜测内容）。若登录后仍停留在登录页或提示
+   「验证码错误」，输出 solve_captcha 且 refresh=true（先点击验证码图片刷新再识别）重试，最多 2 次
+   （验证码错误的重试不受规则 5 的一次限制），仍失败按规则 5 如实收尾。若重试时登录页已被重置（用户名/密码
+   输入框为空）：「必须先重新填写账号与密码，再 solve_captcha（refresh=true），最后点击登录」——
+   禁止只改验证码就直接提交。算术型验证码（图片是「1+2=?」这类）系统会自动计算答案，同样用 solve_captcha；
 6. 浏览策略：优先点击顶部导航 / 侧边菜单等入口，逐个访问主要功能页面；每到一个新页面，用 note 记录「页面标题：主要功能点」；
-7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；
+7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；动作（点击/提交/跳转）完成后系统会自动给出
+   最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
 8. 步数有限：先做最有价值的事（登录 → 主菜单 → 核心功能页 2-4 个）；
 9. 目标达成或主要功能已覆盖 → 立即返回 done，并在 summary/features 给出结论；禁止虚构没看到的功能。
 
 【输出格式 — 只输出一个 JSON 对象，不要任何其他文字、不要代码块】
 {
   "thinking": "1-3 句：当前页面是什么、下一步做什么及原因",
-  "action": "goto|click|fill|press|select|wait|done",
-  "ref": "元素动作必填：候选列表中的 ref（如 e12）",
-  "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数",
+  "action": "goto|click|fill|press|select|wait|solve_captcha|done",
+  "ref": "元素动作必填：候选列表中的 ref（如 e12）；solve_captcha 填验证码输入框的 ref",
+  "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数；solve_captcha 不需要 value",
   "url": "action=goto 时的目标地址",
+  "refresh": "solve_captcha 可选：true=先点击验证码图片刷新再识别（验证码错误重试时使用）",
   "note": "本步观察到的重要信息（页面功能点，一句话，可选）",
   "summary": "action=done 时必填：中文探索结论（站点、登录结果、主要功能概述、是否发现问题）",
   "features": ["功能点1", "功能点2"]
@@ -360,7 +370,7 @@ def _render_candidates(candidates) -> str:
 
 
 def _round_prompt(cfg: BrowseConfig, *, page: dict, candidates, journal: list[dict],
-                  visited: dict[str, dict]) -> str:
+                  visited: dict[str, dict], page_text: str = "") -> str:
     j_lines = []
     for i, st in enumerate(journal[-6:], start=1):
         mark = "✅" if st.get("ok") else "❌"
@@ -393,6 +403,9 @@ def _round_prompt(cfg: BrowseConfig, *, page: dict, candidates, journal: list[di
 标题：{page.get('title') or '(未知)'}
 地址：{page.get('url') or '(未知)'}
 
+【页面文本（节选，供如实记录提示/校验/数据文案；不要推测未出现的文本）】
+{page_text or '（无）'}
+
 【候选元素】（只能引用这些 ref）
 {_render_candidates(candidates)}
 
@@ -401,6 +414,44 @@ def _round_prompt(cfg: BrowseConfig, *, page: dict, candidates, journal: list[di
 
 【提示】{usage}
 请输出下一步动作 JSON。"""
+
+
+def _snapshot_text_excerpt(snapshot: str, limit: int = 1400) -> str:
+    """从快照中提取页面静态文本节选（toast/校验提示/表格数据等，供模型如实记录）。
+
+    playwright-mcp 快照中静态文本以 ``- text: X`` 或 ``- <role> [ref=..]: X`` 形式出现；
+    交互元素（按钮/输入框等）已由候选列表承载，这里只补充非交互文本。
+    """
+    out: list[str] = []
+    content_roles = r"(heading|cell|cellheader|paragraph|strong|emphasis|listitem|term|definition)"
+    # toast/提示常落在 generic 节点上（如 `- generic [ref=e2]: "保存成功"`），一并纳入
+    inline_roles = (
+        r"(generic|section|article|group|region|main|aside|figure|figcaption|"
+        + content_roles[1:-1]
+        + r")"
+    )
+    for line in str(snapshot or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^-\s*text:\s*(.+)$", s)
+        if m:
+            t = m.group(1).strip().strip('"')
+            if t and (not out or out[-1] != t):
+                out.append(t)
+            continue
+        # 冒号形式：- listitem [ref=e13]: Checking the connection
+        m = re.match(rf"^-\s*{inline_roles}\b[^:]*:\s*(.+)$", s)
+        if m:
+            t = m.group(2).strip().strip('"')
+            if t and (not out or out[-1] != t):
+                out.append(t)
+            continue
+        # 引号形式：- heading "工作台" [ref=e3] / - cell "编号" [ref=e5]
+        m = re.match(rf'^-\s*{content_roles}\b\s+"([^"]+)"', s)
+        if m:
+            t = m.group(2).strip()
+            if t and (not out or out[-1] != t):
+                out.append(t)
+    return " / ".join(out)[:limit]
 
 
 def _cand_label(ref: str | None, candidates) -> Optional[str]:
@@ -582,7 +633,12 @@ async def run_exploration(
 
         page = await _page_facts()
         candidates = actionable_candidates(extract_candidates(snapshot or ""))
-        return {"snapshot": snapshot, "candidates": candidates, "page": page}
+        return {
+            "snapshot": snapshot,
+            "candidates": candidates,
+            "page": page,
+            "page_text": _snapshot_text_excerpt(snapshot or ""),
+        }
 
     try:
         if owns_browser:
@@ -633,6 +689,7 @@ async def run_exploration(
             prompt = _round_prompt(
                 cfg, page=obs["page"], candidates=obs["candidates"],
                 journal=journal, visited=pages,
+                page_text=obs.get("page_text") or "",
             )
             try:
                 raw = await asyncio.wait_for(
@@ -682,6 +739,49 @@ async def run_exploration(
                     "ok": False,
                     "error": f"不在允许的动作内 {ACTION_WHITELIST}",
                 })
+                continue
+
+            # 验证码：识别 + 自动填写（引擎侧完成，不经过通用动作通道）
+            if action_name == "solve_captcha":
+                ref = str(decision.get("ref") or "").strip()
+                refresh = bool(decision.get("refresh"))
+                if not cfg.captcha_enabled:
+                    journal.append({
+                        "action": action_name, "target": None, "ok": False,
+                        "error": "验证码自动识别已关闭（系统设置 chat_browse_captcha_enabled）",
+                    })
+                    continue
+                from core.captcha import solve_captcha_via_browser
+
+                result = await solve_captcha_via_browser(
+                    browser, input_ref=(ref or None), refresh=refresh,
+                )
+                captcha_ok = bool(result.get("ok"))
+                journal.append({
+                    "action": "solve_captcha",
+                    "target": (_cand_label(ref, obs["candidates"]) if ref else "验证码图片"),
+                    "value": (
+                        f"已填写（{result.get('text_len') or 0} 位）" if captcha_ok else None
+                    ),
+                    "ok": captcha_ok,
+                    "error": (str(result.get("error"))[:160] if not captcha_ok else None),
+                    "note": f"刷新后重新识别并填写{result.get('note') or ''}" if (captcha_ok and refresh) else (result.get("note") if captcha_ok else None),
+                })
+                await _emit({
+                    "kind": "step",
+                    "label": (
+                        ("刷新验证码并识别填写" if refresh else "识别验证码并填写")
+                        + f"（{'成功' if captcha_ok else '失败'}）"
+                    ),
+                    "url": page.get("url"),
+                    "step_count": len(journal),
+                    "ok": captcha_ok,
+                    "elapsed": round(time.time() - start_ts, 1),
+                })
+                if captcha_ok:
+                    await asyncio.sleep(0.6)
+                    obs = await _observe()
+                    page = obs["page"]
                 continue
 
             # 元素动作的 ref 校验（防编造）
