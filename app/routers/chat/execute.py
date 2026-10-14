@@ -22,7 +22,8 @@ def _ensure_enabled() -> None:
 
 
 class RunCasesRequest(BaseModel):
-    case_ids: list[int]
+    case_ids: list[int] = []
+    suite_id: Optional[int] = None
     mode: str = "server"
     agent_id: Optional[int] = None
     environment_id: Optional[int] = None
@@ -50,7 +51,7 @@ async def run_cases_endpoint(
     card, err, _task_id = await chat_run.start_run(
         db, conversation=conv, case_ids=payload.case_ids,
         mode=payload.mode, agent_id=payload.agent_id, user_id=user.id,
-        environment_id=payload.environment_id,
+        environment_id=payload.environment_id, suite_id=payload.suite_id,
     )
     if card is None:
         raise HTTPException(400, err)

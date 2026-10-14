@@ -279,14 +279,30 @@ async def start_run(
     agent_id: Optional[int],
     user_id: int,
     environment_id: Optional[int] = None,
+    suite_id: Optional[int] = None,
 ) -> tuple[Optional[dict], str, Optional[str]]:
     """发起对话内执行；返回 (card, error, task_id)。
 
     ``environment_id``：显式指定执行环境（须属于对话绑定项目）；缺省用项目默认环境。
+    ``suite_id``：执行用例集（按序展开为用例清单；与 case_ids 二选一，suite 优先来源）。
     """
     project_id = getattr(conversation, "project_id", None)
     if project_id is None:
         return None, "对话未绑定项目", None
+
+    # 用例集展开（按 order_index 顺序；必须同项目）
+    suite_name = None
+    if suite_id and not case_ids:
+        suite = await crud.get_suite(db, int(suite_id))
+        if suite is None:
+            return None, f"用例集 #{suite_id} 不存在", None
+        if int(getattr(suite, "project_id", 0) or 0) != int(project_id):
+            return None, "用例集不属于当前对话绑定的项目", None
+        ordered = await crud.get_suite_ordered_case_ids(db, int(suite_id))
+        if not ordered:
+            return None, f"用例集「{suite.name}」没有用例", None
+        case_ids = [int(c) for c in ordered[:20]]
+        suite_name = suite.name
 
     settings = get_settings()
     limit = int(getattr(settings, "chat_max_parallel_runs", 3) or 3)
@@ -366,6 +382,8 @@ async def start_run(
         "agent_name": agent_name,
         "case_ids": [c.id for c in cases],
         "case_titles": [c.name for c in cases],
+        "suite_id": int(suite_id) if suite_name else None,
+        "suite_name": suite_name,
         "status": "running",
         "progress": {"total": len(cases), "done": 0},
         "result": None,
@@ -556,16 +574,19 @@ async def run_case_handler(db, conversation, action: dict, ctx: dict) -> ActionO
         agent_id = action.get("agent_id") or None
     environment_id = action.get("environment_id") or conv_env_id
     card, err, task_id = await start_run(
-        db, conversation=conversation, case_ids=action["case_ids"],
+        db, conversation=conversation, case_ids=action.get("case_ids") or [],
         mode=mode, agent_id=agent_id,
         user_id=ctx.get("user_id"), environment_id=environment_id,
+        suite_id=action.get("suite_id"),
     )
     if card is None:
         return ActionOutcome(ok=False, note=f"（执行未发起：{err}）")
     env_name = card.get("environment_name")
+    suite_name = card.get("suite_name")
+    lead = f"用例集「{suite_name}」执行已发起" if suite_name else "执行已发起"
     note = (
-        f"执行已发起（环境：{env_name}），进度与结果会实时回显。"
-        if env_name else "执行已发起，进度与结果会实时回显。"
+        f"{lead}（环境：{env_name}），进度与结果会实时回显。"
+        if env_name else f"{lead}，进度与结果会实时回显。"
     )
     if card.get("env_warning"):
         note += f"注意：{card['env_warning']}"

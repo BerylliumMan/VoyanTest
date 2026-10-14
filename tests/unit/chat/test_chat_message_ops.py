@@ -1,5 +1,6 @@
 """034 US1：多轮编排 / 消息操作（T012，先红）。"""
 import pytest
+import json
 
 from core.chat import orchestrator as orch
 from tests.unit.chat.conftest import FakeConversation
@@ -152,3 +153,45 @@ async def test_delete_message_removes_from_context(chat_store, fake_llm_factory)
     await orch.handle_user_message(None, conversation=conv, user_id=7, content="继续", llm_call=llm2)
     assistant_texts = [m["content"] for m in llm2.calls[0] if m["role"] == "assistant"]
     assert all("R1-内容" not in t for t in assistant_texts)
+
+
+@pytest.mark.asyncio
+async def test_text_fallback_retries_once_for_json(chat_store):
+    """模型第一轮只回自然语言 → 自动纠错重试一次；第二轮合法 JSON 按合同执行。"""
+    from core.chat import orchestrator as _orch
+
+    calls = []
+
+    async def _llm(messages):
+        calls.append(messages)
+        if len(calls) == 1:
+            return "好的，已按当前对话默认设置提交执行。"
+        return json.dumps({
+            "thinking": "上一轮漏了 JSON，本轮补齐动作",
+            "reply": "已处理",
+            "actions": [],
+        }, ensure_ascii=False)
+
+    conv = FakeConversation()
+    _, assistant = await _orch.handle_user_message(
+        None, conversation=conv, user_id=7, content="执行用例集 冒烟", llm_call=_llm,
+    )
+    assert len(calls) == 2
+    assert "只输出一个 JSON 对象" in calls[1][-1]["content"]
+    assert not assistant.actions or assistant.actions[0].get("type") != "text_fallback"
+    assert assistant.content == "已处理"
+
+
+@pytest.mark.asyncio
+async def test_text_fallback_keeps_second_failure_with_raw(chat_store):
+    from core.chat import orchestrator as _orch
+
+    async def _llm(messages):
+        return "第一轮自然语言"
+
+    conv = FakeConversation()
+    _, assistant = await _orch.handle_user_message(
+        None, conversation=conv, user_id=7, content="执行", llm_call=_llm,
+    )
+    assert assistant.actions and assistant.actions[0]["type"] == "text_fallback"
+    assert "raw" in assistant.actions[0]

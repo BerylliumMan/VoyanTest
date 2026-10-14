@@ -3,7 +3,8 @@
 from fastapi import APIRouter
 
 from app.routers.chat import actions, conversations, evidence, execute
-from app.services import (  # noqa: F401 —— 触发动作处理器注册（generate/revise_drafts/edit_case/run_case/explain/set_refs）
+from app.services import (  # noqa: F401 —— 触发动作处理器注册（generate/revise_drafts/edit_case/run_case/explain/set_refs/browse_generate）
+    chat_browse,
     chat_edit,
     chat_evidence,
     chat_gen,

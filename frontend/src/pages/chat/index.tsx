@@ -19,6 +19,7 @@ import {
   IconDownload,
   IconImport,
   IconList,
+  IconLoading,
   IconPlus,
   IconRefresh,
   IconRobot,
@@ -113,6 +114,7 @@ const ChatPage: React.FC = () => {
   // 执行上下文：项目环境列表 / 客户端 Agent 列表
   const [envs, setEnvs] = useState<Array<{ id: number; name: string; is_default?: boolean }>>([]);
   const [agents, setAgents] = useState<Array<{ id: number; name: string; status?: string }>>([]);
+  const [pcClient, setPcClient] = useState<{ agent_id?: number | null; agent_name?: string | null } | null>(null);
   const [refOptions, setRefOptions] = useState<Array<{ id: number; name: string }>>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -153,6 +155,20 @@ const ChatPage: React.FC = () => {
     }
   }, [activeId]);
 
+  // 默认选中「当前 PC 的客户端」：会话未设置过（agent_id 为 null）且本机客户端在线时自动绑定，
+  // 之后执行用例默认走该客户端（显式选「服务端」存 0，不再被自动接管）。
+  useEffect(() => {
+    const conv = conversations.find((c) => c.id === activeId);
+    if (!conv) return;
+    if (conv.agent_id !== null && conv.agent_id !== undefined) return;
+    const name = pcClient?.agent_name;
+    if (!name) return;
+    const target = agents.find((a) => a.name === name);
+    if (target && target.id && target.status === 'online') {
+      patchConversation({ agent_id: target.id });
+    }
+  }, [activeId, conversations, agents, pcClient, patchConversation]);
+
   // 环境列表：跟随当前对话项目
   const activeConvForEnvs = conversations.find((c) => c.id === activeId);
   const activeProjectId = activeConvForEnvs?.project_id ?? null;
@@ -171,6 +187,13 @@ const ChatPage: React.FC = () => {
     axios.get('/api/agents')
       .then((r) => setAgents(Array.isArray(r.data) ? r.data : []))
       .catch(() => setAgents([]));
+  }, []);
+
+  // 当前 PC 的客户端（按请求来源 IP 与在线客户端匹配；用于默认选中与标注）
+  useEffect(() => {
+    axios.get('/api/chat/current-client')
+      .then((r) => setPcClient(r.data || null))
+      .catch(() => setPcClient(null));
   }, []);
 
   useEffect(() => {
@@ -212,6 +235,18 @@ const ChatPage: React.FC = () => {
     }
   }, []);
 
+  // 追加消息（按 id 去重）：发送接口响应往往晚于 WS message.created 事件，
+  // 直接 append 会把同一条消息渲染两遍（发送后不刷新出现两条的缺陷，2026-10-10 修复）
+  const appendMessages = useCallback((incoming: Array<ChatMessage | null | undefined>) => {
+    const items = (incoming || []).filter(Boolean) as ChatMessage[];
+    if (!items.length) return;
+    setMessages((prev) => {
+      const seen = new Set(prev.map((m) => m.id));
+      const add = items.filter((m) => !seen.has(m.id));
+      return add.length ? [...prev, ...add] : prev;
+    });
+  }, []);
+
   // 存在「运行中/生成中」卡片时，每 5s 静默对账一次（WS 断线/丢事件时卡片仍会收敛）
   useEffect(() => {
     if (activeId == null) return undefined;
@@ -219,7 +254,8 @@ const ChatPage: React.FC = () => {
       const t = String(c.type || '');
       const s = String(c.status || '');
       return (t === 'run' && (s === 'running' || s === 'paused'))
-        || (t === 'draft_set' && (s === 'generating' || s === 'queued'));
+        || (t === 'draft_set' && (s === 'generating' || s === 'queued'))
+        || (t === 'browse' && s === 'running');
     }));
     if (!hasActive) return undefined;
     const timer = window.setInterval(() => { refreshMessagesQuiet(activeId); }, 5000);
@@ -387,7 +423,7 @@ const ChatPage: React.FC = () => {
       setAttachments([]);
       setRefCases([]);
       const { user_message, assistant_message } = r.data;
-      setMessages((prev) => [...prev, user_message, assistant_message]);
+      appendMessages([user_message, assistant_message]);
     } catch (e: any) {
       Message.error(e?.response?.data?.detail || '发送失败');
     } finally {
@@ -400,7 +436,7 @@ const ChatPage: React.FC = () => {
     setSending(true);
     try {
       const r = await axios.post(`/api/chat/conversations/${activeId}/messages`, { content: text });
-      setMessages((prev) => [...prev, r.data.user_message, r.data.assistant_message]);
+      appendMessages([r.data.user_message, r.data.assistant_message]);
     } catch (e: any) {
       Message.error(e?.response?.data?.detail || '发送失败');
     } finally {
@@ -626,6 +662,91 @@ const ChatPage: React.FC = () => {
         </div>
       );
     }
+    if (card.type === 'browse') {
+      const status = String(card.status || 'running');
+      const tagMap: Record<string, { color: string; text: string }> = {
+        running: { color: 'arcoblue', text: '探索中' },
+        done: { color: 'green', text: '已完成' },
+        failed: { color: 'red', text: '失败' },
+      };
+      const tag = tagMap[status] || { color: 'gray', text: status };
+      const pages = (card.pages as Array<Record<string, any>>) || [];
+      const features = (card.features as string[]) || [];
+      const steps = (card.steps as Array<Record<string, any>>) || [];
+      const gen = (card.generation as Record<string, any>) || null;
+      return (
+        <div className={styles.card} key={idx}>
+          <div className={styles.cardHeader}>
+            <div className={styles.cardTitle}>
+              浏览器探索
+              <Tag size="small" color={tag.color}>
+                {status === 'running' && <IconLoading className={styles.iconMarginRightSmall} />}
+                {tag.text}
+              </Tag>
+              {card.elapsed ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>{String(card.elapsed)}s</Text>
+              ) : null}
+            </div>
+          </div>
+          <div className={styles.browseGoal}>
+            <Text type="secondary" style={{ fontSize: 12 }}>🌐 {card.url as string}</Text>
+            <div>
+              {card.goal as string}
+              {card.has_credentials ? <Text type="secondary" style={{ fontSize: 12 }}>（使用提供的账号登录）</Text> : null}
+            </div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {card.browser_mode === 'client'
+                ? `浏览器：客户端「${(card.agent_name as string) || ''}」（本机可见）`
+                : '浏览器：服务端无头'}
+            </Text>
+          </div>
+          {status === 'running' && steps.length > 0 && (
+            <div className={styles.browseSteps}>
+              {steps.slice(-5).map((s, i) => (
+                <div key={i} className={styles.browseStep}>
+                  {s.ok === false ? '✗' : '·'} {s.label as string}
+                </div>
+              ))}
+            </div>
+          )}
+          {status === 'running' && <Text type="secondary" style={{ fontSize: 12 }}>探索在后台进行，完成后会自动基于观察结果生成用例草稿</Text>}
+          {card.summary ? <div className={styles.browseSummary}>{card.summary as string}</div> : null}
+          {features.length > 0 && (
+            <div className={styles.browseFeatures}>
+              <Text type="secondary" style={{ fontSize: 12 }}>主要功能</Text>
+              {features.slice(0, 10).map((f, i) => (
+                <div key={i}>· {f}</div>
+              ))}
+            </div>
+          )}
+          {pages.length > 0 && (
+            <div className={styles.browsePages}>
+              {pages.map((p, i) => (
+                <a key={i} href={(p.url as string) || '#'} target="_blank" rel="noreferrer" className={styles.browsePage}>
+                  {p.screenshot ? (
+                    <img src={`/${p.screenshot as string}`} alt={(p.title as string) || ''} />
+                  ) : (
+                    <div className={styles.browsePageNoShot}>无截图</div>
+                  )}
+                  <span>{(p.title as string) || (p.url as string)}</span>
+                </a>
+              ))}
+            </div>
+          )}
+          {status !== 'running' && gen && (
+            <div className={styles.cardFooter}>
+              {gen.started ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>已发起用例生成，见下方草稿卡</Text>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  未发起生成{gen.error ? `：${String(gen.error)}` : '（未采集到页面）'}
+                </Text>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
     if (card.type === 'diff') {
       const status = (card.status as string) || 'pending';
       const tagMap: Record<string, { color: string; text: string }> = {
@@ -715,6 +836,9 @@ const ChatPage: React.FC = () => {
               <Tag size="small" color={card.mode === 'client' ? 'purple' : 'arcoblue'}>
                 {card.mode === 'client' ? `客户端 ${card.agent_name || ''}` : '服务端'}
               </Tag>
+              {card.suite_name ? (
+                <Tag size="small" color="cyan">用例集 {card.suite_name as string}</Tag>
+              ) : null}
               {envName ? (
                 <span title={envUrl}>
                   <Tag size="small" color="gray">环境 {envName}</Tag>
@@ -941,7 +1065,7 @@ const ChatPage: React.FC = () => {
                 options={[
                   { label: '服务端', value: 0 },
                   ...agents.map((a) => ({
-                    label: `${a.name}${a.status === 'online' ? '' : '（离线）'}`,
+                    label: `${a.name}${a.status === 'online' ? '' : '（离线）'}${pcClient?.agent_name && pcClient.agent_name === a.name ? '（当前 PC）' : ''}`,
                     value: a.id,
                   })),
                 ]}

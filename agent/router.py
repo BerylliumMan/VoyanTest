@@ -67,6 +67,10 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
     agent_id = agent_name
     session = None
 
+    # 服务端观测的连接来源 IP（用于「当前 PC 的客户端」匹配；反代下按 X-Forwarded-For）
+    _fwd = (ws.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    observed_ip = _fwd or (ws.client.host if ws.client else "")
+
     async def _send(raw: str):
         # Avoid Starlette ASGI crash when client already disconnected
         try:
@@ -117,6 +121,8 @@ async def agent_websocket(ws: WebSocket, agent_name: str):
                 agent_id = agent_name
                 agent = await agent_manager.register(agent_id, reg, _send)
                 session = await agent_manager.get_session(agent_id)
+                if session is not None and observed_ip:
+                    session.agent.observed_ip = observed_ip
                 await _sync_to_db(agent_name, reg.ip_address, reg.hostname)
                 ack = WSMessage(type=WSMessageType.REGISTERED, agent_id=agent_id,
                                 payload={"status": "ok", "message": f"Registered as {agent_id}"})

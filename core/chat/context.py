@@ -101,6 +101,26 @@ def build_environments_block(environments) -> str:
     return "【项目环境 — 用户指定环境执行时 environment_id 只能取自本列表】\n" + "\n".join(lines)
 
 
+def build_suites_block(suites) -> str:
+    """项目用例集清单（对话内执行用例集用；仅渲染 id/名称/类型/条数）。"""
+    lines = []
+    for s in suites or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            sid = int(s.get("id"))
+        except (TypeError, ValueError):
+            continue
+        name = str(s.get("name") or "").strip() or f"用例集#{sid}"
+        kind = "UI" if (s.get("case_kind") or "ui") == "ui" else "功能"
+        count = s.get("count")
+        suffix = f"（{kind}" + (f"，{count} 条）" if count is not None else "）")
+        lines.append(f"- 用例集#{sid} {name}{suffix}")
+    if not lines:
+        return ""
+    return "【项目用例集 — 执行用例集时 suite_id 只能取自本列表】\n" + "\n".join(lines)
+
+
 def build_llm_messages(
     *,
     system_prompt: str,
@@ -110,6 +130,7 @@ def build_llm_messages(
     project_name: str | None = None,
     draft_digest: str | None = None,
     environments=None,
+    suites=None,
     settings_block: str | None = None,
 ) -> list[dict]:
     """组装发给 LLM 的 messages（system 注入上下文块 + 历史消息）。"""
@@ -122,6 +143,9 @@ def build_llm_messages(
     env_block = build_environments_block(environments)
     if env_block:
         ctx_parts.append(env_block)
+    suite_block = build_suites_block(suites)
+    if suite_block:
+        ctx_parts.append(suite_block)
     refs_block = build_refs_block(refs)
     if refs_block:
         ctx_parts.append(refs_block)

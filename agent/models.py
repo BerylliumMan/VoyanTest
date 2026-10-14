@@ -19,6 +19,9 @@ class AgentInfo(BaseModel):
     name: str
     hostname: str
     ip_address: str
+    # 服务端观测到的连接来源 IP（WS peer；反代下取 X-Forwarded-For）——
+    # 用于「当前 PC 的客户端」匹配（2026-10-10）：比客户端自报 IP 更可靠
+    observed_ip: str = ""
     status: AgentStatus = AgentStatus.ONLINE
     last_seen: Optional[datetime] = None
     capabilities: List[str] = []

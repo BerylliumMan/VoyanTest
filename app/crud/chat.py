@@ -85,20 +85,40 @@ async def list_conversations(
 async def update_conversation(
     db: AsyncSession,
     conversation: db_models.ChatConversation,
+    *,
+    preserve_updated_at: bool = False,
     **fields,
 ) -> db_models.ChatConversation:
-    """部分更新：仅写入显式给出的字段。"""
+    """部分更新：仅写入显式给出的字段。
+
+    ``preserve_updated_at``：上下文类修改（agent/environment/case_kind）不触碰
+    updated_at —— 会话列表按 updated_at 排序，自动绑定客户端不应让列表重排
+    （2026-10-10 用户实测：浏览会话时列表不断跳动）。
+    """
     allowed = {
         "title", "project_id", "assistant_agent_id", "status",
         "refs", "summary", "summarized_until_message_id",
         "case_kind", "environment_id", "agent_id",
     }
+    _old_updated = conversation.updated_at
     for key, value in fields.items():
         if key not in allowed:
             continue
         if key == "title" and value is not None:
             value = str(value)[:200]
         setattr(conversation, key, value)
+    if preserve_updated_at and _old_updated is not None:
+        # 仅显式 setattr 不足以跳过 onupdate：当值未变化时 SQLAlchemy 不把该列
+        # 纳入 UPDATE，onupdate 仍会刷新时间戳（2026-10-10 实测）——
+        # 用 Core 显式 UPDATE 强制写回原值。
+        from sqlalchemy import update as _sa_update
+
+        await db.flush()
+        await db.execute(
+            _sa_update(type(conversation))
+            .where(type(conversation).id == conversation.id)
+            .values(updated_at=_old_updated)
+        )
     await db.commit()
     await db.refresh(conversation)
     return conversation

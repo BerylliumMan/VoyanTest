@@ -151,6 +151,21 @@ async def _maybe_update_summary(db, conversation, messages, llm) -> tuple[Option
     return merged or None, recent
 
 
+def _redact_action(action: dict) -> dict:
+    """审计用：递归打码敏感字段（password 等），疑似凭据只留掩码。"""
+    def _walk(value):
+        if isinstance(value, dict):
+            return {
+                k: ("******" if str(k).lower() in ("password", "secret", "token") else _walk(v))
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [_walk(v) for v in value]
+        return value
+
+    return _walk(dict(action or {}))
+
+
 async def _audit(db, user_id: int, conversation_id: int, action: dict, outcome: ActionOutcome) -> None:
     try:
         from app.auth import log_audit
@@ -159,7 +174,7 @@ async def _audit(db, user_id: int, conversation_id: int, action: dict, outcome: 
             db, user_id, f"chat.{action['type']}",
             details={
                 "conversation_id": conversation_id,
-                "action": action,
+                "action": _redact_action(action),
                 "status": "ok" if outcome.ok else "failed",
             },
         )
@@ -228,6 +243,23 @@ async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None)
         except Exception:
             logger.debug("load chat environments failed", exc_info=True)
     settings_block = await _conversation_settings_block(db, conversation)
+    suites = None
+    if getattr(conversation, "project_id", None):
+        try:
+            from app.crud.suite import list_suites
+
+            _suites = await list_suites(db, conversation.project_id)
+            suites = [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "case_kind": getattr(s, "case_kind", "ui"),
+                    "count": len(list(getattr(s, "cases", None) or [])),
+                }
+                for s in (_suites or [])
+            ]
+        except Exception:
+            logger.debug("load chat suites failed", exc_info=True)
     return context.build_llm_messages(
         system_prompt=system_prompt,
         summary=summary,
@@ -236,6 +268,7 @@ async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None)
         project_name=project_name,
         draft_digest=draft_digest,
         environments=environments,
+        suites=suites,
         settings_block=settings_block,
     )
 
@@ -426,6 +459,34 @@ async def handle_user_message(
         return user_msg, assistant_msg
 
     decision, err = contracts.parse_decision(raw)
+    _diag: Optional[str] = None
+    if decision is None:
+        # 一次纠错重试：模型偶发只输出自然语言而漏掉 JSON 契约（实测：要求"执行用例集"时
+        # 连续两轮只回话不动作）——追加纠错提示再要一轮 JSON，仍失败才走兜底。
+        try:
+            retry_messages = llm_messages + [{
+                "role": "user",
+                "content": (
+                    "你上一轮输出不是契约要求的决策 JSON。请严格只输出一个 JSON 对象"
+                    "（不要任何其他文字、不要代码块），把本轮该执行的动作放进 actions。"
+                ),
+            }]
+            if llm_call is not None:
+                raw2 = await llm(retry_messages)
+            else:
+                try:
+                    raw2 = await _stream_llm(conversation, retry_messages, agent_id=agent_id)
+                except Exception:
+                    logger.warning("chat stream retry failed, fallback to blocking call", exc_info=True)
+                    raw2 = await llm(retry_messages)
+            decision2, _err2 = contracts.parse_decision(raw2)
+            if decision2 is not None:
+                decision, raw = decision2, raw2
+            else:
+                _diag = (raw or "")[:400] + "\n---retry---\n" + (raw2 or "")[:400]
+                raw = raw2 or raw  # 展示用：优先重试后的输出
+        except Exception:
+            logger.warning("chat JSON retry failed", exc_info=True)
     if decision is None:
         # 文本兜底：模型直接输出自然语言（未按 JSON 契约）时保留其回复，不丢弃
         fallback = contracts._text_fallback(raw)
@@ -433,7 +494,7 @@ async def handle_user_message(
             assistant_msg = await chat_crud.create_message(
                 db, conversation_id=conversation.id, role="assistant",
                 content=fallback,
-                actions=[{"type": "text_fallback", "status": "ok"}],
+                actions=[{"type": "text_fallback", "status": "ok", "raw": (_diag or raw or "")[:800]}],
             )
             await emit(conversation.id, {"type": "message.created", "message": serialize_message(assistant_msg)})
             return user_msg, assistant_msg
@@ -446,6 +507,7 @@ async def handle_user_message(
         return user_msg, assistant_msg
 
     # 5) 动作校验与执行（动作级容错）
+    decision = contracts.redact_decision_secrets(decision)
     cards, actions_log, notes, task_id = await _execute_decision(db, conversation, user_id, decision, llm)
 
     # 6) 助手消息落库

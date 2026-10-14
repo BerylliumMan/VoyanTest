@@ -581,6 +581,20 @@ class AgentManager:
         self._pending.pop(run_id, None)
         fut.set_result(result)
 
+    async def send_get_snapshot(self, agent_id: str, run_id: str) -> dict:
+        """GET_SNAPSHOT 消息：客户端空闲时会自行启动/恢复浏览器会话。
+
+        2026-10-10 背景：客户端 observe/act 不负责拉起 MCP（仅 run_start 与
+        get_snapshot 路径会），对话浏览器探索（browse_generate）没有 run_start，
+        需先经本消息冷启动客户端浏览器。返回 {"text": 快照} 或 {"success": False, ...}。
+        """
+        return await self._send_and_wait(
+            agent_id,
+            {"type": "get_snapshot", "run_id": run_id},
+            timeout=90,
+            matcher=lambda r: ("text" in r) or (r.get("success") is False),
+        )
+
     async def send_observe(self, agent_id: str, run_id: str, want_screenshot: bool = False,
                            screenshot_target: str | None = None,
                            screenshot_highlight: bool = False) -> dict:

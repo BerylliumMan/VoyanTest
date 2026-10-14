@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 import re
 
-ACTION_TYPES = ("generate", "revise_drafts", "edit_case", "run_case", "explain", "set_refs")
+ACTION_TYPES = (
+    "generate", "revise_drafts", "edit_case", "run_case", "explain", "set_refs",
+    "browse_generate",
+)
 REF_TYPES = ("project", "environment", "agent", "case", "batch")
 MAX_ACTIONS_PER_TURN = 2
 CASE_STEP_FIELDS = ("description", "expected", "target_name", "value", "action", "wait_mode")
@@ -149,6 +152,34 @@ def validate_action(action) -> tuple[dict | None, str]:
             "payload": {"description": desc[:20000], "file_ref": payload.get("file_ref")},
         }, ""
 
+    if t == "browse_generate":
+        url = str(action.get("url") or "").strip()
+        if not url:
+            return None, "browse_generate 缺少 url"
+        if "://" not in url:
+            url = "http://" + url.lstrip("/")
+        from urllib.parse import urlparse as _urlparse
+
+        parsed = _urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None, f"browse_generate.url 非法: {url[:80]}"
+        if len(url) > 300:
+            return None, "browse_generate.url 过长"
+        goal = str(action.get("goal") or "").strip()[:500] or "浏览站点主要功能"
+        username = str(action.get("username") or "").strip()[:200]
+        password = str(action.get("password") or "")[:200]
+        # 凭据不回显进任何存储字段：目标文本中的账号/密码统一打码
+        for _sec in (username, password):
+            if _sec and len(_sec) >= 3:
+                goal = goal.replace(_sec, "******")
+        kind = action.get("kind") or "ui"
+        if kind not in ("functional", "ui"):
+            return None, "browse_generate.kind 必须为 functional|ui"
+        return {
+            "type": "browse_generate", "url": url, "goal": goal,
+            "username": username, "password": password, "kind": kind,
+        }, ""
+
     if t == "revise_drafts":
         session_id = action.get("gen_session_id")
         if not session_id or not isinstance(session_id, str):
@@ -172,11 +203,17 @@ def validate_action(action) -> tuple[dict | None, str]:
 
     if t == "run_case":
         case_ids = action.get("case_ids")
-        if not isinstance(case_ids, list) or not case_ids:
-            return None, "run_case 缺少 case_ids"
-        clean = [c for c in case_ids if isinstance(c, int)]
-        if not clean:
-            return None, "run_case case_ids 非法"
+        suite_id = action.get("suite_id")
+        if suite_id is not None:
+            try:
+                suite_id = int(suite_id)
+            except (TypeError, ValueError):
+                return None, "run_case.suite_id 必须为正整数"
+            if suite_id <= 0:
+                return None, "run_case.suite_id 必须为正整数"
+        clean = [c for c in case_ids if isinstance(c, int)] if isinstance(case_ids, list) else []
+        if not clean and suite_id is None:
+            return None, "run_case 需要 case_ids 或 suite_id"
         mode = action.get("mode")
         if mode is not None and mode not in ("server", "client"):
             return None, "run_case.mode 必须为 server|client"
@@ -194,7 +231,8 @@ def validate_action(action) -> tuple[dict | None, str]:
             if env_id <= 0:
                 return None, "run_case.environment_id 必须为正整数"
         return {
-            "type": "run_case", "case_ids": clean[:20], "mode": mode,
+            "type": "run_case", "case_ids": clean[:20], "suite_id": suite_id,
+            "mode": mode,
             "agent_id": agent_id, "environment_id": env_id,
         }, ""
 
@@ -444,3 +482,44 @@ def apply_case_patch(steps: list[dict], patch: dict) -> tuple[list[dict] | None,
     if not out:
         return None, [], "补丁应用后步骤为空"
     return out, changes, ""
+
+
+def redact_decision_secrets(decision: dict) -> dict:
+    """凭据防泄漏：把 browse_generate 动作里的账号/密码从回复与思考中打码。
+
+    动作本身保留明文（执行侧需要），但 reply/thinking 及目标文本不得回显
+    （2026-10-10 实测：模型把用户给的密码原样写进了回复，被落库/展示）。
+    """
+    actions = decision.get("actions") or []
+    secrets: list[str] = []
+    for a in actions:
+        if isinstance(a, dict) and a.get("type") == "browse_generate":
+            for key in ("username", "password"):
+                v = str(a.get(key) or "")
+                if len(v) >= 3:
+                    secrets.append(v)
+    if not secrets:
+        return decision
+
+    def _redact(text: str) -> str:
+        out = text
+        for sec in secrets:
+            out = out.replace(sec, "******")
+        return out
+
+    out = dict(decision)
+    for key in ("reply", "thinking"):
+        val = str(out.get(key) or "")
+        if val:
+            out[key] = _redact(val)
+    new_actions = []
+    for a in actions:
+        if isinstance(a, dict):
+            b = dict(a)
+            if b.get("type") == "browse_generate" and b.get("goal"):
+                b["goal"] = _redact(str(b["goal"]))
+            new_actions.append(b)
+        else:
+            new_actions.append(a)
+    out["actions"] = new_actions
+    return out

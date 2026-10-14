@@ -289,3 +289,84 @@
   font-size: 12px;
   color: #86909c;
 }
+
+// 浏览器探索卡片（browse_generate）：目标 / 步骤 / 结论 / 功能点 / 页面截图
+.browseGoal {
+  font-size: 13px;
+  line-height: 1.7;
+  margin-bottom: 6px;
+}
+
+.browseSteps {
+  border-left: 2px solid #e5e6eb;
+  padding-left: 8px;
+  margin: 6px 0;
+}
+
+.browseStep {
+  font-size: 12px;
+  color: #4e5969;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.browseSummary {
+  font-size: 13px;
+  color: #1d2129;
+  line-height: 1.7;
+  margin: 6px 0;
+  white-space: pre-wrap;
+}
+
+.browseFeatures {
+  font-size: 12px;
+  color: #4e5969;
+  line-height: 1.7;
+  margin: 4px 0;
+}
+
+.browsePages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.browsePage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 148px;
+  font-size: 12px;
+  color: #4e5969;
+  text-decoration: none;
+
+  img {
+    width: 148px;
+    height: 96px;
+    object-fit: cover;
+    border: 1px solid #e5e6eb;
+    border-radius: 4px;
+  }
+
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &:hover span {
+    color: #165dff;
+  }
+}
+
+.browsePageNoShot {
+  width: 148px;
+  height: 96px;
+  border: 1px dashed #e5e6eb;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #c9cdd4;
+}

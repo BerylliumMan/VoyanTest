@@ -7,7 +7,7 @@ import os
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.crud import chat as chat_crud
 from app.crud import get_environments
 from app.database import get_async_db
+from app.utils import client_ip
 from core.chat import orchestrator
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,81 @@ async def _default_environment_id(db: AsyncSession, project_id: Optional[int]) -
         return None
 
 
+def match_pc_agent(online_agents, ip: str):
+    """在线客户端中与请求来源 IP 相同的一台（同机多客户端取最近活跃）。
+
+    优先匹配服务端观测到的连接 IP（observed_ip，反代/NAT 下仍可靠），
+    回退到客户端自报 IP（旧记录无 observed_ip 时）。
+    """
+    if not ip:
+        return None
+    same = [
+        a for a in (online_agents or [])
+        if ip in (
+            (getattr(a, "observed_ip", "") or "").strip(),
+            (getattr(a, "ip_address", "") or "").strip(),
+        ) and ip
+    ]
+    if not same:
+        return None
+    from datetime import datetime, timezone
+
+    _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+    def _seen(a):
+        ls = getattr(a, "last_seen", None)
+        if ls is not None and getattr(ls, "tzinfo", None) is None:
+            ls = ls.replace(tzinfo=timezone.utc)
+        return ls or _epoch
+
+    return max(same, key=_seen)
+
+
+async def _pc_agent_for_request(db: AsyncSession, request: Request) -> Optional[dict]:
+    """识别「当前 PC 的客户端」：请求来源 IP 与在线客户端注册 IP 一致。
+
+    WS 客户端注册时带 ip_address（agent.manager），浏览器请求同样带来源 IP，
+    同一台机器上两者一致（经反向代理时按 X-Forwarded-For 解析）。
+    """
+    try:
+        from agent.manager import agent_manager
+
+        online = await agent_manager.get_online_agents()
+    except Exception:
+        logger.debug("pc agent match: agent_manager unavailable", exc_info=True)
+        return None
+    ip = client_ip(request)
+    matched = match_pc_agent(online, ip)
+    if matched is None:
+        return None
+    name = str(getattr(matched, "name", "") or "")
+    agent_id = 0
+    try:
+        from app.crud.agent import get_agent_by_name
+
+        db_agent = await get_agent_by_name(db, name)
+        if db_agent is not None:
+            agent_id = int(db_agent.id)
+    except Exception:
+        logger.debug("pc agent db lookup failed", exc_info=True)
+    return {"agent_id": agent_id, "agent_name": name, "ip": ip}
+
+
+@router.get("/current-client")
+async def current_client(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+) -> dict:
+    """「当前 PC 的客户端」：按请求来源 IP 匹配在线客户端。
+
+    前端据此默认选中客户端（执行默认走它）；未匹配返回 agent_id=None。
+    """
+    _ensure_enabled()
+    matched = await _pc_agent_for_request(db, request)
+    return matched or {"agent_id": None, "agent_name": None, "ip": client_ip(request)}
+
+
 # ----------------------------
 # 会话
 # ----------------------------
@@ -141,6 +217,7 @@ async def _default_environment_id(db: AsyncSession, project_id: Optional[int]) -
 @router.post("/conversations")
 async def create_conversation(
     payload: ConversationCreate,
+    request: Request,
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
@@ -176,9 +253,15 @@ async def create_conversation(
     environment_id = payload.environment_id
     if environment_id is None:
         environment_id = await _default_environment_id(db, payload.project_id)
+    # 默认选中「当前 PC 的客户端」：请求来源 IP 与在线客户端一致时自动绑定
+    agent_id = payload.agent_id
+    if agent_id is None:
+        matched = await _pc_agent_for_request(db, request)
+        if matched and matched.get("agent_id"):
+            agent_id = int(matched["agent_id"])
     await _validate_context_fields(
         db, project_id=payload.project_id, environment_id=environment_id,
-        agent_id=payload.agent_id, user=user,
+        agent_id=agent_id, user=user,
     )
 
     conv = await chat_crud.create_conversation(
@@ -188,7 +271,7 @@ async def create_conversation(
         refs=refs,
         case_kind=case_kind,
         environment_id=environment_id,
-        agent_id=payload.agent_id,
+        agent_id=agent_id,
     )
     return serialize_conversation(conv)
 
@@ -266,7 +349,8 @@ async def patch_conversation(
             fields["environment_id"] = payload.environment_id
     if payload.agent_id is not None:
         if payload.agent_id == -1:
-            fields["agent_id"] = None
+            # 显式选择「服务端」：存 0 而非 NULL —— 与「未设置」区分，不再被自动接管
+            fields["agent_id"] = 0
         else:
             await _validate_context_fields(
                 db, project_id=None, environment_id=None,
@@ -283,7 +367,9 @@ async def patch_conversation(
             if env is None or int(env.project_id) != int(fields["project_id"]):
                 fields["environment_id"] = await _default_environment_id(db, fields["project_id"])
     if fields:
-        conv = await chat_crud.update_conversation(db, conv, **fields)
+        # 上下文类修改（客户端/环境/用例类型）不重排会话列表（不触碰 updated_at）
+        _ctx_only = set(fields.keys()) <= {"agent_id", "environment_id", "case_kind"}
+        conv = await chat_crud.update_conversation(db, conv, preserve_updated_at=_ctx_only, **fields)
     return serialize_conversation(conv)
 
 

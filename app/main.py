@@ -127,6 +127,50 @@ async def _recover_orphaned_agent_runs():
         logger.warning("孤儿 agent_run 恢复失败: %s", exc, exc_info=True)
 
 
+async def _recover_interrupted_browse_cards():
+    """启动时恢复被中断的浏览器探索卡片（034 迭代）：
+
+    探索由进程内 asyncio 任务执行，服务重启会中断任务 —— 卡片若不收敛会
+    永远显示"探索中"。这里把状态为 running 的 browse 卡片标记为 failed。
+    """
+    try:
+        from app.database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+        from sqlalchemy import select as sa_select
+
+        from app.crud import chat as chat_crud
+        from app.models.chat import ChatMessage
+
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(sa_select(ChatMessage).where(ChatMessage.cards.isnot(None)))
+            ).scalars().all()
+            recovered = 0
+            for m in rows:
+                cards = [
+                    dict(c) if isinstance(c, dict) else c for c in (m.cards or [])
+                ]
+                dirty = False
+                for c in cards:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "browse"
+                        and c.get("status") == "running"
+                    ):
+                        c["status"] = "failed"
+                        base = str(c.get("summary") or "").strip()
+                        c["summary"] = (base + " " if base else "") + "（服务重启，探索被中断）"
+                        dirty = True
+                if dirty:
+                    await chat_crud.update_message_cards(db, m, cards)
+                    recovered += 1
+            if recovered:
+                logger.info("已恢复 %d 条被中断的浏览器探索卡片（running → failed）", recovered)
+    except Exception as exc:
+        logger.warning("浏览器探索卡片恢复失败: %s", exc, exc_info=True)
+
+
 def _decrypt_secret_value(value: str) -> str:
     """解密 ``enc:v1:<fernet>``（app/security/secret_vars.py 的历史格式）。"""
     from app.security.secret_vars import SECRET_PREFIX, decrypt_secret_value
@@ -799,6 +843,8 @@ async def _run_startup_init():
 
     # 恢复孤儿 agent_runs（服务重启后清理假 running 状态）
     await _recover_orphaned_agent_runs()
+    # 034 迭代：重启中断的浏览器探索卡片收敛（running → failed，避免假"探索中"）
+    await _recover_interrupted_browse_cards()
 
     # 031（US2 T024）：接口测试 secret 变量幂等加密回填（失败不阻断启动）
     await _migrate_secrets_to_plaintext()
