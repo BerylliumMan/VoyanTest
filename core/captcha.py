@@ -18,43 +18,74 @@ from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_CAPTCHA_KEY_RE = "验证码|captcha|verif|vcode|checkcode|安全码|校验码"
+# 识别验证码输入框 / 图片的关键词（2026-10-14 实测加固：补齐国内系统常见命名——
+# imgCode / yzm / authCode / kaptcha / randCode / seccode 等此前不命中导致「未找到验证码图片」）
+_CAPTCHA_KEY_RE = (
+    "验证码|图片码|captcha|kaptcha|verif|vcode|checkcode|check_code|authcode|auth_code|"
+    "imgcode|img_code|randcode|rand_code|randimg|rand_img|seccode|sec_code|safe_?code|"
+    "安全码|校验码|yzm|verify_img|verifyimage|code_img|codeimg"
+)
 
 _CAPTURE_JS_TMPL = """async () => {
   const CAPRE = /(__CAPRE__)/i;
   const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const attrs = (el) => [el.placeholder, el.name, el.id, el.getAttribute('aria-label'), el.title].filter(Boolean).join(' ');
-  const inputs = Array.from(document.querySelectorAll('input')).filter(vis);
-  const capInput = inputs.find((i) => CAPRE.test(attrs(i)));
-  const pickImg = () => {
-    const els = Array.from(document.querySelectorAll('img,canvas')).filter(vis);
-    let best = null; let bestS = -1;
-    for (const el of els) {
-      let s = 0;
-      const at = [el.src, el.id, el.className, el.alt, el.getAttribute('aria-label'), el.title].filter(Boolean).join(' ');
-      if (CAPRE.test(String(at))) s += 100;
-      const r = el.getBoundingClientRect();
-      if (r.width >= 40 && r.width <= 300 && r.height >= 16 && r.height <= 120) s += 25;
-      if (el.tagName === 'IMG' && el.naturalWidth && el.naturalWidth <= 320) s += 10;
-      if (capInput) {
-        const a = capInput.getBoundingClientRect();
-        const dx = Math.abs((a.left + a.width / 2) - (r.left + r.width / 2));
-        const dy = Math.abs((a.top + a.height / 2) - (r.top + r.height / 2));
-        s += Math.max(0, 70 - dx / 6 - dy / 6);
-      }
-      if (s > bestS) { bestS = s; best = el; }
-    }
-    return bestS >= 45 ? best : null;
+  const nearText = (el) => {
+    let s = '';
+    try { const lab = el.closest('label'); if (lab) s += ' ' + (lab.innerText || ''); } catch (e) {}
+    try {
+      let p = el.parentElement; let hops = 0;
+      while (p && hops < 2 && s.length < 160) { s += ' ' + (p.innerText || ''); p = p.parentElement; hops++; }
+    } catch (e) {}
+    return s;
   };
+  const inputs = Array.from(document.querySelectorAll('input')).filter(vis);
+  const capInput = inputs.find((i) => CAPRE.test(attrs(i)) || CAPRE.test(nearText(i)));
+  const imgs = Array.from(document.querySelectorAll('img,canvas')).filter(vis);
+  const scored = [];
+  for (const el of imgs) {
+    let s = 0;
+    const at = [el.src, el.id, el.className, el.alt, el.getAttribute('aria-label'), el.title, el.name].filter(Boolean).join(' ');
+    const kw = CAPRE.test(String(at));
+    if (kw) s += 100;
+    const r = el.getBoundingClientRect();
+    const sizeOk = r.width >= 40 && r.width <= 320 && r.height >= 14 && r.height <= 120;
+    if (sizeOk) s += 25;
+    if (el.tagName === 'IMG' && el.naturalWidth && el.naturalWidth <= 360) s += 10;
+    if (capInput) {
+      const a = capInput.getBoundingClientRect();
+      const dx = Math.abs((a.left + a.width / 2) - (r.left + r.width / 2));
+      const dy = Math.abs((a.top + a.height / 2) - (r.top + r.height / 2));
+      s += Math.max(0, 80 - dx / 5 - dy / 5);
+    }
+    scored.push({ el, s, kw, sizeOk });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  let pickInfo = scored.length ? scored[0] : null;
+  // 选择规则：关键词命中 > 输入框邻近（尺寸合理） > 全页仅一张合理小图
+  if (!(pickInfo && (pickInfo.kw || (capInput && pickInfo.sizeOk)))) {
+    const smalls = scored.filter((c) => c.sizeOk);
+    pickInfo = !capInput && smalls.length === 1 ? smalls[0] : null;
+  }
   if (__REFRESH__) {
-    const cur = pickImg();
+    const cur = pickInfo && pickInfo.el;
     if (cur) { try { cur.click(); } catch (e) {} await new Promise((r) => setTimeout(r, 1200)); }
   }
-  const img = pickImg();
+  const img = pickInfo && pickInfo.el;
   if (!img) return { ok: false, error: '未找到验证码图片（img/canvas）' };
+  // 图片未加载完成时等待（上限 1.5s）
+  if (img.tagName === 'IMG' && (!img.complete || !img.naturalWidth)) {
+    const t0 = Date.now();
+    while ((!img.complete || !img.naturalWidth) && Date.now() - t0 < 1500) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    if (!img.naturalWidth) return { ok: false, error: '验证码图片未加载完成（naturalWidth=0）' };
+  }
   let dataUrl = '';
   if (img.tagName === 'CANVAS') {
     try { dataUrl = img.toDataURL('image/png'); } catch (e) { dataUrl = ''; }
+  } else if (String(img.src || '').startsWith('data:')) {
+    dataUrl = img.src;
   } else {
     try {
       const c = document.createElement('canvas');
@@ -71,7 +102,9 @@ _CAPTURE_JS_TMPL = """async () => {
     }
   }
   if (!dataUrl) return { ok: false, error: '无法读取验证码图片（跨域受限）' };
+  let maxlength = 0;
   if (capInput) {
+    maxlength = parseInt(capInput.getAttribute('maxlength') || '0', 10) || 0;
     capInput.setAttribute('data-vt-cap', '1');
     capInput.setAttribute('autocomplete', 'off');
     try {
@@ -82,7 +115,7 @@ _CAPTURE_JS_TMPL = """async () => {
       }
     } catch (e) {}
   }
-  return { ok: true, img: dataUrl, has_input: !!capInput };
+  return { ok: true, img: dataUrl, has_input: !!capInput, maxlength: maxlength };
 }"""
 
 _VERIFY_JS_TMPL = """() => {
@@ -105,6 +138,36 @@ _JS_FILL_TMPL = """() => {
   } catch (e) { return { ok: false, error: '写入失败' }; }
 }"""
 
+# 引擎侧确定性补填（vt-refill）：登录重试前把「被清空的」账号/密码框补回来——
+# 实测缺陷：验证码错误重试时部分站点会重置表单，模型只改验证码直接提交 → 账号为空登录必败。
+# 仅在字段为空时补填；只在页面存在 password 框时启用（登录页信号），不猜测其他表单。
+_REFILL_JS_TMPL = """() => { /* vt-refill */
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const setVal = (el, v) => {
+    try {
+      const st = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      st.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return el.value === v;
+    } catch (e) { return false; }
+  };
+  const out = { user: false, pass: false };
+  const inputs = Array.from(document.querySelectorAll('input')).filter(vis);
+  const pw = inputs.find((i) => (i.type || '').toLowerCase() === 'password');
+  if (!pw) return out;
+  const pwd = __PASSWORD__;
+  const usr = __USERNAME__;
+  if (pwd && !pw.value) out.pass = setVal(pw, pwd);
+  if (usr) {
+    const idx = inputs.indexOf(pw);
+    const cands = inputs.slice(Math.max(0, idx - 2), idx);
+    const u = cands.find((i) => !i.value && ['', 'text', 'email', 'tel', 'search'].includes((i.type || '').toLowerCase()));
+    if (u) out.user = setVal(u, usr);
+  }
+  return out;
+}"""
+
 
 def _capture_js(refresh: bool) -> str:
     return (
@@ -122,29 +185,111 @@ def _verify_js(value: str) -> str:
     return _VERIFY_JS_TMPL.replace("__VALUE__", json.dumps(value, ensure_ascii=False))
 
 
+def _refill_js(username: str, password: str) -> str:
+    return (
+        _REFILL_JS_TMPL
+        .replace("__USERNAME__", json.dumps(username or "", ensure_ascii=False))
+        .replace("__PASSWORD__", json.dumps(password or "", ensure_ascii=False))
+    )
+
+
 async def solve_captcha_via_browser(
     browser,
     *,
     input_ref: Optional[str] = None,
     refresh: bool = False,
-    solve_fn: Optional[Callable[[str], tuple[str, str]]] = None,
+    solve_fn: Optional[Callable[..., tuple[str, str]]] = None,
+    username: str = "",
+    password: str = "",
 ) -> dict:
     """识别并填写验证码；返回 ``{"ok": bool, "note"/"error": str, "text_len": int}``。
 
     ``browser`` 需实现 ``evaluate_json(fn)`` 与 ``act(action)``（服务端/客户端通用）。
-    ``solve_fn`` 可注入（测试用）；默认走 ddddocr。
+    ``solve_fn`` 可注入（测试用）；默认走 ddddocr（支持 ``prefer_len`` 关键字时会传输入框 maxlength）。
+    ``username``/``password``：登录重试前确定性补填「被站点清空的」账号/密码框（仅空字段）。
     """
     if solve_fn is None:
         from core.captcha_solver import solve_text_captcha as solve_fn  # type: ignore[no-redef]
 
-    cap = await browser.evaluate_json(_capture_js(refresh))
-    if not isinstance(cap, dict) or not cap.get("ok"):
-        err = (cap or {}).get("error") if isinstance(cap, dict) else None
-        return {"ok": False, "error": str(err or "验证码捕获失败")}
+    accepts_prefer_len = False
+    try:
+        import inspect
 
-    text, err = solve_fn(str(cap.get("img") or ""))
+        accepts_prefer_len = "prefer_len" in inspect.signature(solve_fn).parameters
+    except (TypeError, ValueError):
+        accepts_prefer_len = False
+
+    refilled = {"user": False, "pass": False}
+
+    async def _refill() -> None:
+        if not username and not password:
+            return
+        try:
+            r = await browser.evaluate_json(_refill_js(username, password))
+        except Exception:
+            return
+        if isinstance(r, dict):
+            refilled["user"] = refilled["user"] or bool(r.get("user"))
+            refilled["pass"] = refilled["pass"] or bool(r.get("pass"))
+
+    async def _capture(with_refresh: bool) -> dict:
+        await _refill()  # 重试/首次都先补回空白的账号密码（实测：站点重试会重置表单）
+        cap = await browser.evaluate_json(_capture_js(with_refresh))
+        return cap if isinstance(cap, dict) else {}
+
+    async def _solve(img_data_url: str, prefer: int | None) -> tuple[str, str]:
+        if prefer and accepts_prefer_len:
+            return solve_fn(img_data_url, prefer_len=prefer)
+        return solve_fn(img_data_url)
+
+    cap = await _capture(refresh)
+    last_err = str(cap.get("error") or "验证码捕获失败")
+
+    # 图片未出现（懒加载/接口竞态）：刷新一次再抓（上限 2 次尝试）
+    if not cap.get("ok") and "未找到验证码图片" in last_err:
+        import asyncio as _aio
+
+        await _aio.sleep(1.0)
+        cap = await _capture(True)
+        last_err = str(cap.get("error") or last_err)
+
+    if not cap.get("ok"):
+        return {"ok": False, "error": last_err}
+
+    try:
+        prefer_len = int(cap.get("maxlength") or 0) or None
+    except (TypeError, ValueError):
+        prefer_len = None
+
+    text, err = await _solve(str(cap.get("img") or ""), prefer_len)
+
+    # 识别为空/异常：刷新验证码重试一次（上限 2 次尝试）
     if err or not text:
-        return {"ok": False, "error": err or "验证码识别失败"}
+        import asyncio as _aio
+
+        cap2 = await _capture(True)
+        if cap2.get("ok"):
+            try:
+                prefer_len2 = int(cap2.get("maxlength") or 0) or prefer_len
+            except (TypeError, ValueError):
+                prefer_len2 = prefer_len
+            text2, err2 = await _solve(str(cap2.get("img") or ""), prefer_len2)
+            if text2 and not err2:
+                cap, text, err = cap2, text2, ""
+            else:
+                err = err2 or err
+        if err or not text:
+            return {"ok": False, "error": err or "验证码识别失败"}
+
+    # 长度约束：识别结果长于输入框 maxlength 时截断（噪声粘连导致的常见超标）
+    clamped = False
+    try:
+        ml = int(cap.get("maxlength") or 0)
+    except (TypeError, ValueError):
+        ml = 0
+    if ml and len(text) > ml:
+        text = text[:ml]
+        clamped = True
 
     has_input = bool(cap.get("has_input"))
     filled = False
@@ -176,4 +321,10 @@ async def solve_captcha_via_browser(
     if not filled and not has_input:
         return {"ok": False, "error": "验证码已识别但未找到输入框（可先点击验证码输入框后重试）"}
 
-    return {"ok": True, "note": f"已识别并自动填写验证码（{len(text)} 位）", "text_len": len(text)}
+    note = f"已识别并自动填写验证码（{len(text)} 位）"
+    if refilled["user"] or refilled["pass"]:
+        who = "账号和密码" if (refilled["user"] and refilled["pass"]) else ("账号" if refilled["user"] else "密码")
+        note += f"（{who}输入框为空，已自动补回）"
+    if clamped:
+        note += "（识别结果超过输入框长度上限，已截断）"
+    return {"ok": True, "note": note, "text_len": len(text)}

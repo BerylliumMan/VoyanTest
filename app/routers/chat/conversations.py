@@ -2,6 +2,7 @@
 # 034 对话工作台 REST（contracts C1.1）：会话 CRUD / 消息 / 重新生成 / 删除 / 附件。
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -78,6 +79,61 @@ class MessageSend(BaseModel):
     content: str = ""
     refs: Optional[list] = None
     attachments: Optional[list] = None
+
+
+class MessageEdit(BaseModel):
+    content: str = ""
+    regenerate: bool = True
+
+
+async def _emit_turn_stopped(conversation_id: int) -> None:
+    from core.chat.events import emit as chat_emit
+
+    await chat_emit(conversation_id, {"type": "turn.stopped", "conversation_id": conversation_id})
+
+
+async def _run_turn(conversation_id: int, coro):
+    """把一轮生成包成可停止任务（发送/编辑/重新生成共用）。
+
+    返回 (result | None, stopped)。``stopped=True`` 表示用户点击了停止
+    （子任务被取消）；请求方自身断开导致的取消继续上抛，不吞掉。
+    """
+    from core.chat import turns as chat_turns
+
+    task = asyncio.create_task(coro)
+    chat_turns.register_turn(conversation_id, task)
+    try:
+        return await task, False
+    except asyncio.CancelledError:
+        if task.cancelled() and not asyncio.current_task().cancelling():
+            return None, True
+        raise
+    finally:
+        chat_turns.unregister_turn(conversation_id, task)
+
+
+async def _stopped_turn_payload(db, conversation_id: int, *, edited_message_id: Optional[int] = None) -> dict:
+    """停止后的响应：返回已落库的用户消息（本轮回复被取消，None 表示无助手回复）。"""
+    from app.database import AsyncSessionLocal
+
+    try:
+        await db.rollback()  # 被取消的子任务与请求会话共用，尽力复位事务状态
+    except Exception:
+        logger.debug("rollback after stopped turn failed", exc_info=True)
+    payload = None
+    try:
+        async with AsyncSessionLocal() as db2:
+            if edited_message_id is not None:
+                msg = await chat_crud.get_message(db2, conversation_id, edited_message_id)
+            else:
+                msgs = await chat_crud.list_messages_after(db2, conversation_id)
+                msg = next((m for m in reversed(msgs) if m.role == "user"), None)
+            if msg is not None:
+                payload = orchestrator.serialize_message(msg)
+    except Exception:
+        logger.warning("stopped turn payload load failed", exc_info=True)
+    await _emit_turn_stopped(conversation_id)
+    return {"user_message": payload, "assistant_message": None, "stopped": True}
 
 
 def serialize_conversation(c) -> dict:
@@ -429,18 +485,31 @@ async def send_message(
             raise HTTPException(403, "；".join(problems[:3]))
         refs = valid
 
-    user_msg, assistant = await orchestrator.handle_user_message(
-        db, conversation=conv, user_id=user.id, content=content,
-        refs=refs, attachments=payload.attachments,
+    # 单会话同时至多一轮在途：避免上下文交错（可先点停止）
+    from core.chat import turns as chat_turns
+
+    if chat_turns.has_turn(conversation_id):
+        raise HTTPException(409, "上一条消息仍在处理中，请稍候或点击停止")
+
+    result, stopped = await _run_turn(
+        conversation_id,
+        orchestrator.handle_user_message(
+            db, conversation=conv, user_id=user.id, content=content,
+            refs=refs, attachments=payload.attachments,
+        ),
     )
+    if stopped:
+        return await _stopped_turn_payload(db, conversation_id)
+    user_msg, assistant = result
     return {
         "user_message": orchestrator.serialize_message(user_msg),
         "assistant_message": orchestrator.serialize_message(assistant),
+        "stopped": False,
     }
 
 
 class ConversationStop(BaseModel):
-    kind: Optional[str] = None  # browse | generate；缺省=停止全部进行中任务
+    kind: Optional[str] = None  # turn | browse | generate；缺省=停止全部（含在途回复）
     key: Optional[str] = None   # browse_id 或 gen_session_id（可选，精确停止单个任务）
 
 
@@ -451,17 +520,36 @@ async def stop_conversation(
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
-    """停止对话内进行中的任务（浏览器探索 / 用例生成）。"""
+    """停止对话内进行中的任务：在途回复（turn）/ 浏览器探索 / 用例生成。"""
     _ensure_enabled()
     conv = await _get_owned(db, conversation_id, user)
-    if payload.kind not in (None, "browse", "generate"):
-        raise HTTPException(400, "kind 必须为 browse|generate")
+    if payload.kind not in (None, "turn", "browse", "generate"):
+        raise HTTPException(400, "kind 必须为 turn|browse|generate")
+
+    # 在途回复：取消当前正在生成的这一轮（发送按钮「停止」）
+    turn_stopped = False
+    if payload.kind in (None, "turn"):
+        from core.chat import turns as chat_turns
+
+        turn_stopped = chat_turns.cancel_turn(conversation_id)
+        if turn_stopped:
+            await _emit_turn_stopped(conversation_id)
+
+    if payload.kind == "turn":
+        return {
+            "stopped": {"turn": turn_stopped},
+            "total": 1 if turn_stopped else 0,
+            "message": "已停止" if turn_stopped else "没有正在生成的回复",
+        }
+
     from app.services import chat_tasks
 
     stopped = await chat_tasks.stop_conversation_tasks(
         db, conversation=conv, user_id=user.id, kind=payload.kind, key=payload.key,
     )
-    total = len(stopped["browse"]) + len(stopped["generate"])
+    if turn_stopped:
+        stopped = {"turn": True, **stopped}
+    total = len(stopped["browse"]) + len(stopped["generate"]) + (1 if turn_stopped else 0)
     return {
         "stopped": stopped,
         "total": total,
@@ -478,13 +566,81 @@ async def regenerate_message(
 ) -> dict:
     _ensure_enabled()
     conv = await _get_owned(db, conversation_id, user)
-    updated, err = await orchestrator.regenerate_message(
-        db, conversation=conv, message_id=message_id, user_id=user.id,
+    from core.chat import turns as chat_turns
+
+    if chat_turns.has_turn(conversation_id):
+        raise HTTPException(409, "当前有正在生成的回复，请先停止")
+    result, stopped = await _run_turn(
+        conversation_id,
+        orchestrator.regenerate_message(
+            db, conversation=conv, message_id=message_id, user_id=user.id,
+        ),
     )
+    if stopped:
+        await _emit_turn_stopped(conversation_id)
+        return {"assistant_message": None, "stopped": True}
+    updated, err = result
     if updated is None:
         status = 404 if "不存在" in err else 400
         raise HTTPException(status, err)
-    return {"assistant_message": orchestrator.serialize_message(updated)}
+    return {"assistant_message": orchestrator.serialize_message(updated), "stopped": False}
+
+
+@router.patch("/conversations/{conversation_id}/messages/{message_id}")
+async def edit_message_endpoint(
+    conversation_id: int,
+    message_id: int,
+    payload: MessageEdit,
+    db: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+) -> dict:
+    """编辑已发送的用户消息；``regenerate=true``（默认）删除其后消息并以新内容重跑本轮。"""
+    _ensure_enabled()
+    conv = await _get_owned(db, conversation_id, user)
+    from core.chat import turns as chat_turns
+
+    if chat_turns.has_turn(conversation_id):
+        raise HTTPException(409, "当前有正在生成的回复，请先停止再编辑")
+    content = (payload.content or "").strip()
+    if not content:
+        raise HTTPException(400, "消息内容不能为空")
+    msg = await chat_crud.get_message(db, conversation_id, message_id)
+    if msg is None:
+        raise HTTPException(404, "消息不存在")
+    if msg.role != "user":
+        raise HTTPException(400, "只能编辑用户消息")
+
+    if not payload.regenerate:
+        from core.chat.events import emit as chat_emit
+
+        updated = await chat_crud.update_message(db, msg, content=content)
+        await chat_emit(conversation_id, {
+            "type": "message.updated",
+            "message": orchestrator.serialize_message(updated),
+        })
+        return {
+            "user_message": orchestrator.serialize_message(updated),
+            "assistant_message": None,
+            "stopped": False,
+        }
+
+    result, stopped = await _run_turn(
+        conversation_id,
+        orchestrator.edit_message(
+            db, conversation=conv, message_id=message_id, content=content, user_id=user.id,
+        ),
+    )
+    if stopped:
+        return await _stopped_turn_payload(db, conversation_id, edited_message_id=message_id)
+    user_msg, assistant, err = result
+    if user_msg is None:
+        status = 404 if "不存在" in (err or "") else 400
+        raise HTTPException(status, err or "编辑失败")
+    return {
+        "user_message": orchestrator.serialize_message(user_msg),
+        "assistant_message": orchestrator.serialize_message(assistant),
+        "stopped": False,
+    }
 
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}")

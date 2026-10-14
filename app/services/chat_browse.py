@@ -46,6 +46,59 @@ def _web_path(abs_path: str | None) -> str | None:
         return None
 
 
+def build_streaming_llm(*, on_event, agent_id: int | None):
+    """构造流式决策回调（ZCode 式时间线的「思考」数据源）。
+
+    - 网关返回 reasoning 增量 → 直接作为思考增量；
+    - 网关不回推理时 → 从决策 JSON 的 thinking 字段做部分提取（增量）；
+    - 调用结束发 thinking_done（全文 + 持续秒数）。
+    ``on_event``：async callable(dict)，事件 kinds：thinking_delta / thinking_done。
+    """
+
+    async def _llm(messages):
+        from app.gen.model_client import call_model
+        from core.chat import stream as chat_stream
+
+        partial = chat_stream.PartialDecisionStream()
+        seen_reasoning = {"v": False}
+        acc: list[str] = []
+        started = time.monotonic()
+
+        async def on_reasoning(chunk: str) -> None:
+            seen_reasoning["v"] = True
+            acc.append(chunk)
+            await on_event({"kind": "thinking_delta", "delta": chunk})
+
+        async def on_content(chunk: str) -> None:
+            partial.feed(chunk)
+            if not seen_reasoning["v"]:
+                cur = partial.get("thinking")
+                got = "".join(acc)
+                if len(cur) > len(got):
+                    delta = cur[len(got):]
+                    acc.append(delta)
+                    await on_event({"kind": "thinking_delta", "delta": delta})
+
+        try:
+            return await call_model(
+                messages,
+                agent_type="assistant",
+                agent_id=agent_id,
+                stream_callback=on_content,
+                reasoning_callback=on_reasoning,
+            )
+        finally:
+            text = "".join(acc).strip()
+            if text:
+                await on_event({
+                    "kind": "thinking_done",
+                    "text": text,
+                    "duration": round(time.monotonic() - started, 1),
+                })
+
+    return _llm
+
+
 async def _find_card_message(db, conversation_id: int, browse_id: str):
     msgs = await chat_crud.list_messages_after(db, conversation_id)
     for m in reversed(msgs):
@@ -121,6 +174,7 @@ async def _run_browse_task(
             "goal": goal,
             "has_credentials": bool(username or password),
             "steps": [],
+            "timeline": [],
             "pages": [],
             "features": [],
             "summary": "",
@@ -133,11 +187,60 @@ async def _run_browse_task(
     await _update(lambda c: c.update(_base_card()) if c else None)
 
     last_write = 0.0
+    # ZCode 式时间线：待落库项（节流跳过写库时滞留，下一次写入或收尾时统一冲刷，不丢内容）
+    _pending_timeline: list[dict] = []
 
     async def _on_event(evt: dict) -> None:
         nonlocal last_write
+        kind = str(evt.get("kind") or "")
+        # 思考增量：仅 WS 瞬时推送（不落库；完整文本在 thinking_done 落时间线）
+        if kind == "thinking_delta":
+            delta = str(evt.get("delta") or "")
+            if delta:
+                await emit(conversation_id, {
+                    "type": "browse.stream",
+                    "conversation_id": conversation_id,
+                    "browse_id": browse_id,
+                    "delta": delta,
+                })
+            return
+
+        item = None
+        if kind == "thinking_done":
+            text = str(evt.get("text") or "").strip()
+            if text:
+                item = {
+                    "type": "thinking",
+                    "text": text[:2000],
+                    "duration": evt.get("duration"),
+                    "at": round(float(evt.get("elapsed") or 0), 1),
+                }
+            # 通知前端结束瞬时思考流（该块已随下一次写库落时间线）
+            await emit(conversation_id, {
+                "type": "browse.stream",
+                "conversation_id": conversation_id,
+                "browse_id": browse_id,
+                "done": True,
+            })
+        elif kind == "note":
+            text = str(evt.get("text") or "").strip()
+            if text:
+                item = {"type": "text", "text": text[:400], "at": round(float(evt.get("elapsed") or 0), 1)}
+        elif kind == "step":
+            item = {
+                "type": "step",
+                "label": str(evt.get("label") or "")[:160],
+                "url": evt.get("url"),
+                "ok": evt.get("ok"),
+                "at": round(float(evt.get("elapsed") or 0), 1),
+            }
+        if item is not None:
+            _pending_timeline.append(item)
+
         now = time.monotonic()
-        if now - last_write < 1.5 and evt.get("kind") != "done":
+        # thinking/note 内容不可从 report 重建 → 立即写；step 维持 1.5s 节流（收尾由 report 兜底）
+        urgent = kind in ("thinking_done", "note", "done")
+        if not urgent and now - last_write < 1.5:
             return
         last_write = now
         step = {
@@ -146,20 +249,23 @@ async def _run_browse_task(
             "ok": evt.get("ok"),
             "at": round(float(evt.get("elapsed") or 0), 1),
         }
+        pending_now = list(_pending_timeline)
+        _pending_timeline.clear()
 
         def _mut(c: dict) -> None:
-            c["steps"] = (c.get("steps") or [])[-24:] + [step]
+            if kind == "step":
+                c["steps"] = (c.get("steps") or [])[-24:] + [step]
+            if pending_now:
+                c["timeline"] = ((c.get("timeline") or []) + pending_now)[-120:]
             c["elapsed"] = evt.get("elapsed") or c.get("elapsed")
 
         await _update(_mut)
 
     report: dict | None = None
     try:
-        from app.gen.model_client import call_model
         from core.chat.browse import BrowseConfig, build_report_materials, run_exploration
 
-        async def _llm(messages):
-            return await call_model(messages, agent_type="assistant", agent_id=assistant_agent_id)
+        _llm = build_streaming_llm(on_event=_on_event, agent_id=assistant_agent_id)
 
         cfg = BrowseConfig(
             url=url, goal=goal, username=username, password=password,
@@ -274,6 +380,9 @@ async def _run_browse_task(
             c["browser_mode"] = report.get("browser_mode")
         if report.get("agent_name") is not None:
             c["agent_name"] = report.get("agent_name")
+        if _pending_timeline:
+            c["timeline"] = ((c.get("timeline") or []) + list(_pending_timeline))[-120:]
+            _pending_timeline.clear()
         c["steps"] = [
             {
                 "label": _step_label(s),
@@ -392,6 +501,7 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
         "agent_name": agent_name,
         "has_credentials": bool(action.get("username") or action.get("password")),
         "steps": [],
+        "timeline": [],
         "pages": [],
         "features": [],
         "summary": "",

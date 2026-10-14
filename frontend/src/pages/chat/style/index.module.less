@@ -126,6 +126,23 @@
   }
 }
 
+/* 编辑已发送消息：内联编辑框 + 保存/取消 */
+.editBox {
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  padding: 10px;
+  min-width: 320px;
+}
+
+.editActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
 /* 卡片 */
 .card {
   margin-top: 8px;
@@ -309,6 +326,77 @@
   font-size: 12px;
   color: #4e5969;
   line-height: 1.6;
+  word-break: break-all;
+}
+
+/* ZCode 式探索时间线：思考块 / 文本旁白 / 工具行 交替输出 */
+.browseTimeline {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tlThinking {
+  background: #f7f8fa;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.tlThinkingHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: #86909c;
+}
+
+.tlThinkingLabel {
+  flex: 0 0 auto;
+}
+
+.tlSpin {
+  font-size: 12px;
+  color: #86909c;
+}
+
+.tlThinkingBody {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #4e5969;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.tlText {
+  font-size: 13px;
+  color: #1d2129;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tlStep {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #4e5969;
+  line-height: 1.6;
+}
+
+.tlStepMark {
+  flex: 0 0 auto;
+  color: #86909c;
+}
+
+.tlStepLabel {
+  flex: 1 1 auto;
   word-break: break-all;
 }
 

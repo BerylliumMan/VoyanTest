@@ -101,6 +101,41 @@ def _cfg(**kw):
 # ----------------------------
 
 @pytest.mark.asyncio
+async def test_timeline_note_event_emitted_before_step(patch_candidates):
+    """ZCode 式时间线：决策 note 作为文本旁白事件先于该动作的 step 事件发出。"""
+    patch_candidates([_candidate("e2")])
+    browser = FakeBrowser()
+    llm = await _llm_script([
+        {"thinking": "点登录", "action": "click", "ref": "e2", "note": "准备点击登录按钮"},
+        {"thinking": "完成", "action": "done", "summary": "OK", "features": []},
+    ])
+    events: list[dict] = []
+
+    async def _on_event(evt):
+        events.append(evt)
+
+    report = await run_exploration(
+        _cfg(), llm=llm, browser=browser, screenshot_dir="/tmp/opencode/bt_shots",
+        on_event=_on_event,
+    )
+    assert report["ok"] is True
+    notes = [e for e in events if e.get("kind") == "note"]
+    assert [n["text"] for n in notes] == ["准备点击登录按钮"]
+    # 顺序：note 先于随后的 step（goto step 之前/之后均可，但 note 必须早于对应 click 的 step）
+    kinds = [e.get("kind") for e in events]
+    note_at = kinds.index("note")
+    click_step_at = next(
+        i for i, e in enumerate(events)
+        if e.get("kind") == "step" and "点击" in str(e.get("label") or "") or (
+            e.get("kind") == "step" and "login" in str(e.get("label") or ""))
+    ) if any(e.get("kind") == "step" for e in events) else None
+    assert click_step_at is None or note_at < click_step_at
+
+    # 凭据打码：note 中如含密码需打码（此处无密码，回归 redact 管线即可）
+    assert all("Secret123" not in n["text"] for n in notes)
+
+
+@pytest.mark.asyncio
 async def test_happy_path_credentials_masked_and_substituted(patch_candidates):
     patch_candidates([_candidate("e2"), _candidate("e3"), _candidate("e4")])
     browser = FakeBrowser()

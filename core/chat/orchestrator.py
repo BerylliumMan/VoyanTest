@@ -405,10 +405,13 @@ async def handle_user_message(
     refs=None,
     attachments: Optional[list] = None,
     llm_call: Optional[Callable[[list], Awaitable[str]]] = None,
+    user_message=None,
 ) -> tuple:
     """处理一条用户消息：落库 → LLM 决策 → 动作执行 → 助手消息落库。
 
     返回 (user_message, assistant_message)。``llm_call`` 可注入（测试/替换）。
+    ``user_message``：编辑重生成场景传入已存在的用户消息（跳过落库与 message.created，
+    内容已在调用前更新）。
     """
     from app.gen.model_client import call_model
 
@@ -426,18 +429,23 @@ async def handle_user_message(
     conversation, dropped_refs = await _prune_conversation_refs(db, conversation)
 
     # 2) 落用户消息（附件以 file 引用形式随消息存储，供上下文注入）
-    refs_all = list(refs or [])
-    for a in (attachments or [])[:5]:
-        if isinstance(a, dict) and a.get("file_ref"):
-            refs_all.append({
-                "type": "file",
-                "file_ref": str(a["file_ref"])[:500],
-                "label": str(a.get("filename") or "")[:200],
-            })
-    user_msg = await chat_crud.create_message(
-        db, conversation_id=conversation.id, role="user", content=content, refs=refs_all or None,
-    )
-    await emit(conversation.id, {"type": "message.created", "message": serialize_message(user_msg)})
+    if user_message is None:
+        refs_all = list(refs or [])
+        for a in (attachments or [])[:5]:
+            if isinstance(a, dict) and a.get("file_ref"):
+                refs_all.append({
+                    "type": "file",
+                    "file_ref": str(a["file_ref"])[:500],
+                    "label": str(a.get("filename") or "")[:200],
+                })
+        user_msg = await chat_crud.create_message(
+            db, conversation_id=conversation.id, role="user", content=content, refs=refs_all or None,
+        )
+        await emit(conversation.id, {"type": "message.created", "message": serialize_message(user_msg)})
+    else:
+        # 编辑重生成：消息已更新并推送 message.updated，本轮不重复落库
+        user_msg = user_message
+        history = [m for m in history if m.id < user_msg.id]
 
     # 3) 上下文组装（摘要 + 引用 + 草稿摘要）
     messages = list(history) + [user_msg]
@@ -583,6 +591,48 @@ async def regenerate_message(
         await db.commit()
     await emit(conversation.id, {"type": "message.updated", "message": serialize_message(updated)})
     return updated, ""
+
+
+async def edit_message(
+    db,
+    *,
+    conversation,
+    message_id: int,
+    content: str,
+    user_id: int,
+    llm_call: Optional[Callable[[list], Awaitable[str]]] = None,
+) -> tuple:
+    """编辑已发送的用户消息并重新生成（2026-10-14 新增能力）。
+
+    语义：更新该用户消息内容 → 删除其后所有消息（含助手回复）→ 以新内容重跑本轮。
+    返回 (user_message | None, assistant_message | None, error)。
+    """
+    msg = await chat_crud.get_message(db, conversation.id, message_id)
+    if msg is None:
+        return None, None, "消息不存在"
+    if msg.role != "user":
+        return None, None, "只能编辑用户消息"
+
+    content = (content or "").strip()
+    if not content:
+        return None, None, "消息内容不能为空"
+
+    # 1) 截断：删除该消息之后的全部消息（WS 同步推送 message.deleted，前端收缩列表）
+    later = list(await chat_crud.list_messages_after(db, conversation.id, after_id=message_id))
+    for m in later:
+        await chat_crud.delete_message(db, m)
+        await emit(conversation.id, {"type": "message.deleted", "message_id": m.id})
+
+    # 2) 更新内容
+    updated = await chat_crud.update_message(db, msg, content=content)
+    await emit(conversation.id, {"type": "message.updated", "message": serialize_message(updated)})
+
+    # 3) 以新内容重跑本轮（不重复落用户消息、不重复推 message.created）
+    user_msg, assistant = await handle_user_message(
+        db, conversation=conversation, user_id=user_id, content=content,
+        llm_call=llm_call, user_message=updated,
+    )
+    return user_msg, assistant, ""
 
 
 async def delete_message(db, *, conversation, message_id: int) -> tuple:

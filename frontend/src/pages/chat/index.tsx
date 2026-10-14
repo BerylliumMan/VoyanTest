@@ -15,8 +15,11 @@ import {
   Typography,
 } from '@arco-design/web-react';
 import {
+  IconCaretDown,
+  IconCaretRight,
   IconDelete,
   IconDownload,
+  IconEdit,
   IconImport,
   IconList,
   IconLoading,
@@ -24,6 +27,7 @@ import {
   IconRefresh,
   IconRobot,
   IconSend,
+  IconStop,
   IconUpload,
 } from '@arco-design/web-react/icon';
 import axios from 'axios';
@@ -91,6 +95,37 @@ const screenshotHref = (raw: unknown): string => {
   return '/' + s.replace(/^\/+/, '');
 };
 
+// ZCode 式「已工作」计时格式（导出供测试）
+export const fmtWorked = (sec: number): string => {
+  const total = Math.max(0, Math.round(sec));
+  if (total < 60) return `${total} 秒`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m} 分 ${s} 秒`;
+};
+
+// 思考块（默认折叠，ZCode 式「思考 · 持续 N 秒」）；running 时流式展示且展开跟随
+const ThinkingItem: React.FC<{
+  text: string;
+  duration?: number | null;
+  running?: boolean;
+}> = ({ text, duration, running }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={styles.tlThinking}>
+      <div className={styles.tlThinkingHead} onClick={() => setOpen((v) => !v)}>
+        {open ? <IconCaretDown /> : <IconCaretRight />}
+        <span className={styles.tlThinkingLabel}>
+          思考{running ? '中' : ''}
+          {!running && duration != null ? ` · 持续 ${duration} 秒` : ''}
+        </span>
+        {running ? <IconLoading className={styles.tlSpin} /> : null}
+      </div>
+      {open && text ? <div className={styles.tlThinkingBody}>{text}</div> : null}
+    </div>
+  );
+};
+
 const ChatPage: React.FC = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -111,6 +146,11 @@ const ChatPage: React.FC = () => {
   // 流式输出：thinking/reply 增量；targetId 为被「重新生成」的消息 id（null = 新一轮回复）
   const [stream, setStream] = useState<{ targetId: number | null; thinking: string; reply: string } | null>(null);
   const [streamOpen, setStreamOpen] = useState(true);
+  // 探索时间线瞬时流：browse_id → 当前思考增量（done 后清空，由卡片时间线接管）
+  const [browseLive, setBrowseLive] = useState<Record<string, string>>({});
+  // 编辑已发送消息（保存并从该条重新生成）
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editText, setEditText] = useState('');
   const streamReplyStartedRef = useRef(false);
   // 执行上下文：项目环境列表 / 客户端 Agent 列表
   const [envs, setEnvs] = useState<Array<{ id: number; name: string; is_default?: boolean }>>([]);
@@ -271,6 +311,16 @@ const ChatPage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [activeId, messages, refreshMessagesQuiet]);
 
+  // 探索卡「已工作」计数：本地每秒走秒（ZCode 式连续计时，不依赖网络事件）
+  const [, setClockTick] = useState(0);
+  const hasRunningBrowse = messages.some((m) =>
+    (m.cards || []).some((c) => String(c.type) === 'browse' && String(c.status) === 'running'));
+  useEffect(() => {
+    if (!hasRunningBrowse) return undefined;
+    const timer = window.setInterval(() => setClockTick((v) => v + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasRunningBrowse]);
+
   // WS：实时消息与卡片更新；断线重连后 REST 补偿
   useEffect(() => {
     if (activeId == null) return undefined;
@@ -298,6 +348,9 @@ const ChatPage: React.FC = () => {
           streamReplyStartedRef.current = false;
           setStream({ targetId: (data.target_message_id as number) ?? null, thinking: '', reply: '' });
           setStreamOpen(true);
+        } else if (data.type === 'turn.stopped') {
+          // 停止按钮（本端或他端）→ 清掉流式预览，发送按钮由 send() 的 finally 收敛
+          setStream(null);
         } else if (data.type === 'message.stream') {
           const channel = String(data.channel || '');
           const delta = String(data.delta || '');
@@ -314,6 +367,21 @@ const ChatPage: React.FC = () => {
               ? { ...prev, thinking: prev.thinking + delta }
               : { ...prev, reply: prev.reply + delta };
           });
+        } else if (data.type === 'browse.stream') {
+          // ZCode 式时间线：探索引擎思考增量（瞬时，不落库；done 后由卡片时间线接管）
+          const bid = String(data.browse_id || '');
+          if (!bid) return;
+          if (data.done) {
+            setBrowseLive((prev) => {
+              if (!(bid in prev)) return prev;
+              const next = { ...prev };
+              delete next[bid];
+              return next;
+            });
+          } else {
+            const delta = String(data.delta || '');
+            if (delta) setBrowseLive((prev) => ({ ...prev, [bid]: (prev[bid] || '') + delta }));
+          }
         }
       } catch {
         /* ignore */
@@ -431,8 +499,9 @@ const ChatPage: React.FC = () => {
       setInput('');
       setAttachments([]);
       setRefCases([]);
-      const { user_message, assistant_message } = r.data;
+      const { user_message, assistant_message, stopped } = r.data;
       appendMessages([user_message, assistant_message]);
+      if (stopped) Message.info('已停止本轮回复');
     } catch (e: any) {
       Message.error(e?.response?.data?.detail || '发送失败');
     } finally {
@@ -446,8 +515,49 @@ const ChatPage: React.FC = () => {
     try {
       const r = await axios.post(`/api/chat/conversations/${activeId}/messages`, { content: text });
       appendMessages([r.data.user_message, r.data.assistant_message]);
+      if (r.data.stopped) Message.info('已停止本轮回复');
     } catch (e: any) {
       Message.error(e?.response?.data?.detail || '发送失败');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // 停止：取消当前正在生成的这轮回复（发送按钮在生成期间显示为「停止」）
+  const stopTurn = async () => {
+    if (activeId == null) return;
+    try {
+      const r = await axios.post(`/api/chat/conversations/${activeId}/stop`, { kind: 'turn' });
+      if (r.data?.total) Message.info('已停止生成');
+    } catch {
+      /* ignore：send() 的响应会收敛状态 */
+    }
+    setStream(null);
+  };
+
+  // 编辑已发送的用户消息 → 保存并从该条重新生成（其后消息会被清除）
+  const saveEdit = async (mid: number) => {
+    if (activeId == null) return;
+    const text = editText.trim();
+    if (!text) {
+      Message.warning('消息内容不能为空');
+      return;
+    }
+    setSending(true);
+    try {
+      const r = await axios.patch(`/api/chat/conversations/${activeId}/messages/${mid}`, {
+        content: text,
+        regenerate: true,
+      });
+      // 本地截断 + 更新（WS 的 message.deleted/updated 已先行，幂等兜底）
+      setMessages((prev) => prev
+        .filter((x) => x.id <= mid)
+        .map((x) => (x.id === mid ? { ...x, content: text } : x)));
+      appendMessages([r.data.user_message, r.data.assistant_message]);
+      setEditingId(null);
+      if (r.data.stopped) Message.info('已停止本轮回复');
+    } catch (e: any) {
+      Message.error(e?.response?.data?.detail || '保存失败');
     } finally {
       setSending(false);
     }
@@ -507,8 +617,9 @@ const ChatPage: React.FC = () => {
   const regenerate = async (mid: number) => {
     if (activeId == null) return;
     try {
-      await axios.post(`/api/chat/conversations/${activeId}/messages/${mid}/regenerate`);
-      Message.success('已重新生成');
+      const r = await axios.post(`/api/chat/conversations/${activeId}/messages/${mid}/regenerate`);
+      if (r.data?.stopped) Message.info('已停止本轮回复');
+      else Message.success('已重新生成');
     } catch (e: any) {
       Message.error(e?.response?.data?.detail || '重新生成失败');
     }
@@ -705,7 +816,18 @@ const ChatPage: React.FC = () => {
       const pages = (card.pages as Array<Record<string, any>>) || [];
       const features = (card.features as string[]) || [];
       const steps = (card.steps as Array<Record<string, any>>) || [];
+      const timeline = (card.timeline as Array<Record<string, any>>) || [];
       const gen = (card.generation as Record<string, any>) || null;
+      const bid = String(card.browse_id || '');
+      const live = browseLive[bid] || '';
+      // 运行中且无警告时按 started_at 本地走秒（WS/轮询之外也有连续计数）
+      let workedSec: number | null = null;
+      if (status === 'running' && card.started_at) {
+        const t0 = Date.parse(String(card.started_at));
+        if (!Number.isNaN(t0)) workedSec = (Date.now() - t0) / 1000;
+      } else if (card.elapsed != null) {
+        workedSec = Number(card.elapsed) || 0;
+      }
       return (
         <div className={styles.card} key={idx}>
           <div className={styles.cardHeader}>
@@ -715,8 +837,10 @@ const ChatPage: React.FC = () => {
                 {status === 'running' && <IconLoading className={styles.iconMarginRightSmall} />}
                 {tag.text}
               </Tag>
-              {card.elapsed ? (
-                <Text type="secondary" style={{ fontSize: 12 }}>{String(card.elapsed)}s</Text>
+              {workedSec != null ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {status === 'running' ? `已工作 ${fmtWorked(workedSec)}` : `用时 ${fmtWorked(workedSec)}`}
+                </Text>
               ) : null}
             </div>
           </div>
@@ -732,13 +856,41 @@ const ChatPage: React.FC = () => {
                 : '浏览器：服务端无头'}
             </Text>
           </div>
-          {status === 'running' && steps.length > 0 && (
-            <div className={styles.browseSteps}>
-              {steps.slice(-5).map((s, i) => (
-                <div key={i} className={styles.browseStep}>
-                  {s.ok === false ? '✗' : '·'} {s.label as string}
-                </div>
-              ))}
+          {(timeline.length > 0 || live || status === 'running') && (
+            <div className={styles.browseTimeline}>
+              {timeline.length > 0
+                ? timeline.map((it, i) =>
+                    it.type === 'thinking' ? (
+                      <ThinkingItem
+                        key={i}
+                        text={String(it.text || '')}
+                        duration={it.duration != null ? Number(it.duration) : null}
+                      />
+                    ) : it.type === 'text' ? (
+                      <div key={i} className={styles.tlText}>{String(it.text || '')}</div>
+                    ) : (
+                      <div key={i} className={styles.tlStep}>
+                        <span className={styles.tlStepMark}>{it.ok === false ? '✗' : '·'}</span>
+                        <span className={styles.tlStepLabel}>{String(it.label || '')}</span>
+                        {it.ok === false ? (
+                          <Tag size="small" color="red">失败</Tag>
+                        ) : (
+                          <Tag size="small" color="green">已完成</Tag>
+                        )}
+                      </div>
+                    ),
+                  )
+                : // 旧卡片无 timeline：退回 steps 渲染（后向兼容）
+                  steps.slice(-8).map((s, i) => (
+                    <div key={i} className={styles.tlStep}>
+                      <span className={styles.tlStepMark}>{s.ok === false ? '✗' : '·'}</span>
+                      <span className={styles.tlStepLabel}>{s.label as string}</span>
+                    </div>
+                  ))}
+              {status === 'running' && live ? <ThinkingItem text={live} running /> : null}
+              {status === 'running' && !live && timeline.length === 0 && steps.length === 0 ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>正在连接浏览器…</Text>
+              ) : null}
             </div>
           )}
           {status === 'running' && (
@@ -1119,6 +1271,35 @@ const ChatPage: React.FC = () => {
                   <div style={{ maxWidth: '76%' }}>
                     {(() => {
                       const live = stream && stream.targetId === m.id ? stream : null;
+                      if (m.role === 'user' && editingId === m.id) {
+                        return (
+                          <div className={styles.editBox}>
+                            <Input.TextArea
+                              value={editText}
+                              onChange={setEditText}
+                              autoSize={{ minRows: 2, maxRows: 8 }}
+                              placeholder="修改这条消息…"
+                            />
+                            <div className={styles.editActions}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                保存后从这条消息重新生成，其后的消息会被清除
+                              </Text>
+                              <div>
+                                <Button size="small" onClick={() => setEditingId(null)}>取消</Button>
+                                <Button
+                                  size="small"
+                                  type="primary"
+                                  loading={sending}
+                                  style={{ marginLeft: 8 }}
+                                  onClick={() => saveEdit(m.id)}
+                                >
+                                  保存并重新生成
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
                       const thinkingText = live ? live.thinking : (m.role === 'assistant' ? m.thinking : null);
                       const showThinking = m.role === 'assistant' && (thinkingText || (live && !live.reply));
                       return (
@@ -1174,6 +1355,19 @@ const ChatPage: React.FC = () => {
                               引用：{r.label || `${r.type}#${r.id}`}
                             </Tag>
                           ))}
+                      </div>
+                    )}
+                    {m.role === 'user' && editingId !== m.id && (
+                      <div className={styles.msgTools} style={{ justifyContent: 'flex-end' }}>
+                        <span
+                          className={styles.msgTool}
+                          onClick={() => {
+                            setEditingId(m.id);
+                            setEditText(m.content || '');
+                          }}
+                        >
+                          <IconEdit style={{ marginRight: 2 }} />编辑
+                        </span>
                       </div>
                     )}
                     {(m.cards || []).map((c, i) => renderCard(c, i, m.id))}
@@ -1293,9 +1487,15 @@ const ChatPage: React.FC = () => {
                     e.target.value = '';
                   }}
                 />
-                <Button type="primary" icon={<IconSend />} loading={sending} onClick={send}>
-                  发送
-                </Button>
+                {sending ? (
+                  <Button type="primary" status="danger" icon={<IconStop />} onClick={stopTurn}>
+                    停止
+                  </Button>
+                ) : (
+                  <Button type="primary" icon={<IconSend />} onClick={send}>
+                    发送
+                  </Button>
+                )}
               </div>
               <div className={styles.hint}>
                 当前项目：{activeConv?.project_id ? (projects.find((p) => p.id === activeConv.project_id)?.name || activeConv.project_id) : '未绑定'} ·

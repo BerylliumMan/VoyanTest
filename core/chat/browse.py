@@ -78,10 +78,11 @@ B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设�
 5b.（图形验证码）登录表单含验证码（输入框占位/标签含「验证码」，旁边有验证码图片）时：
    按 账号 → 密码 → 验证码 → 登录 的顺序操作；验证码一步输出 solve_captcha（ref=验证码输入框的 ref；
    系统会自动识别并填写，不需要 value，不要询问用户、不要猜测内容）。若登录后仍停留在登录页或提示
-   「验证码错误」，输出 solve_captcha 且 refresh=true（先点击验证码图片刷新再识别）重试，最多 2 次
+   「验证码错误」，输出 solve_captcha 且 refresh=true（先点击验证码图片刷新再识别）重试，最多 3 次
    （验证码错误的重试不受规则 5 的一次限制），仍失败按规则 5 如实收尾。若重试时登录页已被重置（用户名/密码
    输入框为空）：「必须先重新填写账号与密码，再 solve_captcha（refresh=true），最后点击登录」——
    禁止只改验证码就直接提交。算术型验证码（图片是「1+2=?」这类）系统会自动计算答案，同样用 solve_captcha；
+   若系统识别失败（步骤会显示失败原因），先 refresh=true 重试；仍失败则用 note 记录该情况并继续其他步骤；
 6. 浏览策略：优先点击顶部导航 / 侧边菜单等入口，逐个访问主要功能页面；每到一个新页面，用 note 记录「页面标题：主要功能点」；
 7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；动作（点击/提交/跳转）完成后系统会自动给出
    最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
@@ -718,6 +719,13 @@ async def run_exploration(
             action_name = str(decision.get("action") or "").strip().lower()
             note = redact_text(str(decision.get("note") or "").strip()[:200],
                                [cfg.username, cfg.password])
+            # ZCode 式时间线：模型的旁白文本先于动作出现（观察报告/决策理由）
+            if note:
+                await _emit({
+                    "kind": "note",
+                    "text": note,
+                    "elapsed": round(time.time() - start_ts, 1),
+                })
 
             if action_name == "done":
                 report["summary"] = redact_text(
@@ -755,6 +763,7 @@ async def run_exploration(
 
                 result = await solve_captcha_via_browser(
                     browser, input_ref=(ref or None), refresh=refresh,
+                    username=cfg.username or "", password=cfg.password or "",
                 )
                 captcha_ok = bool(result.get("ok"))
                 journal.append({
@@ -771,7 +780,7 @@ async def run_exploration(
                     "kind": "step",
                     "label": (
                         ("刷新验证码并识别填写" if refresh else "识别验证码并填写")
-                        + f"（{'成功' if captcha_ok else '失败'}）"
+                        + ("（成功）" if captcha_ok else f"（失败：{str(result.get('error') or '')[:50]}）")
                     ),
                     "url": page.get("url"),
                     "step_count": len(journal),
@@ -820,7 +829,9 @@ async def run_exploration(
             elif action_name == "wait":
                 action["value"] = str(decision.get("value") or "1")
 
-            label = note or _action_label(action_name, decision, obs["candidates"])
+            # 时间线分工：note 作为独立文本行（上面的 note 事件），步骤行用动作描述
+            # （ZCode 式「工具行 · 已完成」），避免同一句话出现两遍
+            label = _action_label(action_name, decision, obs["candidates"])
             executed = _substitute_credentials(action, cfg)
             res = await browser.act(executed)
             ok = bool(res.get("success"))
