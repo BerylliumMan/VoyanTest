@@ -220,8 +220,9 @@ def validate_action(action) -> tuple[dict | None, str]:
         agent_id = action.get("agent_id")
         if agent_id is not None and not isinstance(agent_id, int):
             agent_id = None
-        if mode == "client" and agent_id is None:
-            return None, "run_case mode=client 需要 agent_id"
+        # 注：mode=client 但未显式给 agent_id 是合法的——对话默认客户端（会话设置）会在
+        # 执行处理器里补齐；缺失时由 start_run 给出明确错误（2026-10-15 修复：此前在此
+        # 直接拒绝，导致"当前 PC 客户端"默认绑定场景下动作被忽略）
         env_id = action.get("environment_id")
         if env_id is not None:
             try:

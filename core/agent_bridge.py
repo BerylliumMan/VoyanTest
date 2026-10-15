@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -140,6 +141,11 @@ class AgentBridge:
         self._case_url: str = ""
         self._replay_logs: list[dict] | None = None
         self._console_entries: list[str] = []  # 032 US2：console 错误证据（收尾采集）
+        # B2：运行证据（网络问题请求 / 视频）
+        self._network_entries: list[str] = []
+        self._video_state: dict = {"started": False, "filename": None}
+        self._video_web_path: str | None = None
+        self._evidence_dir: str | None = None
         self._environment_id = environment_id
         self._reuse_browser_session = bool((goal or {}).get("reuse_browser_session"))
         self._screenshot_dir: str | None = None
@@ -206,8 +212,27 @@ class AgentBridge:
             _d = _os.path.join("reports", f"agent_{run.id}_{tz_now().strftime('%Y%m%d_%H%M%S')}", "screenshots")
             _os.makedirs(_d, exist_ok=True)
             self._screenshot_dir = _d
+            self._evidence_dir = _os.path.join(_os.path.dirname(_d), "evidence")
         except Exception:
             pass
+
+        # B2：视频证据启动（默认关 exec_video_evidence；旧客户端未知动作 → 静默跳过）
+        try:
+            from app.config import get_settings as _gs_v
+
+            if bool(getattr(_gs_v(), "exec_video_evidence", False)):
+                _fname = f"vt_run_{run.id}_{tz_now().strftime('%H%M%S')}.webm"
+                _res = await asyncio.wait_for(
+                    self.agent_manager.send_act(
+                        agent_id, run_id_str, {"name": "video_start", "args": {"value": _fname}},
+                    ),
+                    timeout=20,
+                )
+                if isinstance(_res, dict) and _res.get("success"):
+                    self._video_state.update(started=True, filename=_fname)
+                    logger.info("Bridge 视频证据已启动（run #%s）", run_id_str)
+        except Exception:
+            logger.debug("Bridge 视频证据启动跳过", exc_info=True)
 
         # 立即创建 RunBatch（执行中即可见）
         try:
@@ -285,35 +310,100 @@ class AgentBridge:
         return self._screenshot_paths[last_key]
 
     async def _collect_console_before_report(self, agent_id: str, run_id_str: str) -> None:
-        """032 US2：报告落库前采集 console 错误（act 通道一次；任何失败静默降级）。"""
+        """032 US2 / B2：报告落库前采集 console 错误 + 网络问题请求 + 视频证据。
+
+        全部经 act 通道一次；任何失败静默降级（旧客户端未知动作同样安全）。
+        """
         try:
             from app.config import get_settings
 
             s = get_settings()
             if not getattr(s, "exec_console_evidence", True):
-                return
-            res = await asyncio.wait_for(
-                self.agent_manager.send_act(
-                    agent_id, run_id_str, {"name": "console", "args": {}},
-                ),
-                timeout=30,
-            )
-            if not (isinstance(res, dict) and res.get("success")):
-                return
-            from core.console_evidence import dedupe_cap, parse_console_messages
-
-            text = str(res.get("text") or res.get("result") or "")
-            kept, _ = dedupe_cap(
-                parse_console_messages(text),
-                int(getattr(s, "exec_console_max_entries", 20) or 20),
-            )
-            self._console_entries = kept
-            if kept:
-                logger.info(
-                    "Bridge console 证据: %d 条（run #%s）", len(kept), run_id_str,
+                pass
+            else:
+                res = await asyncio.wait_for(
+                    self.agent_manager.send_act(
+                        agent_id, run_id_str, {"name": "console", "args": {}},
+                    ),
+                    timeout=30,
                 )
+                if isinstance(res, dict) and res.get("success"):
+                    from core.console_evidence import dedupe_cap, parse_console_messages
+
+                    text = str(res.get("text") or res.get("result") or "")
+                    kept, _ = dedupe_cap(
+                        parse_console_messages(text),
+                        int(getattr(s, "exec_console_max_entries", 20) or 20),
+                    )
+                    self._console_entries = kept
+                    if kept:
+                        logger.info(
+                            "Bridge console 证据: %d 条（run #%s）", len(kept), run_id_str,
+                        )
         except Exception:
             logger.debug("Bridge console 证据采集跳过", exc_info=True)
+
+        # B2：网络证据（问题请求摘要；默认开）
+        try:
+            from app.config import get_settings as _gs_n
+
+            s_n = _gs_n()
+            if bool(getattr(s_n, "exec_network_evidence", True)):
+                from core.run_evidence import network_problem_lines
+
+                cap_n = int(getattr(s_n, "exec_network_max_entries", 10) or 10)
+                res_n = await asyncio.wait_for(
+                    self.agent_manager.send_act(
+                        agent_id, run_id_str, {"name": "network", "args": {}},
+                    ),
+                    timeout=30,
+                )
+                if isinstance(res_n, dict) and res_n.get("success"):
+                    lines = network_problem_lines(
+                        str(res_n.get("text") or res_n.get("result") or ""), cap_n,
+                    )
+                    self._network_entries = lines
+                    if lines:
+                        logger.info(
+                            "Bridge 网络证据: %d 条（run #%s）", len(lines), run_id_str,
+                        )
+        except Exception:
+            logger.debug("Bridge 网络证据采集跳过", exc_info=True)
+
+        # B2：视频证据（停止 → 客户端回传 base64 → 落盘 run 证据目录）
+        if self._video_state.get("started"):
+            try:
+                from core.run_evidence import (
+                    parse_video_filename,
+                    save_b64_file,
+                    web_path_for,
+                )
+
+                res_v = await asyncio.wait_for(
+                    self.agent_manager.send_act(
+                        agent_id, run_id_str, {"name": "video_stop", "args": {}},
+                    ),
+                    timeout=60,
+                )
+                if isinstance(res_v, dict) and res_v.get("success"):
+                    fname = (
+                        str(res_v.get("file_name") or "")
+                        or parse_video_filename(str(res_v.get("text") or ""))
+                        or self._video_state.get("filename")
+                        or "video.webm"
+                    )
+                    dest = os.path.join(
+                        self._evidence_dir or os.path.join("reports", "evidence"),
+                        os.path.basename(fname),
+                    )
+                    saved = save_b64_file(res_v.get("file_b64"), dest)
+                    if saved:
+                        self._video_web_path = web_path_for(saved)
+                        logger.info(
+                            "Bridge 视频证据已保存: %s（run #%s）", self._video_web_path, run_id_str,
+                        )
+            except Exception:
+                logger.debug("Bridge 视频证据收尾跳过", exc_info=True)
 
     async def _resolve_coordinate_target(
         self, agent_id: str, run_id_str: str, action: dict[str, Any],
@@ -357,7 +447,7 @@ class AgentBridge:
 
     async def _enrich_failure_evidence(
         self, agent_id: str, run_id_str: str, action: dict[str, Any],
-        result: dict[str, Any],
+        result: dict[str, Any], snapshot: str | None = None,
     ) -> None:
         """032 US6/US7：动作失败时补充证据（不改变成败）。
 
@@ -392,7 +482,7 @@ class AgentBridge:
                         )
                         text = str((res or {}).get("text") or "").strip()
                         if text:
-                            result["error"] = (error + f" | find: {text[:200]}")[:600]
+                            result["error"] = (error[:420] + f" | find: {text[:200]}")[:600]
                             error = result["error"]
                             logger.info("Bridge find 辅助: %s（run #%s）", text[:80], run_id_str)
                     except Exception:
@@ -418,10 +508,66 @@ class AgentBridge:
 
                     diag = await diagnose_missing(_caller, target)
                     if diag.get("note"):
-                        result["error"] = (error + f" | {diag['note']}")[:600]
+                        result["error"] = (error[:420] + f" | {diag['note']}")[:600]
                         logger.info("Bridge 隐藏元素诊断: %s（run #%s）", diag["note"][:90], run_id_str)
                 except Exception:
                     logger.debug("隐藏元素诊断跳过", exc_info=True)
+
+        # B4：点击类失败 → 遮挡/视口诊断（只读，结果附到错误文本供下一轮参考）
+        if (
+            s is not None
+            and bool(getattr(s, "exec_occlusion_probe", True))
+            and name in ("click", "double_click", "right_click", "check", "hover", "press_key")
+        ):
+            target = str(args.get("element_desc") or args.get("value") or "").strip()
+            selector = str(args.get("selector") or "").strip()
+            if selector:
+                try:
+                    from core.locator_candidates import is_snapshot_ref
+
+                    if is_snapshot_ref(selector):
+                        # ref 无法在 JS 中解析——从快照候选里回解可读名称
+                        if not target and snapshot:
+                            from core.locator_candidates import (
+                                actionable_candidates,
+                                extract_candidates,
+                                find_candidate,
+                            )
+
+                            cand = find_candidate(
+                                actionable_candidates(extract_candidates(snapshot)),
+                                selector,
+                            )
+                            if cand is not None:
+                                target = str(
+                                    getattr(cand, "name", "") or getattr(cand, "text", "") or ""
+                                ).strip()
+                        selector = ""
+                except Exception:
+                    selector = ""
+            note = ""
+            if selector or target:
+                try:
+                    async def _caller(tool: str, payload: dict) -> dict:
+                        return await asyncio.wait_for(
+                            self.agent_manager.send_act(
+                                agent_id, run_id_str,
+                                {"name": "evaluate", "args": {"value": payload.get("function")}},
+                            ),
+                            timeout=30,
+                        )
+
+                    from core.browser_probe import probe_occlusion
+
+                    probe = await probe_occlusion(_caller, target, selector=selector or None)
+                    note = str(probe.get("note") or "")
+                except Exception:
+                    logger.debug("遮挡诊断跳过", exc_info=True)
+            if not note and re.search(r"intercepts pointer|拦截|遮挡", str(result.get("error") or ""), re.I):
+                note = "目标被页面元素遮挡（点击被拦截——通常为弹窗/遮罩层覆盖）：先关闭/移开遮挡层再操作"
+            if note:
+                result["error"] = (str(result.get("error") or "")[:420] + f" | {note}")[:600]
+                logger.info("Bridge 遮挡诊断: %s（run #%s）", note[:90], run_id_str)
 
     async def _capture_failure_screenshot(
         self, agent_id: str, run_id_str: str, name: str = "failure_final",
@@ -570,6 +716,24 @@ class AgentBridge:
                 )
             except Exception:
                 logger.debug("console 证据合并跳过", exc_info=True)
+
+        # B2：网络问题请求证据（与 console 同一种合并式归属）
+        if self._network_entries:
+            try:
+                from core.run_evidence import apply_network_evidence
+
+                apply_network_evidence(logs, self._network_entries)
+            except Exception:
+                logger.debug("网络证据合并跳过", exc_info=True)
+
+        # B2：视频证据（运行级信息行，路径可点击）
+        if self._video_web_path:
+            try:
+                from core.run_evidence import apply_video_evidence
+
+                apply_video_evidence(logs, self._video_web_path)
+            except Exception:
+                logger.debug("视频证据合并跳过", exc_info=True)
 
         last_shot = self._last_screenshot_path()
         # 无工具调用但失败时，写一条错误日志（挂上失败现场截图）
@@ -819,8 +983,21 @@ class AgentBridge:
 
         # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
         _unit_uncertain = bool(getattr(outcome, "uncertain", False))
+        _failed = outcome.failed_action or {}
+        _err_text = str(outcome.error or "")
+        # B4：失败步落库前先做遮挡/视口诊断（与单动作路径同口径，诊断附入错误文本）
+        if _failed and not _unit_uncertain:
+            try:
+                _scratch = {"error": _err_text}
+                await self._enrich_failure_evidence(
+                    agent_id, run_id_str, dict(_failed), _scratch, snapshot,
+                )
+                _enriched = str(_scratch.get("error") or "")
+                if _enriched != _err_text:
+                    _err_text = _enriched
+            except Exception:
+                logger.debug("Bridge unit 失败证据补充跳过", exc_info=True)
         try:
-            _failed = outcome.failed_action or {}
             _failed_args = tool_args_from_action(_failed)
             if _unit_uncertain:
                 _failed_args["_uncertain"] = True
@@ -829,7 +1006,7 @@ class AgentBridge:
                 str(_failed.get("action") or "unknown"),
                 _failed_args,
                 False,
-                str(outcome.error or "")[:500],
+                _err_text[:500],
             )
         except Exception:
             logger.debug("Bridge unit 失败步落库跳过", exc_info=True)
@@ -843,7 +1020,7 @@ class AgentBridge:
             "role": "assistant",
             "content": (
                 f"SYSTEM: 宏动作单元在第 {(outcome.failed_index or 0) + 1} 步失败"
-                f"（已完成 {outcome.executed_count} 步）：{str(outcome.error)[:160]}。"
+                f"（已完成 {outcome.executed_count} 步）：{_err_text[:200]}。"
                 "请重新观察页面后继续（可改用单动作逐个处理该段）。"
             ),
         })
@@ -865,7 +1042,7 @@ class AgentBridge:
         return {
             "success": False,
             "executed": outcome.executed_count,
-            "error": str(outcome.error or ""),
+            "error": _err_text,
             "uncertain": _unit_uncertain,
         }
 
@@ -1952,7 +2129,7 @@ class AgentBridge:
 
             # 032 US6/US7：失败补充证据（find 辅助 + 隐藏元素诊断；均静默降级、不改变成败）
             if not result.get("success") and not result.get("_uncertain"):
-                await self._enrich_failure_evidence(agent_id, run_id_str, action, result)
+                await self._enrich_failure_evidence(agent_id, run_id_str, action, result, snapshot)
 
             # 动作后确定性验证（028：与 nl_goal 同一 verifier，MCP 成功不等于页面已变化）
             _ver_name = str(action.get("name", action.get("action", "")) or "").lower().replace("browser_", "")

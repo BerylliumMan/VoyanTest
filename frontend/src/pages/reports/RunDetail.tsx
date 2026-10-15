@@ -1,6 +1,7 @@
 import React from 'react';
 import { Modal, Descriptions, Card, Tag, Button } from '@arco-design/web-react';
 import useLocale from '@/utils/useLocale';
+import { renderEvidenceLinks } from '@/utils/evidenceLinks';
 import ApiStepDetail from './ApiStepDetail';
 import styles from './style/index.module.less';
 import type { StepDetail, RunItem } from './types';
@@ -68,7 +69,7 @@ const RunDetail: React.FC<RunDetailProps> = ({ visible, run, onClose }) => {
                     <Tag className={styles.stepIndexTag}>
                       {step.step_number || idx + 1}
                     </Tag>
-                    <span className={styles['step-description']}>{step.original_description || step.description}</span>
+                    <span className={styles['step-description']}>{renderEvidenceLinks(step.original_description || step.description)}</span>
                     {step.status && getStatusTag(
                       step.status === 'skipped' ? 'skipped' :
                       step.status === 'info' ? 'info' :

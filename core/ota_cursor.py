@@ -45,7 +45,7 @@ ACTIONS (maps to Playwright MCP):
 - "double_click" / "right_click": selector=ref.
 - "fill": Type into input. selector=ref, value=text.
 - "select": Dropdown. selector=ref, value=option text/value.
-- "hover" / "check": selector=ref.
+- "hover" / "check": selector=ref. ("check" clicks/toggles the checkbox — verify its current checked state in the snapshot first; "uncheck" also toggles.)
 - "goto": Navigate. selector=null, value=URL.
 - "wait": Wait for text or seconds. selector=null, value=text or number.
   For "等待【X】消失/隐藏/不再出现" (negative wait) add "wait_mode": "gone" (maps to textGone).
@@ -59,6 +59,24 @@ ACTIONS (maps to Playwright MCP):
 - "drop": Drop file(s) onto target. selector=ref, value=absolute path(s).
 - "tabs": list|new|select:N|close[:N].
 - "navigate_back": Browser back.
+- "fill_form": Fill MULTIPLE fields in ONE call (atomic; best when the step asks to fill a whole form).
+  selector=null, value=JSON array e.g.
+  [{"target":"e11","name":"用户名","type":"textbox","value":"admin"},{"target":"e13","name":"密码","type":"textbox","value":"***"}].
+  type ∈ textbox|checkbox|radio|combobox|slider; checkbox value="true"/"false"; combobox value=option text.
+- "verify_text": Native assertion that text is visible. value=expected text. Prefer it when the step
+  asks to assert text presence and the target is plain text.
+- "verify_visible": Native assertion that an element is visible. role=ARIA role (button/heading/link/
+  cell/textbox…), value=accessible name. Both taken from the CURRENT snapshot.
+- "verify_value": Native assertion of an input's value. selector=ref, value=expected value,
+  field_type=textbox|checkbox|combobox|radio (default textbox).
+- "verify_list": Native assertion of a list's items. selector=list ref, value=JSON array of expected items.
+- "resize": Set viewport size. selector=null, value="1280x720".
+- "close": Close the current page/tab (popup cleanup only). selector=null, value=null.
+- "pdf": Save the current page as PDF (export/print checks). selector=null, value=optional filename.
+- "network": List network requests as evidence. selector=null, value=optional filter regex or "static".
+- "mouse_down" / "mouse_up": Hold/release mouse button (paired only). value=left|right|middle.
+- "emulate_media": CSS media emulation (dark mode / print). value=dark|light, or JSON {"media":"print"}.
+- Media/trace controls ("video_start"/"video_stop"/"trace_start"/"trace_stop"): evidence recording; the engine drives these — use only when a step explicitly asks.
 - "evaluate": Short JS only when refs fail (see priority 3).
 - "screenshot" / "snapshot": Capture / refresh observation.
 - "done": Goal achieved. value=summary.
@@ -75,7 +93,7 @@ BATCH UNIT (optional, saves round trips — Phase B):
      {"action": "assert_text", "selector": "e40", "value": "Test.allTheThings() T-Shirt (Red)"}
   ]}
 - Up to 6 sub-actions. Allowed in a unit: click / double_click / right_click / fill / select /
-  press_key / check / hover / scroll / wait / goto / dialog / assert_text.
+  press_key / check / hover / scroll / wait / goto / dialog / assert_text / fill_form.
 - Each sub-action uses the SAME fields as a single action. Optional "fallbacks" is a short list of
   alternative selectors (CSS, text=..., role=button[name=...]) tried in order when the ref fails.
 - Refs MUST come from the CURRENT snapshot candidates. Sub-actions run sequentially and each one is

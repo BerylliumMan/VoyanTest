@@ -68,6 +68,25 @@ class Settings(BaseSettings):
     # - 探索视觉（每轮决策附当前页面截图；deepseek-v4.1-flash 等多模态模型可直接读图，
     #   判断布局/遮挡/验证码。关闭=纯文本快照；模型不支持图片时自动降级）
     chat_browse_vision: bool = True
+    # - run_code 动作（browser_run_code_unsafe）：红线段——在 Playwright 服务端进程执行
+    #   任意 JS（RCE 等价）。默认关闭；仅显式开启后执行链才放行（探索链永不使用）
+    exec_run_code_enabled: bool = False
+    # - B2 运行证据：网络问题请求摘要（默认开；激进的失败排查素材）
+    exec_network_evidence: bool = True
+    exec_network_max_entries: int = 10
+    # - B2 运行证据：视频录制（默认关；开启后服务端/新版客户端执行时自动录屏，
+    #   失败时章节标注，录像落入 run 证据目录并在报告可见）
+    exec_video_evidence: bool = False
+    # - B4 失败诊断：点击类动作失败时做遮挡/视口只读诊断（默认开；结果注入下一轮
+    #   上下文与步骤日志，帮助模型绕开遮挡，不影响动作成败）
+    exec_occlusion_probe: bool = True
+    # - B5 网络模拟（route/unroute/network_state）：默认关（mock/断网会改变被测系统行为）
+    exec_network_mock_enabled: bool = False
+    # - B5 存储操作（cookie/localstorage/sessionstorage/storage_state）：默认关
+    #   （直接读写 cookies/存储可能伪造登录态）
+    exec_storage_actions_enabled: bool = False
+    # - B5 探索链只读探针（js_probe：links/nav/storage_keys/frameworks 固定只读 JS）
+    chat_browse_js_probe: bool = True
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

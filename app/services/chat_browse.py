@@ -179,6 +179,7 @@ async def _run_browse_task(
             "features": [],
             "summary": "",
             "console": [],
+            "network": [],
             "started_at": datetime.now(timezone.utc).isoformat(),
             "elapsed": 0,
             "generation": None,
@@ -315,6 +316,7 @@ async def _run_browse_task(
         logger.exception("chat browse task failed")
         report = {
             "ok": False, "summary": "", "features": [], "pages": [], "console": [],
+            "network": [],
             "steps": [], "stopped_reason": "error", "error": str(exc)[:300],
         }
 
@@ -394,6 +396,7 @@ async def _run_browse_task(
             for s in (report.get("steps") or [])[-30:]
         ]
         c["console"] = (report.get("console") or [])[:10]
+        c["network"] = (report.get("network") or [])[:10]
         c["stopped_reason"] = report.get("stopped_reason")
         c["elapsed"] = report.get("elapsed_s")
         c["generation"] = generation
@@ -507,6 +510,7 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
         "features": [],
         "summary": "",
         "console": [],
+        "network": [],
         "started_at": datetime.now(timezone.utc).isoformat(),
         "elapsed": 0,
         "generation": None,

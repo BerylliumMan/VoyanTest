@@ -145,3 +145,125 @@ async def test_run_unit_probe_zero_match_fails_with_evidence():
     outcome = await run_unit([step], _exec, probe=_probe, retry_delays=())
     assert not outcome.success
     assert "DOM 探针" in (outcome.error or "") and "匹配 0" in (outcome.error or "")
+
+
+# ── B4：遮挡 / 视口诊断（probe_occlusion） ────────────────────────────────
+
+
+def _mcp_text(payload: dict) -> str:
+    """模拟 playwright-mcp 真实返回：### Result + 双重编码 JSON 字符串 + 代码回显。"""
+    return (
+        "### Result\n"
+        + json.dumps(json.dumps(payload, ensure_ascii=False))
+        + "\n### Ran Playwright code\n```js\nawait page.evaluate('() => {...}');\n```\n"
+    )
+
+
+def _collect_payload(name: str, selector: str) -> dict:
+    return {
+        "url": "http://x/",
+        "title": "t",
+        "count": 1,
+        "elements": [{"role": "button", "name": name, "selector": selector, "visible": True}],
+    }
+
+
+def _occ_payload(state: str, **extra) -> dict:
+    base = {"state": state, "in_viewport": True, "disabled": False,
+            "pointer_events": "auto", "rect": {"x": 1, "y": 1, "w": 10, "h": 10}}
+    base.update(extra)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_probe_occlusion_covered_reports_by_element():
+    from core.browser_probe import probe_occlusion
+
+    calls = []
+
+    async def caller(tool, args):
+        calls.append(args.get("function") or "")
+        if len(calls) == 1:  # collect_elements
+            return {"success": True, "text": _mcp_text(_collect_payload("提交", "#submit"))}
+        return {"success": True, "text": _mcp_text(_occ_payload(
+            "covered", by={"tag": "div", "cls": "mask-layer", "text": "加载中"},
+        ))}
+
+    out = await probe_occlusion(caller, "提交")
+    assert out["state"] == "covered"
+    assert "#submit" in calls[1]
+    assert "遮挡" in out["note"] and "加载中" in out["note"]
+
+
+@pytest.mark.asyncio
+async def test_probe_occlusion_direct_selector_skips_collect():
+    from core.browser_probe import probe_occlusion
+
+    calls = []
+
+    async def caller(tool, args):
+        calls.append(args.get("function") or "")
+        return {"success": True, "text": _mcp_text(_occ_payload("off_viewport"))}
+
+    out = await probe_occlusion(caller, selector="#deep")
+    assert out["state"] == "off_viewport"
+    assert "滚动" in out["note"]
+    assert len(calls) == 1  # 不经过 collect
+
+
+@pytest.mark.asyncio
+async def test_probe_occlusion_disabled_and_pointer_events():
+    from core.browser_probe import probe_occlusion
+
+    async def caller_disabled(tool, args):
+        return {"success": True, "text": _mcp_text(_occ_payload("disabled"))}
+
+    out = await probe_occlusion(caller_disabled, selector="#btn")
+    assert out["state"] == "disabled" and "禁用" in out["note"]
+
+    async def caller_pe(tool, args):
+        return {"success": True, "text": _mcp_text(_occ_payload("pointer_events_none"))}
+
+    out2 = await probe_occlusion(caller_pe, selector="#btn")
+    assert out2["state"] == "pointer_events_none" and "pointer-events" in out2["note"]
+
+
+@pytest.mark.asyncio
+async def test_probe_occlusion_ok_notes_transient():
+    from core.browser_probe import probe_occlusion
+
+    async def caller(tool, args):
+        return {"success": True, "text": _mcp_text(_occ_payload("ok"))}
+
+    out = await probe_occlusion(caller, selector="#btn")
+    assert out["state"] == "ok" and "重试" in out["note"]
+
+
+@pytest.mark.asyncio
+async def test_probe_occlusion_not_in_dom_no_note():
+    from core.browser_probe import probe_occlusion
+
+    async def caller(tool, args):
+        return {"success": True, "text": _mcp_text(
+            {"url": "", "title": "", "count": 0, "elements": []},
+        )}
+
+    out = await probe_occlusion(caller, "幽灵按钮")
+    assert out["state"] == "not_in_dom" and out["note"] == ""
+
+
+@pytest.mark.asyncio
+async def test_probe_occlusion_failure_silent_unknown():
+    from core.browser_probe import probe_occlusion
+
+    async def broken(tool, args):
+        raise RuntimeError("mcp down")
+
+    out = await probe_occlusion(broken, "提交")
+    assert out["state"] == "unknown" and out["note"] == ""
+
+    async def bad_result(tool, args):
+        return {"success": False, "error": "evaluate failed"}
+
+    out2 = await probe_occlusion(bad_result, selector="#x")
+    assert out2["state"] == "unknown" and out2["note"] == ""

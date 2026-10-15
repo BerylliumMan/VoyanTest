@@ -203,6 +203,102 @@ def _norm(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
 
 
+# ---------------------------------------------------------------------------
+# B4：遮挡 / 视口诊断（点击失败时"为什么点不中"）
+# ---------------------------------------------------------------------------
+
+_OCCLUSION_FN = r"""() => {
+  const sel = %s;
+  let el = null;
+  try { el = sel ? document.querySelector(sel) : null; } catch (e) { el = null; }
+  if (!el) return JSON.stringify({state: 'not_found'});
+  const style = window.getComputedStyle(el);
+  const r = el.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const inVp = r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw && r.width > 0 && r.height > 0;
+  const cx = Math.min(Math.max(r.left + r.width / 2, 0), Math.max(vw - 1, 0));
+  const cy = Math.min(Math.max(r.top + r.height / 2, 0), Math.max(vh - 1, 0));
+  const top = document.elementFromPoint(cx, cy);
+  const info = {
+    in_viewport: inVp,
+    disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+    pointer_events: style.pointerEvents,
+    rect: {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)},
+    state: 'ok',
+  };
+  if (info.disabled) { info.state = 'disabled'; }
+  else if (style.pointerEvents === 'none') { info.state = 'pointer_events_none'; }
+  else if (!inVp) { info.state = 'off_viewport'; }
+  else if (!top) { info.state = 'covered_unknown'; }
+  else if (top === el || el.contains(top) || top.contains(el)) { info.state = 'ok'; }
+  else {
+    info.state = 'covered';
+    info.by = {
+      tag: top.tagName.toLowerCase(),
+      cls: String(top.className || '').slice(0, 80),
+      text: String(top.innerText || top.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 60),
+    };
+  }
+  return JSON.stringify(info);
+}"""
+
+_OCCLUSION_NOTES = {
+    "covered": "目标被其他元素遮挡：中心点上实际是 {by}，点击无法命中——先关闭/移开遮挡层（弹窗、遮罩、浮层）或滚动后再操作",
+    "off_viewport": "目标存在但不在视口内——先滚动页面让目标进入视口再操作",
+    "covered_unknown": "目标中心点没有可命中的元素（可能被透明层拦截或动画中）——等待动画结束或滚动后重试",
+    "disabled": "目标处于禁用状态（disabled）——当前不可点击，等待其启用或换其他入口",
+    "pointer_events_none": "目标设置了 pointer-events:none（视觉存在但不可交互）——换其他入口或先触发使其可交互",
+    "ok": "目标位置无遮挡（可能为瞬时拦截/动画中）——可稍后重试",
+}
+
+
+async def probe_occlusion(
+    caller: Callable[[str, dict], Awaitable[dict]],
+    target: str = "",
+    *,
+    selector: str | None = None,
+) -> dict[str, Any]:
+    """B4：目标存在但动作失败时的遮挡/视口诊断（只读，失败静默）。
+
+    - selector 为 CSS 时直接检查；否则从行动元素集合按名称/文本匹配出 CSS 再检查
+      （快照 ref 无法在 JS 中解析，调用方不应传 ref）。
+    返回 {state, note, ...}；state ∈ covered / off_viewport / covered_unknown /
+    disabled / pointer_events_none / ok / not_in_dom / unknown。
+    """
+    try:
+        sel = (selector or "").strip() or None
+        if not sel:
+            if not target:
+                return {"state": "unknown", "note": ""}
+            data = await collect_elements(caller, include_hidden=True)
+            matched = match_target(data.get("elements") or [], target)
+            if not matched:
+                return {"state": "not_in_dom", "note": ""}
+            sel = str(matched[0].get("selector") or "").strip() or None
+            if not sel:
+                return {"state": "unknown", "note": ""}
+        r = await caller("browser_evaluate", {"function": _OCCLUSION_FN % json.dumps(sel)})
+        if not isinstance(r, dict) or not r.get("success"):
+            return {"state": "unknown", "note": ""}
+        data = _extract_json(str(r.get("text") or ""))
+        state = str(data.get("state") or "unknown")
+        note = ""
+        if state in _OCCLUSION_NOTES:
+            by = data.get("by") or {}
+            by_label = ""
+            if state == "covered":
+                parts = [str(by.get("tag") or "?")]
+                if by.get("text"):
+                    parts.append(f"「{by['text']}」")
+                elif by.get("cls"):
+                    parts.append(f".{str(by['cls']).split()[0]}")
+                by_label = "".join(parts)
+            note = _OCCLUSION_NOTES[state].format(by=by_label)
+        return {"state": state, "note": note, **{k: v for k, v in data.items() if k != "state"}}
+    except Exception:  # noqa: BLE001
+        return {"state": "unknown", "note": ""}
+
+
 def match_target(elements: list[dict[str, Any]], target: str) -> list[dict[str, Any]]:
     """按"精确名/文本 → 包含"匹配；返回按优先级排序的候选（不改判歧义，交给调用方）。"""
     t = _norm(target)

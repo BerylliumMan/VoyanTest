@@ -15,6 +15,8 @@ DB 操作的 SQL 细节已经下沉到 core.runner._persistence（mark_run_faile
 协调浏览器/用例循环 + 批量跟踪。
 """
 import logging
+import os
+import shutil
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -256,6 +258,25 @@ async def run_test_case_via_agent(
     ))
     await update_agent_run_status(db, run.id, "running")
 
+    # B2：运行证据目录 + 视频录制（默认关，exec_video_evidence；失败静默降级）
+    evidence_dir = os.path.join(
+        "reports", f"agent_{run.id}_{tz_now().strftime('%Y%m%d_%H%M%S')}", "evidence",
+    )
+    video_state: dict = {"started": False, "filename": None}
+    try:
+        from app.config import get_settings as _gs_v
+
+        if bool(getattr(_gs_v(), "exec_video_evidence", False)):
+            from core.run_evidence import start_video_via_caller
+
+            _fname = f"vt_run_{run.id}_{tz_now().strftime('%H%M%S')}.webm"
+            if await start_video_via_caller(
+                lambda t, a: mcp_manager.call_tool(t, a), _fname,
+            ):
+                video_state.update(started=True, filename=_fname)
+    except Exception:
+        logger.debug("视频证据启动跳过", exc_info=True)
+
     runner = AgentRunner(
         mcp_manager=mcp_manager,
         case_steps=[
@@ -350,6 +371,50 @@ async def run_test_case_via_agent(
             logs = apply_console_evidence(logs, _entries, _cap)
     except Exception:
         logger.debug("console 证据采集跳过", exc_info=True)
+    # B2：网络证据（问题请求摘要；默认开）——与 console 同一种"合并式归属"
+    try:
+        from app.config import get_settings as _gs_net
+
+        _sn = _gs_net()
+        if bool(getattr(_sn, "exec_network_evidence", True)):
+            from core.run_evidence import apply_network_evidence, network_problem_lines
+
+            _capn = int(getattr(_sn, "exec_network_max_entries", 10) or 10)
+            _nr = await mcp_manager.call_tool("browser_network_requests", {"static": False})
+            if isinstance(_nr, dict) and _nr.get("success", True):
+                _lines = network_problem_lines(str(_nr.get("text") or ""), _capn)
+                logs = apply_network_evidence(logs, _lines, _capn)
+    except Exception:
+        logger.debug("网络证据采集跳过", exc_info=True)
+    # B2：视频证据收尾（章节 → 停止 → 落入 run 证据目录）
+    if video_state.get("started"):
+        try:
+            from core.run_evidence import (
+                apply_video_evidence,
+                find_newest_video,
+                parse_video_filename,
+                stop_video_via_caller,
+                web_path_for,
+            )
+
+            _chapter = ("失败：" + str(ota_result.get("error") or final_status)) if case_status != "passed" else "完成"
+            try:
+                await mcp_manager.call_tool("browser_video_chapter", {"title": _chapter[:80]})
+            except Exception:
+                pass
+            _text = await stop_video_via_caller(lambda t, a: mcp_manager.call_tool(t, a))
+            _fname = parse_video_filename(_text) or video_state.get("filename")
+            _cwd = os.getcwd()
+            _src = os.path.join(_cwd, _fname) if _fname else None
+            if not (_src and os.path.isfile(_src)):
+                _src = find_newest_video(_cwd, prefix="vt_run_")
+            if _src and os.path.isfile(_src):
+                os.makedirs(evidence_dir, exist_ok=True)
+                _dest = os.path.join(evidence_dir, os.path.basename(_src))
+                shutil.move(_src, _dest)
+                logs = apply_video_evidence(logs, web_path_for(_dest))
+        except Exception:
+            logger.debug("视频证据收尾跳过", exc_info=True)
     try:
         saved_run_id = await save_run_results(
             case_id, case_status, start_time, end_time,

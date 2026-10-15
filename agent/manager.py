@@ -645,6 +645,13 @@ class AgentManager:
           · 扁平形 {"action": "fill", "selector": ..., "value": ...}（宏动作单元 / 自动成组）
         此前只认包装形，宏动作单元会把 action 发成 None（客户端报 Unknown action）。
         """
+        # B1：配置门控动作（run_code）在派发前拦截（服务端进程有配置，客户端只需执行）
+        from core.mcp_args import action_disabled_reason
+
+        _act_name = tool_call.get("name") or tool_call.get("tool") or tool_call.get("action") or ""
+        _disabled = action_disabled_reason(_act_name)
+        if _disabled:
+            return {"success": False, "error": _disabled}
         args = tool_call.get("args")
         if not isinstance(args, dict):
             _RESERVED = {"name", "tool", "action", "args", "thinking", "description", "timeout"}
@@ -660,6 +667,10 @@ class AgentManager:
             "url": args.get("url"),
             "timeout_ms": args.get("timeout_ms", 30000),
             "timeout": 120000,
+            # B5：verify 四件套的 role/type 字段 + 032 US4 的 wait_mode（此前漏传）
+            "role": args.get("role"),
+            "field_type": args.get("field_type"),
+            "wait_mode": args.get("wait_mode"),
             # 032 US3：失败时客户端优先元素级截图（可选；旧客户端忽略）
             "element_screenshot": bool(tool_call.get("_element_screenshot")),
         }, timeout=120,

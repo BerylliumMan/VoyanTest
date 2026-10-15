@@ -106,8 +106,9 @@ def test_validate_action_run_case_environment_id():
     assert "environment_id" in err
     _, err = validate_action({"type": "run_case", "case_ids": [1], "environment_id": -1})
     assert "environment_id" in err
-    _, err = validate_action({"type": "run_case", "case_ids": [1], "mode": "client"})
-    assert "agent_id" in err  # 显式客户端形态必须带 agent_id
+    # 2026-10-15 修复：mode=client 未带 agent_id 合法（对话默认客户端会在处理器里补齐）
+    norm, err = validate_action({"type": "run_case", "case_ids": [1], "mode": "client"})
+    assert err == "" and norm["mode"] == "client" and norm["agent_id"] is None
     norm, err = validate_action({"type": "run_case", "case_ids": [1], "mode": "client", "agent_id": 3})
     assert err == "" and norm["mode"] == "client" and norm["agent_id"] == 3
 

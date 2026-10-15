@@ -5,6 +5,7 @@ import {
 import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete, IconMessage } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiRequest } from '@/utils/apiRequest';
+import { renderEvidenceLinks } from '@/utils/evidenceLinks';
 import useLocale from '@/utils/useLocale';
 import RunDetail from './RunDetail';
 import ApiStepDetail from './ApiStepDetail';
@@ -494,7 +495,7 @@ const Reports: React.FC = () => {
                                   {step.step_number || idx + 1}
                                 </Tag>
                                 <span className={styles['step-description']}>
-                                  {step.original_description || step.description}
+                                  {renderEvidenceLinks(step.original_description || step.description)}
                                 </span>
                                 {step.status
                                   ? getStatusTag(step.status === 'skipped' ? 'skipped' : step.status === 'info' ? 'info' : step.success ? 'passed' : 'failed')

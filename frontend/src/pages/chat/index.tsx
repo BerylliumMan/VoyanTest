@@ -910,6 +910,14 @@ const ChatPage: React.FC = () => {
               ))}
             </div>
           )}
+          {((card.network as string[]) || []).length > 0 && (
+            <div className={styles.browseFeatures}>
+              <Text type="secondary" style={{ fontSize: 12 }}>网络异常</Text>
+              {((card.network as string[]) || []).slice(0, 5).map((n, i) => (
+                <div key={i} style={{ color: '#d4380d', fontSize: 12 }}>· {n}</div>
+              ))}
+            </div>
+          )}
           {pages.length > 0 && (
             <div className={styles.browsePages}>
               {pages.map((p, i) => (

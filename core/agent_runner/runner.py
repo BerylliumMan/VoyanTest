@@ -76,6 +76,31 @@ _RUNNER_ACTIONS = (
     "click_xy",
     "move_mouse",
     "drag_xy",
+    # ── B1 动作面全量接线（2026-10-14）─────────────────────────────────────
+    "assert_text",
+    "find",
+    "console",
+    "highlight",
+    "hide_highlight",
+    "fill_form",
+    "network",
+    "network_request",
+    "resize",
+    "emulate_media",
+    "mouse_down",
+    "mouse_up",
+    "close",
+    "pdf",
+    "video_start",
+    "video_stop",
+    "video_chapter",
+    "video_show_actions",
+    "video_hide_actions",
+    "trace_start",
+    "trace_stop",
+    "recording_start",
+    "recording_stop",
+    "run_code",
 )
 
 _DEFAULT_TOOLS: list[ToolDefinition] = [
@@ -560,18 +585,25 @@ class AgentRunner:
             return {"success": True, "executed": outcome.executed_count}
         # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
         _unit_uncertain = bool(getattr(outcome, "uncertain", False))
+        _failed = outcome.failed_action or {}
+        # B4：失败步落库前先做遮挡/视口诊断（诊断附入失败步错误文本，报告可见）
+        _occ_note = ""
+        if _failed and not _unit_uncertain:
+            _occ_note = await self._maybe_occlusion_hint(dict(_failed), str(outcome.error or ""), turn) or ""
         if self._db is not None and self._run_id is not None:
             try:
-                _failed = outcome.failed_action or {}
                 _failed_args = tool_args_from_action(_failed)
                 if _unit_uncertain:
                     _failed_args["_uncertain"] = True
+                _err_text = str(outcome.error or "")
+                if _occ_note:
+                    _err_text = (_err_text[:420] + f" | {_occ_note}")
                 await crud_agent_run.create_tool_call(
                     self._db, self._run_id, turn,
                     str(_failed.get("action") or "unknown"),
                     _failed_args,
                     False,
-                    str(outcome.error or "")[:500],
+                    _err_text[:500],
                 )
             except Exception:
                 logger.debug("unit 失败步落库跳过", exc_info=True)
@@ -609,6 +641,68 @@ class AgentRunner:
         }
 
     # ── 主循环 ────────────────────────────────────────────────────────────
+
+    async def _maybe_occlusion_hint(self, action: dict[str, Any], error: str, turn: int) -> str | None:
+        """B4：点击类动作失败时的遮挡/视口诊断（只读、静默降级、不改成败）。
+
+        返回诊断文本（调用方决定写入步骤错误/报告），并注入下一轮上下文，
+        让模型知道"为什么点不中"（被谁遮挡 / 在视口外 / 禁用）。
+        """
+        try:
+            name = str(action.get("action") or action.get("name") or "").strip().lower()
+            if name not in ("click", "double_click", "right_click", "check", "hover", "press_key"):
+                return None
+            from app.config import get_settings
+
+            if not bool(getattr(get_settings(), "exec_occlusion_probe", True)):
+                return None
+            target = str(action.get("element_desc") or action.get("value") or "").strip()
+            selector = str(action.get("selector") or "").strip()
+            if selector:
+                from core.locator_candidates import is_snapshot_ref
+
+                if is_snapshot_ref(selector):
+                    # ref 无法在 JS 中解析——从观察候选里回解可读名称
+                    if not target:
+                        try:
+                            cands = self._last_candidates or []
+                            cand = next(
+                                (c for c in cands if getattr(c, "ref", None) == selector), None,
+                            )
+                            if cand is not None:
+                                target = str(
+                                    getattr(cand, "name", "") or getattr(cand, "text", "") or ""
+                                ).strip()
+                        except Exception:
+                            pass
+                    selector = ""
+            note = ""
+            if selector or target:
+                from core.browser_probe import probe_occlusion
+
+                probe = await probe_occlusion(
+                    self._mcp_manager.call_tool, target, selector=selector or None,
+                )
+                note = str(probe.get("note") or "")
+            if not note and re.search(r"intercepts pointer|拦截|遮挡", error or "", re.I):
+                # 无目标可探时，依据 MCP 错误文本给确定性结论（Playwright 拦截错误）
+                note = "目标被页面元素遮挡（点击被拦截——通常为弹窗/遮罩层覆盖）：先关闭/移开遮挡层再操作"
+            if not note:
+                return None
+            hint = f"点击失败诊断（系统自动检测）：{note}"
+            self.context.add_turn("user", hint)
+            if self._db is not None and self._run_id is not None:
+                try:
+                    await crud_agent_run.create_message(
+                        self._db, self._run_id, turn, "user", hint,
+                    )
+                except Exception:
+                    logger.debug("遮挡诊断提示写入跳过", exc_info=True)
+            logger.info("遮挡诊断（turn %d）: %s", turn, note[:100])
+            return note
+        except Exception:
+            logger.debug("遮挡诊断跳过", exc_info=True)
+            return None
 
     async def run(
         self,
@@ -861,6 +955,14 @@ class AgentRunner:
             else:
                 self._consecutive_act_failures += 1
                 self._force_next_screenshot = True
+                # B4：点击类失败 → 遮挡/视口只读诊断（注入下一轮上下文 + 附入步骤错误）
+                _occ_note = await self._maybe_occlusion_hint(
+                    action, str(result.get("error") or ""), turn,
+                )
+                if _occ_note:
+                    result["error"] = (
+                        str(result.get("error") or "")[:420] + f" | {_occ_note}"
+                    )[:600]
 
             # 记录到上下文
             action_summary = (

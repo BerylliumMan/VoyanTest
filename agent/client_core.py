@@ -930,7 +930,8 @@ class AgentClient:
         args = [
             _node_exe, _cli_js, "--browser=chromium",
             "--allow-unrestricted-file-access",
-            "--caps=vision",
+            # B1：vision（截图/鼠标系）+ devtools（highlight/视频/追踪）+ pdf
+            "--caps=vision,pdf,devtools,network,storage,testing",
         ]
 
         if cdp_endpoint:
@@ -1150,7 +1151,7 @@ class AgentClient:
 
         args = self._build_mcp_args(
             action, selector, value, element_desc=element_desc, timeout_ms=timeout_ms,
-            wait_mode=wait_mode,
+            wait_mode=wait_mode, role=role, field_type=field_type,
         )
         # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本先跨 frame 即时检查
         if mcp_tool == "browser_wait_for" and (args.get("text") or "").strip():
@@ -1385,11 +1386,14 @@ class AgentClient:
         element_desc: str | None = None,
         timeout_ms: int = 30000,
         wait_mode: str | None = None,
+        role: str | None = None,
+        field_type: str | None = None,
     ) -> dict:
         from core.mcp_args import build_mcp_args
         return build_mcp_args(
             action, selector=selector, element_desc=element_desc,
             value=value, timeout_ms=timeout_ms, wait_mode=wait_mode,
+            role=role, field_type=field_type,
         )
 
     # ---- messaging ----
@@ -2265,6 +2269,9 @@ class AgentClient:
         timeout_ms = tc.get("timeout_ms") or p.get("timeout_ms") or 30000
         # 032 US4：负向等待标记（等待【X】消失 → textGone）
         wait_mode = tc.get("wait_mode") if "wait_mode" in tc else p.get("wait_mode")
+        # B5：verify 四件套的 role/type 字段
+        role = tc.get("role") if "role" in tc else p.get("role")
+        field_type = tc.get("field_type") if "field_type" in tc else p.get("field_type")
         # send_act 可能把 URL 放在 url 字段
         if not value:
             value = tc.get("url") or p.get("url")
@@ -2320,9 +2327,38 @@ class AgentClient:
                     highlight=_el_mode,
                 )
                 result["screenshot_b64"] = ss_b64 or ""
-            elif (action or "").lower() in ("console", "find"):
-                # 032 US2/US6：console 证据 / find 结果文本回传（成功路径默认不带 text）
+            elif (action or "").lower() in (
+                "console", "find", "network", "network_requests", "browser_network_requests",
+                # B5：读取类动作结果文本回传（cookie/localstorage/verify/route_list 等）
+                "cookie_list", "cookie_get", "localstorage_list", "localstorage_get",
+                "sessionstorage_list", "sessionstorage_get",
+                "verify_visible", "verify_text", "verify_value", "verify_list",
+                "route_list", "route", "unroute", "network_state",
+                "storage_state_save", "storage_state_restore",
+            ):
+                # 032 US2/US6 + B2：console 证据 / find 结果 / 网络证据文本回传
+                # （成功路径默认不带 text）
                 result["text"] = str(mcp_result.get("text") or "")
+            elif (action or "").lower() in ("video_stop", "browser_stop_video"):
+                # B2：视频证据回传（解析文件名 → 读取 base64；超限/缺失静默）
+                try:
+                    from core.run_evidence import (
+                        find_newest_video,
+                        parse_video_filename,
+                        read_video_b64,
+                    )
+
+                    _fname = parse_video_filename(str(mcp_result.get("text") or ""))
+                    _base = os.getcwd()
+                    _path = os.path.join(_base, _fname) if _fname else None
+                    if not (_path and os.path.isfile(_path)):
+                        _path = find_newest_video(_base, prefix="vt_run_")
+                    _b64 = read_video_b64(_path) if _path else None
+                    if _b64:
+                        result["file_b64"] = _b64
+                        result["file_name"] = os.path.basename(_path)
+                except Exception as _ve:
+                    self._log_error(f"video evidence read failed: {_ve}")
         except Exception as e:
             result["error"] = str(e)
             result["success"] = False

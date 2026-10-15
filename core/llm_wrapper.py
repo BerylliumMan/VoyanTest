@@ -80,6 +80,16 @@ class PlaywrightMCPToolCall(BaseModel):
         None,
         description="What the agent plans to do after this step",
     )
+    role: Optional[str] = Field(
+        None,
+        description="ARIA role for verify_visible (e.g. 'button', 'heading', 'link') — "
+        "read it from the snapshot; required for verify_visible.",
+    )
+    field_type: Optional[str] = Field(
+        None,
+        description="Element type for verify_value (textbox/checkbox/combobox/radio). "
+        "Defaults to 'textbox'.",
+    )
     needs_verification: bool = Field(
         default=False,
         description="是否需要在执行完成后再次验证页面状态。"
@@ -196,12 +206,19 @@ ACTIONS available (maps to Playwright MCP tools):
 - "double_click": Double-click an element (inline edit / open detail). selector=ref, value=null.
 - "right_click": Right-click an element to open its context menu. selector=ref, value=null.
 - "drag": Drag one element onto another. selector=start ref, value=end ref.
-- "check": Toggle a checkbox by ref (checks or unchecks according to its current state). selector=ref, value=null.
+- "check": Toggle a checkbox by ref (click; verify its checked state in the snapshot first). selector=ref, value=null.
 - "dialog": Accept or dismiss a native browser dialog (alert/confirm/prompt). selector=null, value="accept" | "dismiss" | "accept:<prompt文本>".
 - "upload": Upload local file(s) into a file input. selector=ref of the file input. value MUST be the absolute path exactly as written in the step text - never guess, never rewrite it.
 - "drop": Drag & drop local file(s) ONTO an element (use for steps like 拖入/拖放到某区域). selector=ref of the drop target, value=absolute path(s) of the file(s).
 - "tabs": Manage browser tabs. selector=null, value="list" | "new" | "select:<index>" | "close[:index]".
 - "navigate_back": Browser back. selector=null, value=null.
+- "fill_form": Fill MULTIPLE fields in ONE call — use when one step asks to fill a whole form (e.g. 填写表单/完整填写). selector=null, value=JSON array like [{"target":"e11","name":"用户名","type":"textbox","value":"…"},{"target":"e13","name":"密码","type":"textbox","value":"…"}]. Never put credentials in it unless the step itself provides them.
+- "resize": Set viewport size. selector=null, value="1280x720".
+- "close": Close the current page/tab (popup cleanup only). selector=null, value=null.
+- "pdf": Save page as PDF. selector=null, value=optional filename.
+- "network": List network requests (evidence only). selector=null, value=optional filter regex.
+- "mouse_down" / "mouse_up": Hold/release mouse button (paired only). value=left|right|middle.
+- "emulate_media": CSS media emulation. value=dark|light or JSON {"media":"print"}.
 - Download steps: click the download trigger, then verify the file with "evaluate" (e.g. value="async () => { const r = await fetch('report.csv'); return await r.text(); }"). There is no native download tool, so the evaluate fetch IS the download verification.
 - "click_xy": Click by page coordinates (canvas / no ref available). selector=null, value="x,y".
 - "move_mouse": Move the mouse to coordinates. selector=null, value="x,y".

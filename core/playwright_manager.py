@@ -24,6 +24,17 @@ SUPPORTED_BROWSERS = {'chromium', 'firefox', 'webkit'}
 from core.mcp_args import TOOL_MAP as ACTION_TOOL_MAP
 
 
+_TEXT_RESULT_ACTIONS = frozenset({
+    # B5：读取类动作（结果值在 MCP 文本里，需透传给模型/日志）
+    "cookie_list", "cookie_get",
+    "localstorage_list", "localstorage_get",
+    "sessionstorage_list", "sessionstorage_get",
+    "verify_visible", "verify_text", "verify_value", "verify_list",
+    "route_list", "route", "unroute", "network_state",
+    "storage_state_save", "storage_state_restore",
+})
+
+
 class PlaywrightMCPManager:
     """管理 Playwright MCP 服务器子进程和 MCP 客户端会话。"""
 
@@ -204,7 +215,8 @@ class PlaywrightMCPManager:
             browser_arg,
             '--isolated',
             '--allow-unrestricted-file-access',
-            '--caps=vision',
+            # B1：vision（截图/鼠标系）+ devtools（highlight/视频/追踪）+ pdf
+            '--caps=vision,pdf,devtools,network,storage,testing',
             *_executable_args,
         ]
         if cdp_endpoint:
@@ -368,6 +380,13 @@ class PlaywrightMCPManager:
         element_desc = tool_call.get('element_desc') or tool_call.get('element')
         step_description = tool_call.get('step_description') or tool_call.get('description')
 
+        # B1：配置门控动作（run_code）在 MCP 派发前拦截
+        from core.mcp_args import action_disabled_reason
+
+        _disabled = action_disabled_reason(action)
+        if _disabled:
+            return {'success': False, 'error': _disabled}
+
         if action == 'error':
             return {'success': False, 'error': f"LLM error: {value}"}
 
@@ -411,7 +430,10 @@ class PlaywrightMCPManager:
                 except Exception as exc:
                     logger.warning("Pre-click tab list failed: %s", exc)
 
-            args = self._build_mcp_args(action, selector, value, tool_call.get('wait_mode'))
+            args = self._build_mcp_args(
+                action, selector, value, tool_call.get('wait_mode'),
+                tool_call.get('role'), tool_call.get('field_type'),
+            )
             if element_desc and isinstance(args.get('element'), str) and not args['element']:
                 args['element'] = element_desc
             # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本跨 frame 兜底
@@ -445,17 +467,24 @@ class PlaywrightMCPManager:
                 except Exception as exc:
                     logger.warning("New-tab switch after click failed: %s", exc)
 
-            return {'success': True, 'error': None}
+            # B5：读取类动作成功时透传 text（cookie/localstorage/verify/route_list 等
+            # 的结果在文本里；此前成功路径一律丢弃 text，导致"读不到值"）
+            out = {'success': True, 'error': None}
+            if str(action).lower() in _TEXT_RESULT_ACTIONS:
+                out['text'] = result.get('text') or ''
+            return out
         except (RuntimeError, ConnectionError, OSError, ValueError, TypeError, KeyError) as exc:
             # 参数构建 / MCP 调用 / 字段缺失等失败统一返回结构化错误
             return {'success': False, 'error': str(exc)}
 
     @staticmethod
     def _build_mcp_args(action: str, selector: str | None, value: str | None,
-                        wait_mode: str | None = None) -> dict:
+                        wait_mode: str | None = None,
+                        role: str | None = None, field_type: str | None = None) -> dict:
         """兼容包装——实际映射见 core.mcp_args.build_mcp_args（契约 C2）。"""
         from core.mcp_args import legacy_build_mcp_args
-        return legacy_build_mcp_args(action, selector, value, wait_mode=wait_mode)
+        return legacy_build_mcp_args(action, selector, value, wait_mode=wait_mode,
+                                     role=role, field_type=field_type)
 
     # ------------------------------------------------------------------
     # DOM snapshot for LLM context
@@ -484,10 +513,14 @@ class PlaywrightMCPManager:
     async def clear_cookies(self) -> bool:
         """Clear all browser cookies via MCP.
 
-        Returns True if successful, False otherwise.
+        2026-10-15 修复：正确工具名为 browser_cookie_clear（caps=storage）；
+        browser_clear_cookies 在 MCP 中不存在（此前调用一直失败并告警）。
+        旧客户端无该工具时回退尝试旧名（静默）。
         """
         try:
-            result = await self.call_tool('browser_clear_cookies', {})
+            result = await self.call_tool('browser_cookie_clear', {})
+            if not result.get('success'):
+                result = await self.call_tool('browser_clear_cookies', {})
             if result['success']:
                 logger.info("Browser cookies cleared")
             else:

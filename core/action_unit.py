@@ -40,6 +40,8 @@ ALLOWED_UNIT_ACTIONS: set[str] = {
     "goto",
     "dialog",
     "assert_text",
+    # B1：批量填表（一次填多个字段，原子动作）
+    "fill_form",
 }
 
 # 需要 selector 的动作（缺失即丢弃该子动作）
@@ -48,7 +50,7 @@ _REQUIRE_SELECTOR = {
     "press_key", "check", "hover", "scroll",
 }
 # 需要 value 的动作
-_REQUIRE_VALUE = {"fill", "select", "press_key", "wait", "dialog", "goto", "assert_text"}
+_REQUIRE_VALUE = {"fill", "select", "press_key", "wait", "dialog", "goto", "assert_text", "fill_form"}
 
 
 @dataclass

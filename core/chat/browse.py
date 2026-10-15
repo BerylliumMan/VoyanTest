@@ -36,7 +36,43 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-ACTION_WHITELIST = ("goto", "click", "fill", "press", "select", "wait", "solve_captcha", "done")
+ACTION_WHITELIST = (
+    "goto", "click", "fill", "press", "select",
+    # B1 探索动作面扩展（2026-10-14）：滚动/悬停/勾选/批量填表/对话框/后退/标签页
+    "scroll", "hover", "check", "fill_form", "dialog", "navigate_back", "tabs",
+    # B5 只读探针（2026-10-15）：links/nav/storage_keys/frameworks 固定只读 JS
+    "js_probe",
+    "wait", "solve_captcha", "done",
+)
+
+# B5：只读探针 JS（固定库，模型只能选名字，不能自写代码；全部纯读取）
+_JS_PROBES = {
+    "links": (
+        "() => JSON.stringify({links: Array.from(document.querySelectorAll('a[href]'))"
+        ".map(a => ({t: (a.innerText || a.getAttribute('aria-label') || '').trim()"
+        ".replace(/\\s+/g, ' ').slice(0, 40), h: a.href}))"
+        ".filter(x => x.h && x.h.indexOf('http') === 0).slice(0, 100)})"
+    ),
+    "nav": (
+        "() => JSON.stringify({links: Array.from(document.querySelectorAll("
+        "'nav a[href], header a[href], aside a[href], [role=menubar] a[href], "
+        "[role=menu] a[href], .menu a[href], .sidebar a[href], .navbar a[href]'))"
+        ".map(a => ({t: (a.innerText || a.getAttribute('aria-label') || '').trim()"
+        ".replace(/\\s+/g, ' ').slice(0, 40), h: a.href}))"
+        ".filter(x => x.h && x.h.indexOf('http') === 0).slice(0, 100)})"
+    ),
+    "storage_keys": (
+        "() => { const keys = (s) => { try { return Object.keys(s); } catch (e) { return []; } };"
+        " return JSON.stringify({local: keys(window.localStorage), session: keys(window.sessionStorage)}); }"
+    ),
+    "frameworks": (
+        "() => { const g = []; ['__NUXT__', '__NEXT_DATA__', 'Vue', 'React', 'angular', 'jQuery']"
+        ".forEach(k => { try { if (window[k] !== undefined) g.push(k); } catch (e) {} });"
+        " return JSON.stringify({globals: g,"
+        " scripts: Array.from(document.querySelectorAll('script[src]')).map(s => s.src).slice(0, 30),"
+        " title: document.title}); }"
+    ),
+}
 
 # 破坏性点击关键词（按可访问名拦截；登录/提交表单不在此列）
 _DANGEROUS_RE = re.compile(
@@ -81,7 +117,7 @@ B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设�
 1. 只能操作【候选元素】列表中真实存在的元素（用其 ref）；禁止编造元素、禁止猜测选择器；
 2. 禁止用 JS 注入或修改 URL 来改变页面状态；goto 只允许回到起始地址或站内已访问过的地址；
 3. 禁止破坏性操作：点击名称含「退出/注销/删除/移除/清空/支付/付款/下单/结算/购买」的元素一律不做，改为记录并跳过；
-4. 需要登录时：在登录表单里用 <<USERNAME>> 填账号、<<PASSWORD>> 填密码（占位符原样输出，系统会替换；绝不输出真实凭据），然后点击登录按钮，并确认登录成功（地址变化 / 出现导航菜单 / 出现用户名）；
+4. 需要登录时：在登录表单里用 <<USERNAME>> 填账号、<<PASSWORD>> 填密码（占位符原样输出，系统会替换；绝不输出真实凭据），然后点击登录按钮，并确认登录成功（地址变化 / 出现导航菜单 / 出现用户名）；**登录表单优先用 fill_form 一次填完账号+密码（避免分步填写期间验证码/页面过期）**；
 5. 登录失败只重试一次（核对表单后），仍失败就如实收尾（summary 说明失败原因）；
 5b.（图形验证码）登录表单含验证码（输入框占位/标签含「验证码」，旁边有验证码图片）时：
    按 账号 → 密码 → 验证码 → 登录 的顺序操作；验证码一步输出 solve_captcha（ref=验证码输入框的 ref；
@@ -94,17 +130,22 @@ B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设�
    若附有页面截图且验证码清晰可读：也可以直接用 fill 把读到的字符填进验证码输入框（截图可直接读图）；
    不确定或读不清时优先 solve_captcha（本地识别确定性更高）；
 6. 浏览策略：优先点击顶部导航 / 侧边菜单等入口，逐个访问主要功能页面；每到一个新页面，用 note 记录「页面标题：主要功能点」；
-7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；动作（点击/提交/跳转）完成后系统会自动给出
+7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；点击失败时系统会自动做遮挡诊断（步骤记录里会附「被遮挡/在视口外/禁用」等结论）——按诊断提示处理（关闭/移开遮挡层、滚动到目标、等动画结束）后再试，不要原样重复点击；动作（点击/提交/跳转）完成后系统会自动给出
    最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
 8. 步数有限：先做最有价值的事（登录 → 主菜单 → 核心功能页 2-4 个）；
-9. 目标达成或主要功能已覆盖 → 立即返回 done，并在 summary/features 给出结论；禁止虚构没看到的功能。
+9. 目标达成或主要功能已覆盖 → 立即返回 done，并在 summary/features 给出结论；禁止虚构没看到的功能；
+9b.（只读探针）js_probe 不修改页面，用于补齐「看不到的」结构信息：
+    links=页面全部链接（含折叠菜单/隐藏入口，可发现快照里没有的页面）；nav=导航区链接；
+    storage_keys=localStorage/sessionStorage 的键名（不含值）；frameworks=框架/脚本线索。
+    探针发现的新页面仍需逐页实访验证后才算「看到」，不要在 summary 里把没访问过的链接写成已验证功能。
 
 【输出格式 — 只输出一个 JSON 对象，不要任何其他文字、不要代码块】
 {
   "thinking": "1-3 句：当前页面是什么、下一步做什么及原因",
-  "action": "goto|click|fill|press|select|wait|solve_captcha|done",
-  "ref": "元素动作必填：候选列表中的 ref（如 e12）；solve_captcha 填验证码输入框的 ref",
-  "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数；solve_captcha 不需要 value",
+  "action": "goto|click|fill|press|select|scroll|hover|check|fill_form|dialog|navigate_back|tabs|js_probe|wait|solve_captcha|done",
+  "ref": "元素动作必填：候选列表中的 ref（如 e12）；solve_captcha 填验证码输入框的 ref；fill_form 不需要（见 fields）",
+  "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数；scroll=像素数|up|down；dialog=accept|dismiss；tabs=list|new|select:N|close；js_probe=links|nav|storage_keys|frameworks；solve_captcha 不需要 value",
+  "fields": "fill_form 专用：JSON 数组，一次填写多个字段，如 [{\"target\":\"e11\",\"name\":\"用户名\",\"type\":\"textbox\",\"value\":\"<<USERNAME>>\"},{\"target\":\"e13\",\"name\":\"密码\",\"type\":\"textbox\",\"value\":\"<<PASSWORD>>\"}]（type 可为 textbox/checkbox/radio/combobox/slider；凭据用占位符）",
   "url": "action=goto 时的目标地址",
   "refresh": "solve_captcha 可选：true=先点击验证码图片刷新再识别（验证码错误重试时使用）",
   "note": "本步观察到的重要信息（页面功能点，一句话，可选）",
@@ -189,6 +230,18 @@ class ServerBrowser:
             from core.console_evidence import collect_console_via_mcp
 
             return await collect_console_via_mcp(self._mcp, limit)
+        except Exception:
+            return []
+
+    async def network(self, limit: int = 10) -> list[str]:
+        """B2：网络问题请求（FAILED/4xx/5xx）摘要；失败静默。"""
+        try:
+            r = await self._mcp.call_tool("browser_network_requests", {"static": False})
+            if not isinstance(r, dict) or not r.get("success", True):
+                return []
+            from core.run_evidence import network_problem_lines
+
+            return network_problem_lines(str(r.get("text") or ""), limit)
         except Exception:
             return []
 
@@ -302,6 +355,23 @@ class ClientBrowser:
                 limit,
             )
             return kept
+        except Exception:
+            return []
+
+    async def network(self, limit: int = 10) -> list[str]:
+        """B2：网络问题请求摘要（客户端 act 通道；旧客户端未知动作 → 静默空）。"""
+        try:
+            res = await asyncio.wait_for(
+                self._manager.send_act(self._agent, self._run_id, {"name": "network", "args": {}}),
+                timeout=30,
+            )
+            if not (isinstance(res, dict) and res.get("success")):
+                return []
+            from core.run_evidence import network_problem_lines
+
+            return network_problem_lines(
+                str(res.get("text") or res.get("result") or ""), limit,
+            )
         except Exception:
             return []
 
@@ -517,6 +587,16 @@ def _masked_value(action: dict, cfg: BrowseConfig) -> Optional[str]:
 def _action_label(action_name: str, decision: dict, candidates) -> str:
     if action_name == "goto":
         return f"导航到 {str(decision.get('url') or '')[:60]}"
+    if action_name == "fill_form":
+        return "批量填写表单"
+    if action_name == "scroll":
+        return f"滚动 {str(decision.get('value') or 'down')[:20]}"
+    if action_name == "dialog":
+        return f"处理浏览器对话框（{str(decision.get('value') or 'accept')[:20]}）"
+    if action_name == "navigate_back":
+        return "浏览器后退"
+    if action_name == "tabs":
+        return f"标签页 {str(decision.get('value') or 'list')[:20]}"
     ref = str(decision.get("ref") or "")
     label = _cand_label(ref, candidates) or ref
     if action_name == "click":
@@ -527,14 +607,18 @@ def _action_label(action_name: str, decision: dict, candidates) -> str:
         return f"按键 {decision.get('value')} 于 {label}"
     if action_name == "select":
         return f"选择 {label}"
+    if action_name == "hover":
+        return f"悬停 {label}"
+    if action_name == "check":
+        return f"勾选/取消勾选 {label}"
     if action_name == "wait":
         return f"等待 {decision.get('value')}"
     return action_name
 
 
 def _substitute_credentials(action: dict, cfg: BrowseConfig) -> dict:
-    """fill 值占位符 → 真实凭据（仅在此处接触明文，不落任何日志）。"""
-    if str(action.get("action")) != "fill":
+    """fill/fill_form 值占位符 → 真实凭据（仅在此处接触明文，不落任何日志）。"""
+    if str(action.get("action")) not in ("fill", "fill_form", "press_key"):
         return action
     value = str(action.get("value") or "")
     if _USERNAME_PLACEHOLDER in value or _PASSWORD_PLACEHOLDER in value:
@@ -604,6 +688,16 @@ def build_report_materials(report: dict) -> str:
         lines.append("## 页面控制台错误（供用例设计参考，可能不算缺陷）")
         for e in report["console"][:10]:
             lines.append(f"- {e}")
+    if report.get("network"):
+        lines.append("")
+        lines.append("## 网络请求异常（自动采集：FAILED/4xx/5xx，供排查参考）")
+        for e in report["network"][:10]:
+            lines.append(f"- {e}")
+    if report.get("link_map"):
+        lines.append("")
+        lines.append("## 站内链接（只读探针采集，未逐一访问，供用例设计参考）")
+        for u in report["link_map"][:40]:
+            lines.append(f"- {u}")
     return "\n".join(lines)
 
 
@@ -636,6 +730,8 @@ async def run_exploration(
         "features": [],
         "pages": [],
         "console": [],
+        "network": [],
+        "link_map": [],
         "steps": [],
         "stopped_reason": "error",
         "error": None,
@@ -871,9 +967,118 @@ async def run_exploration(
                     page = obs["page"]
                 continue
 
+            # B5：只读探针（固定库；不改页面状态）
+            if action_name == "js_probe":
+                probe_name = str(decision.get("value") or "links").strip().lower()
+                from app.config import get_settings as _gs_jp
+
+                if not bool(getattr(_gs_jp(), "chat_browse_js_probe", True)):
+                    journal.append({
+                        "action": "js_probe", "target": probe_name, "ok": False,
+                        "error": "只读探针已关闭（系统设置 chat_browse_js_probe）",
+                    })
+                    continue
+                if probe_name not in _JS_PROBES:
+                    journal.append({
+                        "action": "js_probe", "target": probe_name, "ok": False,
+                        "error": f"未知探针（可用：{'/'.join(_JS_PROBES)}）",
+                    })
+                    continue
+                _probe_data = await browser.evaluate_json(_JS_PROBES[probe_name])
+                _probe_ok = isinstance(_probe_data, dict)
+                _probe_summary = ""
+                if _probe_ok and probe_name in ("links", "nav"):
+                    _links = [
+                        str(x.get("h") or "")
+                        for x in (_probe_data.get("links") or [])
+                        if isinstance(x, dict) and x.get("h")
+                    ]
+                    _probe_summary = f"{len(_links)} 个链接：" + "、".join(_links[:12])
+                    if probe_name == "links" and _links:
+                        _existing = set(report.get("link_map") or [])
+                        report["link_map"] = sorted(_existing | set(_links))[:60]
+                elif _probe_ok and probe_name == "storage_keys":
+                    _local = [str(k) for k in (_probe_data.get("local") or [])][:20]
+                    _sess = [str(k) for k in (_probe_data.get("session") or [])][:20]
+                    _probe_summary = (
+                        f"localStorage 键：{('、'.join(_local) or '无')}；"
+                        f"sessionStorage 键：{('、'.join(_sess) or '无')}"
+                    )
+                elif _probe_ok and probe_name == "frameworks":
+                    _gl = "、".join(str(g) for g in (_probe_data.get("globals") or [])) or "未检出"
+                    _probe_summary = (
+                        f"框架线索：{_gl}；脚本 {len(_probe_data.get('scripts') or [])} 个；"
+                        f"标题「{_probe_data.get('title') or ''}」"
+                    )
+                journal.append({
+                    "action": "js_probe", "target": probe_name,
+                    "value": _probe_summary[:400] if _probe_ok else None,
+                    "ok": _probe_ok,
+                    "error": None if _probe_ok else "探针执行失败",
+                })
+                await _emit({
+                    "kind": "step",
+                    "label": f"只读探针 {probe_name}" + ("（完成）" if _probe_ok else "（失败）"),
+                    "url": page.get("url"),
+                    "step_count": len(journal),
+                    "ok": _probe_ok,
+                    "elapsed": round(time.time() - start_ts, 1),
+                })
+                continue
+
             # 元素动作的 ref 校验（防编造）
             action = {"action": action_name}
-            if action_name in ("click", "fill", "press", "select"):
+            if action_name in ("click", "fill", "press", "select", "hover", "check", "fill_form"):
+                # B1：fill_form 的 fields 走独立字段（内部 target 逐个校验）
+                if action_name == "fill_form":
+                    fields = decision.get("fields")
+                    if not isinstance(fields, list) or not fields:
+                        journal.append({
+                            "action": "fill_form", "ok": False,
+                            "error": "fields 缺失或不是数组（需给出 target/name/type/value）",
+                        })
+                        continue
+                    candidate_refs = {c.ref for c in obs["candidates"]}
+                    bad = [
+                        str(f.get("target") or "")
+                        for f in fields
+                        if isinstance(f, dict) and str(f.get("target") or "") not in candidate_refs
+                    ]
+                    if bad:
+                        journal.append({
+                            "action": "fill_form", "ok": False,
+                            "error": f"fields 中 ref 不在当前候选元素中: {bad[:3]}，请重新观察",
+                        })
+                        continue
+                    action["value"] = json.dumps(fields, ensure_ascii=False)
+                    label = "批量填写表单 " + "、".join(
+                        str(f.get("name") or f.get("target"))[:14]
+                        for f in fields[:4] if isinstance(f, dict)
+                    )
+                    executed = _substitute_credentials(action, cfg)
+                    res = await browser.act(executed)
+                    ok = bool(res.get("success"))
+                    journal.append({
+                        "action": "fill_form",
+                        "target": f"{len(fields)} 个字段",
+                        "value": _masked_value(action, cfg),
+                        "ok": ok,
+                        "error": (str(res.get("error"))[:160] if not ok else None),
+                        "note": note or None,
+                    })
+                    await _emit({
+                        "kind": "step",
+                        "label": label,
+                        "url": page.get("url"),
+                        "step_count": len(journal),
+                        "ok": ok,
+                        "elapsed": round(time.time() - start_ts, 1),
+                    })
+                    if ok:
+                        await asyncio.sleep(0.8)
+                        obs = await _observe()
+                        page = obs["page"]
+                    continue
                 ref = str(decision.get("ref") or "").strip()
                 candidate_refs = {c.ref for c in obs["candidates"]}
                 if ref not in candidate_refs:
@@ -904,8 +1109,27 @@ async def run_exploration(
                     })
                     continue
                 action["value"] = target
+            elif action_name == "scroll":
+                action["value"] = str(decision.get("value") or "down")
+            elif action_name == "dialog":
+                action["value"] = str(decision.get("value") or "accept")
+            elif action_name == "navigate_back":
+                action["action"] = "navigate_back"
+            elif action_name == "tabs":
+                token = str(decision.get("value") or "list").strip().lower()
+                if token.startswith("close"):
+                    journal.append({
+                        "action": "tabs", "value": token, "ok": False,
+                        "error": "探索期禁止关闭标签页（close），list/new/select 可用",
+                    })
+                    continue
+                action["value"] = token
             elif action_name == "wait":
                 action["value"] = str(decision.get("value") or "1")
+
+            # B1 修复：press → press_key（此前 whitelist 允许 press 但执行链路无此动作名）
+            if str(action.get("action")) == "press":
+                action["action"] = "press_key"
 
             # 时间线分工：note 作为独立文本行（上面的 note 事件），步骤行用动作描述
             # （ZCode 式「工具行 · 已完成」），避免同一句话出现两遍
@@ -923,6 +1147,46 @@ async def run_exploration(
                 "note": note or None,
             }
             journal.append(step)
+
+            # B4：点击类失败 → 遮挡/视口诊断（只读；诊断附入步骤记录供下一轮参考）
+            if not ok and action_name in (
+                "click", "double_click", "right_click", "check", "hover", "press_key"
+            ):
+                try:
+                    from app.config import get_settings as _gs_occ
+
+                    if bool(getattr(_gs_occ(), "exec_occlusion_probe", True)):
+                        from core.browser_probe import probe_occlusion
+
+                        async def _occ_caller(tool: str, payload: dict) -> dict:
+                            data = await browser.evaluate_json(str(payload.get("function") or ""))
+                            if not isinstance(data, dict):
+                                return {"success": False}
+                            return {"success": True, "text": json.dumps(data, ensure_ascii=False)}
+
+                        _cand = next(
+                            (c for c in obs["candidates"] if c.ref == action.get("selector")), None,
+                        )
+                        _occ_target = ""
+                        if _cand is not None:
+                            _occ_target = str(
+                                getattr(_cand, "name", "") or getattr(_cand, "text", "") or ""
+                            ).strip()
+                        _probe = await probe_occlusion(_occ_caller, _occ_target)
+                        _occ_note = str(_probe.get("note") or "")
+                        if not _occ_note and re.search(
+                            r"intercepts pointer|拦截|遮挡", str(res.get("error") or ""), re.I
+                        ):
+                            _occ_note = (
+                                "目标被页面元素遮挡（点击被拦截——通常为弹窗/遮罩层覆盖）："
+                                "先关闭/移开遮挡层再操作"
+                            )
+                        if _occ_note:
+                            step["error"] = (
+                                str(step.get("error") or "") + f" | {_occ_note}"
+                            )[:260]
+                except Exception:
+                    logger.debug("explore 遮挡诊断跳过", exc_info=True)
 
             if ok:
                 await asyncio.sleep(0.8)
@@ -947,7 +1211,7 @@ async def run_exploration(
                 "elapsed": round(time.time() - start_ts, 1),
             })
 
-        # 3) 收尾证据：console（只读，失败静默）
+        # 3) 收尾证据：console + 网络问题请求（只读，失败静默）
         report["stopped_reason"] = stopped
         if not report.get("summary"):
             report["summary"] = _auto_summary(journal, pages, stopped)
@@ -956,6 +1220,13 @@ async def run_exploration(
         except Exception:
             console = []
         report["console"] = console
+        try:
+            from app.config import get_settings as _gs_net_br
+
+            if bool(getattr(_gs_net_br(), "exec_network_evidence", True)):
+                report["network"] = await browser.network(10)
+        except Exception:
+            report["network"] = report.get("network") or []
         report["pages"] = list(pages.values())
         report["steps"] = journal
         report["ok"] = bool(pages) and stopped != "error"
