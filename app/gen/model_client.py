@@ -3,10 +3,76 @@ import inspect
 import json
 import re
 import logging
+from dataclasses import dataclass, field
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ModelToolCall:
+    """模型发起的一次工具调用（arguments 为原始 JSON 字符串）。"""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass
+class ModelReply:
+    """带工具调用的模型回复（tools 模式下返回，替代纯字符串）。"""
+
+    content: str
+    tool_calls: list = field(default_factory=list)
+    finish_reason: str | None = None
+
+
+class ToolCallingUnsupported(Exception):
+    """网关/模型拒绝 tools 参数（4xx）——调用方应降级为决策协议（C7 降级矩阵）。"""
+
+
+def _parse_tool_calls_from_message(message: dict) -> list[ModelToolCall]:
+    out: list[ModelToolCall] = []
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        out.append(ModelToolCall(
+            id=str(tc.get("id") or ""),
+            name=str(fn.get("name") or ""),
+            arguments=str(fn.get("arguments") or ""),
+        ))
+    return out
+
+
+def _accumulate_tool_call_delta(acc: dict, delta_tool_calls) -> None:
+    """流式 tool_calls 增量按 index 累积（id/name 覆盖，arguments 拼接）。"""
+    for tc in delta_tool_calls or []:
+        idx = tc.get("index", 0)
+        entry = acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+        if tc.get("id"):
+            entry["id"] = str(tc["id"])
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            entry["name"] = str(fn["name"])
+        if fn.get("arguments"):
+            entry["arguments"] += str(fn["arguments"])
+
+
+def _finalize_tool_calls(acc: dict) -> list[ModelToolCall]:
+    return [
+        ModelToolCall(id=acc[i]["id"], name=acc[i]["name"], arguments=acc[i]["arguments"])
+        for i in sorted(acc.keys())
+    ]
+
+
+def _tools_unsupported(exc: Exception, tools) -> bool:
+    """tools 模式下 4xx → 网关不支持工具参数（降级信号）。"""
+    return (
+        tools is not None
+        and isinstance(exc, httpx.HTTPStatusError)
+        and 400 <= exc.response.status_code < 500
+    )
+
 
 
 def _strip_br(value: str) -> str:
@@ -184,11 +250,16 @@ async def call_model(
     agent_type: str | None = None,
     agent_id: int | None = None,
     enable_thinking: bool | None = None,
-) -> str:
+    tools: list | None = None,
+) -> "str | ModelReply":
     """Call the AI model using uitest-work's AI config / AgentDefinition overrides.
 
     ``stream_callback``：流式内容增量回调（同步或 async 均可）；``reasoning_callback``：思考增量回调
     （reasoning_content / reasoning 字段，存在时逐增量回调）。
+
+    ``tools``：原生工具调用（035）。提供时 payload 携带 tools/tool_choice，返回值升级为
+    :class:`ModelReply`（content + tool_calls）；网关 4xx 拒绝 tools 时抛
+    :class:`ToolCallingUnsupported`（调用方降级）。不提供时行为与历史完全一致（返回 str）。
     """
     config = await _load_ai_config(agent_type=agent_type, agent_id=agent_id)
 
@@ -219,6 +290,9 @@ async def call_model(
         else config.get('enable_thinking', True)
     )
     payload.update(build_thinking_options(thinking, model_name, api_url))
+    if tools is not None:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     await _pace_calls()
 
     if stream_callback:
@@ -226,6 +300,8 @@ async def call_model(
         # 027-e2e-fixes P5 扩展：stream 建连阶段 5xx/网络错误同样退避重试
         for attempt in range(1, _LLM_RETRY_ATTEMPTS + 1):
             full_content: list[str] = []
+            tool_acc: dict = {}
+            finish_reason: str | None = None
             try:
                 async with httpx.AsyncClient(timeout=600) as client:
                     async with client.stream("POST", api_url, json=payload, headers=headers) as resp:
@@ -243,6 +319,9 @@ async def call_model(
                                     continue
                                 choices = data.get('choices') or []
                                 delta = (choices[0].get('delta') or {}) if choices else {}
+                                if choices and choices[0].get("finish_reason"):
+                                    finish_reason = choices[0]["finish_reason"]
+                                _accumulate_tool_call_delta(tool_acc, delta.get("tool_calls"))
                                 chunk = delta.get('content') or ''
                                 reasoning = (
                                     delta.get('reasoning_content')
@@ -258,8 +337,16 @@ async def call_model(
                                     result = stream_callback(chunk)
                                     if inspect.isawaitable(result):
                                         await result
-                return _strip_br(''.join(full_content))
+                content = _strip_br(''.join(full_content))
+                if tools is not None:
+                    return ModelReply(content=content, tool_calls=_finalize_tool_calls(tool_acc),
+                                      finish_reason=finish_reason)
+                return content
             except Exception as exc:
+                if _tools_unsupported(exc, tools):
+                    raise ToolCallingUnsupported(
+                        f"网关拒绝 tools 参数（HTTP {exc.response.status_code}）"
+                    ) from exc
                 if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
                     raise
                 delay = _retry_delay(exc, attempt)
@@ -280,11 +367,21 @@ async def call_model(
                     data = resp.json()
                 choice = data["choices"][0]
                 finish_reason = choice.get("finish_reason", "unknown")
-                raw = _extract_message_text(choice["message"])
+                message = choice["message"]
+                raw = _extract_message_text(message)
                 if finish_reason == "length":
                     logger.warning("Model output truncated (finish_reason=length), content length: %d chars", len(raw))
-                return _strip_br(raw)
+                content = _strip_br(raw)
+                if tools is not None:
+                    return ModelReply(content=content,
+                                      tool_calls=_parse_tool_calls_from_message(message),
+                                      finish_reason=finish_reason)
+                return content
             except Exception as exc:
+                if _tools_unsupported(exc, tools):
+                    raise ToolCallingUnsupported(
+                        f"网关拒绝 tools 参数（HTTP {exc.response.status_code}）"
+                    ) from exc
                 if not _is_retryable(exc) or attempt == _LLM_RETRY_ATTEMPTS:
                     raise
                 last_exc = exc

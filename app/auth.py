@@ -160,12 +160,31 @@ async def _get_validated_session(db: AsyncSession, request: Request) -> object |
 
 # 031（US8）：CI 令牌的项目范围（get_current_user 命中令牌时写入；端点可据此限权）
 _TOKEN_SCOPE: "ContextVar[Optional[int] | None]" = ContextVar("vt_token_project_scope", default=None)
+# 035（US4）：令牌范围等级（read|write）与令牌 id（MCP 接入用；session 请求保持 None=全权）
+_TOKEN_LEVEL: "ContextVar[Optional[str]]" = ContextVar("vt_token_scope_level", default=None)
+_TOKEN_ID: "ContextVar[Optional[int]]" = ContextVar("vt_token_id", default=None)
 
 
-async def authenticate_api_token(db: AsyncSession, authorization: Optional[str]):
-    """按 ``Authorization: Bearer vt_…`` 解析令牌。
+def token_scope_allows_mutation(scope: "Optional[str]") -> bool:
+    """令牌范围判定：read=只读；write/NULL（历史令牌/会话）=允许写。"""
+    return str(scope or "write").strip().lower() != "read"
 
-    返回 ``(user, project_scope)``；无效（缺头/格式不符/未知/撤销/过期/创建者失效）返回 ``(None, None)``。
+
+def set_token_context(*, project_scope: Optional[int], level: Optional[str], token_id: Optional[int]) -> None:
+    """MCP 等自建认证路径手动写入令牌上下文（HTTP 端点由 get_current_user 自动写入）。"""
+    _TOKEN_SCOPE.set(project_scope)
+    _TOKEN_LEVEL.set(level)
+    _TOKEN_ID.set(token_id)
+
+
+def current_token_level() -> "Optional[str]":
+    return _TOKEN_LEVEL.get()
+
+
+async def authenticate_api_token_full(db: AsyncSession, authorization: Optional[str]):
+    """按 ``Authorization: Bearer vt_…`` 解析令牌（完整版）。
+
+    返回 ``(user, token_row)``；无效返回 ``(None, None)``。
     """
     header = str(authorization or "").strip()
     if not header.lower().startswith("bearer "):
@@ -181,6 +200,14 @@ async def authenticate_api_token(db: AsyncSession, authorization: Optional[str])
         await db.execute(select(db_models.User).where(db_models.User.id == token.created_by))
     ).scalar_one_or_none()
     if user is None or user.status == "disabled":
+        return None, None
+    return user, token
+
+
+async def authenticate_api_token(db: AsyncSession, authorization: Optional[str]):
+    """兼容版：返回 ``(user, project_scope)``（既有调用方语义不变）。"""
+    user, token = await authenticate_api_token_full(db, authorization)
+    if user is None:
         return None, None
     return user, token.project_id
 
@@ -202,9 +229,11 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_asyn
     sess = await _get_validated_session(db, request)
     if sess is None:
         # 031（US8）：无会话时回退 CI 令牌（与 session 认证并存）
-        token_user, scope = await authenticate_api_token(db, request.headers.get("authorization"))
+        token_user, token = await authenticate_api_token_full(db, request.headers.get("authorization"))
         if token_user is not None:
-            _TOKEN_SCOPE.set(scope)
+            _TOKEN_SCOPE.set(token.project_id)
+            _TOKEN_LEVEL.set(token.scope or "write")
+            _TOKEN_ID.set(token.id)
             return token_user
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
     from app import db_models

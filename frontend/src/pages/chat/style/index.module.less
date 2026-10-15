@@ -460,3 +460,104 @@
   justify-content: center;
   color: #c9cdd4;
 }
+
+// 035 工具调用行（实时流式 + 消息内历史折叠区）
+.toolRows {
+  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toolRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.toolName {
+  font-weight: 600;
+  color: #4e5969;
+  flex-shrink: 0;
+}
+
+.toolArgs {
+  color: #86909c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.toolStatus {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.toolRunning {
+  color: #165dff;
+  background: #e8f3ff;
+}
+
+.toolOk {
+  color: #00b42a;
+  background: #e8ffea;
+}
+
+.toolFail {
+  color: #f53f3f;
+  background: #ffece8;
+}
+
+.toolHistory {
+  margin-top: 6px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+  font-size: 12px;
+  overflow: hidden;
+
+  summary {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .toolHistorySummary {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+    color: #86909c;
+
+    &::before {
+      content: '▸';
+      font-size: 10px;
+      transition: transform 0.15s;
+    }
+  }
+
+  &[open] .toolHistorySummary::before {
+    transform: rotate(90deg);
+  }
+
+  .toolHistoryBody {
+    padding: 0 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+}

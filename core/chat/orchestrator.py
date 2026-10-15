@@ -396,6 +396,89 @@ async def _stream_llm(
 
 # ----------------------------
 
+def _tool_loop_enabled() -> bool:
+    """035：工具循环开关（chat_tool_loop_enabled，默认开）。"""
+    try:
+        return bool(getattr(get_settings(), "chat_tool_loop_enabled", True))
+    except Exception:
+        return False
+
+
+async def _tool_stream_callbacks(conversation, target_message_id: int | None = None):
+    """工具循环流式回调：message.stream_start + thinking/reply 增量（与决策模式同通道）。
+
+    content 双形态自适应：纯文本（工具模式正常回复）直接推送；
+    决策 JSON（混合输出兼容）按 PartialDecisionStream 增量提取 reply/thinking。
+    """
+    from core.chat import stream as chat_stream
+
+    conv_id = conversation.id
+    reasoning_parts: list[str] = []
+    state = {
+        "mode": "unknown",  # unknown | text | json
+        "buf": "",
+        "stream": None,
+        "t_len": 0,
+        "r_len": 0,
+    }
+    reasoning_seen = {"v": False}
+
+    async def push(channel: str, text: str) -> None:
+        if not text:
+            return
+        await emit(conv_id, {
+            "type": "message.stream",
+            "conversation_id": conv_id,
+            "channel": channel,
+            "delta": text,
+            "target_message_id": target_message_id,
+        })
+
+    async def on_reasoning(chunk: str) -> None:
+        reasoning_seen["v"] = True
+        reasoning_parts.append(chunk)
+        await push("thinking", chunk)
+
+    async def on_content(chunk: str) -> None:
+        if state["mode"] == "unknown":
+            state["buf"] += chunk
+            stripped = state["buf"].lstrip()
+            if not stripped:
+                return
+            if stripped.startswith("{"):
+                state["mode"] = "json"
+                state["stream"] = chat_stream.PartialDecisionStream()
+                state["stream"].feed(state["buf"])
+                state["buf"] = ""
+            else:
+                state["mode"] = "text"
+                await push("reply", state["buf"])
+                state["buf"] = ""
+                return
+        elif state["mode"] == "text":
+            await push("reply", chunk)
+            return
+        else:
+            state["stream"].feed(chunk)
+        if state["mode"] == "json":
+            if not reasoning_seen["v"]:
+                cur_t = state["stream"].get("thinking")
+                if len(cur_t) > state["t_len"]:
+                    await push("thinking", cur_t[state["t_len"]:])
+                    state["t_len"] = len(cur_t)
+            cur_r = state["stream"].get("reply")
+            if len(cur_r) > state["r_len"]:
+                await push("reply", cur_r[state["r_len"]:])
+                state["r_len"] = len(cur_r)
+
+    await emit(conv_id, {
+        "type": "message.stream_start",
+        "conversation_id": conv_id,
+        "target_message_id": target_message_id,
+    })
+    return on_reasoning, on_content, reasoning_parts
+
+
 async def handle_user_message(
     db,
     *,
@@ -450,6 +533,76 @@ async def handle_user_message(
     # 3) 上下文组装（摘要 + 引用 + 草稿摘要）
     messages = list(history) + [user_msg]
     llm_messages = await _build_llm_messages(db, conversation, messages, llm, agent_id=agent_id)
+
+    # 3.5) 035：原生工具循环（优先；网关不支持/开关关闭/测试注入 → 既有决策协议，C7）
+    tool_outcome = None
+    tool_thinking: Optional[str] = None
+    if llm_call is None and _tool_loop_enabled():
+        from app.gen.model_client import ToolCallingUnsupported
+        from core.tools.loop import run_tool_loop
+        from core.tools.registry import ToolContext
+
+        try:
+            on_reasoning, on_content, reasoning_parts = await _tool_stream_callbacks(conversation)
+            tool_ctx = ToolContext(db=db, user_id=user_id, conversation=conversation, source="chat")
+
+            async def _tool_llm(messages, *, tools, stream_callback=None, reasoning_callback=None):
+                from app.gen.model_client import call_model as _cm
+
+                return await _cm(messages, tools=tools, stream_callback=stream_callback,
+                                 reasoning_callback=reasoning_callback,
+                                 agent_type="assistant", agent_id=agent_id)
+
+            tool_outcome = await run_tool_loop(
+                db=db, conversation=conversation, ctx=tool_ctx, messages=llm_messages,
+                llm=_tool_llm, on_content=on_content, on_reasoning=on_reasoning,
+            )
+            tool_thinking = "".join(reasoning_parts).strip() or None
+        except ToolCallingUnsupported as exc:
+            logger.info("tool loop unsupported → decision protocol fallback: %s", exc)
+            tool_outcome = None
+        except Exception as exc:
+            logger.warning("tool loop failed: %s", exc, exc_info=True)
+            assistant_msg = await chat_crud.create_message(
+                db, conversation_id=conversation.id, role="assistant",
+                content="（模型调用失败，请稍后重试）",
+                actions=[{"type": "error", "status": "error", "error": str(exc)[:300]}],
+            )
+            await emit(conversation.id, {"type": "message.created", "message": serialize_message(assistant_msg)})
+            return user_msg, assistant_msg
+
+    if tool_outcome is not None:
+        # 混合输出兼容（C7）：未用工具但内容为决策 JSON → 交决策协议执行
+        if not tool_outcome.used_tools and tool_outcome.reply:
+            _decision, _err = contracts.parse_decision(tool_outcome.reply)
+            if _decision is not None:
+                _decision = contracts.redact_decision_secrets(_decision)
+                cards, actions_log, notes, task_id = await _execute_decision(
+                    db, conversation, user_id, _decision, llm,
+                )
+                reply = _compose_reply(_decision["reply"], notes, cards)
+                if dropped_refs:
+                    reply = (reply + f"\n（失效引用已剔除：{'、'.join(dropped_refs[:3])}）").strip()
+                assistant_msg = await chat_crud.create_message(
+                    db, conversation_id=conversation.id, role="assistant",
+                    content=reply, thinking=_decision.get("thinking") or tool_thinking,
+                    cards=cards or None, actions=actions_log or None, task_id=task_id,
+                )
+                await emit(conversation.id, {"type": "message.created", "message": serialize_message(assistant_msg)})
+                return user_msg, assistant_msg
+        # 工具循环正常完成：落库（卡片/工具行/任务句柄来自循环）
+        reply = tool_outcome.reply
+        if dropped_refs:
+            reply = (reply + f"\n（失效引用已剔除：{'、'.join(dropped_refs[:3])}）").strip()
+        assistant_msg = await chat_crud.create_message(
+            db, conversation_id=conversation.id, role="assistant",
+            content=reply, thinking=tool_thinking,
+            cards=tool_outcome.cards or None,
+            actions=tool_outcome.actions_log or None,
+            task_id=tool_outcome.task_id,
+        )
+        await emit(conversation.id, {"type": "message.created", "message": serialize_message(assistant_msg)})
+        return user_msg, assistant_msg
 
     # 4) LLM 决策（生产路径走流式：thinking/reply 实时推送；测试注入 llm_call 时走阻塞路径）
     try:

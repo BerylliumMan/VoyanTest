@@ -24,6 +24,7 @@ class TokenCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     project_id: Optional[int] = None
     expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    scope: Optional[str] = Field(default="read", description="read（默认，最小权限）| write")
 
 
 @router.post("/tokens", status_code=201)
@@ -33,13 +34,17 @@ async def create_token(
     db: AsyncSession = Depends(get_async_db),  # noqa: B008
 ) -> dict[str, Any]:
     """签发 CI 令牌（明文只返回一次）。"""
-    token, plaintext = await crud_token.create_token(
-        db,
-        name=payload.name,
-        project_id=payload.project_id,
-        created_by=user.id,
-        expires_in_days=payload.expires_in_days,
-    )
+    try:
+        token, plaintext = await crud_token.create_token(
+            db,
+            name=payload.name,
+            project_id=payload.project_id,
+            created_by=user.id,
+            expires_in_days=payload.expires_in_days,
+            scope=payload.scope or "read",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     data = crud_token.to_public_dict(token)
     data["plaintext"] = plaintext  # 唯一一次返回
     return data

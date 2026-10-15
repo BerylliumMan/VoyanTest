@@ -548,6 +548,124 @@ async def test_watch_run_updates_card_until_terminal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_watch_run_tolerates_late_card_message(monkeypatch):
+    """035 回归：卡片消息滞后落库（工具循环多轮）时，watcher 应等待而非早退。"""
+    conv_id = 3
+    batch_id = 505
+    msg = FakeMessage(conversation_id=conv_id, role="assistant", cards=[
+        {"type": "run", "batch_id": batch_id, "status": "running", "case_ids": [11],
+         "progress": {"total": 1, "done": 0}},
+    ])
+    writes = []
+    state = {"i": 0}
+
+    class Batch:
+        id = batch_id
+        status = "passed"
+        total_cases = 1
+        passed = 1
+        failed = 0
+
+    async def fake_sleep(sec):
+        state["i"] += 1
+
+    async def get_batch(db, bid):
+        return Batch()
+
+    async def find_card(db, cid, bid):
+        # 前 3 轮找不到（消息未落库），第 4 轮起可见
+        if state["i"] < 4:
+            return None, None
+        return msg, msg.cards[0]
+
+    async def write_card(db, m, card):
+        writes.append(card)
+        m.cards = [card]
+        return m
+
+    async def noop_emit(cid, ev):
+        return None
+
+    async def collect(db, bid, cids):
+        return []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSessionLocal:
+        def __call__(self):
+            return FakeSession()
+
+    import app.database as db_mod
+
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", FakeSessionLocal())
+    monkeypatch.setattr(chat_run.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(chat_run.crud, "get_run_batch", get_batch)
+    monkeypatch.setattr(chat_run, "_find_run_card_message", find_card)
+    monkeypatch.setattr(chat_run, "_write_run_card", write_card)
+    monkeypatch.setattr(chat_run, "_collect_evidence", collect)
+    monkeypatch.setattr(chat_run, "emit", noop_emit)
+
+    await chat_run._watch_run(conv_id, batch_id, max_iterations=10)
+    assert len(writes) == 1
+    assert writes[0]["status"] == "done"
+    assert writes[0]["result"] == {"passed": 1, "failed": 0}
+
+
+@pytest.mark.asyncio
+async def test_watch_run_gives_up_after_grace_when_card_never_appears(monkeypatch):
+    conv_id = 3
+    batch_id = 506
+    state = {"i": 0, "finds": 0}
+
+    class Batch:
+        id = batch_id
+        status = "running"
+        total_cases = 1
+        passed = 0
+        failed = 0
+
+    async def fake_sleep(sec):
+        state["i"] += 1
+
+    async def get_batch(db, bid):
+        return Batch()
+
+    async def find_card(db, cid, bid):
+        state["finds"] += 1
+        return None, None
+
+    async def noop_emit(cid, ev):
+        return None
+
+    class FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSessionLocal:
+        def __call__(self):
+            return FakeSession()
+
+    import app.database as db_mod
+
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", FakeSessionLocal())
+    monkeypatch.setattr(chat_run.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(chat_run.crud, "get_run_batch", get_batch)
+    monkeypatch.setattr(chat_run, "_find_run_card_message", find_card)
+    monkeypatch.setattr(chat_run, "emit", noop_emit)
+
+    await chat_run._watch_run(conv_id, batch_id, max_iterations=100)
+    assert state["finds"] == 60  # 宽限 60 轮后放弃（不无限等待）
+
+
+@pytest.mark.asyncio
 async def test_watch_run_survives_transient_db_error(monkeypatch):
     """单次轮询异常不应终止 watcher（应继续轮询直至终态）。"""
     conv_id = 3

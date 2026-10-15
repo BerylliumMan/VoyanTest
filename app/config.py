@@ -87,6 +87,19 @@ class Settings(BaseSettings):
     exec_storage_actions_enabled: bool = False
     # - B5 探索链只读探针（js_probe：links/nav/storage_keys/frameworks 固定只读 JS）
     chat_browse_js_probe: bool = True
+    # 035 智能体工具化与 MCP 外部接入：
+    # - 对话原生工具调用循环（false=降级为既有决策 JSON 协议，用户无感）
+    chat_tool_loop_enabled: bool = True
+    # - 单轮工具循环轮次上限
+    chat_tool_max_rounds: int = 8
+    # - 单轮工具循环时长上限（秒）
+    chat_tool_timeout_seconds: int = 180
+    # - 只读工具并行上限（mutate/execute 恒串行）
+    chat_tool_parallel_max: int = 4
+    # - 工具结果序列化字节上限（超出→分页切片 + 显式截断标注）
+    chat_tool_result_max_bytes: int = 16384
+    # - 外部接入活跃会话全局上限（MCP /mcp）
+    chat_external_max_sessions: int = 4
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

@@ -223,6 +223,8 @@ async def _watch_generation(conversation_id: int, session_id: str, *, max_iterat
     """轮询生成会话状态 → 回填草稿卡片 + WS 推送（终态后退出）。"""
     from app.database import AsyncSessionLocal
 
+    consecutive_errors = 0
+    missing_card = 0
     for _ in range(max_iterations):
         await asyncio.sleep(2.0)
         try:
@@ -233,7 +235,15 @@ async def _watch_generation(conversation_id: int, session_id: str, *, max_iterat
                 status = record.status
                 msg, card = await _find_card_message(db, conversation_id, session_id)
                 if msg is None or card is None:
-                    return
+                    # 卡片消息可能滞后落库（035 工具循环下：generate_cases 工具返回后循环
+                    # 还要跑最后一轮 LLM 才落助手消息）——宽限 60 轮（≈120s）再放弃，
+                    # 避免 watcher 早退导致卡片永远停在「生成中」（2026-10-15 实测）。
+                    missing_card += 1
+                    if missing_card >= 60:
+                        return
+                    continue
+                missing_card = 0
+                consecutive_errors = 0
                 if status in ("pending", "analyzing"):
                     card = {
                         **card,
@@ -264,8 +274,10 @@ async def _watch_generation(conversation_id: int, session_id: str, *, max_iterat
                 })
                 return
         except Exception:
-            logger.debug("watch generation failed session=%s", session_id, exc_info=True)
-            return
+            consecutive_errors += 1
+            logger.debug("watch generation failed session=%s consecutive=%s", session_id, consecutive_errors, exc_info=True)
+            if consecutive_errors >= 15:
+                return
 
 
 # ----------------------------

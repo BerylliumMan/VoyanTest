@@ -1,6 +1,7 @@
 # app/crud/run.py - 测试运行 + 运行批次 CRUD
 import logging
-from typing import Any
+from contextvars import ContextVar
+from typing import Any, Optional
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,21 @@ from app import db_models
 from app.tz import now as tz_now
 
 logger = logging.getLogger(__name__)
+
+# 035（US4/T040）：批次来源覆盖——外部接入（MCP）调用期间由接入层设置，
+# create_run_batch 未显式传 source 时取用（外部执行批次 source='external' + token id）。
+_BATCH_SOURCE_OVERRIDE: ContextVar[Optional[tuple]] = ContextVar("vt_batch_source_override", default=None)
+
+
+def set_batch_source_override(source: str, source_id: Optional[int] = None):
+    return _BATCH_SOURCE_OVERRIDE.set((source, source_id))
+
+
+def reset_batch_source_override(token) -> None:
+    try:
+        _BATCH_SOURCE_OVERRIDE.reset(token)
+    except (ValueError, LookupError):
+        pass
 
 
 # ----------------------------
@@ -72,6 +88,10 @@ async def create_run_log(db: AsyncSession, run_id: int, level: str, message: str
 
 async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0, triggered_by: str | None = None, source: str | None = None, source_id: int | None = None) -> db_models.RunBatch:
     """创建运行批次"""
+    if source is None:
+        override = _BATCH_SOURCE_OVERRIDE.get()
+        if override:
+            source, source_id = override
     batch = db_models.RunBatch(
         project_id=project_id,
         name=name,

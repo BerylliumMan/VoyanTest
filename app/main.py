@@ -476,6 +476,15 @@ async def _run_startup_init():
             "ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS agent_id INTEGER",
             "chat_conversations.agent_id 迁移",
         )
+        # ── 035-agent-tools-mcp：令牌范围（read/write）+ 对话来源（user/external）──
+        await _ddl(
+            "ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS scope VARCHAR(16)",
+            "api_tokens.scope 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'user'",
+            "chat_conversations.source 迁移",
+        )
         await _ddl(
             """
             DO $$
@@ -885,6 +894,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # ── 035 US4：MCP 服务端 session manager（stateless streamable HTTP） ──
+    try:
+        from app.routers.mcp import start_mcp_session_manager
+
+        await start_mcp_session_manager()
+        logger.info("MCP server session manager started (/mcp)")
+    except Exception as e:
+        logger.warning("MCP session manager 启动失败: %s", e)
+
     try:
         from app.scheduler import scheduler, start_scheduler
 
@@ -1017,6 +1035,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("定时调度器启动失败: %s", e)
     yield
+    try:
+        from app.routers.mcp import stop_mcp_session_manager
+
+        await stop_mcp_session_manager()
+    except Exception:
+        pass
     cleanup_task.cancel()
     try:
         await cleanup_task
@@ -1222,6 +1246,11 @@ app.websocket("/ws/agent-runs/{run_id}")(_agent_run_websocket)
 from app.routers.chat.ws import chat_conversation_ws  # noqa: E402
 
 app.websocket("/ws/conversations/{conversation_id}")(chat_conversation_ws)
+
+# 035 US4：MCP 服务端出口（外部智能体接入；Bearer vt_ 鉴权，stateless streamable HTTP）
+from app.routers.mcp import register_mcp_routes  # noqa: E402
+
+register_mcp_routes(app)
 
 
 _SPA_INDEX = os.path.join(_root, "app", "static", "index.html")

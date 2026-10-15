@@ -28,6 +28,7 @@ async def create_conversation(
     case_kind: Optional[str] = None,
     environment_id: Optional[int] = None,
     agent_id: Optional[int] = None,
+    source: str = "user",
 ) -> db_models.ChatConversation:
     record = db_models.ChatConversation(
         title=(title or "新对话")[:200],
@@ -35,6 +36,7 @@ async def create_conversation(
         project_id=project_id,
         assistant_agent_id=assistant_agent_id,
         status="active",
+        source=source or "user",
         refs=refs or None,
         case_kind=(case_kind or "ui"),
         environment_id=environment_id,
@@ -67,6 +69,7 @@ async def list_conversations(
     user_id: int,
     *,
     status: Optional[str] = None,
+    source: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
@@ -75,6 +78,8 @@ async def list_conversations(
     )
     if status:
         base = base.where(db_models.ChatConversation.status == status)
+    if source:
+        base = base.where(db_models.ChatConversation.source == source)
     base = base.order_by(db_models.ChatConversation.updated_at.desc())
     items = (
         await db.execute(base.offset(max(0, offset)).limit(max(1, min(200, limit))))

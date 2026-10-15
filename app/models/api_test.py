@@ -183,6 +183,7 @@ class ApiToken(Base):
     token_hash = Column(String(128), nullable=False, unique=True, index=True)
     token_prefix = Column(String(16), nullable=False)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)  # NULL=全部可见项目
+    scope = Column(String(16), nullable=True)  # read | write；NULL=write（历史令牌，CI 行为不变）
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)

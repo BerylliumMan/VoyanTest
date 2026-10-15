@@ -130,6 +130,24 @@ else
         || info "所有变更被跳过 (非 .py / dist 目标)"
 fi
 
+# ── 前端构建产物：frontend/dist 被 gitignore（不出现在 git diff），单独整体部署 ──
+# （2026-10-15 035 实测：只跑 git diff 会漏掉前端 bundle，页面停留在旧版）
+if [ -d frontend/dist ] && [ -f frontend/dist/index.html ]; then
+    docker exec "$CONTAINER" mkdir -p /app/app/static 2>/dev/null || true
+    if docker cp frontend/dist/. "$CONTAINER:/app/app/static/" 2>/dev/null; then
+        local_sha=$(sha256sum frontend/dist/index.html | awk '{print $1}')
+        container_sha=$(docker exec "$CONTAINER" sh -c "sha256sum /app/app/static/index.html" 2>/dev/null | awk '{print $1}')
+        if [ "$local_sha" = "$container_sha" ]; then
+            pass "frontend/dist → /app/app/static (index.html 校验一致)"
+            CHANGED_FILES+=("frontend/dist/**")
+        else
+            fail "frontend/dist 校验不匹配"; CHECKSUM_OK=false
+        fi
+    else
+        fail "frontend/dist docker cp 失败"; CHECKSUM_OK=false
+    fi
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 步骤 2: 重启容器 + 轮询健康检查 (最长 30s)
 # ═══════════════════════════════════════════════════════════════════════════════

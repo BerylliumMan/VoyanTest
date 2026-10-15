@@ -143,6 +143,7 @@ def serialize_conversation(c) -> dict:
         "project_id": c.project_id,
         "assistant_agent_id": c.assistant_agent_id,
         "status": c.status,
+        "source": getattr(c, "source", None) or "user",
         "refs": c.refs or [],
         "summary": c.summary,
         "case_kind": getattr(c, "case_kind", None) or "ui",
@@ -335,13 +336,18 @@ async def create_conversation(
 @router.get("/conversations")
 async def list_conversations(
     status: Optional[str] = None,
+    source: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     db: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ) -> dict:
     _ensure_enabled()
-    result = await chat_crud.list_conversations(db, user.id, status=status, limit=limit, offset=offset)
+    if source not in (None, "user", "external"):
+        raise HTTPException(400, "source 必须为 user|external")
+    result = await chat_crud.list_conversations(
+        db, user.id, status=status, source=source, limit=limit, offset=offset,
+    )
     return {"items": [serialize_conversation(c) for c in result["items"]]}
 
 

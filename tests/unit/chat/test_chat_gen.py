@@ -89,3 +89,128 @@ async def test_import_drafts_error_paths(monkeypatch):
     monkeypatch.setattr(chat_gen.crud, "get_gen_session", get_session)
     result, err = await chat_gen.import_drafts(None, conversation=conv, gen_session_id="s1")
     assert result is None and "尚未完成" in err
+
+
+# ----------------------------
+# watcher（035 回归：卡片消息滞后落库）
+# ----------------------------
+
+@pytest.mark.asyncio
+async def test_watch_generation_tolerates_late_card_message(monkeypatch):
+    """035 回归：工具循环下卡片消息滞后落库时，生成 watcher 应等待而非早退。"""
+    conv_id = 3
+    session_id = "s-late"
+    msg = FakeMessage(conversation_id=conv_id, role="assistant", cards=[
+        {"type": "draft_set", "gen_session_id": session_id, "status": "generating", "items": []},
+    ])
+    writes = []
+    state = {"i": 0}
+
+    class Record:
+        status = "completed"
+        progress = 100
+        progress_message = "分析完成"
+        error_message = None
+
+    async def fake_sleep(sec):
+        state["i"] += 1
+
+    async def get_gen_session(db, sid):
+        return Record()
+
+    async def find_card(db, cid, sid):
+        if state["i"] < 3:
+            return None, None
+        return msg, msg.cards[0]
+
+    async def list_gen_test_cases(db, sid):
+        class TC:
+            id = 1
+            title = "用例A"
+            test_steps = "打开页面\n点击登录"
+            expected_result = "跳转仪表盘"
+            priority = "P0"
+            module = "登录"
+        return [TC()]
+
+    async def write_card(db, m, card):
+        writes.append(card)
+        m.cards = [card]
+        return m
+
+    async def noop_emit(cid, ev):
+        return None
+
+    class FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSessionLocal:
+        def __call__(self):
+            return FakeSession()
+
+    import app.database as db_mod
+
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", FakeSessionLocal())
+    monkeypatch.setattr(chat_gen.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(chat_gen.crud, "get_gen_session", get_gen_session)
+    monkeypatch.setattr(chat_gen.crud, "list_gen_test_cases", list_gen_test_cases)
+    monkeypatch.setattr(chat_gen, "_find_card_message", find_card)
+    monkeypatch.setattr(chat_gen, "_write_card", write_card)
+    monkeypatch.setattr(chat_gen, "emit", noop_emit)
+
+    await chat_gen._watch_generation(conv_id, session_id, max_iterations=10)
+    assert len(writes) == 1
+    assert writes[0]["status"] == "draft"
+    assert writes[0]["items"][0]["title"] == "用例A"
+
+
+@pytest.mark.asyncio
+async def test_watch_generation_gives_up_after_grace(monkeypatch):
+    conv_id = 3
+    session_id = "s-never"
+    state = {"finds": 0}
+
+    class Record:
+        status = "analyzing"
+        progress = 10
+        progress_message = ""
+        error_message = None
+
+    async def fake_sleep(sec):
+        return None
+
+    async def get_gen_session(db, sid):
+        return Record()
+
+    async def find_card(db, cid, sid):
+        state["finds"] += 1
+        return None, None
+
+    async def noop_emit(cid, ev):
+        return None
+
+    class FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSessionLocal:
+        def __call__(self):
+            return FakeSession()
+
+    import app.database as db_mod
+
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", FakeSessionLocal())
+    monkeypatch.setattr(chat_gen.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(chat_gen.crud, "get_gen_session", get_gen_session)
+    monkeypatch.setattr(chat_gen, "_find_card_message", find_card)
+    monkeypatch.setattr(chat_gen, "emit", noop_emit)
+
+    await chat_gen._watch_generation(conv_id, session_id, max_iterations=100)
+    assert state["finds"] == 60

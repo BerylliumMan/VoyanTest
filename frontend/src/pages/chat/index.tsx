@@ -41,6 +41,7 @@ interface Conversation {
   project_id: number | null;
   assistant_agent_id: number | null;
   status: string;
+  source?: string;
   refs?: Array<Record<string, unknown>>;
   case_kind?: string | null;
   environment_id?: number | null;
@@ -146,6 +147,16 @@ const ChatPage: React.FC = () => {
   // 流式输出：thinking/reply 增量；targetId 为被「重新生成」的消息 id（null = 新一轮回复）
   const [stream, setStream] = useState<{ targetId: number | null; thinking: string; reply: string } | null>(null);
   const [streamOpen, setStreamOpen] = useState(true);
+  // 035：工具调用实时行（tool.call.start/end 事件；终稿落库后清空）
+  const [liveTools, setLiveTools] = useState<Array<{
+    callId: string;
+    tool: string;
+    argsDigest: string;
+    status: string;
+    summary?: string;
+    durationMs?: number;
+    truncated?: boolean;
+  }>>([]);
   // 探索时间线瞬时流：browse_id → 当前思考增量（done 后清空，由卡片时间线接管）
   const [browseLive, setBrowseLive] = useState<Record<string, string>>({});
   // 编辑已发送消息（保存并从该条重新生成）
@@ -169,15 +180,18 @@ const ChatPage: React.FC = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const [convFilter, setConvFilter] = useState<'all' | 'user' | 'external'>('all');
+
   const loadConversations = useCallback(async () => {
     try {
-      const r = await axios.get('/api/chat/conversations');
+      const params = convFilter === 'all' ? {} : { source: convFilter };
+      const r = await axios.get('/api/chat/conversations', { params });
       setConversations(r.data.items || []);
       return r.data.items as Conversation[];
     } catch {
       return [];
     }
-  }, []);
+  }, [convFilter]);
 
   const loadMessages = useCallback(async (cid: number) => {
     setLoadingMsgs(true);
@@ -332,7 +346,10 @@ const ChatPage: React.FC = () => {
         const data = JSON.parse(ev.data);
         if (data.type === 'message.created' || data.type === 'message.updated') {
           const msg = data.message as ChatMessage;
-          if (msg.role === 'assistant') setStream(null); // 终稿落库 → 结束流式预览
+          if (msg.role === 'assistant') {
+            setStream(null); // 终稿落库 → 结束流式预览
+            setLiveTools([]);
+          }
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === msg.id);
             if (idx >= 0) {
@@ -346,11 +363,31 @@ const ChatPage: React.FC = () => {
           setMessages((prev) => prev.filter((m) => m.id !== data.message_id));
         } else if (data.type === 'message.stream_start') {
           streamReplyStartedRef.current = false;
+          setLiveTools([]);
           setStream({ targetId: (data.target_message_id as number) ?? null, thinking: '', reply: '' });
           setStreamOpen(true);
         } else if (data.type === 'turn.stopped') {
           // 停止按钮（本端或他端）→ 清掉流式预览，发送按钮由 send() 的 finally 收敛
           setStream(null);
+          setLiveTools([]);
+        } else if (data.type === 'tool.call.start') {
+          setLiveTools((prev) => [...prev, {
+            callId: String(data.call_id || ''),
+            tool: String(data.tool || ''),
+            argsDigest: String(data.args_digest || ''),
+            status: 'running',
+          }]);
+        } else if (data.type === 'tool.call.end') {
+          const cid = String(data.call_id || '');
+          setLiveTools((prev) => prev.map((t) => (t.callId === cid
+            ? {
+                ...t,
+                status: data.ok ? 'ok' : 'failed',
+                summary: String(data.summary || ''),
+                durationMs: Number(data.duration_ms || 0),
+                truncated: Boolean(data.truncated),
+              }
+            : t)));
         } else if (data.type === 'message.stream') {
           const channel = String(data.channel || '');
           const delta = String(data.delta || '');
@@ -1193,6 +1230,19 @@ const ChatPage: React.FC = () => {
           )}
         </div>
         <div className={styles.convList}>
+          <div style={{ padding: '0 4px 8px' }}>
+            <Select
+              size="small"
+              value={convFilter}
+              onChange={(v) => setConvFilter(v as 'all' | 'user' | 'external')}
+              style={{ width: '100%' }}
+              options={[
+                { label: '全部对话', value: 'all' },
+                { label: '我的对话', value: 'user' },
+                { label: '外部接入', value: 'external' },
+              ]}
+            />
+          </div>
           {conversations.map((c) => (
             <div
               key={c.id}
@@ -1200,7 +1250,14 @@ const ChatPage: React.FC = () => {
               onClick={() => setActiveId(c.id)}
             >
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div className={styles.convTitle}>{c.title}</div>
+                <div className={styles.convTitle}>
+                  {c.source === 'external' && (
+                    <Tag size="small" color="arcoblue" style={{ marginRight: 4 }}>
+                      外部
+                    </Tag>
+                  )}
+                  {c.title}
+                </div>
                 <div className={styles.convMeta}>{c.updated_at ? new Date(c.updated_at).toLocaleString() : ''}</div>
               </div>
               <Popconfirm title="删除该对话？" onOk={() => deleteConversation(c.id)}>
@@ -1379,6 +1436,25 @@ const ChatPage: React.FC = () => {
                       </div>
                     )}
                     {(m.cards || []).map((c, i) => renderCard(c, i, m.id))}
+                    {m.role === 'assistant' && (m.actions || []).filter((a: any) => a && a.type === 'tool').length > 0 && (
+                      <details className={styles.toolHistory}>
+                        <summary className={styles.toolHistorySummary}>
+                          <IconRobot />
+                          工具调用 × {(m.actions || []).filter((a: any) => a && a.type === 'tool').length}
+                        </summary>
+                        <div className={styles.toolHistoryBody}>
+                          {(m.actions || []).filter((a: any) => a && a.type === 'tool').map((a: any, i: number) => (
+                            <div key={i} className={styles.toolRow}>
+                              <span className={styles.toolName}>{String(a.tool || '')}</span>
+                              <span className={`${styles.toolStatus} ${a.status === 'ok' ? styles.toolOk : styles.toolFail}`}>
+                                {a.status === 'ok' ? '已完成' : '失败'}
+                              </span>
+                              {a.summary ? <span className={styles.toolArgs}>{String(a.summary)}</span> : null}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
                     {m.role === 'assistant' && (
                       <div className={styles.msgTools}>
                         <span className={styles.msgTool} onClick={() => regenerate(m.id)}>
@@ -1397,6 +1473,23 @@ const ChatPage: React.FC = () => {
               {stream && stream.targetId == null && (
                 <div className={styles.msgRow}>
                   <div style={{ maxWidth: '76%' }}>
+                    {liveTools.length > 0 && (
+                      <div className={styles.toolRows}>
+                        {liveTools.map((t) => (
+                          <div key={t.callId} className={styles.toolRow}>
+                            <span className={styles.toolName}>{t.tool}</span>
+                            <span className={styles.toolArgs}>{t.argsDigest}</span>
+                            <span className={`${styles.toolStatus} ${t.status === 'running' ? styles.toolRunning : t.status === 'ok' ? styles.toolOk : styles.toolFail}`}>
+                              {t.status === 'running'
+                                ? '执行中…'
+                                : t.status === 'ok'
+                                  ? `已完成${t.durationMs ? ` · ${(t.durationMs / 1000).toFixed(1)}s` : ''}`
+                                  : '失败'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {(stream.thinking || !stream.reply) && (
                       <details
                         className={styles.thinking}

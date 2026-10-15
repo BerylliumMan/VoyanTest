@@ -31,6 +31,8 @@ interface ApiTokenRow {
   name: string;
   token_prefix: string;
   project_id: number | null;
+  scope: string;
+  scope_legacy?: boolean;
   expires_at: string | null;
   revoked_at: string | null;
   last_used_at: string | null;
@@ -89,6 +91,7 @@ const CITokenManagement: React.FC = () => {
           name: values.name,
           project_id: values.project_id ?? null,
           expires_in_days: values.expires_in_days ?? null,
+          scope: values.scope || 'read',
         },
       });
       setCreateVisible(false);
@@ -150,6 +153,18 @@ const CITokenManagement: React.FC = () => {
                 : projects.find((p) => p.id === v)?.name || `#${v}`,
           },
           {
+            title: t['ci.token.range'],
+            dataIndex: 'scope',
+            render: (_: unknown, row: ApiTokenRow) =>
+              row.scope_legacy ? (
+                <Tag color="gray">{t['ci.token.range_legacy']}</Tag>
+              ) : row.scope === 'read' ? (
+                <Tag color="blue">{t['ci.token.range_read']}</Tag>
+              ) : (
+                <Tag color="orange">{t['ci.token.range_write']}</Tag>
+              ),
+          },
+          {
             title: t['ci.token.expires'],
             dataIndex: 'expires_at',
             render: (v: string | null) => (v ? v.slice(0, 19).replace('T', ' ') : t['ci.token.never']),
@@ -190,9 +205,17 @@ const CITokenManagement: React.FC = () => {
           form.resetFields();
         }}
       >
-        <Form form={form} layout="vertical" initialValues={{ expires_in_days: 90 }}>
+        <Form form={form} layout="vertical" initialValues={{ expires_in_days: 90, scope: 'read' }}>
           <Form.Item field="name" label={t['ci.token.name']} rules={[{ required: true }]}>
             <Input placeholder={t['ci.token.name_placeholder']} />
+          </Form.Item>
+          <Form.Item field="scope" label={t['ci.token.range']} extra={t['ci.token.range_hint']}>
+            <Select
+              options={[
+                { label: t['ci.token.range_read'], value: 'read' },
+                { label: t['ci.token.range_write'], value: 'write' },
+              ]}
+            />
           </Form.Item>
           <Form.Item field="project_id" label={t['ci.token.scope']}>
             <Select

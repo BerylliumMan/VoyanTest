@@ -27,6 +27,8 @@ class ChatConversation(Base):
     agent_id = Column(Integer, nullable=True)  # agents.id（在线客户端；空 = 服务端形态）
     # active / archived
     status = Column(String(16), nullable=False, default="active")
+    # user | external（外部智能体经 MCP 接入的影子会话）
+    source = Column(String(16), nullable=True, default="user")
     # 当前有效引用集：[{type: project|environment|agent|case|batch, id, label}]
     refs = Column(JSON, nullable=True)
     # 历史摘要（FR-005）

@@ -11,6 +11,7 @@ from app.services import (  # noqa: F401 —— 触发动作处理器注册（ge
     chat_refs,
     chat_run,
 )
+from core.tools import builtin  # noqa: F401 —— 035：内置工具注册（导入即注册）
 
 router = APIRouter()
 router.include_router(conversations.router)

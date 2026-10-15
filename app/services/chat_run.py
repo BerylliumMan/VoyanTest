@@ -501,6 +501,7 @@ async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int
     from app.database import AsyncSessionLocal
 
     consecutive_errors = 0
+    missing_card = 0
     for _ in range(max_iterations):
         await asyncio.sleep(2.0)
         try:
@@ -519,7 +520,14 @@ async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int
 
                 msg, card = await _find_run_card_message(db, conversation_id, batch_id)
                 if msg is None or card is None:
-                    return
+                    # 卡片消息可能滞后落库（035 工具循环下：run_case 工具返回后循环还要跑
+                    # 最后一轮 LLM 才落助手消息）——宽限 60 轮（≈120s）再放弃，避免
+                    # watcher 早退导致卡片永远停在「执行中」（2026-10-15 批次 503/504 实测）。
+                    missing_card += 1
+                    if missing_card >= 60:
+                        return
+                    continue
+                missing_card = 0
 
                 status = batch.status or "running"
                 done = int(batch.passed or 0) + int(batch.failed or 0)

@@ -36,8 +36,15 @@ async def create_token(
     project_id: Optional[int] = None,
     created_by: Optional[int] = None,
     expires_in_days: Optional[int] = None,
+    scope: str = "read",
 ) -> tuple[ApiToken, str]:
-    """创建令牌；返回 (DB 行, 明文)。明文只在这里产生一次。"""
+    """创建令牌；返回 (DB 行, 明文)。明文只在这里产生一次。
+
+    ``scope``：read（默认，最小权限）| write；非法值抛 ValueError。
+    """
+    scope = str(scope or "read").strip().lower()
+    if scope not in ("read", "write"):
+        raise ValueError(f"非法令牌范围：{scope}（仅 read|write）")
     plaintext = generate_plaintext()
     expires_at = None
     if expires_in_days:
@@ -47,6 +54,7 @@ async def create_token(
         token_hash=hash_token(plaintext),
         token_prefix=plaintext[:8],
         project_id=project_id,
+        scope=scope,
         created_by=created_by,
         expires_at=expires_at,
     )
@@ -98,11 +106,14 @@ async def resolve_token(db: AsyncSession, plaintext: str) -> Optional[ApiToken]:
 
 def to_public_dict(token: ApiToken) -> dict:
     """对外形状（不含哈希与明文）。"""
+    effective = token.scope or "write"  # NULL=历史令牌 → 读写（CI 行为不变）
     return {
         "id": token.id,
         "name": token.name,
         "token_prefix": token.token_prefix,
         "project_id": token.project_id,
+        "scope": effective,
+        "scope_legacy": token.scope is None,
         "created_by": token.created_by,
         "expires_at": token.expires_at.isoformat() if token.expires_at else None,
         "revoked_at": token.revoked_at.isoformat() if token.revoked_at else None,
