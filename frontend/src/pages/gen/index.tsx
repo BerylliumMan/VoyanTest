@@ -447,12 +447,12 @@ const GenPage: React.FC = () => {
             <Title heading={5}>上传需求文档</Title>
             <Upload
               drag
-              accept=".docx,.pdf,.md,.png,.jpg,.jpeg"
+              accept=".docx,.pdf,.md,.xlsx,.png,.jpg,.jpeg"
               fileList={fileList}
               onChange={setFileList}
               autoUpload={false}
               multiple
-              tip="支持 .docx, .pdf, .md, .png, .jpg, .jpeg 格式"
+              tip="支持 .docx, .pdf, .md, .xlsx, .png, .jpg, .jpeg 格式"
             />
           </div>
 

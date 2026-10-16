@@ -1153,14 +1153,22 @@ class AgentClient:
             action, selector, value, element_desc=element_desc, timeout_ms=timeout_ms,
             wait_mode=wait_mode, role=role, field_type=field_type,
         )
+        # 上传路径 ASCII 安全化：MCP 对非 ASCII（中文）文件名静默失败（2026-10-16 实测）
+        from core.upload_paths import cleanup_upload_temps, prepare_upload_args
+
+        args, _up_temps = prepare_upload_args(args)
         # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本先跨 frame 即时检查
         if mcp_tool == "browser_wait_for" and (args.get("text") or "").strip():
             from core.mcp_args import verify_text_cross_frame
             hit = await verify_text_cross_frame(self._mcp_tools_call, args["text"])
             if hit:
+                cleanup_upload_temps(_up_temps)
                 logger.info("Cross-frame text hit at %s: %s", hit, args["text"][:40])
                 return {"success": True, "error": None, "text": f"text visible in {hit}"}
-        result = await self._mcp_tools_call(mcp_tool, args)
+        try:
+            result = await self._mcp_tools_call(mcp_tool, args)
+        finally:
+            cleanup_upload_temps(_up_temps)
         if mcp_tool == "browser_wait_for" and not result.get("success") and (args.get("text") or "").strip():
             from core.mcp_args import verify_text_cross_frame
             hit = await verify_text_cross_frame(self._mcp_tools_call, args["text"])

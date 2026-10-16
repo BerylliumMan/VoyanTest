@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     chat_context_max_chars: int = 24000
     # - 摘要后保留最近 N 条消息原文
     chat_summary_keep_messages: int = 12
+    # - 附件内容提取预算（docx/pdf/xlsx/md → 文本进对话上下文 / 文档驱动探索；超限截断）
+    chat_attachment_max_chars: int = 6000
     # - 单对话并行执行上限（生成类同对话串行，不受此限）
     chat_max_parallel_runs: int = 3
     # - 证据汇总 console 条目上限

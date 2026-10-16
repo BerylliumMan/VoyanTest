@@ -59,18 +59,33 @@ async def _run_action(ctx: ToolContext, action: dict) -> ToolResult:
 
 @register_tool(
     name="generate_cases",
-    description="生成测试用例草稿（UI 或功能）。输入需求描述文本；产出草稿卡（提议态），用户在界面确认后导入。",
+    description=(
+        "生成测试用例草稿（UI 或功能）。可传需求描述文本，或传附件 file_ref"
+        "（来自消息引用中的 file_ref=…，支持 docx/pdf/xlsx/md）从文档生成。"
+        "产出草稿卡（提议态），用户在界面确认后导入。"
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "description": {"type": "string", "description": "需求描述全文（用于生成用例）"},
+            "description": {"type": "string", "description": "需求描述全文（文本生成时必填）"},
             "kind": {"type": "string", "enum": ["ui", "functional"], "description": "用例类型，默认 ui"},
+            "file_ref": {
+                "type": "string",
+                "description": "附件 file_ref（从文档生成时传；与 description 二选一）",
+            },
         },
-        "required": ["description"],
+        "required": [],
     },
     side_effect="mutate",
 )
-async def generate_cases(ctx: ToolContext, description: str, kind: str = "ui"):
+async def generate_cases(ctx: ToolContext, description: str = "", kind: str = "ui", file_ref: str = ""):
+    if str(file_ref or "").strip():
+        return await _run_action(ctx, {
+            "type": "generate", "kind": kind or "ui", "source": "file",
+            "payload": {"file_ref": file_ref},
+        })
+    if not str(description or "").strip():
+        return error_result("generate_cases 需要 description（需求文本）或 file_ref（附件）之一")
     return await _run_action(ctx, {
         "type": "generate", "kind": kind or "ui", "source": "text",
         "payload": {"description": description},
@@ -184,7 +199,10 @@ async def set_refs(ctx: ToolContext, add: list | None = None, remove: list | Non
 
 @register_tool(
     name="browse_site",
-    description="打开网站进行探索性测试/按描述操作（浏览器真实执行），完成后生成 UI 用例草稿。需要站点 URL。",
+    description=(
+        "打开网站进行探索性测试/按描述操作（浏览器真实执行），完成后生成 UI 用例草稿。"
+        "需要站点 URL；可传 document_ref（附件 file_ref）让探索按文档内容执行测试。"
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -193,14 +211,19 @@ async def set_refs(ctx: ToolContext, add: list | None = None, remove: list | Non
             "username": {"type": "string", "description": "登录账号（用户消息中给出时；系统会替换占位符，不会泄露）"},
             "password": {"type": "string", "description": "登录密码（同上）"},
             "kind": {"type": "string", "enum": ["ui", "functional"], "description": "生成用例类型，默认 ui"},
+            "document_ref": {
+                "type": "string",
+                "description": "附件 file_ref（用户上传的测试文档 docx/pdf/xlsx/md；提供后按文档内容执行测试）",
+            },
         },
         "required": ["url"],
     },
     side_effect="execute",
 )
 async def browse_site(ctx: ToolContext, url: str, goal: str = "", username: str = "",
-                      password: str = "", kind: str = "ui"):
+                      password: str = "", kind: str = "ui", document_ref: str = ""):
     return await _run_action(ctx, {
         "type": "browse_generate", "url": url, "goal": goal,
         "username": username, "password": password, "kind": kind,
+        "document_ref": document_ref,
     })

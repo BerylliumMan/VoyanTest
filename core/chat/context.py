@@ -24,6 +24,11 @@ def message_text(msg) -> str:
             continue
         if r.get("type") == "file":
             lines.append(f"- 文件 {r.get('label') or ''} (file_ref={r.get('file_ref')})")
+            text = str(r.get("text") or "").strip()
+            if text:
+                lines.append(f"【文件内容（节选）】\n{text}")
+            elif r.get("text_error"):
+                lines.append(f"（文件未能提取内容：{r.get('text_error')}）")
         else:
             lines.append(f"- {r.get('type')}#{r.get('id')} {r.get('label') or ''}".rstrip())
     if lines:
@@ -75,6 +80,11 @@ def build_refs_block(refs) -> str:
             continue
         if r.get("type") == "file":
             lines.append(f"- 文件 {r.get('label') or r.get('file_ref')}")
+            text = str(r.get("text") or "").strip()
+            if text:
+                lines.append(f"【文件内容（节选）】\n{text}")
+            elif r.get("text_error"):
+                lines.append(f"（文件未能提取内容：{r.get('text_error')}）")
             continue
         label = str(r.get("label") or "").strip()
         lines.append(f"- {r.get('type')}#{r.get('id')} {label}".rstrip())

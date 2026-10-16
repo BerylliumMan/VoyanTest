@@ -1,7 +1,7 @@
 """Shared constants for the AI generation module."""
 
 # Upload limits
-ALLOWED_EXTENSIONS = {".docx", ".md", ".png", ".jpg", ".jpeg", ".pdf"}
+ALLOWED_EXTENSIONS = {".docx", ".md", ".png", ".jpg", ".jpeg", ".pdf", ".xlsx"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB per file
 MAX_FILES = 10
 MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50MB total

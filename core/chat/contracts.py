@@ -175,9 +175,12 @@ def validate_action(action) -> tuple[dict | None, str]:
         kind = action.get("kind") or "ui"
         if kind not in ("functional", "ui"):
             return None, "browse_generate.kind 必须为 functional|ui"
+        # 035+：文档驱动探索——附件 file_ref（受控路径解析在处理器内做）
+        document_ref = str(action.get("document_ref") or "").strip()[:500]
         return {
             "type": "browse_generate", "url": url, "goal": goal,
             "username": username, "password": password, "kind": kind,
+            "document_ref": document_ref,
         }, ""
 
     if t == "revise_drafts":

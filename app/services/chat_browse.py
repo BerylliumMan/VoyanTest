@@ -145,6 +145,7 @@ async def _run_browse_task(
     username: str,
     password: str,
     assistant_agent_id: int | None,
+    document_text: str = "",
 ) -> None:
     """后台执行探索并链式发起生成（全程卡片回填；异常收敛为 failed 卡片）。"""
     from app.database import AsyncSessionLocal
@@ -273,6 +274,7 @@ async def _run_browse_task(
             max_steps=max_steps, timeout_s=timeout_s,
             captcha_enabled=bool(getattr(settings, "chat_browse_captcha_enabled", True)),
             vision=bool(getattr(settings, "chat_browse_vision", True)),
+            document_text=document_text,
         )
 
         # 浏览器后端：会话选中客户端 → 客户端浏览器（用户机器上，可见）；
@@ -483,6 +485,25 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
         return ActionOutcome(ok=False, note="（浏览器探索能力已关闭，可在系统设置开启）")
 
     browse_id = uuid.uuid4().hex[:12]
+
+    # 035+：文档驱动探索——解析附件为参考文档（受控路径；失败则明确拒绝）
+    document_text = ""
+    document_label = ""
+    doc_ref = str(action.get("document_ref") or "").strip()
+    if doc_ref:
+        from app.services.chat_files import extract_attachment_text, resolve_chat_file
+
+        path = resolve_chat_file(doc_ref)
+        if path is None:
+            return ActionOutcome(ok=False, note="（附件不存在或路径非法，无法按文档探索；可把要求直接写在消息里）")
+        max_chars = int(getattr(settings, "chat_attachment_max_chars", 6000) or 6000)
+        document_text, doc_err = await asyncio.to_thread(
+            extract_attachment_text, path, max_chars=max_chars
+        )
+        if not document_text:
+            return ActionOutcome(ok=False, note=f"（附件未能提取文本：{doc_err}；可把要求直接写在消息里）")
+        document_label = os.path.basename(path)
+
     # 浏览器后端：会话选中客户端 → 用户机器上可见的浏览器；未选 → 服务端无头
     browser_mode = "server"
     agent_name = None
@@ -504,6 +525,7 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
         "browser_mode": browser_mode,
         "agent_name": agent_name,
         "has_credentials": bool(action.get("username") or action.get("password")),
+        "document": ({"label": document_label, "chars": len(document_text)} if document_text else None),
         "steps": [],
         "timeline": [],
         "pages": [],
@@ -526,6 +548,7 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
         username=action.get("username") or "",
         password=action.get("password") or "",
         assistant_agent_id=getattr(conversation, "assistant_agent_id", None),
+        document_text=document_text,
     ))
     _TASKS.add(task)
     _TASK_INDEX[browse_id] = (conversation.id, task)
@@ -539,11 +562,12 @@ async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> 
     task.add_done_callback(_cleanup)
 
     cred_note = "（使用你提供的账号登录）" if card["has_credentials"] else ""
+    doc_note = f"（按文档《{document_label}》执行）" if document_text else ""
     return ActionOutcome(
         card=card,
         task_id=browse_id,
         note=(
-            f"浏览器探索已启动{cred_note}，将在**{mode_label}**中进行：{action['goal']}。"
+            f"浏览器探索已启动{cred_note}{doc_note}，将在**{mode_label}**中进行：{action['goal']}。"
             "探索过程会实时回显，完成后自动基于页面观察结果生成用例草稿。"
         ),
     )

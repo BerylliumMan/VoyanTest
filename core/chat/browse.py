@@ -101,6 +101,9 @@ class BrowseConfig:
     # deepseek-v4.1-flash 多模态可用）。关闭后退回纯文本快照。
     vision: bool = True
     vision_max_width: int = 1152
+    # 035+：文档驱动——用户上传的测试文档（docx/pdf/xlsx 提取文本，已截断）。
+    # 非空时按文档中的步骤/检查项执行测试（提示词注入【参考文档】块）。
+    document_text: str = ""
 
 
 EXPLORER_SYSTEM_PROMPT = """你是 VoyanTest 的「网页探索器」：在真实浏览器里以纯 GUI 黑盒方式操作网页，产出可供测试用例生成使用的观察报告。
@@ -109,6 +112,7 @@ EXPLORER_SYSTEM_PROMPT = """你是 VoyanTest 的「网页探索器」：在真�
 【目标】可能是两种之一：
 A. 探索性目标（如「查看主要功能」）：自行规划浏览路径，优先访问主要功能页面；
 B. 操作性 / 测试描述（如「点登录，输入账号密码，进入设置页」「测试设置页留空保存的校验提示」）：严格按描述顺序逐步操作；其中「测试/验证/观察」类要求，在安全准则内执行代表性操作并观察真实结果（提示文案、跳转、校验状态、数据变化），把观察到的真实行为记录为功能点（note/features）；描述执行完成后，再补充观察当前页面与相关入口；未按描述验证到的点，在 summary 中如实说明（不要脑补结果）。
+C. 提供【参考文档】时：文档内容即测试要求（来自用户上传的测试文档）。按文档中可执行的步骤/检查项操作与验证；文档中不可执行、超出安全准则或与当前站点无关的要求跳过，并在 summary 中如实说明。
 
 【行为准则 — 严格遵守】
 0.（视觉，若随消息附有页面截图）截图展示的是当前页面真实渲染结果：可用于判断布局、
@@ -473,8 +477,11 @@ def _round_prompt(cfg: BrowseConfig, *, page: dict, candidates, journal: list[di
         f"已用步数 {len(journal)}/{cfg.max_steps}；"
         + ("还够用，继续。" if len(journal) < cfg.max_steps - 3 else "步数将尽，尽快 done 总结。")
     )
+    doc_block = ""
+    if cfg.document_text:
+        doc_block = f"\n【参考文档（用户上传的测试文档节选；按文档内容执行测试）】\n{cfg.document_text}\n"
     return f"""【目标】{cfg.goal}
-【起始站点】{cfg.url}
+{doc_block}【起始站点】{cfg.url}
 【登录凭据】账号占位符 {_USERNAME_PLACEHOLDER}；密码占位符 {_PASSWORD_PLACEHOLDER}（fill 时原样使用，系统自动替换，禁止输出真实值）
 
 【已访问页面】

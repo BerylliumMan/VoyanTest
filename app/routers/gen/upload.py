@@ -65,6 +65,7 @@ _MAGIC_SIGNATURES: dict[str, list[bytes]] = {
     ".jpeg": [b"\xff\xd8\xff"],
     ".pdf": [b"%PDF-"],
     ".docx": [b"PK\x03\x04"],
+    ".xlsx": [b"PK\x03\x04"],
 }
 
 # .md 无固定魔术字节，跳过二进制检查
@@ -73,7 +74,7 @@ _MAGIC_SIGNATURES: dict[str, list[bytes]] = {
 def _check_extension(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, f"不支持的文件类型：'{filename}' (ext='{ext}')，仅支持 .docx/.md/.png/.jpg/.jpeg/.pdf")
+        raise HTTPException(400, f"不支持的文件类型：'{filename}' (ext='{ext}')，仅支持 .docx/.md/.pdf/.xlsx/.png/.jpg/.jpeg")
     return ext
 
 

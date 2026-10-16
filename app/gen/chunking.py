@@ -130,7 +130,7 @@ def looks_like_filename_module(module: str) -> bool:
     if _FILENAME_MODULE_RE.search(m):
         return True
     # e.g. "需求说明_v1.docx" or "文件1: foo.png"
-    if re.search(r"(?i)\.(?:docx?|pdf|md|png|jpe?g)\b", m):
+    if re.search(r"(?i)\.(?:docx?|pdf|md|png|jpe?g|xlsx?)\b", m):
         return True
     return False
 

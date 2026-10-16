@@ -7,6 +7,7 @@
 #   - 审计：每个成功执行的动作写 audit_logs（FR-006）。
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -516,11 +517,28 @@ async def handle_user_message(
         refs_all = list(refs or [])
         for a in (attachments or [])[:5]:
             if isinstance(a, dict) and a.get("file_ref"):
-                refs_all.append({
+                ref = {
                     "type": "file",
                     "file_ref": str(a["file_ref"])[:500],
                     "label": str(a.get("filename") or "")[:200],
-                })
+                }
+                # 035+：附件内容提取（docx/pdf/xlsx/md → 文本进上下文；受控路径 + 预算截断）
+                try:
+                    from app.services.chat_files import extract_attachment_text, resolve_chat_file
+
+                    path = resolve_chat_file(ref["file_ref"])
+                    if path:
+                        max_chars = int(getattr(get_settings(), "chat_attachment_max_chars", 6000) or 6000)
+                        text, err = await asyncio.to_thread(
+                            extract_attachment_text, path, max_chars=max_chars
+                        )
+                        if text:
+                            ref["text"] = text
+                        elif err:
+                            ref["text_error"] = err[:200]
+                except Exception:
+                    logger.debug("attachment extract failed", exc_info=True)
+                refs_all.append(ref)
         user_msg = await chat_crud.create_message(
             db, conversation_id=conversation.id, role="user", content=content, refs=refs_all or None,
         )

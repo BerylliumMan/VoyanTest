@@ -1581,7 +1581,7 @@ const ChatPage: React.FC = () => {
                   ref={fileInputRef}
                   type="file"
                   style={{ display: 'none' }}
-                  accept=".md,.txt,.docx,.pdf,.doc,.png,.jpg,.jpeg"
+                  accept=".md,.docx,.pdf,.xlsx,.png,.jpg,.jpeg"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     if (f) uploadFile(f);

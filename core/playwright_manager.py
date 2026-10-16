@@ -436,13 +436,21 @@ class PlaywrightMCPManager:
             )
             if element_desc and isinstance(args.get('element'), str) and not args['element']:
                 args['element'] = element_desc
+            # 上传路径 ASCII 安全化：MCP 对非 ASCII（中文）文件名静默失败（2026-10-16 实测）
+            from core.upload_paths import cleanup_upload_temps, prepare_upload_args
+
+            args, _up_temps = prepare_upload_args(args)
             # 025-ref-click: browser_wait_for 只扫主 frame——iframe 文本跨 frame 兜底
             from core.mcp_args import verify_text_cross_frame
             if mcp_tool == 'browser_wait_for' and (args.get('text') or '').strip():
                 hit = await verify_text_cross_frame(self.call_tool, args['text'])
                 if hit:
+                    cleanup_upload_temps(_up_temps)
                     return {'success': True, 'error': None}
-            result = await self.call_tool(mcp_tool, args)
+            try:
+                result = await self.call_tool(mcp_tool, args)
+            finally:
+                cleanup_upload_temps(_up_temps)
             if not result['success'] and mcp_tool == 'browser_wait_for':
                 hit = await verify_text_cross_frame(self.call_tool, args.get('text') or '')
                 if hit:

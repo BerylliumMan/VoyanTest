@@ -20,6 +20,7 @@ from app.gen.pdf_parser import (
     is_pdf_dual_layer,
     render_pdf_pages_to_images,
 )
+from app.gen.xlsx_parser import extract_text_from_xlsx
 
 from app.gen.cancel import GenAnalysisCancelled
 
@@ -87,7 +88,7 @@ async def extract_multi_file_content(
         ext = os.path.splitext(filename)[1].lower()
 
         if ext not in ALLOWED_EXTENSIONS:
-            raise ValueError(f"不支持的文件类型: {ext}，仅支持 .docx、.md、.png、.jpg、.jpeg、.pdf")
+            raise ValueError(f"不支持的文件类型: {ext}，仅支持 .docx、.md、.pdf、.xlsx、.png、.jpg、.jpeg")
 
         if progress_callback:
             progress_callback(idx, total_files, f"正在提取: {filename} ({idx + 1}/{total_files})")
@@ -105,6 +106,14 @@ async def extract_multi_file_content(
 
             elif ext == ".md":
                 text = await asyncio.to_thread(extract_text_from_md, file)
+                if not text.strip():
+                    warnings.append(f"文件 {filename} 为空，已跳过")
+                    continue
+                content_parts.append(_file_header(idx, filename))
+                content_parts.append({"type": "text", "text": text})
+
+            elif ext == ".xlsx":
+                text = await asyncio.to_thread(extract_text_from_xlsx, file)
                 if not text.strip():
                     warnings.append(f"文件 {filename} 为空，已跳过")
                     continue
