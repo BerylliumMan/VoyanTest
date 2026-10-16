@@ -78,6 +78,13 @@ ACTIONS (maps to Playwright MCP):
 - "emulate_media": CSS media emulation (dark mode / print). value=dark|light, or JSON {"media":"print"}.
 - Media/trace controls ("video_start"/"video_stop"/"trace_start"/"trace_stop"): evidence recording; the engine drives these — use only when a step explicitly asks.
 - "evaluate": Short JS only when refs fail (see priority 3).
+- "fetch": Call the page's OWN API in the page context (auto-attaches the page session). Use ONLY when the
+  UI path is blocked/unreliable: native/system-level windows (save dialogs), download-only actions with no
+  page change, import/export targets that cannot be driven via clicks. value=JSON:
+  {"method":"GET|POST|PUT|PATCH|DELETE","url":"/api/export","headers":{...},"body":"...","evidence":true,"filename":"out.csv"}.
+  evidence=true stores the response body as a report evidence file. NEVER use fetch to skip steps the case
+  explicitly requires, and NEVER fire destructive writes beyond what the case describes. The report will
+  honestly label this step as "以 API 方式完成".
 - "screenshot" / "snapshot": Capture / refresh observation.
 - "done": Goal achieved. value=summary.
 - "error": Cannot proceed. value=reason.

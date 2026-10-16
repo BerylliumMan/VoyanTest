@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     exec_storage_actions_enabled: bool = False
     # - B5 探索链只读探针（js_probe：links/nav/storage_keys/frameworks 固定只读 JS）
     chat_browse_js_probe: bool = True
+    # 036 页面 API 调用与沙箱诊断脚本：
+    # - fetch 存证单文件上限（MB；超出截断并标注实际大小）
+    exec_fetch_evidence_max_mb: int = 100
     # 035 智能体工具化与 MCP 外部接入：
     # - 对话原生工具调用循环（false=降级为既有决策 JSON 协议，用户无感）
     chat_tool_loop_enabled: bool = True
@@ -102,6 +105,11 @@ class Settings(BaseSettings):
     chat_tool_result_max_bytes: int = 16384
     # - 外部接入活跃会话全局上限（MCP /mcp）
     chat_external_max_sessions: int = 4
+    # 036 页面 API 调用与沙箱诊断脚本：
+    # - 诊断脚本工具总开关（默认关闭；开启后全体对话用户可用、免逐次审批）
+    chat_script_enabled: bool = False
+    # - 诊断脚本执行超时上限（毫秒；接口测试脚本的既有 2000ms 语义不变）
+    chat_script_timeout_ms: int = 30000
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

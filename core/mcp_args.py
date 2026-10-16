@@ -100,6 +100,8 @@ TOOL_MAP = {
     "sessionstorage_clear": "browser_sessionstorage_clear",
     "storage_state_save": "browser_storage_state",
     "storage_state_restore": "browser_set_storage_state",
+    # 036：页面 API 调用（在页面上下文经 evaluate 注入 fetch；分发由各链路 fetch 分支处理）
+    "fetch": "browser_evaluate",
 }
 
 ACTION_DESCRIPTIONS = {
@@ -174,6 +176,8 @@ ACTION_DESCRIPTIONS = {
     "sessionstorage_clear": "清空 sessionStorage",
     "storage_state_save": "保存存储状态（cookies+localStorage）到文件（value=可选文件名）",
     "storage_state_restore": "从文件恢复存储状态（value=文件名）",
+    # 036：页面 API 调用（系统级窗口/下载受阻时的替代路径；报告会如实标注「以 API 方式完成」）
+    "fetch": "在页面上下文调用页面 API（value=JSON：method/url/headers?/body?/evidence?/filename?；自动携带页面会话；evidence=true 时响应体存为报告证据）",
 }
 
 
@@ -757,6 +761,8 @@ SIDE_EFFECT_ACTIONS = frozenset({
     "goto", "navigate", "hover",
     # B1：批量填表 / 鼠标按键 / 关页 / 任意代码都属"派发后可能已生效"
     "fill_form", "mouse_down", "mouse_up", "close", "run_code",
+    # 036：页面 API 调用（写方法派发后可能已生效；传输级超时按 uncertain 不盲重试）
+    "fetch",
 })
 
 _UNCERTAIN_FAILURE_RE = re.compile(

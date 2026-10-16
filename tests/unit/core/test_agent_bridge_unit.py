@@ -344,3 +344,93 @@ async def test_action_unit_records_failed_subaction(monkeypatch):
     assert out.get("success") is False
     assert [(c["name"], c["success"]) for c in calls] == [("fill", True), ("click", False)]
     assert "strict mode violation" in calls[1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_bridge_fetch_drives_evaluate_sequence_and_saves_evidence(
+    tmp_path, monkeypatch
+):
+    """036：客户端链 fetch 由 bridge 驱动既有 evaluate 序列；证据在服务端落盘。"""
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    bridge = _make_bridge()
+    bridge._evidence_dir = "reports/agent_3/evidence"
+
+    def _mk(payload):
+        return {
+            "success": True,
+            "text": "### Result\n" + _json.dumps(_json.dumps(payload)) + "\n### Page\n",
+        }
+
+    acts = []
+
+    async def fake_send_act(agent_id, run_id, tool_call):
+        acts.append(tool_call)
+        if tool_call.get("action") != "evaluate":
+            raise AssertionError("fetch 编排必须只发既有 evaluate 动作")
+        js = tool_call.get("value") or ""
+        if "await fetch(" in js:
+            return _mk({"ok": True, "status": 200, "size": 4,
+                        "content_type": "text/plain", "stored": 8})
+        if "s.b64.substr" in js:
+            return _mk({"data": "dGVzdA==", "eof": True, "size": 8})
+        if "delete window" in js:
+            return {"success": True, "text": "### Result\n\"released\"\n### Page\n"}
+        return _mk({"size": 8})
+
+    bridge.agent_manager.send_act = fake_send_act
+
+    result = await bridge._execute_fetch_action(
+        "agent-1", "42",
+        {"action": "fetch",
+         "value": _json.dumps({"method": "GET", "url": "/x", "evidence": True})},
+    )
+    assert result["success"] is True
+    fetch = result["fetch"]
+    assert fetch["api"]["status"] == 200
+    assert fetch["evidence_path"].startswith("reports/agent_3/evidence/fetch_")
+    assert fetch["evidence_path"].endswith(".txt")
+    assert (tmp_path / fetch["evidence_path"]).read_bytes() == b"test"
+    assert all(a["action"] == "evaluate" for a in acts)
+
+
+@pytest.mark.asyncio
+async def test_bridge_fetch_reads_wrapped_args_shape(tmp_path, monkeypatch):
+    """036 回归：_llm_decide 返回 {name, tool, args:{value…}} 包装形——
+    此前只读顶层 value，fetch 永远报「需要 value JSON」（run 448 实测）。"""
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    bridge = _make_bridge()
+    bridge._evidence_dir = "reports/agent_4/evidence"
+
+    def _mk(payload):
+        return {
+            "success": True,
+            "text": "### Result\n" + _json.dumps(_json.dumps(payload)) + "\n### Page\n",
+        }
+
+    async def fake_send_act(agent_id, run_id, tool_call):
+        js = tool_call.get("value") or ""
+        if "await fetch(" in js:
+            return _mk({"ok": True, "status": 200, "size": 2, "content_type": "text/plain"})
+        if "delete window" in js:
+            return {"success": True, "text": "### Result\n\"released\"\n### Page\n"}
+        return _mk({"size": 0})
+
+    bridge.agent_manager.send_act = fake_send_act
+
+    result = await bridge._execute_fetch_action(
+        "agent-1", "42",
+        {
+            "name": "fetch",
+            "tool": "fetch",
+            "args": {
+                "value": _json.dumps({"method": "GET", "url": "/api/export.csv"}),
+                "timeout_ms": 30000,
+            },
+        },
+    )
+    assert result["success"] is True
+    assert result["fetch"]["api"]["status"] == 200

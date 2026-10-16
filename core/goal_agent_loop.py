@@ -355,6 +355,11 @@ def journal_entry_covers_checklist(
     if action == "screenshot":
         return False
 
+    # 036：fetch（以 API 方式完成）可覆盖「导出/下载/导入/提交」类交互步骤；
+    # 断言/等待类步骤不得被覆盖（报告已如实标注 API 方式，且此处保持诚实口径）
+    if action in ("fetch", "browser_fetch"):
+        return not is_wait_assert_checklist_step(desc)
+
     if is_click_checklist_step(desc):
         if action in ("click", "browser_click"):
             return True

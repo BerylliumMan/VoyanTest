@@ -40,7 +40,12 @@ def scope_allows_tool(scope: Optional[str], spec) -> bool:
 
 
 def _visible_specs(scope: Optional[str]):
-    return [s for s in REGISTRY.all() if scope_allows_tool(scope, s)]
+    from core.tools.loop import default_tool_filter
+
+    return [
+        s for s in REGISTRY.all()
+        if scope_allows_tool(scope, s) and default_tool_filter(s.name)
+    ]
 
 
 # ----------------------------

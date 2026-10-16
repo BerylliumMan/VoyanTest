@@ -33,6 +33,9 @@ def parse_console_messages(text: str | None) -> list[str]:
             continue
         if _ZERO_COUNT_RE.match(s):
             continue
+        # 浏览器通用噪声（favicon 404）：不作为证据（2026-10-16 用户反馈报告噪声）
+        if "favicon.ico" in s:
+            continue
         out.append(s[:MAX_ENTRY_CHARS])
     return out
 

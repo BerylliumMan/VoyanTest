@@ -469,6 +469,12 @@
   gap: 4px;
 }
 
+.toolRowWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .toolRow {
   display: flex;
   align-items: center;
@@ -479,6 +485,37 @@
   background: #f7f8fa;
   font-size: 12px;
   max-width: 100%;
+}
+
+.toolRowClickable {
+  cursor: pointer;
+
+  &:hover {
+    background: #eef0f3;
+  }
+}
+
+.toolChevron {
+  flex-shrink: 0;
+  color: #86909c;
+  font-size: 11px;
+}
+
+// 036：脚本输出节选（≤2000 字符 + 截断标注）
+.toolExcerpt {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #e5e6eb;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  background: #1d2129;
+  color: #e5e6eb;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow: auto;
 }
 
 .toolName {

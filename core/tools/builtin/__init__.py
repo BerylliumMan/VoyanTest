@@ -2,3 +2,4 @@
 from core.tools.builtin import actions  # noqa: F401 —— 7 能力工具化（US1）
 from core.tools.builtin import demo  # noqa: F401 —— 扩展点演示工具（US5）
 from core.tools.builtin import queries  # noqa: F401 —— 只读查询（US2）
+from core.tools.builtin import script  # noqa: F401 —— 诊断脚本（036 US3）

@@ -164,7 +164,11 @@ async def run_case(ctx: ToolContext, case_ids: list | None = None, suite_id: int
 
 @register_tool(
     name="explain_failure",
-    description="分析执行批次失败原因（基于失败步骤/console/截图证据）。证据不足时明确说明，不臆造。",
+    description=(
+        "分析执行批次失败原因（基于失败步骤/console/截图证据）。证据不足时明确说明，不臆造。"
+        "若现有证据不足以定位原因（如需要核对数据库状态、调用接口或读取报告文件），"
+        "可先用 run_script 工具取证（只读查询/HTTP/平台查询），再把脚本输出作为依据给出结论。"
+    ),
     parameters={
         "type": "object",
         "properties": {

@@ -1110,6 +1110,8 @@ class AgentClient:
         element_desc: str | None = None,
         timeout_ms: int = 30000,
         wait_mode: str | None = None,
+        role: str | None = None,
+        field_type: str | None = None,
     ) -> dict:
         from core.blank_click import execute_blank_click, should_use_blank_click
         from core.mcp_tabs import (
@@ -2121,6 +2123,7 @@ class AgentClient:
             else:
                 mcp_result = await self._mcp_call_tool(
                     action, selector, value, step_description=desc,
+                    role=role, field_type=field_type,
                 )
                 err_blob = str(mcp_result.get("error") or mcp_result.get("text") or "")
                 if not mcp_result.get("success") and self._looks_like_mcp_protocol_glitch(err_blob):
@@ -2129,6 +2132,7 @@ class AgentClient:
                     ):
                         mcp_result = await self._mcp_call_tool(
                             action, selector, value, step_description=desc,
+                            role=role, field_type=field_type,
                         )
                         err_blob = str(
                             mcp_result.get("error") or mcp_result.get("text") or ""
@@ -2145,6 +2149,7 @@ class AgentClient:
                     ):
                         mcp_result = await self._mcp_call_tool(
                             action, selector, value, step_description=desc,
+                            role=role, field_type=field_type,
                         )
                         result.success = mcp_result.get("success", False)
                         if not result.success:
@@ -2343,6 +2348,8 @@ class AgentClient:
                 "verify_visible", "verify_text", "verify_value", "verify_list",
                 "route_list", "route", "unroute", "network_state",
                 "storage_state_save", "storage_state_restore",
+                # 036：fetch 编排经既有 evaluate 序列驱动（bridge 读取结果文本）
+                "evaluate",
             ):
                 # 032 US2/US6 + B2：console 证据 / find 结果 / 网络证据文本回传
                 # （成功路径默认不带 text）

@@ -218,6 +218,7 @@ async def run_test_case_via_agent(
 
     start_time = tz_now()
     goal_text = str(agent_def.goal or "执行测试用例")
+    steps: list = []
     try:
         tc = await crud.get_test_case(db, case_id)
         if tc:
@@ -293,6 +294,7 @@ async def run_test_case_via_agent(
         base_url=base_url,
         db=db,
         run_id=run.id,
+        evidence_dir=evidence_dir,
     )
 
     try:
@@ -343,15 +345,41 @@ async def run_test_case_via_agent(
         ),
         "screenshot_path": None,
     }
-    # 034 迭代（2026-10-10）：报告步骤 = 每动作行（与客户端 AgentBridge 同口径）；
-    # 无工具调用（如异常早退）时回退摘要行；失败但无失败步骤行时补挂错误摘要。
+    # 报告步骤口径（2026-10-16 用户实测：OTA 路径展开用例应显示**用例步骤**而非原始动作行）：
+    #   用例步骤行（覆盖/失败/未执行）+ 页面 API（fetch）证据行；无用例步骤时工具行兜底；
+    #   最后回退摘要行。
     logs: list[dict] = []
+    tool_rows: list[dict] = []
     try:
         from core.step_logs import build_step_logs_from_tool_calls
 
-        logs = await build_step_logs_from_tool_calls(db, run.id)
+        tool_rows = await build_step_logs_from_tool_calls(db, run.id)
     except Exception:
         logger.debug("构建步骤日志失败，回退摘要行", exc_info=True)
+    if steps:
+        from core.step_logs import build_case_step_logs
+
+        case_steps = [
+            {
+                "step_order": int(getattr(st, "step_order", 0) or 0),
+                "description": getattr(st, "description", "") or "",
+            }
+            for st in steps
+        ]
+        logs = build_case_step_logs(
+            case_steps,
+            ota_result.get("covered_orders") or [],
+            case_status == "passed",
+            ota_result.get("error"),
+        )
+        from core.step_logs import fetch_evidence_rows, merge_fetch_evidence_into_steps
+
+        logs += merge_fetch_evidence_into_steps(
+            logs, fetch_evidence_rows(tool_rows),
+            list(getattr(runner, "journal", None) or []),
+        )
+    else:
+        logs = tool_rows
     if not logs:
         logs = [summary_row]
     elif case_status != "passed" and not any(

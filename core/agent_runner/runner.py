@@ -101,6 +101,13 @@ _RUNNER_ACTIONS = (
     "recording_start",
     "recording_stop",
     "run_code",
+    # ── 036 页面 API 调用（系统级窗口/下载受阻时的替代路径）────────────────
+    "fetch",
+    # ── 修复：B5 verify 四件套漏接服务端注册表（此前服务端链报「未知操作」）──
+    "verify_text",
+    "verify_visible",
+    "verify_value",
+    "verify_list",
 )
 
 _DEFAULT_TOOLS: list[ToolDefinition] = [
@@ -223,6 +230,7 @@ class AgentRunner:
         base_url: str | None = None,
         db=None,
         run_id: int | None = None,
+        evidence_dir: str | None = None,
     ):
         """初始化 AgentRunner。
 
@@ -249,6 +257,8 @@ class AgentRunner:
 
         self._db = db
         self._run_id = run_id
+        # 036：运行证据目录（fetch 存证落盘用；缺省跳过落盘并如实标注）
+        self._evidence_dir = evidence_dir
 
         self.tool_registry = ToolRegistry(mcp_manager)
         self.context = AgentContext(max_turns=context_max_turns)
@@ -432,7 +442,42 @@ class AgentRunner:
                     result = await self._execute_action_once(action)
                     if result.get("success"):
                         break
+        # 036：fetch 证据落盘（bytes → 证据文件；路径写回 result.fetch 供 tool_args 记录）
+        self._persist_fetch_evidence(result)
         return result
+
+    async def _act_or_unit(
+        self, action: dict[str, Any], turn: int, observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """恢复路径共用：unit 决策走宏动作单元（此前恢复路径直接 act → 「未知操作: None」）。"""
+        if isinstance(action.get("unit"), list):
+            unit_out = await self._execute_action_unit(turn, action.get("unit"), observation)
+            return {
+                "success": bool(unit_out.get("success")),
+                "error": unit_out.get("error") or "",
+            }
+        return await self.act(action)
+
+    def _persist_fetch_evidence(self, result: dict[str, Any]) -> None:
+        """036：把 fetch 回传的证据字节写入运行证据目录（缺目录/失败如实标注）。"""
+        if not isinstance(result, dict):
+            return
+        fetch = result.get("fetch")
+        if not isinstance(fetch, dict) or not fetch.get("evidence"):
+            return
+        ev = fetch.pop("evidence")
+        if not self._evidence_dir:
+            fetch["evidence_error"] = "无证据目录（跳过落盘）"
+            return
+        from core.fetch_action import save_fetch_evidence_file
+
+        saved = save_fetch_evidence_file(
+            self._evidence_dir,
+            ev,
+            fetch.get("filename"),
+            (fetch.get("api") or {}).get("content_type") or "",
+        )
+        fetch.update(saved)
 
     async def _resolve_coordinate_target(
         self, action: dict[str, Any], result: dict[str, Any],
@@ -908,7 +953,7 @@ class AgentRunner:
                         ):
                             action = retry_action
                             thinking_text = action.get("thinking", "") or thinking_text
-                            result = await self.act(action)
+                            result = await self._act_or_unit(action, turn, fresh_obs)
                             logger.info(
                                 "Stale-ref recovery %s (turn %d): success=%s",
                                 self._retries_this_run, turn, result.get("success"),
@@ -936,7 +981,7 @@ class AgentRunner:
                             ):
                                 action = retry_action
                                 thinking_text = action.get("thinking", "") or thinking_text
-                                result = await self.act(action)
+                                result = await self._act_or_unit(action, turn, fresh_obs)
                                 logger.info(
                                     "Heal recovery (turn %d): success=%s",
                                     turn, result.get("success"),
@@ -1107,6 +1152,8 @@ class AgentRunner:
             idx = pick_checklist_index(self._run_steps, self._journal_covered, entry)
             if idx is not None:
                 self._journal_covered.add(int(idx))
+                # 2026-10-16：fetch 证据归并到步骤行需要 turn→步骤 映射
+                entry["checklist_index"] = int(idx)
         except Exception:
             pass
 
@@ -1148,6 +1195,22 @@ class AgentRunner:
             )
             if action.get(key) is not None
         }
+        # 036：fetch 的 api 元数据 / 证据路径并入 tool_args（报告标注「以 API 方式完成」）
+        _fetch = result.get("fetch") if isinstance(result, dict) else None
+        if isinstance(_fetch, dict):
+            _api = _fetch.get("api") or {}
+            if _api:
+                tool_args["api"] = {
+                    k: v for k, v in _api.items() if k != "excerpt"
+                }
+                if _api.get("excerpt"):
+                    tool_args["api"]["excerpt"] = str(_api["excerpt"])[:500]
+            if _fetch.get("evidence_path"):
+                tool_args["evidence_path"] = _fetch["evidence_path"]
+                tool_args["evidence_size"] = _fetch.get("evidence_size")
+                tool_args["evidence_truncated"] = bool(_fetch.get("evidence_truncated"))
+            if _fetch.get("evidence_error"):
+                tool_args["evidence_error"] = str(_fetch["evidence_error"])[:200]
         await crud_agent_run.create_tool_call(
             self._db, self._run_id, turn,
             str(action.get("name") or action.get("action") or "unknown"),
@@ -1177,6 +1240,8 @@ class AgentRunner:
             "error": error,
             "duration_ms": round(duration_ms, 1),
             "context": self.context.to_dict() if status != "completed" else None,
+            # 2026-10-16：报告步骤按用例步骤渲染需要覆盖信息（OTA 路径）
+            "covered_orders": sorted(int(x) for x in self._journal_covered),
         }
 
     def _is_goal_met(self, result: dict[str, Any]) -> bool:

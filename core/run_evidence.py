@@ -42,6 +42,9 @@ def network_problem_lines(
         s = raw.strip()
         if not s or s.lower().startswith(_SKIP_PREFIXES):
             continue
+        # 浏览器通用噪声（favicon 404）：不作为网络证据
+        if "favicon.ico" in s:
+            continue
         m = _REQ_LINE_RE.match(s)
         if not m:
             continue

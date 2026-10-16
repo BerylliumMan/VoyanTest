@@ -683,8 +683,8 @@ class AgentBridge:
             except Exception:
                 logger.exception("Bridge batch notify failed batch=%s", self._batch_id)
 
-        # 从 agent_tool_calls 构建步骤日志（渲染口径统一在 core/step_logs.py）
-        logs: list[dict] = []
+        # 工具调用行（失败截图解析；fetch 证据行备用）——渲染口径统一在 core/step_logs.py
+        tool_rows: list[dict] = []
         try:
             from core.step_logs import build_step_logs_from_tool_calls
 
@@ -695,14 +695,37 @@ class AgentBridge:
                     or self._last_screenshot_path()
                 )
 
-            logs = await build_step_logs_from_tool_calls(
+            tool_rows = await build_step_logs_from_tool_calls(
                 self.db, run.id, resolve_screenshot=_resolve_ss
             )
         except Exception as _tce:
             logger.warning("Could not load tool calls for run %d: %s", run.id, _tce)
 
+        # 报告步骤口径（2026-10-16 用户实测：OTA 路径展开用例应显示**用例步骤**，
+        # 而非 goto/click 等原始动作行——与固化回放路径同口径）：
+        #   固化回放 → 回放步骤行；OTA → 用例步骤行（+ 页面 API 证据行）；
+        #   无用例步骤 → 工具行兜底。
+        logs: list[dict] = []
+        case_step_mode = False
         if self._replay_logs:
             logs = list(self._replay_logs)
+        elif getattr(self, "_run_steps", None):
+            from core.step_logs import build_case_step_logs
+
+            case_step_mode = True
+            run_ok = run.status in ("completed", "passed")
+            logs = build_case_step_logs(
+                self._run_steps, self._journal_covered, run_ok, run.error,
+            )
+            # 页面 API（fetch）证据并入其覆盖的步骤行（含存证路径；重复调用去重；
+            # 无法映射的残余行原样保留）
+            from core.step_logs import fetch_evidence_rows, merge_fetch_evidence_into_steps
+
+            logs += merge_fetch_evidence_into_steps(
+                logs, fetch_evidence_rows(tool_rows), self._journal,
+            )
+        else:
+            logs = tool_rows
 
         # 032 US2：console 证据并入步骤日志（失败步骤合并 / 运行级汇总行）
         if self._console_entries:
@@ -764,6 +787,21 @@ class AgentBridge:
         # 若 _fail 已同步置败预创建的 TestRun（027 兜底），复用同一行避免重复 run
         _synced = getattr(self, "_synced_test_run_ids", None) or []
         _reuse_run_id = _synced[0] if len(_synced) == 1 else None
+        # 用例步骤口径下：预置的通用「执行失败:」行冗余（失败原因已并入失败步骤行）→ 清理
+        if _reuse_run_id and case_step_mode:
+            try:
+                from sqlalchemy import text as _text_del
+
+                await self.db.execute(
+                    _text_del(
+                        "DELETE FROM run_logs WHERE run_id=:r AND level='error' "
+                        "AND message LIKE '执行失败:%'"
+                    ),
+                    {"r": _reuse_run_id},
+                )
+                await self.db.commit()
+            except Exception:
+                logger.debug("清理预置失败行跳过", exc_info=True)
         saved_run_id = await save_run_results(
             case_id=case_id,
             status=run_status_map,
@@ -1984,10 +2022,16 @@ class AgentBridge:
             # ── 3. Act: WS 执行 ──
             try:
                 _act_t0 = time.monotonic()
-                result = await asyncio.wait_for(
-                    self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
-                    timeout=120,
-                )
+                _act_kind = str(action.get("name", action.get("action", "")) or "").lower()
+                if _act_kind == "fetch":
+                    # 036：fetch 由 bridge 驱动（既有 evaluate 动作序列 + 分块回传；
+                    # 证据字节在服务端落盘——客户端无需新增动作）
+                    result = await self._execute_fetch_action(agent_id, run_id_str, action)
+                else:
+                    result = await asyncio.wait_for(
+                        self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
+                        timeout=120,
+                    )
             except asyncio.TimeoutError:
                 logger.warning("Act timeout at turn %d", turn)
                 result = {"success": False, "error": "Act timeout (120s)"}
@@ -2114,10 +2158,20 @@ class AgentBridge:
                             and not retry_action.get("_error")
                         ):
                             action = retry_action
-                            result = await asyncio.wait_for(
-                                self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
-                                timeout=120,
-                            )
+                            if isinstance(action.get("unit"), list):
+                                # 036 修复：恢复路径不得绕过宏动作单元
+                                # （此前直接 send_act(unit) → 客户端「未知操作」）
+                                result = await self._execute_action_unit(
+                                    run, turn, agent_id, run_id_str,
+                                    action.get("unit"),
+                                    obs_retry.get("snapshot", ""),
+                                    context_messages,
+                                )
+                            else:
+                                result = await asyncio.wait_for(
+                                    self.agent_manager.send_act(agent_id, run_id_str, {**action, "_element_screenshot": _el_ss}),
+                                    timeout=120,
+                                )
                             logger.info(
                                 "Bridge stale-ref recovery (turn %d): success=%s",
                                 turn, result.get("success"),
@@ -2427,6 +2481,65 @@ class AgentBridge:
 
     # ── 持久化 ──────────────────────────────────────────────────────────────
 
+    async def _execute_fetch_action(
+        self, agent_id: str, run_id_str: str, action: dict,
+    ) -> dict:
+        """036：fetch 动作的客户端链编排（bridge 驱动既有 evaluate 序列）。
+
+        客户端只需支持既有 evaluate 动作（结果文本回传，见 client_core 文本白名单）；
+        证据字节经分块回传后在服务端落盘（客户端旧版本亦可工作）。
+        """
+        from core.fetch_action import run_fetch_action
+
+        async def _eval(tool: str, args: dict) -> dict:
+            res = await asyncio.wait_for(
+                self.agent_manager.send_act(
+                    agent_id, run_id_str,
+                    {"action": "evaluate", "value": args.get("function") or ""},
+                ),
+                timeout=90,
+            )
+            return res or {}
+
+        # 动作字典有两种形态：_llm_decide 返回 {name, tool, args:{value…}}；
+        # 单动作路径为顶层平铺 {action, value…}（服务端 runner 即平铺）。
+        # 036 实测：只读顶层导致 fetch 永远报「需要 value JSON」（run 448）。
+        _nested = action.get("args") if isinstance(action.get("args"), dict) else {}
+        _value = action.get("value")
+        if _value in (None, ""):
+            _value = _nested.get("value")
+        try:
+            out = await run_fetch_action(_eval, _value or "")
+        except Exception as exc:  # noqa: BLE001 — 可读失败即可
+            logger.warning("fetch 编排失败: %s", exc)
+            return {"success": False, "error": str(exc)}
+
+        payload: dict = {"api": out.get("api"), "token": out.get("token")}
+        ev = out.get("evidence")
+        if ev:
+            if self._evidence_dir:
+                from core.fetch_action import save_fetch_evidence_file
+
+                payload.update(
+                    save_fetch_evidence_file(
+                        self._evidence_dir,
+                        ev,
+                        out.get("filename"),
+                        (out.get("api") or {}).get("content_type") or "",
+                    )
+                )
+            else:
+                payload["evidence_error"] = "无证据目录（跳过落盘）"
+        if out.get("evidence_error"):
+            payload["evidence_error"] = out["evidence_error"]
+        if not out.get("success"):
+            return {
+                "success": False,
+                "error": out.get("error") or "fetch 执行失败",
+                "fetch": payload,
+            }
+        return {"success": True, "error": None, "fetch": payload}
+
     async def _record_turn(
         self,
         run_id: int,
@@ -2454,6 +2567,20 @@ class AgentBridge:
         _tool_args = dict(action.get("args", {}) or {})
         if result.get("_uncertain"):
             _tool_args["_uncertain"] = True
+        # 036：fetch 的 api 元数据 / 证据路径并入 tool_args（报告标注「以 API 方式完成」）
+        _fetch = result.get("fetch") if isinstance(result, dict) else None
+        if isinstance(_fetch, dict):
+            _api = _fetch.get("api") or {}
+            if _api:
+                _tool_args["api"] = {k: v for k, v in _api.items() if k != "excerpt"}
+                if _api.get("excerpt"):
+                    _tool_args["api"]["excerpt"] = str(_api["excerpt"])[:500]
+            if _fetch.get("evidence_path"):
+                _tool_args["evidence_path"] = _fetch["evidence_path"]
+                _tool_args["evidence_size"] = _fetch.get("evidence_size")
+                _tool_args["evidence_truncated"] = bool(_fetch.get("evidence_truncated"))
+            if _fetch.get("evidence_error"):
+                _tool_args["evidence_error"] = str(_fetch["evidence_error"])[:200]
         await crud_agent_run.create_tool_call(
             self.db, run_id, turn,
             str(action.get("name") or action.get("action") or "unknown"),

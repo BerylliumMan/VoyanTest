@@ -1,10 +1,12 @@
 import React from 'react';
 
 /**
- * B2 运行证据：把报告步骤文本中的证据文件路径（reports/xxx.webm|pdf|zip）
- * 渲染为可点击链接（视频证据、抓包等）。
+ * B2/036 运行证据：把报告步骤文本中的证据文件路径
+ * （reports/xxx.webm|pdf|zip|csv|json|txt|xlsx|docx|log|bin）
+ * 渲染为可点击链接（视频证据、抓包、fetch 下载存证等）。
  */
-const EVIDENCE_RE = /(reports\/[^\s;)]+\.(?:webm|pdf|zip))/g;
+const EVIDENCE_RE =
+  /(reports\/[^\s;)]+\.(?:webm|pdf|zip|csv|json|txt|xlsx|docx|log|bin))/g;
 
 export function renderEvidenceLinks(text: string | undefined | null): React.ReactNode {
   const value = String(text || '');

@@ -495,6 +495,7 @@ def run_script(
     with_checks: bool = False,
     with_request_overrides: bool = False,
     with_cookies: bool = False,
+    extra_namespaces: Optional[dict[str, Any]] = None,
 ) -> ScriptResult:
     """执行一段脚本（前置/后置共用）。
 
@@ -564,6 +565,10 @@ def run_script(
     read_context = dict(context or {})
     env.update(read_context)
     injected |= set(read_context)
+    # 036：额外命名空间（受控 SDK：http/db/platform/files）——注入对象按只读用途使用
+    if isinstance(extra_namespaces, dict) and extra_namespaces:
+        env.update(extra_namespaces)
+        injected |= set(extra_namespaces)
 
     def _exec() -> None:
         code = compile(tree, "<script>", "exec")

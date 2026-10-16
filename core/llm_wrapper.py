@@ -66,7 +66,9 @@ class PlaywrightMCPToolCall(BaseModel):
         description="Per-action payload: URL for goto; text for fill; option for select; "
         "end ref for drag; key name for press_key; text for wait/assert_text; "
         "absolute path(s) for upload (comma separated); accept/dismiss/accept:<text> for dialog; "
-        "list/new/select:N/close[:N] for tabs; px count or up/down for scroll.",
+        "list/new/select:N/close[:N] for tabs; px count or up/down for scroll; "
+        "JSON string for fetch (method/url/headers/body/evidence/filename — "
+        "the JSON object may also be passed directly, it will be serialized).",
     )
     timeout_ms: int = Field(
         default=30000,
@@ -123,6 +125,16 @@ class PlaywrightMCPToolCall(BaseModel):
             ):
                 if field in data and data[field] is None:
                     data[field] = default
+            # 036：fetch 的 value 契约是 JSON——模型常直接给出 JSON 对象/数组
+            # （实测：「value Input should be a valid string」整条作废重试，fetch 永远发不出去）
+            v = data.get("value")
+            if isinstance(v, (dict, list)):
+                import json as _json
+
+                data["value"] = _json.dumps(v, ensure_ascii=False)
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                # 模型偶发把 wait 秒数写成数字（曾实测 "'int' object has no attribute 'isdigit'"）
+                data["value"] = str(v)
         return data
 
     @model_validator(mode="after")
@@ -220,6 +232,7 @@ ACTIONS available (maps to Playwright MCP tools):
 - "mouse_down" / "mouse_up": Hold/release mouse button (paired only). value=left|right|middle.
 - "emulate_media": CSS media emulation. value=dark|light or JSON {"media":"print"}.
 - Download steps: click the download trigger, then verify the file with "evaluate" (e.g. value="async () => { const r = await fetch('report.csv'); return await r.text(); }"). There is no native download tool, so the evaluate fetch IS the download verification.
+- "fetch": Call the page's OWN API in the page context (auto-attaches the page session). Use ONLY when the UI path is blocked or unreliable: native/system-level windows (e.g. save dialogs), download-only actions with no page change, import/export targets not drivable via clicks. value=JSON like {"method":"GET","url":"/api/export","evidence":true,"filename":"out.csv"}; evidence=true stores the response body as a report evidence file. NEVER use it to skip steps the case explicitly requires, and NEVER fire destructive writes beyond what the case describes. The report will honestly label the step as "以 API 方式完成".
 - "click_xy": Click by page coordinates (canvas / no ref available). selector=null, value="x,y".
 - "move_mouse": Move the mouse to coordinates. selector=null, value="x,y".
 - "drag_xy": Drag between coordinates. selector=null, value="startX,startY,endX,endY".

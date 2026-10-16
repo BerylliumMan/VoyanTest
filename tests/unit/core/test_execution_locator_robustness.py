@@ -213,3 +213,51 @@ async def test_client_reports_done_signal_clearly():
     assert result["success"] is False
     assert "done" in result["error"]
     assert "Unknown action" not in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_client_dispatch_reaches_mcp_without_name_error():
+    """回归（036 映射发现）：_mcp_call_tool 曾引用未定义的 role/field_type →
+    任何非 error/done 动作派发都 NameError（B1 引入，旧测试只覆盖早返回分支）。"""
+    from agent.client_core import AgentClient
+
+    client = object.__new__(AgentClient)
+    calls = []
+
+    async def _record_tool_call(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return {"success": True, "text": "### Result\n{}"}
+
+    client._mcp_tools_call = _record_tool_call
+
+    result = await client._mcp_call_tool(action="snapshot", selector="", value="")
+
+    assert result["success"] is True
+    assert calls and calls[0][0] == "browser_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_client_threads_role_field_type_into_mcp_args():
+    """verify_visible 的 role、verify_value 的 field_type 必须贯通到 MCP 参数。"""
+    from agent.client_core import AgentClient
+
+    client = object.__new__(AgentClient)
+    calls = []
+
+    async def _record_tool_call(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return {"success": True, "text": "### Result\n{}"}
+
+    client._mcp_tools_call = _record_tool_call
+
+    await client._mcp_call_tool(
+        action="verify_visible", selector="", value="登录", role="button",
+    )
+    assert calls[0][0] == "browser_verify_element_visible"
+    assert calls[0][1].get("role") == "button"
+
+    await client._mcp_call_tool(
+        action="verify_value", selector="e5", value="admin", field_type="textbox",
+    )
+    assert calls[1][0] == "browser_verify_value"
+    assert calls[1][1].get("type") == "textbox"

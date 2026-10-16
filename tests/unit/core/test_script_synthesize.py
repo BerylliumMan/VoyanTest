@@ -92,3 +92,24 @@ def test_accept_rejects_url_with_cjk_bracket():
         '    await page.goto("http://localhost:8030/upload.html")\n'
     )
     assert "async def" in _accept_synthesized_script(good, case_id=9)
+
+
+def test_required_targets_ignore_fullwidth_paren_fragment():
+    """036 回归：括号内「点击导出会触发文件下载）」曾被误提取为必现目标字符串
+    （导致合法合成脚本被覆盖检查拒绝、回落 OTA）。"""
+    from core.script_synthesize import extract_required_targets
+
+    steps = [
+        {"step_order": 1, "description": "打开【报表页】"},
+        {"step_order": 2, "description": "导出报表为 CSV 文件（点击导出会触发文件下载）"},
+        {"step_order": 3, "description": "断言页面显示【报表页】"},
+    ]
+    targets = extract_required_targets(steps)
+    assert "报表页" in targets
+    assert not any("会触发文件下载" in t for t in targets)
+
+    # 常规句式不受影响
+    normal = extract_required_targets(
+        [{"description": "点击登录"}, {"description": "选择京州市院"}]
+    )
+    assert "登录" in normal and "京州市院" in normal

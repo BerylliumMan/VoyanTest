@@ -156,7 +156,10 @@ const ChatPage: React.FC = () => {
     summary?: string;
     durationMs?: number;
     truncated?: boolean;
+    excerpt?: string;
   }>>([]);
+  // 036：工具行输出节选展开（call_id 集合）
+  const [toolOpen, setToolOpen] = useState<Record<string, boolean>>({});
   // 探索时间线瞬时流：browse_id → 当前思考增量（done 后清空，由卡片时间线接管）
   const [browseLive, setBrowseLive] = useState<Record<string, string>>({});
   // 编辑已发送消息（保存并从该条重新生成）
@@ -386,6 +389,7 @@ const ChatPage: React.FC = () => {
                 summary: String(data.summary || ''),
                 durationMs: Number(data.duration_ms || 0),
                 truncated: Boolean(data.truncated),
+                excerpt: typeof data.excerpt === 'string' ? data.excerpt : t.excerpt,
               }
             : t)));
         } else if (data.type === 'message.stream') {
@@ -1444,12 +1448,31 @@ const ChatPage: React.FC = () => {
                         </summary>
                         <div className={styles.toolHistoryBody}>
                           {(m.actions || []).filter((a: any) => a && a.type === 'tool').map((a: any, i: number) => (
-                            <div key={i} className={styles.toolRow}>
-                              <span className={styles.toolName}>{String(a.tool || '')}</span>
-                              <span className={`${styles.toolStatus} ${a.status === 'ok' ? styles.toolOk : styles.toolFail}`}>
-                                {a.status === 'ok' ? '已完成' : '失败'}
-                              </span>
-                              {a.summary ? <span className={styles.toolArgs}>{String(a.summary)}</span> : null}
+                            <div key={i} className={styles.toolRowWrap}>
+                              <div
+                                className={`${styles.toolRow} ${a.excerpt ? styles.toolRowClickable : ''}`}
+                                onClick={() => {
+                                  if (a.excerpt) {
+                                    const key = `${m.id}:${i}`;
+                                    setToolOpen((prev) => ({ ...prev, [key]: !prev[key] }));
+                                  }
+                                }}
+                              >
+                                <span className={styles.toolName}>{String(a.tool || '')}</span>
+                                <span className={`${styles.toolStatus} ${a.status === 'ok' ? styles.toolOk : styles.toolFail}`}>
+                                  {a.status === 'ok' ? '已完成' : '失败'}
+                                </span>
+                                {a.summary ? <span className={styles.toolArgs}>{String(a.summary)}</span> : null}
+                                {a.excerpt ? (
+                                  <span className={styles.toolChevron}>{toolOpen[`${m.id}:${i}`] ? '▾' : '▸'}</span>
+                                ) : null}
+                              </div>
+                              {a.excerpt && toolOpen[`${m.id}:${i}`] ? (
+                                <pre className={styles.toolExcerpt}>
+                                  {String(a.excerpt)}
+                                  {a.truncated ? '\n…（已截断，展示节选）' : ''}
+                                </pre>
+                              ) : null}
                             </div>
                           ))}
                         </div>
@@ -1476,16 +1499,34 @@ const ChatPage: React.FC = () => {
                     {liveTools.length > 0 && (
                       <div className={styles.toolRows}>
                         {liveTools.map((t) => (
-                          <div key={t.callId} className={styles.toolRow}>
-                            <span className={styles.toolName}>{t.tool}</span>
-                            <span className={styles.toolArgs}>{t.argsDigest}</span>
-                            <span className={`${styles.toolStatus} ${t.status === 'running' ? styles.toolRunning : t.status === 'ok' ? styles.toolOk : styles.toolFail}`}>
-                              {t.status === 'running'
-                                ? '执行中…'
-                                : t.status === 'ok'
-                                  ? `已完成${t.durationMs ? ` · ${(t.durationMs / 1000).toFixed(1)}s` : ''}`
-                                  : '失败'}
-                            </span>
+                          <div key={t.callId} className={styles.toolRowWrap}>
+                            <div
+                              className={`${styles.toolRow} ${t.excerpt ? styles.toolRowClickable : ''}`}
+                              onClick={() => {
+                                if (t.excerpt) {
+                                  setToolOpen((prev) => ({ ...prev, [t.callId]: !prev[t.callId] }));
+                                }
+                              }}
+                            >
+                              <span className={styles.toolName}>{t.tool}</span>
+                              <span className={styles.toolArgs}>{t.argsDigest}</span>
+                              <span className={`${styles.toolStatus} ${t.status === 'running' ? styles.toolRunning : t.status === 'ok' ? styles.toolOk : styles.toolFail}`}>
+                                {t.status === 'running'
+                                  ? '执行中…'
+                                  : t.status === 'ok'
+                                    ? `已完成${t.durationMs ? ` · ${(t.durationMs / 1000).toFixed(1)}s` : ''}`
+                                    : '失败'}
+                              </span>
+                              {t.excerpt ? (
+                                <span className={styles.toolChevron}>{toolOpen[t.callId] ? '▾' : '▸'}</span>
+                              ) : null}
+                            </div>
+                            {t.excerpt && toolOpen[t.callId] ? (
+                              <pre className={styles.toolExcerpt}>
+                                {t.excerpt}
+                                {t.truncated ? '\n…（已截断，展示节选）' : ''}
+                              </pre>
+                            ) : null}
                           </div>
                         ))}
                       </div>

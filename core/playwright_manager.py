@@ -390,6 +390,26 @@ class PlaywrightMCPManager:
         if action == 'error':
             return {'success': False, 'error': f"LLM error: {value}"}
 
+        # 036：fetch 动作（页面 API 调用）——页面上下文请求 + 分块回传；
+        # 证据字节由调用方（bridge/runner）落盘到运行证据目录。
+        if str(action).lower() == 'fetch':
+            from core.fetch_action import run_fetch_action
+
+            out = await run_fetch_action(self.call_tool, value or "")
+            payload: dict = {"api": out.get("api"), "token": out.get("token")}
+            if out.get("evidence"):
+                payload["evidence"] = out["evidence"]
+                payload["filename"] = out.get("filename")
+            if out.get("evidence_error"):
+                payload["evidence_error"] = out["evidence_error"]
+            if not out.get("success"):
+                return {
+                    'success': False,
+                    'error': out.get("error") or "fetch 执行失败",
+                    'fetch': payload,
+                }
+            return {'success': True, 'error': None, 'fetch': payload}
+
         from core.blank_click import execute_blank_click, should_use_blank_click
 
         if should_use_blank_click(

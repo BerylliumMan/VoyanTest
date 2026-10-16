@@ -82,17 +82,30 @@ async def _audit_tool_call(ctx: ToolContext, name: str, args: dict, result: Tool
     try:
         from app.auth import log_audit
 
+        details: dict = {
+            "conversation_id": getattr(getattr(ctx, "conversation", None), "id", None),
+            "source": getattr(ctx, "source", "chat"),
+            "token_id": getattr(ctx, "token_id", None),
+            "args": _redact(dict(args or {})),
+            "status": "ok" if result.ok else "failed",
+        }
+        # 036（T030）：诊断脚本审计细节（输出字节 / db+http 计数 / 拒绝摘要）
+        if isinstance(result.data, dict):
+            data = result.data
+            if "db_queries" in data or "http_calls" in data:
+                out = data.get("output")
+                details["output_bytes"] = len(out.encode("utf-8")) if isinstance(out, str) else 0
+                details["db_queries"] = int(data.get("db_queries") or 0)
+                details["http_calls"] = int(data.get("http_calls") or 0)
+                if data.get("title"):
+                    details["title"] = str(data["title"])[:100]
+        if not result.ok and result.error:
+            details["error"] = str(result.error)[:200]
         await log_audit(
             ctx.db,
             ctx.user_id,
             f"tool.{name}",
-            details={
-                "conversation_id": getattr(getattr(ctx, "conversation", None), "id", None),
-                "source": getattr(ctx, "source", "chat"),
-                "token_id": getattr(ctx, "token_id", None),
-                "args": _redact(dict(args or {})),
-                "status": "ok" if result.ok else "failed",
-            },
+            details=details,
         )
     except Exception:
         logger.debug("tool audit failed name=%s", name, exc_info=True)
@@ -156,7 +169,12 @@ async def _run_one_tool(*, ctx: ToolContext, conversation_id: int, call,
     await _audit_tool_call(ctx, name, args, result)
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    await emit(conversation_id, {
+    excerpt = None
+    if isinstance(result.data, dict):
+        raw_excerpt = result.data.get("output")
+        if isinstance(raw_excerpt, str) and raw_excerpt.strip():
+            excerpt = raw_excerpt[:2000]
+    event: dict = {
         "type": "tool.call.end",
         "conversation_id": conversation_id,
         "call_id": call_id,
@@ -164,7 +182,10 @@ async def _run_one_tool(*, ctx: ToolContext, conversation_id: int, call,
         "summary": (result.summary or "")[:200],
         "duration_ms": duration_ms,
         "truncated": bool(result.truncated),
-    })
+    }
+    if excerpt:
+        event["excerpt"] = excerpt
+    await emit(conversation_id, event)
     return call_id, result
 
 
@@ -229,6 +250,22 @@ async def _default_llm(messages, *, tools, stream_callback=None, reasoning_callb
     )
 
 
+def default_tool_filter(spec_or_name) -> bool:
+    """036：门控工具（chat_script_enabled=false 时 run_script 从清单与派发中剔除）。
+
+    兼容两种入参：ToolSpec（注册表 allow 回调）或工具名（显式判断）。
+    """
+    name = str(getattr(spec_or_name, "name", spec_or_name) or "")
+    if name == "run_script":
+        try:
+            from app.config import get_settings
+
+            return bool(getattr(get_settings(), "chat_script_enabled", False))
+        except Exception:
+            return False
+    return True
+
+
 async def run_tool_loop(
     *,
     db,
@@ -250,11 +287,11 @@ async def run_tool_loop(
 
     settings = get_settings()
     reg = registry if registry is not None else REGISTRY
-    specs = {s.name: s for s in reg.all()}
+    specs = {s.name: s for s in reg.all() if default_tool_filter(s.name)}
     if not specs:
         raise ToolCallingUnsupported("无注册工具")
 
-    tools_payload = reg.as_openai_tools()
+    tools_payload = reg.as_openai_tools(allow=default_tool_filter)
     max_rounds = int(max_rounds or getattr(settings, "chat_tool_max_rounds", 8) or 8)
     timeout_s = int(timeout_s or getattr(settings, "chat_tool_timeout_seconds", 180) or 180)
     deadline = time.monotonic() + timeout_s
@@ -357,6 +394,13 @@ async def run_tool_loop(
                 "status": "ok" if result.ok else "failed",
                 "summary": (result.summary or "")[:300],
                 "truncated": bool(result.truncated),
+                # 036：脚本输出节选持久化（刷新后仍可展开查看，≤2000 字符）
+                **(
+                    {"excerpt": str((result.data or {}).get("output"))[:2000]}
+                    if isinstance(result.data, dict) and isinstance((result.data or {}).get("output"), str)
+                    and str((result.data or {}).get("output")).strip()
+                    else {}
+                ),
             })
 
         if stop_reason:

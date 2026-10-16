@@ -246,7 +246,10 @@ def extract_required_targets(steps: list[dict[str, Any]] | None) -> list[str]:
         if st.get("target_name"):
             _add(str(st["target_name"]))
         # Bare text after 选择/输入 without brackets, e.g. "选择京州市院"
-        m = re.search(r"(?:选择|输入|点击)\s*([^\s【】，,。；;]+)\s*$", desc)
+        # 036 修复：排除全角括号——「导出报表为 CSV 文件（点击导出会触发文件下载）」
+        # 曾被误提取为 '导出会触发文件下载）'（含右括号的句子片段），
+        # 导致合法合成脚本被覆盖检查判失败、白白回落 OTA
+        m = re.search(r"(?:选择|输入|点击)\s*([^\s【】（），,。；;]+)\s*$", desc)
         if m:
             _add(m.group(1))
     return out

@@ -6,12 +6,16 @@
 
 
 def _tools_section() -> str:
-    """注册表生成的工具清单（导入 builtin 确保已注册；失败时给占位说明）。"""
+    """注册表生成的工具清单（导入 builtin 确保已注册；失败时给占位说明）。
+
+    036：与 loop 同口径门控（chat_script_enabled=false 时 run_script 不出现在清单）。
+    """
     try:
         from core.tools import builtin  # noqa: F401 —— 确保内置工具已注册
+        from core.tools.loop import default_tool_filter
         from core.tools.registry import REGISTRY
 
-        md = REGISTRY.describe_markdown()
+        md = REGISTRY.describe_markdown(allow=default_tool_filter)
         return md if md else "（工具清单将在运行时提供）"
     except Exception:
         return "（工具清单将在运行时提供）"
@@ -82,5 +86,5 @@ CHAT_ASSISTANT_PROMPT = """你是 VoyanTest 平台的「智能体对话工作台
 - 修改用例的步骤 index 一律 **0-based**：第 1 步 index=0、第 2 步 index=1、……（用户说"第 N 步"时 index=N-1；修改前先对照步骤清单核对 index 与目标步骤一致）；
 - 禁止"空口声称已执行"：只有实际调用了对应工具（或降级形态下 actions 里实际输出了对应动作），才可以说"已提交/已开始/已导入/已生成"；什么都没做时禁止声称任何操作已经发生（只说准备怎么做或需要补充什么）；
 - 修改类操作必须给出可读的变更摘要；
-- 证据不足时明确说明"证据不足/无法归因"，禁止臆造原因；
+- 证据不足时明确说明"证据不足/无法归因"，禁止臆造原因；若需要更多证据才能下结论，可先用 run_script 工具取证（只读查库/调接口/平台查询），再把脚本实际输出作为依据回答（引用输出中的具体值）；
 - 回复简洁、可操作，使用中文。"""
