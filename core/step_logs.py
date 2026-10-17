@@ -76,6 +76,21 @@ def render_step_message(
             logger.debug("uncertain_note 渲染跳过", exc_info=True)
         return msg
 
+    # 036+：诊断脚本行按元数据渲染（标题/耗时/DB·HTTP 计数；失败带原因）
+    if tool == "run_script":
+        sc = args.get("script") if isinstance(args.get("script"), dict) else {}
+        title = str(args.get("title") or args.get("element_desc") or "").strip()
+        head = f"诊断脚本「{title}」" if title else "诊断脚本"
+        ok = sc.get("ok")
+        msg = head + ("：成功" if ok else ("：失败" if ok is False else ""))
+        if sc.get("duration_ms") is not None:
+            msg += f"（{sc.get('duration_ms')}ms，DB {sc.get('db_queries', 0)} / HTTP {sc.get('http_calls', 0)}）"
+        if ok is False and sc.get("error"):
+            msg += f" — {str(sc['error'])[:120]}"
+        if not ok and error_message:
+            msg += f" | {str(error_message)[:160]}"
+        return msg
+
     vals = [
         v
         for v in (
@@ -162,6 +177,25 @@ def fetch_evidence_rows(tool_rows: list[dict]) -> list[dict]:
     seen: set[str] = set()
     for r in tool_rows or []:
         if r.get("tool") != "fetch":
+            continue
+        key = str(r.get("message") or "")
+        if key and key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def script_evidence_rows(tool_rows: list[dict]) -> list[dict]:
+    """诊断脚本（run_script）证据行：同渲染内容去重（保留首次）。
+
+    执行链 run_script 是调查/取证动作，不作为步骤行；以证据行呈现
+    （标题/耗时/DB·HTTP 计数/失败原因），完整脚本与输出在 agent_tool_calls。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in tool_rows or []:
+        if r.get("tool") != "run_script":
             continue
         key = str(r.get("message") or "")
         if key and key in seen:

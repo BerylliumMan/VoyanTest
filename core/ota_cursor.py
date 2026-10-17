@@ -85,6 +85,9 @@ ACTIONS (maps to Playwright MCP):
   evidence=true stores the response body as a report evidence file. NEVER use fetch to skip steps the case
   explicitly requires, and NEVER fire destructive writes beyond what the case describes. The report will
   honestly label this step as "以 API 方式完成".
+- "run_script": Run a diagnostic script (sandboxed Python: NO import/def/class/try; bounded for-loops) to CHECK FACTS you cannot confirm on the page: read-only DB queries (SELECT/WITH only), platform queries (projects/cases/suites/batches), HTTP calls, reading files under data/ or reports/. Use it when a step says 查询/核对/诊断/脚本, or when you need evidence before deciding the next action. value=script code, element_desc=short title.
+  Example: value="r = db.query('SELECT id,status FROM run_batches ORDER BY id DESC LIMIT 3'); print(r['rows'])".
+  The script output is fed back to you. Scripts must NOT fake interactions — never use it to mark a click/fill/assert step done.
 - "screenshot" / "snapshot": Capture / refresh observation.
 - "done": Goal achieved. value=summary.
 - "error": Cannot proceed. value=reason.

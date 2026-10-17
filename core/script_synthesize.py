@@ -291,6 +291,25 @@ def check_script_covers_intents(
     return missing
 
 
+# 036+：诊断脚本步骤（run_script）无法忠实固化到 Playwright 脚本——
+# 实测（case 700）：合成器把「用诊断脚本查询数据库…」写成 sqlite 探测函数，回放"通过"但
+# 实际未验证任何东西（假通过）。含此类步骤的用例禁用编译先行/固化回放，始终走 OTA。
+_RUN_SCRIPT_STEP_RE = re.compile(
+    r"诊断脚本|执行脚本|写代码|run_script|查询数据库|数据库查询|查库", re.I,
+)
+
+
+def case_requires_run_script(steps: list[dict[str, Any]] | None) -> bool:
+    """用例是否含诊断脚本意图的步骤（true → 不走编译先行/固化回放）。"""
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        desc = str(s.get("description") or s.get("original_description") or "")
+        if _RUN_SCRIPT_STEP_RE.search(desc):
+            return True
+    return False
+
+
 # 选择器类 API：参数就是 Playwright selector，绝不能是快照 ref
 _SELECTOR_CALL_RE = re.compile(
     r"""\.(?:locator|wait_for_selector|query_selector|frame_locator|

@@ -214,10 +214,10 @@ def test_steps_from_run_log_rows_case_insensitive_and_info():
     assert steps[3]["step_number"] == 3 and steps[3]["success"] is True
 
 
-def test_parse_console_messages_skips_zero_count_header():
+def test_parse_console_messages_skips_count_headers():
     text = 'Returning 0 messages for level "error".\n### Result\n[ERROR] boom @ http://a'
     entries = parse_console_messages(text)
     assert entries == ["[ERROR] boom @ http://a"]
-    # 非零计数行保留（含数量信息）
-    text2 = 'Returning 2 messages for level "error"'
-    assert parse_console_messages(text2) == [text2]
+    # 非零计数头行同为空转噪声（条目本身才是证据；favicon 过滤后头行更显突兀）
+    text2 = 'Returning 2 messages for level "error"\n[ERROR] real1\n[ERROR] real2'
+    assert parse_console_messages(text2) == ["[ERROR] real1", "[ERROR] real2"]

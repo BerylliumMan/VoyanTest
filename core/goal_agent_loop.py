@@ -360,6 +360,12 @@ def journal_entry_covers_checklist(
     if action in ("fetch", "browser_fetch"):
         return not is_wait_assert_checklist_step(desc)
 
+    # 036+：诊断脚本只覆盖「脚本/查询/核对」类步骤；交互/断言类不得被冒充
+    if action in ("run_script", "browser_run_script"):
+        if not desc:
+            return False
+        return bool(re.search(r"脚本|代码|查询|查库|核对|诊断|数据库", desc))
+
     if is_click_checklist_step(desc):
         if action in ("click", "browser_click"):
             return True

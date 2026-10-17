@@ -103,6 +103,8 @@ _RUNNER_ACTIONS = (
     "run_code",
     # ── 036 页面 API 调用（系统级窗口/下载受阻时的替代路径）────────────────
     "fetch",
+    # ── 036+ 执行链诊断脚本（用例执行中写 Python 查库/调接口/核对数据）──────
+    "run_script",
     # ── 修复：B5 verify 四件套漏接服务端注册表（此前服务端链报「未知操作」）──
     "verify_text",
     "verify_visible",
@@ -259,6 +261,8 @@ class AgentRunner:
         self._run_id = run_id
         # 036：运行证据目录（fetch 存证落盘用；缺省跳过落盘并如实标注）
         self._evidence_dir = evidence_dir
+        # 036+：执行链 run_script 的批次/身份（首次调用时从批次解析并缓存）
+        self._script_user_id: int | None = None
 
         self.tool_registry = ToolRegistry(mcp_manager)
         self.context = AgentContext(max_turns=context_max_turns)
@@ -421,6 +425,10 @@ class AgentRunner:
         logger.info("Act: %s (selector=%s, value=%s)",
                      action_name, action.get("selector"), action.get("value"))
 
+        # 036+：执行链诊断脚本（服务端沙箱执行，不经 MCP；结果文本回喂模型）
+        if str(action_name).lower() in ("run_script", "browser_run_script"):
+            return await self._execute_script_action(action)
+
         result = await self._execute_action_once(action)
         if result.get("success"):
             await self._resolve_coordinate_target(action, result)
@@ -498,6 +506,40 @@ class AgentRunner:
                 result["_resolved"] = resolved
         except Exception:
             logger.debug("坐标回解跳过", exc_info=True)
+
+    async def _execute_script_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        """036+：执行链 run_script —— 受控沙箱脚本（查库只读 / 平台查询 / HTTP / 读文件）。
+
+        结果文本经 build_tool_status 回喂模型；元数据写回 result["script"]（tool_args 记录）。
+        """
+        from app.config import get_settings
+
+        if not bool(getattr(get_settings(), "exec_script_enabled", True)):
+            return {
+                "success": True,
+                "text": "诊断脚本功能未开启（exec_script_enabled=false，管理员可在系统设置开启）",
+            }
+        nested = action.get("args") if isinstance(action.get("args"), dict) else {}
+        script = str(action.get("value") or nested.get("value") or "")
+        title = str(action.get("element_desc") or action.get("title") or nested.get("element_desc") or "")
+        if not script.strip():
+            return {"success": True, "text": "脚本内容为空（value 需为 Python 脚本）"}
+
+        from app.services.exec_script import execute_script, resolve_script_user_id
+
+        if self._script_user_id is None:
+            self._script_user_id = await resolve_script_user_id(self._db, run_id=self._run_id)
+        res = await execute_script(user_id=self._script_user_id, script=script, title=title)
+
+        head = f"诊断脚本「{title}」" if title.strip() else "诊断脚本"
+        if res.get("ok"):
+            text = (
+                f"{head}成功（{res.get('duration_ms')}ms，DB {res.get('db_queries')} / HTTP {res.get('http_calls')}）：\n"
+                f"{res.get('output') or '（无输出）'}"
+            )
+        else:
+            text = f"{head}失败：{res.get('error') or '未知错误'}"
+        return {"success": True, "text": text[:3000], "script": res}
 
     async def _execute_action_once(self, action: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1211,6 +1253,19 @@ class AgentRunner:
                 tool_args["evidence_truncated"] = bool(_fetch.get("evidence_truncated"))
             if _fetch.get("evidence_error"):
                 tool_args["evidence_error"] = str(_fetch["evidence_error"])[:200]
+        # 036+：诊断脚本元数据并入 tool_args（标题/耗时/计数/错误摘要）
+        _script = result.get("script") if isinstance(result, dict) else None
+        if isinstance(_script, dict):
+            _meta = {
+                k: _script.get(k)
+                for k in ("ok", "duration_ms", "db_queries", "http_calls", "truncated")
+                if _script.get(k) is not None
+            }
+            if _script.get("error"):
+                _meta["error"] = str(_script["error"])[:200]
+            tool_args["script"] = _meta
+            if _script.get("title"):
+                tool_args["title"] = str(_script["title"])[:100]
         await crud_agent_run.create_tool_call(
             self._db, self._run_id, turn,
             str(action.get("name") or action.get("action") or "unknown"),

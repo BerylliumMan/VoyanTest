@@ -58,63 +58,29 @@ async def run_script_tool(ctx: ToolContext, script: str, title: str = "") -> Too
     if not text.strip():
         return error_result("script 不能为空")
 
-    from app.database import AsyncSessionLocal
-    from app.services.script_sdk import SdkState, build_sdk
-    from core.script_sandbox import run_script
+    # 共享执行入口（036+：对话工具与执行链 run_script 动作同源）
+    from app.services.exec_script import execute_script
 
-    try:
-        from app.config import get_settings
+    result = await execute_script(user_id=ctx.user_id, script=text, title=title)
 
-        timeout_ms = int(getattr(get_settings(), "chat_script_timeout_ms", 30000) or 30000)
-    except Exception:
-        timeout_ms = 30000
-    timeout_ms = max(1000, min(timeout_ms, 120000))
-
-    loop = asyncio.get_running_loop()
-    state = SdkState()
-
-    def _run_async(coro: Any) -> Any:
-        fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        return fut.result(timeout=(timeout_ms / 1000) + 5)
-
-    sdk = build_sdk(
-        run_async=_run_async,
-        db_factory=AsyncSessionLocal,
-        user_id=ctx.user_id,
-        state=state,
-    )
-
-    t0 = time.monotonic()
-    result = await asyncio.to_thread(
-        run_script, text, None, timeout_ms=timeout_ms, extra_namespaces=sdk,
-    )
-    duration_ms = int((time.monotonic() - t0) * 1000)
-
-    output = result.output or ""
-    if result.variables:
-        try:
-            dump = json.dumps(result.variables, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            dump = str(result.variables)
-        output = (output + "\n" if output else "") + "vars: " + dump
-
-    truncated = len(output) > OUTPUT_EXCERPT_CHARS
+    output = result.get("output") or ""
     data = {
-        "title": (title or "").strip() or None,
-        "output": output[:OUTPUT_EXCERPT_CHARS],
-        "error": result.error,
-        "duration_ms": duration_ms,
-        "db_queries": state.db_queries,
-        "http_calls": state.http_calls,
-        "truncated": truncated,
+        "title": result.get("title"),
+        "output": output,
+        "error": result.get("error"),
+        "duration_ms": result.get("duration_ms"),
+        "db_queries": result.get("db_queries"),
+        "http_calls": result.get("http_calls"),
+        "truncated": bool(result.get("truncated")),
     }
-    state_txt = "成功" if result.ok else "失败"
+    state_txt = "成功" if result.get("ok") else "失败"
     label = (title or "").strip() or "诊断脚本"
     summary = (
-        f"{label}：{state_txt}（{duration_ms}ms，DB {state.db_queries} / HTTP {state.http_calls}）"
+        f"{label}：{state_txt}（{result.get('duration_ms')}ms，"
+        f"DB {result.get('db_queries')} / HTTP {result.get('http_calls')}）"
     )
-    if not result.ok:
-        err = result.error or "脚本执行失败"
+    if not result.get("ok"):
+        err = result.get("error") or "脚本执行失败"
         # 036 契约：输出超沙箱硬上限（64KB）→ 如实标注截断（脚本可减少打印后重跑）
         if "输出超过上限" in err:
             data["output"] = "（输出超过沙箱 64KB 上限，未返回全文；请减少打印后重跑）"
@@ -122,7 +88,7 @@ async def run_script_tool(ctx: ToolContext, script: str, title: str = "") -> Too
                 ok=False, summary=summary, data=data, truncated=True, error=err,
             )
         return ToolResult(
-            ok=False, summary=summary, data=data, truncated=truncated, error=err,
+            ok=False, summary=summary, data=data, truncated=bool(result.get("truncated")), error=err,
         )
     shaped = shape_result(data, summary=summary)
     shaped.ok = True

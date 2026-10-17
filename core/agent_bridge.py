@@ -141,6 +141,8 @@ class AgentBridge:
         self._case_url: str = ""
         self._replay_logs: list[dict] | None = None
         self._console_entries: list[str] = []  # 032 US2：console 错误证据（收尾采集）
+        # 036+：执行链 run_script 的批次/身份（首次调用时解析并缓存）
+        self._script_user_id: int | None = None
         # B2：运行证据（网络问题请求 / 视频）
         self._network_entries: list[str] = []
         self._video_state: dict = {"started": False, "filename": None}
@@ -719,11 +721,17 @@ class AgentBridge:
             )
             # 页面 API（fetch）证据并入其覆盖的步骤行（含存证路径；重复调用去重；
             # 无法映射的残余行原样保留）
-            from core.step_logs import fetch_evidence_rows, merge_fetch_evidence_into_steps
+            from core.step_logs import (
+                fetch_evidence_rows,
+                merge_fetch_evidence_into_steps,
+                script_evidence_rows,
+            )
 
             logs += merge_fetch_evidence_into_steps(
                 logs, fetch_evidence_rows(tool_rows), self._journal,
             )
+            # 036+：诊断脚本证据行（执行中写代码取证；标题/耗时/计数）
+            logs += script_evidence_rows(tool_rows)
         else:
             logs = tool_rows
 
@@ -1125,6 +1133,12 @@ class AgentBridge:
             steps = await self._load_case_steps(run.case_id)
             if not steps or len(steps) < 2:
                 return False
+            # 036+：含诊断脚本步骤的用例不走编译先行（Playwright 脚本无法忠实覆盖 run_script）
+            from core.script_synthesize import case_requires_run_script
+
+            if case_requires_run_script(steps):
+                logger.info("Bridge 编译先行：含诊断脚本步骤，跳过 case=%s（走 OTA）", run.case_id)
+                return False
             from app.crud import get_test_case
 
             tc = await get_test_case(self.db, run.case_id)
@@ -1203,6 +1217,12 @@ class AgentBridge:
             return False
         steps = await self._load_case_steps(run.case_id)
         if not steps:
+            return False
+        # 036+：含诊断脚本步骤 → 固化脚本无法忠实回放（防假通过），跳过回放走 OTA
+        from core.script_synthesize import case_requires_run_script
+
+        if case_requires_run_script(steps):
+            logger.info("Bridge 固化回放：含诊断脚本步骤，跳过 case=%s（走 OTA）", run.case_id)
             return False
         current_hash = steps_content_hash(steps)
         stored_hash = getattr(tc, "compiled_script_hash", None) or ""
@@ -1480,6 +1500,12 @@ class AgentBridge:
         steps = self._run_steps or await self._load_case_steps(case_id)
         if not steps:
             logger.info("Bridge: synthesis skipped case=%s (no steps loaded)", case_id)
+            return
+        # 036+：含诊断脚本步骤的用例不固化（Playwright 脚本无法忠实覆盖 run_script）
+        from core.script_synthesize import case_requires_run_script
+
+        if case_requires_run_script(steps):
+            logger.info("Bridge: synthesis skipped case=%s (contains run_script step)", case_id)
             return
         tc = await get_test_case(self.db, case_id)
         if tc is None:
@@ -2023,7 +2049,10 @@ class AgentBridge:
             try:
                 _act_t0 = time.monotonic()
                 _act_kind = str(action.get("name", action.get("action", "")) or "").lower()
-                if _act_kind == "fetch":
+                if _act_kind == "run_script":
+                    # 036+：执行链诊断脚本（服务端沙箱执行，不经客户端；结果文本回喂模型）
+                    result = await self._execute_script_action(action)
+                elif _act_kind == "fetch":
                     # 036：fetch 由 bridge 驱动（既有 evaluate 动作序列 + 分块回传；
                     # 证据字节在服务端落盘——客户端无需新增动作）
                     result = await self._execute_fetch_action(agent_id, run_id_str, action)
@@ -2481,6 +2510,39 @@ class AgentBridge:
 
     # ── 持久化 ──────────────────────────────────────────────────────────────
 
+    async def _execute_script_action(self, action: dict) -> dict:
+        """036+：执行链 run_script（客户端链同口径）——服务端沙箱执行，结果回喂模型。"""
+        from app.config import get_settings
+
+        if not bool(getattr(get_settings(), "exec_script_enabled", True)):
+            return {
+                "success": True,
+                "text": "诊断脚本功能未开启（exec_script_enabled=false，管理员可在系统设置开启）",
+            }
+        nested = action.get("args") if isinstance(action.get("args"), dict) else {}
+        script = str(action.get("value") or nested.get("value") or "")
+        title = str(action.get("element_desc") or action.get("title") or nested.get("element_desc") or "")
+        if not script.strip():
+            return {"success": True, "text": "脚本内容为空（value 需为 Python 脚本）"}
+
+        from app.services.exec_script import execute_script, resolve_script_user_id
+
+        if getattr(self, "_script_user_id", None) is None:
+            self._script_user_id = await resolve_script_user_id(
+                self.db, batch_id=getattr(self, "_batch_id", None),
+            )
+        res = await execute_script(user_id=self._script_user_id, script=script, title=title)
+
+        head = f"诊断脚本「{title}」" if title.strip() else "诊断脚本"
+        if res.get("ok"):
+            text = (
+                f"{head}成功（{res.get('duration_ms')}ms，DB {res.get('db_queries')} / HTTP {res.get('http_calls')}）：\n"
+                f"{res.get('output') or '（无输出）'}"
+            )
+        else:
+            text = f"{head}失败：{res.get('error') or '未知错误'}"
+        return {"success": True, "text": text[:3000], "script": res}
+
     async def _execute_fetch_action(
         self, agent_id: str, run_id_str: str, action: dict,
     ) -> dict:
@@ -2581,6 +2643,19 @@ class AgentBridge:
                 _tool_args["evidence_truncated"] = bool(_fetch.get("evidence_truncated"))
             if _fetch.get("evidence_error"):
                 _tool_args["evidence_error"] = str(_fetch["evidence_error"])[:200]
+        # 036+：诊断脚本元数据并入 tool_args（标题/耗时/计数/错误摘要）
+        _script = result.get("script") if isinstance(result, dict) else None
+        if isinstance(_script, dict):
+            _meta = {
+                k: _script.get(k)
+                for k in ("ok", "duration_ms", "db_queries", "http_calls", "truncated")
+                if _script.get(k) is not None
+            }
+            if _script.get("error"):
+                _meta["error"] = str(_script["error"])[:200]
+            _tool_args["script"] = _meta
+            if _script.get("title"):
+                _tool_args["title"] = str(_script["title"])[:100]
         await crud_agent_run.create_tool_call(
             self.db, run_id, turn,
             str(action.get("name") or action.get("action") or "unknown"),

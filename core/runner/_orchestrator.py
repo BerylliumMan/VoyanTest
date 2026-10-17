@@ -89,7 +89,19 @@ async def _synthesize_and_persist_compiled_script(
             logger.info("固化跳过 case=%s（无成功动作日志）", case_id)
             return
         from core.compiled_script import persist_compiled_script, steps_content_hash
-        from core.script_synthesize import synthesize_playwright_script
+        from core.script_synthesize import case_requires_run_script, synthesize_playwright_script
+
+        # 036+：含诊断脚本步骤的用例不固化（Playwright 脚本无法忠实覆盖 run_script）
+        _steps_dicts = [
+            {
+                "step_order": int(getattr(s, "step_order", 0) or 0),
+                "description": getattr(s, "description", "") or "",
+            }
+            for s in (steps or [])
+        ]
+        if case_requires_run_script(_steps_dicts):
+            logger.info("固化跳过 case=%s（含诊断脚本步骤）", case_id)
+            return
 
         # 模型名必须非空（实测：空串直接 400 required model）——沿用执行 Agent 的解析链
         resolved_model = model
@@ -372,12 +384,18 @@ async def run_test_case_via_agent(
             case_status == "passed",
             ota_result.get("error"),
         )
-        from core.step_logs import fetch_evidence_rows, merge_fetch_evidence_into_steps
+        from core.step_logs import (
+            fetch_evidence_rows,
+            merge_fetch_evidence_into_steps,
+            script_evidence_rows,
+        )
 
         logs += merge_fetch_evidence_into_steps(
             logs, fetch_evidence_rows(tool_rows),
             list(getattr(runner, "journal", None) or []),
         )
+        # 036+：诊断脚本证据行（执行中写代码取证；标题/耗时/计数）
+        logs += script_evidence_rows(tool_rows)
     else:
         logs = tool_rows
     if not logs:

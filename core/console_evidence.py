@@ -18,8 +18,9 @@ MAX_ENTRY_CHARS = 300
 # 解析时跳过的结构性行（playwright-mcp 输出包装）
 _SKIP_PREFIXES = ("###", "total messages", "total:", "console messages", "no console messages")
 
-# "Returning 0 messages for level \"error\"" 这类零命中计数行不是证据（2026-10-10 实测污染步骤视图）
-_ZERO_COUNT_RE = re.compile(r"^returning\s+0\s+messages?\b", re.IGNORECASE)
+# "Returning 0 messages for level \"error\"" 这类计数行是元信息不是证据（2026-10-10 实测污染步骤视图；
+# 2026-10-16：非零计数行同为空转噪声——条目本身才是证据，favicon 过滤后只剩头行更显突兀）
+_COUNT_HEADER_RE = re.compile(r"^returning\s+\d+\s+messages?\b", re.IGNORECASE)
 
 
 def parse_console_messages(text: str | None) -> list[str]:
@@ -31,7 +32,7 @@ def parse_console_messages(text: str | None) -> list[str]:
             continue
         if s.lower().startswith(_SKIP_PREFIXES):
             continue
-        if _ZERO_COUNT_RE.match(s):
+        if _COUNT_HEADER_RE.match(s):
             continue
         # 浏览器通用噪声（favicon 404）：不作为证据（2026-10-16 用户反馈报告噪声）
         if "favicon.ico" in s:

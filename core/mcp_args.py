@@ -178,6 +178,7 @@ ACTION_DESCRIPTIONS = {
     "storage_state_restore": "从文件恢复存储状态（value=文件名）",
     # 036：页面 API 调用（系统级窗口/下载受阻时的替代路径；报告会如实标注「以 API 方式完成」）
     "fetch": "在页面上下文调用页面 API（value=JSON：method/url/headers?/body?/evidence?/filename?；自动携带页面会话；evidence=true 时响应体存为报告证据）",
+    "run_script": "执行诊断脚本（Python 沙箱：db 只读查询/HTTP/平台查询/读 data·reports 文件；用于核对数据与取证；value=脚本代码，element_desc=可读标题）",
 }
 
 
@@ -688,9 +689,12 @@ def build_tool_status(result: dict) -> str:
 
     断言类成功必须携带跨 frame 确认证据——否则 LLM 因快照中
     看不到非交互文本而拒绝宣告 done，陷入截图自证循环。
+    036+：诊断脚本结果（result["script"]）输出回喂模型（节选）。
     """
     if not result.get("success"):
         return f"失败: {result.get('error', '未知')}"
+    if result.get("script") is not None and result.get("text"):
+        return str(result["text"])[:2500]
     text = str(result.get("text") or "")
     if "visible in" in text:
         where = text.split("in")[-1].strip() or "?"

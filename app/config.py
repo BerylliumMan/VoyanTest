@@ -70,9 +70,9 @@ class Settings(BaseSettings):
     # - 探索视觉（每轮决策附当前页面截图；deepseek-v4.1-flash 等多模态模型可直接读图，
     #   判断布局/遮挡/验证码。关闭=纯文本快照；模型不支持图片时自动降级）
     chat_browse_vision: bool = True
-    # - run_code 动作（browser_run_code_unsafe）：红线段——在 Playwright 服务端进程执行
-    #   任意 JS（RCE 等价）。默认关闭；仅显式开启后执行链才放行（探索链永不使用）
-    exec_run_code_enabled: bool = False
+    # - run_code 动作（browser_run_code_unsafe）：在 Playwright 服务端进程执行任意 JS。
+    #   2026-10-16 起默认开启（用户决策：任意代码默认开）；关闭后执行链拦截（探索链永不使用）
+    exec_run_code_enabled: bool = True
     # - B2 运行证据：网络问题请求摘要（默认开；激进的失败排查素材）
     exec_network_evidence: bool = True
     exec_network_max_entries: int = 10
@@ -106,8 +106,10 @@ class Settings(BaseSettings):
     # - 外部接入活跃会话全局上限（MCP /mcp）
     chat_external_max_sessions: int = 4
     # 036 页面 API 调用与沙箱诊断脚本：
-    # - 诊断脚本工具总开关（默认关闭；开启后全体对话用户可用、免逐次审批）
-    chat_script_enabled: bool = False
+    # - 诊断脚本工具总开关（2026-10-16 起默认开启；关闭后工具不可见/调用被拒）
+    chat_script_enabled: bool = True
+    # - 执行链诊断脚本动作（run_script：用例执行中写 Python 查库/调接口/核对数据）
+    exec_script_enabled: bool = True
     # - 诊断脚本执行超时上限（毫秒；接口测试脚本的既有 2000ms 语义不变）
     chat_script_timeout_ms: int = 30000
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
