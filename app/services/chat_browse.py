@@ -273,6 +273,16 @@ async def _run_browse_task(
 
         _llm = build_streaming_llm(on_event=_on_event, agent_id=assistant_agent_id)
 
+        # 验证码识别（ZCode 方式）：验证码图片直接交多模态模型读图分析（无本地 OCR 组件）
+        async def _captcha_llm(messages):
+            from app.gen.model_client import call_model
+
+            return await call_model(messages, agent_type="assistant", agent_id=assistant_agent_id)
+
+        from core.captcha import make_model_captcha_solver
+
+        _captcha_solver = make_model_captcha_solver(_captcha_llm)
+
         cfg = BrowseConfig(
             url=url, goal=goal, username=username, password=password,
             max_steps=max_steps, timeout_s=timeout_s,
@@ -315,6 +325,7 @@ async def _run_browse_task(
             browser=browser,
             screenshot_dir=_browse_dir(conversation_id, browse_id),
             on_event=_on_event,
+            captcha_solver=_captcha_solver,
         )
         report["browser_mode"] = browser_mode
         report["agent_name"] = agent_name

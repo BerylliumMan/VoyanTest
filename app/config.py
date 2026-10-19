@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     chat_browse_enabled: bool = True
     chat_browse_max_steps: int = 22
     chat_browse_timeout_s: int = 300
-    # - 探索/登录时的图形验证码自动识别（ddddocr；关闭=引擎拒绝 solve_captcha 动作）
+    # - 探索/登录时的图形验证码自动识别（模型读图分析；关闭=引擎拒绝 solve_captcha 动作）
     chat_browse_captcha_enabled: bool = True
     # - 探索视觉（每轮决策附当前页面截图；deepseek-v4.1-flash 等多模态模型可直接读图，
     #   判断布局/遮挡/验证码。关闭=纯文本快照；模型不支持图片时自动降级）

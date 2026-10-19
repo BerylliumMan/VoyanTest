@@ -1,7 +1,9 @@
-"""验证码自动识别与填写（2026-10-14）：core/captcha.py + core/captcha_solver.py + 探索主循环集成。
+"""验证码自动识别与填写（2026-10-14 首版；2026-10-19 改为模型读图，ZCode 方式）：
+core/captcha.py（模型读图识别器 + 填写流程）+ 探索主循环集成。
 
-覆盖：OCR 封装（data URL 解码 / 算术验证码 / 组件缺失降级）、识别-填写-校验流程
-（ref 填写 / JS 回退 / 捕获失败）、探索主循环 solve_captcha 动作（成功日志 / 刷新传递 / 关闭开关）。
+覆盖：模型读图识别器（答案提取 / 错误如实返回 / 异步解包）、识别-填写-校验流程
+（ref 填写 / JS 回退 / 捕获失败 / 补填凭据）、探索主循环 solve_captcha 动作
+（成功日志 / 刷新传递 / 注入识别器 / 关闭开关）。
 """
 import base64
 import json
@@ -9,8 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from core import captcha_solver
-from core.captcha import _capture_js, solve_captcha_via_browser
+from core.captcha import (
+    _capture_js,
+    _parse_model_captcha_reply,
+    make_model_captcha_solver,
+    solve_captcha_via_browser,
+)
 from core.chat import browse
 from core.chat.browse import BrowseConfig, run_exploration
 
@@ -26,72 +32,56 @@ _IMG_1PX_PNG = (
 
 
 # ----------------------------
-# captcha_solver（OCR 封装）
+# 模型读图识别器（ZCode 方式）
 # ----------------------------
 
-def test_solver_cleans_text_and_strips_noise(monkeypatch):
-    class FakeOcr:
-        def classification(self, payload):
-            assert payload  # 已解码的图片字节
-            return " A1b2! "
-
-    monkeypatch.setattr(captcha_solver, "_get_ocr", lambda beta=False: FakeOcr())
-    text, err = captcha_solver.solve_text_captcha(_IMG_1PX_PNG)
-    assert err == "" and text == "A1b2"
-
-
-def test_solver_arithmetic_captcha_computed(monkeypatch):
-    class FakeOcr:
-        def classification(self, payload):
-            return "3+4=?"
-
-    monkeypatch.setattr(captcha_solver, "_get_ocr", lambda beta=False: FakeOcr())
-    text, err = captcha_solver.solve_text_captcha(_IMG_1PX_PNG)
-    assert err == "" and text == "7"
-    assert captcha_solver.solve_arithmetic("6×7=?") == "42"
-    assert captcha_solver.solve_arithmetic("9-4") == "5"
-    assert captcha_solver.solve_arithmetic("ABCD") is None
+def test_parse_model_reply_variants():
+    assert _parse_model_captcha_reply("11") == "11"
+    assert _parse_model_captcha_reply(" 答案是 11。") == "11"
+    assert _parse_model_captcha_reply("4+7=?") == "11"          # 复述算式 → 兜底计算
+    assert _parse_model_captcha_reply("图中是 4+7=?，答案是 11") == "11"
+    assert _parse_model_captcha_reply("The answer is 11") == "11"
+    assert _parse_model_captcha_reply("The characters are A1B2") == "A1B2"
+    assert _parse_model_captcha_reply("A1B2") == "A1B2"
+    assert _parse_model_captcha_reply("ABCDE", prefer_len=4) == "ABCD"
+    assert _parse_model_captcha_reply("") == ""
+    assert _parse_model_captcha_reply("！！！") == ""
 
 
-def test_solver_prefer_len_picks_matching_result(monkeypatch):
-    """给出输入框 maxlength 时，优先采用长度一致的结果（不同模型组合择优）。"""
-    def _fake_get_ocr(beta=False):
-        class _Ocr:
-            def classification(self, payload):
-                return "AB12X" if not beta else "AB12"  # 默认模型多识别出一个噪声字符
+@pytest.mark.asyncio
+async def test_model_solver_sends_image_and_returns_answer():
+    calls: list[list[dict]] = []
 
-        return _Ocr()
+    async def _llm(messages):
+        calls.append(messages)
+        return "11"
 
-    monkeypatch.setattr(captcha_solver, "_get_ocr", _fake_get_ocr)
-    text, err = captcha_solver.solve_text_captcha(_IMG_1PX_PNG, prefer_len=4)
-    assert err == "" and text == "AB12"
-    # 无长度约束：直接返回首个非空结果
-    text2, err2 = captcha_solver.solve_text_captcha(_IMG_1PX_PNG)
-    assert err2 == "" and text2 == "AB12X"
-
-
-def test_solver_all_empty_reports_error(monkeypatch):
-    class FakeOcr:
-        def classification(self, payload):
-            return "  !!!  "
-
-    monkeypatch.setattr(captcha_solver, "_get_ocr", lambda beta=False: FakeOcr())
-    text, err = captcha_solver.solve_text_captcha(_IMG_1PX_PNG)
-    assert text == "" and "为空" in err
+    solver = make_model_captcha_solver(_llm)
+    text, err = await solver("data:image/png;base64,AAAA")
+    assert text == "11" and err == ""
+    # 验证码图片以 image_url content part 传给模型
+    parts = calls[0][1]["content"]
+    assert any(p.get("type") == "image_url" for p in parts)
 
 
-def test_solver_unavailable_degrades(monkeypatch, caplog):
-    def _boom(beta=False):
-        raise ImportError("no ddddocr")
+@pytest.mark.asyncio
+async def test_model_solver_error_reports_failure():
+    async def _boom(messages):
+        raise RuntimeError("gateway down")
 
-    monkeypatch.setattr(captcha_solver, "_get_ocr", _boom)
-    text, err = captcha_solver.solve_text_captcha(_IMG_1PX_PNG)
-    assert text == "" and "不可用" in err
+    solver = make_model_captcha_solver(_boom)
+    text, err = await solver("data:image/png;base64,AAAA")
+    assert text == "" and "模型验证码分析失败" in err
 
 
-def test_solver_invalid_data_url():
-    text, err = captcha_solver.solve_text_captcha("%%%not-base64%%%")
-    assert text == "" and err
+@pytest.mark.asyncio
+async def test_model_solver_unparsable_reply_reports_failure():
+    async def _llm(messages):
+        return "！！！"
+
+    solver = make_model_captcha_solver(_llm)
+    text, err = await solver("data:image/png;base64,AAAA")
+    assert text == "" and "未能从验证码图片中读出答案" in err
 
 
 # ----------------------------
@@ -235,10 +225,33 @@ async def test_solve_flow_clamps_to_maxlength():
 
 
 @pytest.mark.asyncio
-async def test_solve_flow_ocr_error():
+async def test_solve_flow_async_model_solver_awaited():
+    """异步识别器（模型读图）需被等待：回归 solve_fn 返回 coroutine 未 await 的缺陷。"""
     browser = FakeCaptchaBrowser()
-    result = await solve_captcha_via_browser(browser, input_ref="e9", solve_fn=lambda _: ("", "识别失败"))
-    assert not result["ok"] and "识别失败" in result["error"]
+
+    async def _async_solver(url, *, prefer_len=None):
+        return "11", ""
+
+    result = await solve_captcha_via_browser(browser, input_ref="e9", solve_fn=_async_solver)
+    assert result["ok"] and result["text_len"] == 2
+    fills = [a for a in browser.actions if a.get("action") == "fill"]
+    assert fills and fills[0]["value"] == "11"
+
+
+@pytest.mark.asyncio
+async def test_solve_flow_requires_solver():
+    """未配置识别器（无 OCR 兜底）→ 如实返回错误。"""
+    browser = FakeCaptchaBrowser()
+    result = await solve_captcha_via_browser(browser, input_ref="e9")
+    assert not result["ok"] and "识别器未配置" in result["error"]
+    assert not browser.actions
+
+
+@pytest.mark.asyncio
+async def test_solve_flow_solver_error():
+    browser = FakeCaptchaBrowser()
+    result = await solve_captcha_via_browser(browser, input_ref="e9", solve_fn=lambda _: ("", "模型验证码分析失败（TimeoutError）"))
+    assert not result["ok"] and "模型验证码分析失败" in result["error"]
 
 
 def test_capture_js_refresh_flag():
@@ -285,14 +298,17 @@ async def _llm_script(decisions):
     return _llm
 
 
-async def _run(monkeypatch, browser, decisions, **cfg_kw):
-    monkeypatch.setattr(
-        "core.captcha_solver.solve_text_captcha", lambda data_url: ("A1B2", "")
-    )
+async def _fake_solver(url, *, prefer_len=None):
+    return "A1B2", ""
+
+
+async def _run(monkeypatch, browser, decisions, solver=None, **cfg_kw):
     llm = await _llm_script(decisions)
     base = dict(url="http://site.local", goal="登录", username="admin", password="x")
     base.update(cfg_kw)
-    return await run_exploration(BrowseConfig(**base), llm=llm, browser=browser)
+    return await run_exploration(
+        BrowseConfig(**base), llm=llm, browser=browser, captcha_solver=solver or _fake_solver,
+    )
 
 
 @pytest.mark.asyncio
@@ -322,14 +338,31 @@ async def test_loop_solve_captcha_refresh_passthrough(monkeypatch, patch_candida
 
 
 @pytest.mark.asyncio
+async def test_loop_uses_injected_captcha_solver(monkeypatch, patch_candidates):
+    """探索主循环使用注入的模型读图识别器（不再依赖本地 OCR）。"""
+    patch_candidates([_candidate("e9")])
+    browser = FakeCaptchaBrowser()
+    seen: list[str] = []
+
+    async def _solver(url, *, prefer_len=None):
+        seen.append(url)
+        return "M3N4", ""
+
+    report = await _run(monkeypatch, browser, [
+        {"thinking": "识别验证码", "action": "solve_captcha", "ref": "e9"},
+        {"thinking": "完成", "action": "done", "summary": "ok"},
+    ], solver=_solver)
+    fills = [a for a in browser.actions if a.get("action") == "fill"]
+    assert seen and fills and fills[0]["value"] == "M3N4"
+    steps = [s for s in report["steps"] if s["action"] == "solve_captcha"]
+    assert steps and steps[0]["ok"]
+
+
+@pytest.mark.asyncio
 async def test_loop_solve_captcha_failure_reason_in_step(monkeypatch, patch_candidates):
     """识别失败时步骤文案带失败原因（实测加固：此前只有「失败」无从定位）。"""
     patch_candidates([_candidate("e9")])
 
-    monkeypatch.setattr(
-        "core.captcha_solver.solve_text_captcha",
-        lambda data_url: ("", "未找到验证码图片（img/canvas）"),
-    )
     browser = FakeCaptchaBrowser(capture={"ok": False, "error": "未找到验证码图片（img/canvas）"})
     events: list[dict] = []
 
@@ -343,6 +376,7 @@ async def test_loop_solve_captcha_failure_reason_in_step(monkeypatch, patch_cand
     base = dict(url="http://site.local", goal="登录", username="admin", password="x")
     report = await run_exploration(
         BrowseConfig(**base), llm=llm, browser=browser, on_event=_on_event,
+        captcha_solver=_fake_solver,
     )
     step_events = [e for e in events if e.get("kind") == "step" and "验证码" in str(e.get("label"))]
     assert step_events, "未发出验证码步骤事件"

@@ -1,10 +1,11 @@
 # core/captcha.py
 """验证码自动识别与填写（浏览器无关层）——服务端无头 / 客户端可见浏览器通用。
 
-流程（2026-10-14，对话浏览器探索登录）：
+流程（2026-10-14 首版；2026-10-19 改为模型读图）：
 1. 页面内 JS 定位验证码图片（img/canvas：按 captcha 关键词 + 与验证码输入框的距离打分），
    可选先点击图片刷新；将图片转 data URL（canvas 绘制，跨域时回退 fetch）；
-2. 服务端 OCR（core/captcha_solver，ddddocr）识别文本/算术结果；
+2. 读图分析（ZCode 方式）：验证码图片直接交给多模态大模型（`make_model_captcha_solver`），
+   读出字符或计算算术结果（无本地 OCR 组件）；
 3. 填写：优先模型给出的验证码输入框 ref；失败/无标记时回退 JS 原生 setter 写入；
 4. 校验：读取标记输入框的值确认写入成功；失败如实返回错误（不伪造成功）。
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -193,6 +195,85 @@ def _refill_js(username: str, password: str) -> str:
     )
 
 
+# ----------------------------
+# 模型读图分析（ZCode 方式，2026-10-19）：验证码图片直接交给多模态大模型。
+# 不保留本地 OCR 组件；识别失败由探索流程如实报告并刷新重试。
+# ----------------------------
+
+_CAPTCHA_VISION_PROMPT = (
+    "这是一张验证码图片。请分析图片内容，并只回复需要填入输入框的答案：\n"
+    "1) 若图中是算术题（如「4+7=?」），只回复计算结果（纯数字，如 11）；\n"
+    "2) 若图中是字符验证码，只回复图中字符（区分大小写，不要多余字符）；\n"
+    "只回复答案本身，不要解释、不要标点、不要引号。"
+)
+
+
+def _parse_model_captcha_reply(raw: str, prefer_len: int | None = None) -> str:
+    """从模型回复中提取验证码答案（模型按提示只回复答案时直接命中；其余为兜底解析）。"""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    # 1) 整体即答案（容忍首尾标点/空白；须为纯 ASCII 字母数字）
+    core = s.strip(" \t\r\n。．.，,：:；;！!？?\"'“”‘’（）()")
+    compact = core.replace(" ", "")
+    if compact and compact.isascii() and compact.isalnum() and len(compact) <= 12:
+        if prefer_len and len(compact) > prefer_len:
+            compact = compact[:prefer_len]
+        return compact
+    # 2) 模型复述了算术式（含 = 或 ?）→ 兜底计算
+    if "=" in s or "?" in s or "？" in s:
+        m = re.search(r"(\d{1,3})\s*([+\-×xX*])\s*(\d{1,3})", s)
+        if m:
+            a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+            if op == "+":
+                return str(a + b)
+            if op == "-":
+                return str(a - b)
+            return str(a * b)
+    # 3) 取最后一个长度≥2 的字母数字片段（跳过解释词/计数）
+    tokens = re.findall(r"[A-Za-z0-9]+", s)
+    if not tokens:
+        return ""
+    cands = [t for t in tokens if len(t) >= 2] or tokens
+    value = cands[-1]
+    if len(value) > 12:
+        return ""
+    if prefer_len and len(value) > prefer_len:
+        value = value[:prefer_len]
+    return value
+
+
+def make_model_captcha_solver(llm):
+    """构造「模型读图」验证码识别器（ZCode 方式）。
+
+    ``llm(messages) -> str``：多模态模型调用（messages 支持 image_url content part）。
+    无本地 OCR 兜底：模型调用失败或未读出答案时如实返回错误（由探索流程刷新重试）。
+    """
+
+    async def _solve(img_data_url: str, *, prefer_len: int | None = None) -> tuple[str, str]:
+        hint = f"\n（提示：输入框最多 {int(prefer_len)} 个字符）" if prefer_len else ""
+        try:
+            raw = await llm([
+                {"role": "system", "content": "你是验证码识别助手，只回复要填入输入框的答案本身。"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _CAPTCHA_VISION_PROMPT + hint},
+                        {"type": "image_url", "image_url": {"url": img_data_url}},
+                    ],
+                },
+            ])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("captcha model solve failed: %s", str(exc)[:200])
+            return "", f"模型验证码分析失败（{type(exc).__name__}）"
+        value = _parse_model_captcha_reply(str(raw or ""), prefer_len)
+        if value:
+            return value, ""
+        return "", "模型未能从验证码图片中读出答案"
+
+    return _solve
+
+
 async def solve_captcha_via_browser(
     browser,
     *,
@@ -205,11 +286,11 @@ async def solve_captcha_via_browser(
     """识别并填写验证码；返回 ``{"ok": bool, "note"/"error": str, "text_len": int}``。
 
     ``browser`` 需实现 ``evaluate_json(fn)`` 与 ``act(action)``（服务端/客户端通用）。
-    ``solve_fn`` 可注入（测试用）；默认走 ddddocr（支持 ``prefer_len`` 关键字时会传输入框 maxlength）。
+    ``solve_fn``：验证码识别器（ZCode 方式=模型读图，``make_model_captcha_solver``；异步函数亦可）。
     ``username``/``password``：登录重试前确定性补填「被站点清空的」账号/密码框（仅空字段）。
     """
     if solve_fn is None:
-        from core.captcha_solver import solve_text_captcha as solve_fn  # type: ignore[no-redef]
+        return {"ok": False, "error": "验证码识别器未配置（需传入模型读图识别器）"}
 
     accepts_prefer_len = False
     try:
@@ -238,9 +319,15 @@ async def solve_captcha_via_browser(
         return cap if isinstance(cap, dict) else {}
 
     async def _solve(img_data_url: str, prefer: int | None) -> tuple[str, str]:
+        import inspect as _inspect
+
         if prefer and accepts_prefer_len:
-            return solve_fn(img_data_url, prefer_len=prefer)
-        return solve_fn(img_data_url)
+            out = solve_fn(img_data_url, prefer_len=prefer)
+        else:
+            out = solve_fn(img_data_url)
+        if _inspect.isawaitable(out):  # 异步识别器（如模型读图）需等待
+            out = await out
+        return out
 
     cap = await _capture(refresh)
     last_err = str(cap.get("error") or "验证码捕获失败")

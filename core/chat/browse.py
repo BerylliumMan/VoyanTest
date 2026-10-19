@@ -128,14 +128,14 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
 5. 登录失败只重试一次（核对表单后），仍失败就如实收尾（summary 说明失败原因）；
 5b.（图形验证码）登录表单含验证码（输入框占位/标签含「验证码」，旁边有验证码图片）时：
    按 账号 → 密码 → 验证码 → 登录 的顺序操作；验证码一步输出 solve_captcha（ref=验证码输入框的 ref；
-   系统会自动识别并填写，不需要 value，不要询问用户、不要猜测内容）。若登录后仍停留在登录页或提示
+   系统会把验证码图片交给模型读图分析并自动填写，不需要 value，不要询问用户、不要猜测内容）。若登录后仍停留在登录页或提示
    「验证码错误」，输出 solve_captcha 且 refresh=true（先点击验证码图片刷新再识别）重试，最多 3 次
    （验证码错误的重试不受规则 5 的一次限制），仍失败按规则 5 如实收尾。若重试时登录页已被重置（用户名/密码
    输入框为空）：「必须先重新填写账号与密码，再 solve_captcha（refresh=true），最后点击登录」——
-   禁止只改验证码就直接提交。算术型验证码（图片是「1+2=?」这类）系统会自动计算答案，同样用 solve_captcha；
+   禁止只改验证码就直接提交。算术型验证码（图片是「1+2=?」这类）系统读图后会直接给出计算结果，同样用 solve_captcha；
    若系统识别失败（步骤会显示失败原因），先 refresh=true 重试；仍失败则用 note 记录该情况并继续其他步骤；
    若附有页面截图且验证码清晰可读：也可以直接用 fill 把读到的字符填进验证码输入框（截图可直接读图）；
-   不确定或读不清时优先 solve_captcha（本地识别确定性更高）；
+   不确定或读不清时优先 solve_captcha（系统读图分析更可靠）；
 6. 浏览策略：优先点击顶部导航 / 侧边菜单等入口，逐个访问主要功能页面；每到一个新页面，用 note 记录「页面标题：主要功能点」；
 7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；点击失败时系统会自动做遮挡诊断（步骤记录里会附「被遮挡/在视口外/禁用」等结论）——按诊断提示处理（关闭/移开遮挡层、滚动到目标、等动画结束）后再试，不要原样重复点击；动作（点击/提交/跳转）完成后系统会自动给出
    最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
@@ -743,11 +743,13 @@ async def run_exploration(
     browser=None,
     screenshot_dir: Optional[str] = None,
     on_event: Optional[Callable[[dict], Awaitable[None]]] = None,
+    captcha_solver: Optional[Callable] = None,
     max_shots: int = _MAX_SHOTS,
 ) -> dict:
     """执行有界浏览器探索，返回观察报告（任何异常都收敛为报告，不向上抛）。
 
     ``browser`` 省略时使用服务端无头浏览器；也可传 ClientBrowser（客户端可见浏览器）。
+    ``captcha_solver``：验证码识别器（ZCode 方式=模型读图，见 core.captcha.make_model_captcha_solver）。
     """
     owns_browser = browser is None
     journal: list[dict] = []
@@ -968,6 +970,7 @@ async def run_exploration(
 
                 result = await solve_captcha_via_browser(
                     browser, input_ref=(ref or None), refresh=refresh,
+                    solve_fn=captcha_solver,
                     username=cfg.username or "", password=cfg.password or "",
                 )
                 captcha_ok = bool(result.get("ok"))
