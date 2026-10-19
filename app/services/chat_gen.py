@@ -165,7 +165,11 @@ async def start_generation(
         logger.exception("chat gen save files failed")
         return None, "保存生成输入失败", None
 
-    project_description = f"对话生成（会话 #{conversation.id}）"
+    project_description = (
+        f"浏览器探索生成（会话 #{conversation.id}）"
+        if source == "browse"
+        else f"对话生成（会话 #{conversation.id}）"
+    )
     analysis = AnalysisSession(
         session_id=session_id,
         filename=filenames[0],
@@ -258,6 +262,11 @@ async def _watch_generation(conversation_id: int, session_id: str, *, max_iterat
                     })
                     continue
                 if status == "completed":
+                    # 完成后的草稿清理（去重/噪声过滤/空标题派生；幂等）
+                    try:
+                        await _cleanup_completed_drafts(db, record)
+                    except Exception:
+                        logger.debug("draft cleanup failed session=%s", session_id, exc_info=True)
                     tcs = await crud.list_gen_test_cases(db, session_id)
                     card = {**card, "status": "draft", "progress": 100, "items": [_draft_item(tc) for tc in tcs]}
                 elif status == "cancelled":
@@ -278,6 +287,210 @@ async def _watch_generation(conversation_id: int, session_id: str, *, max_iterat
             logger.debug("watch generation failed session=%s consecutive=%s", session_id, consecutive_errors, exc_info=True)
             if consecutive_errors >= 15:
                 return
+
+
+# ----------------------------
+# 生成完成后的草稿清理（2026-10-19：去重 / 空壳剔除 / 探索元信息噪声过滤）
+# ----------------------------
+
+# 报告元信息短语（仅对「浏览器探索生成」来源生效）：这些字样来自我们自己的
+# 观察报告/工具描述，被误当页面元素生成的用例必为垃圾（用户实测批次）
+_BROWSE_META_MARKERS = (
+    "页面探索观察报告",
+    "完成后生成UI用例草稿",
+    "起始站点",
+    "站内链接",
+    "探索过程",
+    "网络请求异常",
+    "结束原因",
+    "探索结论",
+    "主要功能点",
+    "已观察页面",
+    "生成要求",
+)
+
+
+def _norm_sig_text(s) -> str:
+    """签名归一：去空白/标点/序号，仅保留有效字符（用于重复判定）。"""
+    import re as _re
+
+    return _re.sub(r"[\s\d\.、，,：:；;（）()【】\[\]「」『』\-—_]+", "", str(s or "")).lower()
+
+
+def _draft_signature(title: str, steps_text: str) -> str:
+    return f"{_norm_sig_text(title)}::{_norm_sig_text(steps_text)}"
+
+
+def _norm_step_template(t: str) -> str:
+    """步骤模板归一：「断言页面包含X」「断言X可见」「等待X出现」→「断言X」。
+
+    同一断言的不同模板措辞（实测样本：「断言页面包含【项目管理】」vs「断言【项目管理】可见」）
+    应视为等价——重复判定只看断言目标。
+    """
+    out = str(t or "")
+    out = out.replace("页面包含", "").replace("可见", "").replace("出现", "")
+    out = out.replace("等待", "断言")
+    return out
+
+
+def _case_core_steps(steps: list) -> list:
+    """用例核心步骤（去掉开头的「打开/访问」导航步骤后归一）。
+
+    重复判定只比较核心部分——不同用例的差异通常只在首个导航步骤/措辞。
+    """
+    import re as _re
+
+    core: list[str] = []
+    for s in steps or []:
+        txt = str(s).strip()
+        if not core and _re.match(r"^\d+[\.、]?\s*(打开|访问|前往)", txt):
+            continue
+        norm = _norm_step_template(_norm_sig_text(txt))
+        if norm:
+            core.append(norm)
+    return core
+
+
+def _is_subseq(small: list, big: list) -> bool:
+    """small 是否为 big 的有序子序列（用于「薄用例 ⊂ 厚用例」判定）。"""
+    it = iter(big)
+    return all(any(x == y for y in it) for x in small)
+
+
+def _title_ratio(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, a, b).ratio()
+
+
+_HOLLOW_STEP_RE = None
+
+
+def _is_hollow_case(title: str, steps: list) -> bool:
+    """空心用例：唯一一步只是「打开/访问」页面，且标题承诺了未执行的行为。
+
+    如标题「顶栏语言入口切换界面语言」但步骤只有「1. 打开首页」——用例会在执行时
+    失败或空转，属生成噪声（2026-10-19 实测样本）。标题含 打开/访问/查看/校验/页面
+    的薄用例（如「打开 dashboard 页面」）保留。
+    """
+    import re as _re
+
+    if len(steps or []) != 1:
+        return False
+    only = str(steps[0]).strip()
+    if not _re.match(r"^\d+[\.、]?\s*(打开|访问|前往)", only):
+        return False
+    return not _re.search(r"(打开|访问|查看|校验|页面)", str(title or ""))
+
+
+def _is_browse_meta_junk(title: str, steps_text: str) -> bool:
+    blob = _norm_sig_text(f"{title}\n{steps_text}")
+    return any(_norm_sig_text(m) in blob for m in _BROWSE_META_MARKERS)
+
+
+async def _cleanup_completed_drafts(db, record) -> int:
+    """生成完成后的草稿清理：空壳/空心剔除 + 探索来源噪声过滤 + 重复合并 + 空标题派生。
+
+    2026-10-19 用户实测：探索生成的草稿大量重复（「打开首页」×8；同一功能点
+    多条相似用例），且把报告元信息当作页面元素。三层清理：
+    ① 基础：空壳/元信息噪声/空标题派生（全来源）；
+    ② 精确去重：标题+步骤签名完全相同（全来源）；
+    ③ 近重复合并（仅探索来源）：核心步骤等价/包含、标题相似度 ≥0.85、
+       空心单步用例——组内保留核心步骤最长的用例。
+    返回删除条数（幂等：对已清理的会话再跑无副作用）。
+    """
+    tcs = await crud.list_gen_test_cases(db, record.id)
+    browse_src = str(getattr(record, "project_description", "") or "").startswith("浏览器探索生成")
+    seen: set[str] = set()
+    removed = 0
+    remaining: list = []
+    for tc in tcs:
+        steps = [s.strip() for s in (tc.test_steps or "").splitlines() if s.strip()]
+        title = (tc.title or "").strip()
+        if not title and not steps:
+            await crud.delete_gen_test_case_raw(db, tc.id)
+            removed += 1
+            continue
+        if browse_src and _is_browse_meta_junk(title, tc.test_steps or ""):
+            await crud.delete_gen_test_case_raw(db, tc.id)
+            removed += 1
+            continue
+        if browse_src and _is_hollow_case(title, steps):
+            await crud.delete_gen_test_case_raw(db, tc.id)
+            removed += 1
+            continue
+        if not title and steps:
+            # 空标题 → 用首个步骤派生（导入后标题不再为空；用户反馈「还没有标题」）
+            import re as _re
+
+            derived = _re.sub(r"^\d+[\.、]\s*", "", steps[0])[:60]
+            await crud.update_gen_test_case_raw(db, tc.id, {"title": derived})
+            title = derived
+        sig = _draft_signature(title, tc.test_steps or "")
+        if sig in seen:
+            await crud.delete_gen_test_case_raw(db, tc.id)
+            removed += 1
+            continue
+        seen.add(sig)
+        remaining.append(tc)
+
+    # ③ 近重复合并（仅探索来源）
+    if browse_src and len(remaining) > 1:
+        entries = []
+        for tc in remaining:
+            steps = [s.strip() for s in (tc.test_steps or "").splitlines() if s.strip()]
+            entries.append({
+                "tc": tc,
+                "core": _case_core_steps(steps),
+                "ntitle": _norm_sig_text(tc.title or ""),
+            })
+        parent = list(range(len(entries)))
+
+        def _find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                a, b = entries[i], entries[j]
+                dup = False
+                if a["core"] and b["core"] and a["core"] == b["core"]:
+                    dup = True
+                elif (
+                    a["core"] and b["core"] and len(a["core"]) != len(b["core"])
+                ):
+                    short, long_ = (
+                        (a["core"], b["core"]) if len(a["core"]) < len(b["core"]) else (b["core"], a["core"])
+                    )
+                    if _is_subseq(short, long_):
+                        dup = True
+                if not dup and a["ntitle"] and b["ntitle"] and _title_ratio(a["ntitle"], b["ntitle"]) >= 0.85:
+                    dup = True
+                if dup:
+                    ra, rb = _find(i), _find(j)
+                    if ra != rb:
+                        parent[rb] = ra
+        groups: dict[int, list[int]] = {}
+        for i in range(len(entries)):
+            groups.setdefault(_find(i), []).append(i)
+        for members in groups.values():
+            if len(members) <= 1:
+                continue
+            # 组内保留核心步骤最长者（并列取最早）
+            keep = max(members, key=lambda i: (len(entries[i]["core"]), -i))
+            for i in members:
+                if i != keep:
+                    await crud.delete_gen_test_case_raw(db, entries[i]["tc"].id)
+                    removed += 1
+
+    if removed:
+        logger.info(
+            "chat gen cleanup session=%s removed=%s browse=%s",
+            record.id, removed, browse_src,
+        )
+    return removed
 
 
 # ----------------------------

@@ -173,6 +173,40 @@ def build_llm_messages(
     return out
 
 
+def compact_messages(messages: list[dict], max_chars: int) -> list[dict]:
+    """最后一道防线（ZCode 式）：装配后的 messages 总字符超预算时压缩较早内容。
+
+    - 增量摘要（summarize_history）覆盖跨轮历史；本函数兜底 system/引用块/最近消息
+      叠加后仍超预算的场景（2026-10-19 用户反馈「达到上限没有压缩」）；
+    - 保留 system 与最后 2 条不动；从最早的历史消息起逐步截断（首 1200 字符 + 标记），
+      仍超标时压缩较近消息（首 3000 字符）；返回新列表（不改原对象）。
+    """
+    if max_chars <= 0 or not messages:
+        return messages
+
+    def _total(items: list[dict]) -> int:
+        return sum(len(str(m.get("content") or "")) for m in items)
+
+    if _total(messages) <= max_chars:
+        return messages
+    out = [dict(m) for m in messages]
+    for i in range(1, max(1, len(out) - 2)):
+        content = str(out[i].get("content") or "")
+        if len(content) <= 1200:
+            continue
+        out[i]["content"] = content[:1200] + "\n…（上下文自动压缩：该消息较早内容已省略）"
+        if _total(out) <= max_chars:
+            return out
+    for i in range(max(1, len(out) - 2), len(out)):
+        content = str(out[i].get("content") or "")
+        if len(content) <= 3000:
+            continue
+        out[i]["content"] = content[:3000] + "\n…（上下文自动压缩：该消息内容已省略）"
+        if _total(out) <= max_chars:
+            break
+    return out
+
+
 async def summarize_history(llm_call, messages) -> str:
     """把较早消息压缩为摘要；LLM 失败时退化为确定性截断（不抛错）。"""
     if not messages:

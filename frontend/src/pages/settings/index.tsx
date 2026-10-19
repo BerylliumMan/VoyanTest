@@ -8,6 +8,7 @@ import ScheduleManagement from './ScheduleManagement';
 import CITokenManagement from './CITokenManagement';
 import HealingConfig from './HealingConfig';
 import ExecutionBackendConfig from './ExecutionBackendConfig';
+import ChatBrowseConfig from './ChatBrowseConfig';
 import styles from './index.module.less';
 
 const { TabPane } = Tabs;
@@ -32,6 +33,12 @@ function Settings() {
           title={<><IconThunderbolt className={styles.tabIcon} />执行后端</>}
         >
           <ExecutionBackendConfig />
+        </TabPane>
+        <TabPane
+          key="chat-browse"
+          title={<><IconThunderbolt className={styles.tabIcon} />对话与探索</>}
+        >
+          <ChatBrowseConfig />
         </TabPane>
         <TabPane
           key="ci-tokens"

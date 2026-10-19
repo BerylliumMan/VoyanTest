@@ -22,11 +22,27 @@ _ROLE_ONLY_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*[-*]?\s*([a-z][\w-]*)\s*(?:\[|:|\s*$)",
     re.IGNORECASE,
 )
+# 冒号行内文本形式（如 `- generic [ref=f1e9] [cursor=pointer]: 新增`）：
+# 中文后台常见「div 按钮」——非标准控件没有 role/name，但快照在冒号后带可见文案。
+# 此前该文案被丢弃 → 候选渲染为空名，模型「截图里看得到按钮、候选里却找不到」
+# （2026-10-19 实测复现：函件录入类页面 div 工具栏按钮全部空名）。
+_COLON_TEXT_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*[-*]?\s*([a-z][\w-]*)\s*(?:\[[^\]]*\]\s*)*:\s*(.+)$",
+    re.IGNORECASE,
+)
+# 子文本节点形式（如 `<span onclick>新增</span>` → `- generic [ref=e2]:` 下一行
+# `  - text: 新增`）：标签在直接子文本节点上（2026-10-19 实测复现，第三种形态）。
+_TEXT_NODE_RE: Final[re.Pattern[str]] = re.compile(r"^\s*[-*]?\s*text:\s*(.+)$")
 _HIDDEN_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:aria-hidden\s*[=:]\s*['\"]?true|\bhidden\b)", re.IGNORECASE
 )
 _DISABLED_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:aria-disabled\s*[=:]\s*['\"]?true|\bdisabled\b)", re.IGNORECASE
+)
+# 可点击标记：div 按钮/图标按钮（非标准控件）靠 `[cursor=pointer]` 暴露可点性，
+# 截断保护据此把它们视为操作控件（2026-10-19）。
+_CURSOR_POINTER_RE: Final[re.Pattern[str]] = re.compile(
+    r"\[cursor\s*=\s*pointer\]", re.IGNORECASE
 )
 
 
@@ -86,10 +102,37 @@ class LocatorEvidence:
     error: str | None = None
 
 
+def _child_text_label(lines: list[str], idx: int, *, max_look: int = 8) -> str:
+    """取 ref 元素首个直接子文本节点的文案（非标准控件标签的第三种来源）。
+
+    仅当 ref 行的整个更深块中**不出现任何带 ref 的行**时生效——容器里若还有
+    其它可点元素（如工具栏 div 同时包着「新增」文本与「删除」链接），标签会
+    误导点击（2026-10-19 实测：模型点了容器中心、span 的 onclick 不触发），
+    这种情况交由 click 的 text 文案兜底处理。
+    """
+    base_indent = len(lines[idx]) - len(lines[idx].lstrip())
+    label = ""
+    for j in range(idx + 1, min(idx + 1 + max_look, len(lines))):
+        line = lines[j]
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= base_indent:
+            break
+        if _REF_RE.search(line):
+            return ""  # 更深块里还有可点元素，不臆测容器标签
+        if not label:
+            m = _TEXT_NODE_RE.match(line)
+            if m:
+                label = m.group(1).strip().strip('"').strip()[:80]
+    return label
+
+
 def extract_candidates(snapshot: str, *, frame_path: tuple[str, ...] = ()) -> tuple[LocatorCandidate, ...]:
     """Extract role/name/ref candidates from an accessibility snapshot."""
     candidates: list[LocatorCandidate] = []
-    for line in snapshot.splitlines():
+    lines = snapshot.splitlines()
+    for idx, line in enumerate(lines):
         ref_match = _REF_RE.search(line)
         if ref_match is None:
             continue
@@ -98,16 +141,26 @@ def extract_candidates(snapshot: str, *, frame_path: tuple[str, ...] = ()) -> tu
             role = role_name.group(1)
             name = role_name.group(2).strip()
         else:
-            role_only = _ROLE_ONLY_RE.search(line)
-            role = role_only.group(1) if role_only is not None else "unknown"
-            name = ""
+            colon = _COLON_TEXT_RE.match(line)
+            if colon is not None:
+                # 非标准控件（div 按钮等）：取冒号后的可见文案作标签
+                role = colon.group(1)
+                name = colon.group(2).strip().strip('"').strip()[:80]
+            else:
+                role_only = _ROLE_ONLY_RE.search(line)
+                role = role_only.group(1) if role_only is not None else "unknown"
+                name = ""
+        if not name:
+            name = _child_text_label(lines, idx)
         candidates.append(
             LocatorCandidate(
                 ref=ref_match.group(1),
                 role=role,
                 name=name,
                 text=name,
-                attributes={},
+                attributes=(
+                    {"cursor": "pointer"} if _CURSOR_POINTER_RE.search(line) else {}
+                ),
                 frame_path=frame_path,
                 visible=not _HIDDEN_RE.search(line),
                 enabled=not _DISABLED_RE.search(line),
@@ -225,13 +278,56 @@ def actionable_candidates(
     )
 
 
+# 候选截断保护（2026-10-19）：中文后台列表页动辄数百个行内链接/复选框，
+# 静默截断会把工具栏按钮挤出模型可见范围（实测复现：DOM 后置的「新增」按钮
+# ref 排在第 621 位，前 80 截断后完全不可见；模型只能在截图里干瞪眼）。
+# 截断时按角色优先级挑选：操作控件 > 链接/复选框 > 其它；保持原顺序输出。
+_CONTROL_ROLES: Final[frozenset[str]] = frozenset({
+    "button", "textbox", "searchbox", "combobox", "switch", "tab",
+    "menuitem", "menuitemcheckbox", "menuitemradio", "slider", "spinbutton", "listbox",
+})
+_SECONDARY_ROLES: Final[frozenset[str]] = frozenset({
+    "link", "checkbox", "radio", "option", "treeitem",
+})
+
+
+def prioritize_candidates(
+    candidates: tuple[LocatorCandidate, ...], cap: int,
+) -> tuple[tuple[LocatorCandidate, ...], int]:
+    """截断保护：候选超限时优先保留操作控件，返回 (选中候选, 被省略数)。
+
+    未超限时原样返回（omitted=0）。选中的候选保持原顺序，方便模型理解页面结构。
+    """
+    if cap <= 0 or len(candidates) <= cap:
+        return tuple(candidates), 0
+
+    def _tier(candidate: LocatorCandidate) -> int:
+        role = (candidate.role or "").lower()
+        if role in _CONTROL_ROLES:
+            return 0
+        if role in _SECONDARY_ROLES:
+            return 1
+        # 非标准控件（div 按钮/图标按钮）：cursor=pointer 即视为操作控件
+        if candidate.attributes.get("cursor") == "pointer":
+            return 0
+        return 2
+
+    ranked = sorted(range(len(candidates)), key=lambda i: (_tier(candidates[i]), i))
+    keep = sorted(ranked[:cap])
+    return tuple(candidates[i] for i in keep), len(candidates) - cap
+
+
 def serialize_candidates(
     candidates: tuple[LocatorCandidate, ...],
     max_candidates: int = 40,
 ) -> str:
     """Serialize bounded semantic candidate data for a model decision."""
-    return "\n".join(
+    selected, omitted = prioritize_candidates(candidates, max_candidates)
+    lines = [
         f"- ref={candidate.ref} role={candidate.role} name={candidate.name!r} "
         f"frame={'>'.join(candidate.frame_path) or 'main'}"
-        for candidate in candidates[:max_candidates]
-    )
+        for candidate in selected
+    ]
+    if omitted:
+        lines.append(f"（另有 {omitted} 个候选未列出：优先展示按钮/输入框等操作控件）")
+    return "\n".join(lines)

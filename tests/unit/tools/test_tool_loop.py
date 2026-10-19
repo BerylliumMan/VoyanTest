@@ -233,3 +233,26 @@ async def test_events_emitted(registry, make_tool, make_handler, monkeypatch):
     assert end["ok"] is True
     assert end["duration_ms"] >= 0
     assert end["truncated"] is False
+
+
+def test_compact_tool_messages_truncates_older_results(monkeypatch):
+    """2026-10-19：工具循环内上下文压缩——较早工具结果截断，最近两条保留。"""
+    from types import SimpleNamespace
+
+    from core.tools import loop as tl
+
+    monkeypatch.setattr(
+        "app.runtime_config.chat_browse_config",
+        SimpleNamespace(context_max_chars=4000),
+    )
+    msgs = [{"role": "system", "content": "s" * 50}]
+    for i in range(5):
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 3000})
+    msgs.append({"role": "user", "content": "tail"})
+
+    tl._compact_tool_messages(msgs)
+
+    assert "已压缩" in msgs[1]["content"]   # 最早的工具结果被压缩
+    assert "已压缩" in msgs[2]["content"]
+    assert msgs[5]["content"] == "x" * 3000  # 最近的结果保留
+    assert msgs[-1]["content"] == "tail"

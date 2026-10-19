@@ -161,6 +161,67 @@ def save_execution_backend_config(cfg: ExecutionBackendConfig | None = None) -> 
 load_execution_backend_config()
 
 
+# ----------------------------
+# 对话与探索配置（2026-10-19）：浏览器探索上限/开关 + 对话上下文预算
+# ----------------------------
+
+class ChatBrowseConfig(BaseModel):
+    """系统设置 → 对话与探索（运行时配置，持久化 data/chat_browse.json）。
+
+    - enabled/max_steps/timeout_s/vision/captcha_enabled/js_probe：浏览器探索参数
+      （此前只有 app/config.py 环境默认值，用户无法在界面调整——2026-10-19 反馈）；
+    - context_max_chars/context_keep_messages：对话上下文预算与压缩保留条数
+      （超出时增量摘要较早消息 + 强制压缩兜底）。
+    """
+
+    enabled: bool = True
+    max_steps: int = Field(default=22, ge=5, le=60)
+    timeout_s: int = Field(default=300, ge=60, le=1800)
+    vision: bool = True
+    captcha_enabled: bool = True
+    js_probe: bool = True
+    context_max_chars: int = Field(default=24000, ge=6000, le=200000)
+    context_keep_messages: int = Field(default=12, ge=4, le=50)
+
+
+chat_browse_config = ChatBrowseConfig()
+_CHAT_BROWSE_PATH = Path(
+    os.environ.get("VOYANTEST_CHAT_BROWSE_FILE", "data/chat_browse.json")
+)
+
+
+def load_chat_browse_config() -> ChatBrowseConfig:
+    """从磁盘加载对话与探索配置；文件缺失或损坏时保留当前内存默认。"""
+    global chat_browse_config
+    path = _CHAT_BROWSE_PATH
+    try:
+        if not path.is_file():
+            return chat_browse_config
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        chat_browse_config = ChatBrowseConfig.model_validate(raw)
+        logger.info("Loaded chat browse config from %s", path)
+    except Exception as exc:
+        logger.warning("Failed to load chat browse config from %s: %s", path, exc)
+    return chat_browse_config
+
+
+def save_chat_browse_config(cfg: ChatBrowseConfig | None = None) -> None:
+    """将对话与探索配置写入磁盘。"""
+    global chat_browse_config
+    if cfg is not None:
+        chat_browse_config = cfg
+    path = _CHAT_BROWSE_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(chat_browse_config.model_dump_json(indent=2), encoding="utf-8")
+        logger.info("Saved chat browse config to %s", path)
+    except Exception as exc:
+        logger.warning("Failed to save chat browse config to %s: %s", path, exc)
+
+
+load_chat_browse_config()
+
+
 def render_prompt_variables(template: str, **variables: str) -> str:
     """Replace ``{var}`` / ``{{var}}`` placeholders without interpreting other braces.
 

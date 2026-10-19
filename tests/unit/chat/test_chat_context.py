@@ -76,6 +76,11 @@ async def test_summary_over_threshold_incremental(chat_store, monkeypatch):
         orch, "get_settings",
         lambda: SimpleNamespace(chat_context_max_chars=50, chat_summary_keep_messages=1),
     )
+    # 2026-10-19：预算改由运行时配置优先（系统设置 → 对话与探索）
+    monkeypatch.setattr(
+        "app.runtime_config.chat_browse_config",
+        SimpleNamespace(context_max_chars=50, context_keep_messages=1),
+    )
     conv = FakeConversation()
     msgs = [
         FakeMessage(content="A" * 40),
@@ -136,3 +141,23 @@ async def test_settings_block_ui_default():
     conv = FakeConversation(case_kind="ui")
     block = await orch._conversation_settings_block(None, conv)
     assert "UI 自动化用例" in block
+
+
+def test_compact_messages_truncates_when_over_budget():
+    """2026-10-19：装配后超预算的确定性压缩（system 与最近消息优先保留）。"""
+    from core.chat import context
+
+    msgs = [
+        {"role": "system", "content": "S" * 100},
+        {"role": "user", "content": "A" * 5000},
+        {"role": "assistant", "content": "B" * 5000},
+        {"role": "user", "content": "C" * 5000},
+    ]
+    out = context.compact_messages(msgs, 8000)
+
+    assert sum(len(m["content"]) for m in out) <= 8000
+    assert "上下文自动压缩" in out[1]["content"]
+    assert out[0]["content"] == "S" * 100  # system 不动
+    assert msgs[1]["content"] == "A" * 5000  # 不改原对象
+    # 未超限原样返回
+    assert context.compact_messages(msgs, 100000) is msgs

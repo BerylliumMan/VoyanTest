@@ -13,8 +13,30 @@ import os
 import re
 
 _REF_LINE_RE = re.compile(r"\[ref=")
+# 截断保护（2026-10-19）：ref 块整体超限时按行级优先级挑选——
+# 中文后台列表页动辄数百个行内链接/复选框，盲目从头截断会把工具栏按钮
+# 挤出预算（实测：模型「截图里看得到按钮、候选里却拿不到 ref」）。
+_CTRL_LINE_RE = re.compile(
+    r"^\s*[-*]?\s*(button|textbox|searchbox|combobox|switch|tab|menuitem|"
+    r"slider|spinbutton|listbox)\b",
+    re.IGNORECASE,
+)
+_SECONDARY_LINE_RE = re.compile(
+    r"^\s*[-*]?\s*(link|checkbox|radio|option|treeitem)\b", re.IGNORECASE
+)
+_CURSOR_POINTER_RE = re.compile(r"\[cursor\s*=\s*pointer\]", re.IGNORECASE)
 _DEFAULT_MAX_CHARS = 30000
 _MARKER_RESERVE = 60
+
+
+def _ref_line_tier(line: str) -> int:
+    if _CTRL_LINE_RE.search(line):
+        return 0
+    if _SECONDARY_LINE_RE.search(line):
+        return 1
+    if _CURSOR_POINTER_RE.search(line):
+        return 0
+    return 2
 
 
 def max_snapshot_chars() -> int:
@@ -36,14 +58,21 @@ def compress_snapshot(text: str, max_chars: int | None = None) -> str:
     ref_lines = [ln for ln in lines if _REF_LINE_RE.search(ln)]
     text_lines = [ln for ln in lines if not _REF_LINE_RE.search(ln)]
 
-    # 极端情况：ref 块自身超限——按头部截断保最大数量的 ref 行
+    # 极端情况：ref 块自身超限——优先保留操作控件行（按钮/输入框/可点元素），
+    # 再按原顺序补足能放下的其它行；绝不允许把工具栏按钮挤掉（2026-10-19 实测）。
     ref_block = "\n".join(ref_lines)
     if len(ref_block) + _MARKER_RESERVE > limit:
-        cut = ref_block[: limit - len("\n\n[... TRUNCATED]")]
-        nl = cut.rfind("\n")
-        if nl > limit // 2:
-            cut = cut[:nl]
-        return cut + "\n\n[... TRUNCATED]"
+        ranked = sorted(range(len(ref_lines)), key=lambda i: (_ref_line_tier(ref_lines[i]), i))
+        keep: list[int] = []
+        used = 0
+        for i in ranked:
+            cost = len(ref_lines[i]) + 1
+            if used + cost > limit - _MARKER_RESERVE:
+                continue  # 放不下则跳过；更短的低优先级行仍可补足预算
+            keep.append(i)
+            used += cost
+        keep.sort()
+        return "\n".join(ref_lines[i] for i in keep) + "\n\n[... TRUNCATED]"
 
     # 页面根标题（首个非空非 ref 行）置顶保留上下文
     head = next((ln for ln in text_lines if ln.strip()), "")

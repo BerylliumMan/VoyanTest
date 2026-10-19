@@ -247,15 +247,43 @@ def test_build_report_materials():
     text = build_report_materials({
         "goal": "登录并查看主要功能", "started_url": "http://site.local", "summary": "main ok",
         "stopped_reason": "done", "browser_label": "客户端「本机」的浏览器",
-        "pages": [{"url": "http://site.local/a", "title": "A 页"}],
-        "features": ["登录", "报表"],
+        "pages": [
+            {"url": "http://site.local/a", "title": "A 页"},
+            {"url": "http://site.local/a", "title": "A 页"},  # 重复页面 → 去重
+        ],
+        "features": ["登录", "登录", "报表"],  # 重复功能点 → 去重
         "steps": [{"action": "click", "target": "button:登录", "ok": True, "note": "进入首页"}],
         "console": ["[ERROR] x"],
     })
-    assert "# 页面探索观察报告" in text
+    assert "# UI 自动化测试用例生成材料" in text
+    assert "【生成要求" in text  # 防元信息污染：顶部生成要求
+    assert "禁止把本材料的标题、章节名、元信息" in text
     assert "主要功能点" in text and "- 登录" in text
-    assert "A 页" in text and "客户端「本机」的浏览器" in text
-    assert "[ERROR] x" in text
+    assert text.count("- A 页") == 1  # 页面去重
+    assert text.count("- 登录") == 1  # 功能点去重
+    assert "A 页" in text and "客户端「本机」的浏览器" not in text  # 探索方式不再进材料
+    # 二次修复：过程/控制台/网络等原始记录不再进材料（切断「打开【探索过程】」类污染源）
+    assert "[ERROR] x" not in text
+    assert "### 探索过程" not in text and "### 网络请求异常" not in text
+    assert "button:登录" not in text
+
+
+def test_build_report_materials_features_empty_honest_note():
+    text = build_report_materials({
+        "started_url": "http://site.local", "summary": "未及总结",
+        "pages": [{"url": "http://site.local/a", "title": "A 页"}],
+        "features": [],
+    })
+    assert "未及总结主要功能点" in text and "宁少勿滥" in text
+
+
+def test_build_report_materials_feature_count_directive():
+    text = build_report_materials({
+        "started_url": "http://site.local", "summary": "ok",
+        "pages": [{"url": "http://site.local/a", "title": "A 页"}],
+        "features": ["功能一", "功能二", "功能三"],
+    })
+    assert "主要功能点共 3 条" in text and "每条功能点生成 1 条" in text
 
 
 # ----------------------------
@@ -497,3 +525,78 @@ async def test_vision_image_error_falls_back_text_only(patch_candidates, tmp_pat
     report = await run_exploration(_cfg(), llm=llm, browser=browser, screenshot_dir=str(tmp_path))
     assert report["ok"] is True and report["stopped_reason"] == "done"
     assert isinstance(contents[0], list) and isinstance(contents[1], str)
+
+
+# ----------------------------
+# 候选渲染截断保护（2026-10-19：函件录入类页面「新增」按钮不可见问题）
+# ----------------------------
+
+def test_render_candidates_labels_nonstandard_buttons_and_notice():
+    """div 按钮带标签；候选超限时保控件 + 显式告知截断（不许静默）。"""
+    from core.locator_candidates import LocatorCandidate
+
+    toolbar = (
+        LocatorCandidate("f1e9", "generic", "新增", "新增", {"cursor": "pointer"}, ()),
+        LocatorCandidate("f1e10", "generic", "删除", "删除", {"cursor": "pointer"}, ()),
+    )
+    links = tuple(
+        LocatorCandidate(f"f1e{100 + i}", "link", f"行{i}", f"行{i}", {}, ())
+        for i in range(1, 120)
+    )
+    text = browse._render_candidates(toolbar + links)
+
+    assert '"新增"' in text and '"删除"' in text  # 非标准控件标签可见
+    assert "候选共 121 个" in text and "此处显示 80 个" in text  # 截断告知
+
+
+def test_render_candidates_no_notice_when_fits():
+    from core.locator_candidates import LocatorCandidate
+
+    small = (
+        LocatorCandidate("e1", "button", "登录", "登录", {}, ()),
+        LocatorCandidate("e2", "textbox", "", "", {}, ()),
+    )
+    text = browse._render_candidates(small)
+    assert "候选共" not in text
+    assert "[1] e1 | button | \"登录\"" in text
+
+
+class _BrowserWithSpanText(FakeBrowser):
+    """快照里「新增」是 span 文本（没有自己的 ref，只有承载容器 e2）。"""
+
+    async def snapshot(self):
+        return (
+            "- generic [ref=e2]:\n"
+            "  - text: 新增\n"
+            "  - link \"删除\" [ref=e3] [cursor=pointer]\n"
+        )
+
+
+@pytest.mark.asyncio
+async def test_click_text_fallback_for_span_button(patch_candidates):
+    """span 包文本的按钮：候选里只有承载容器 → click + text 文案兜底成功执行。"""
+    patch_candidates([_candidate("e2", role="generic", name="")])
+    browser = _BrowserWithSpanText()
+    llm = await _llm_script([
+        {"thinking": "文案点击", "action": "click", "text": "新增"},
+        {"thinking": "完成", "action": "done", "summary": "点击完成", "features": []},
+    ])
+    report = await run_exploration(_cfg(), llm=llm, browser=browser)
+    clicks = [a for a in browser.executed if a["action"] == "click"]
+    assert clicks and clicks[0]["selector"] == "text=新增"
+    step = next(s for s in report["steps"] if s["action"] == "click")
+    assert step["ok"] and step["target"] == "text:新增"
+
+
+@pytest.mark.asyncio
+async def test_click_text_fallback_rejects_text_not_in_snapshot(patch_candidates):
+    """文案必须与当前快照逐字一致——不在快照中的 text 被拒绝（防编造）。"""
+    patch_candidates([_candidate("e2", role="generic", name="")])
+    browser = _BrowserWithSpanText()
+    llm = await _llm_script([
+        {"thinking": "编造文案", "action": "click", "text": "删除全部数据"},
+        {"thinking": "完成", "action": "done", "summary": "结束", "features": []},
+    ])
+    report = await run_exploration(_cfg(), llm=llm, browser=browser)
+    assert any("text 不在当前页面快照中" in (s.get("error") or "") for s in report["steps"])
+    assert all(a["action"] == "goto" for a in browser.executed)

@@ -250,6 +250,38 @@ async def _default_llm(messages, *, tools, stream_callback=None, reasoning_callb
     )
 
 
+def _compact_tool_messages(messages: list) -> None:
+    """工具循环内上下文压缩（ZCode 式：快满时压缩较早的工具结果）。
+
+    - 预算 = 运行时配置 context_max_chars（回退环境默认 24000 字符）；
+    - 保留 system 与最近 2 轮（≈4 条）不动；更早的 tool 结果截断为 800 字符 + 标记；
+    - 原地修改（调用方持有同一列表）；无超限时零开销。
+    """
+    try:
+        from app.runtime_config import chat_browse_config as _cb
+
+        budget = int(getattr(_cb, "context_max_chars", 24000) or 24000)
+    except Exception:
+        budget = 24000
+
+    def _total() -> int:
+        return sum(len(str(m.get("content") or "")) for m in messages)
+
+    if _total() <= budget:
+        return
+    keep_from = max(1, len(messages) - 4)
+    for i in range(1, keep_from):
+        m = messages[i]
+        if not isinstance(m, dict) or m.get("role") != "tool":
+            continue
+        content = str(m.get("content") or "")
+        if len(content) <= 800:
+            continue
+        m["content"] = content[:800] + "\n…（较早的工具结果已压缩：仅保留前 800 字符）"
+        if _total() <= budget:
+            return
+
+
 def default_tool_filter(spec_or_name) -> bool:
     """036：门控工具（chat_script_enabled=false 时 run_script 从清单与派发中剔除）。
 
@@ -406,6 +438,10 @@ async def run_tool_loop(
         if stop_reason:
             outcome.notes.append(stop_reason)
             break
+
+        # 上下文压缩（ZCode 式）：工具结果累积超预算时压缩较早的结果，
+        # 防止单轮多工具调用把上下文撑爆（2026-10-19 用户反馈）
+        _compact_tool_messages(messages)
 
         if time.monotonic() > deadline:
             outcome.notes.append(f"任务超出预算（时长 > {timeout_s}s），已终止")

@@ -149,10 +149,14 @@ async def _run_browse_task(
 ) -> None:
     """后台执行探索并链式发起生成（全程卡片回填；异常收敛为 failed 卡片）。"""
     from app.database import AsyncSessionLocal
+    from app.runtime_config import chat_browse_config as _cbcfg
 
     settings = get_settings()
-    max_steps = int(getattr(settings, "chat_browse_max_steps", 14) or 14)
-    timeout_s = int(getattr(settings, "chat_browse_timeout_s", 300) or 300)
+    # 2026-10-19：探索参数改为运行时配置（系统设置 → 对话与探索；缺省回退环境默认值）
+    max_steps = int(getattr(_cbcfg, "max_steps", None) or getattr(settings, "chat_browse_max_steps", 14) or 14)
+    timeout_s = int(getattr(_cbcfg, "timeout_s", None) or getattr(settings, "chat_browse_timeout_s", 300) or 300)
+    _cfg_vision = bool(getattr(_cbcfg, "vision", getattr(settings, "chat_browse_vision", True)))
+    _cfg_captcha = bool(getattr(_cbcfg, "captcha_enabled", getattr(settings, "chat_browse_captcha_enabled", True)))
 
     async def _update(card_mutator) -> None:
         async with AsyncSessionLocal() as db:
@@ -272,8 +276,8 @@ async def _run_browse_task(
         cfg = BrowseConfig(
             url=url, goal=goal, username=username, password=password,
             max_steps=max_steps, timeout_s=timeout_s,
-            captcha_enabled=bool(getattr(settings, "chat_browse_captcha_enabled", True)),
-            vision=bool(getattr(settings, "chat_browse_vision", True)),
+            captcha_enabled=_cfg_captcha,
+            vision=_cfg_vision,
             document_text=document_text,
         )
 
@@ -344,7 +348,7 @@ async def _run_browse_task(
                 if conv is not None:
                     materials = build_report_materials(report)
                     card, err, session_id = await chat_gen.start_generation(
-                        db, conversation=conv, kind=kind, source="text",
+                        db, conversation=conv, kind=kind, source="browse",
                         description=materials, file_ref=None, user_id=user_id,
                     )
                     if card is not None:
@@ -477,11 +481,13 @@ async def stop_browse_tasks(
 async def browse_generate_handler(db, conversation, action: dict, ctx: dict) -> ActionOutcome:
     """浏览器探索生成：启动后台探索任务，返回 running 卡片。"""
     settings = get_settings()
+    from app.runtime_config import chat_browse_config as _cbcfg
+
     if not getattr(settings, "chat_enabled", True):
         return ActionOutcome(ok=False, note="（智能体对话功能已关闭）")
     if not getattr(conversation, "project_id", None):
         return ActionOutcome(ok=False, note="（请先在对话顶部选择项目，再发起浏览器探索）")
-    if not getattr(settings, "chat_browse_enabled", True):
+    if not bool(getattr(_cbcfg, "enabled", getattr(settings, "chat_browse_enabled", True))):
         return ActionOutcome(ok=False, note="（浏览器探索能力已关闭，可在系统设置开启）")
 
     browse_id = uuid.uuid4().hex[:12]

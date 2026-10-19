@@ -214,3 +214,171 @@ async def test_watch_generation_gives_up_after_grace(monkeypatch):
 
     await chat_gen._watch_generation(conv_id, session_id, max_iterations=100)
     assert state["finds"] == 60
+
+
+@pytest.mark.asyncio
+async def test_cleanup_completed_drafts_dedupes_filters_and_derives(monkeypatch):
+    """2026-10-19 用户实测修复：探索生成草稿清理。
+
+    重复合并（「打开首页」×N）/ 元信息噪声过滤（「页面探索观察报告」「起始站点」类
+    报告字样）/ 空壳剔除 / 空标题派生。
+    """
+    from types import SimpleNamespace
+
+    class TC:
+        def __init__(self, id, title, steps):
+            self.id = id
+            self.title = title
+            self.test_steps = steps
+
+    tcs = [
+        TC(1, "打开首页", "1. 打开首页"),
+        TC(2, "打开首页", "1. 打开首页"),                          # 完全重复 → 删
+        TC(3, "打开【页面探索观察报告】", "1. 打开【页面探索观察报告】"),  # 元信息噪声 → 删
+        TC(4, "", "1. 按价格排序商品列表"),                          # 空标题 → 派生
+        TC(5, "", ""),                                             # 空壳 → 删
+        TC(6, "打开站内链接页面", "1. 打开【站内】\n2. 断言页面包含【站内链接】"),  # 探针章节名噪声 → 删
+        TC(7, "查看近7天执行趋势", "1. 打开【探索过程】\n2. 断言图表可见"),  # 章节名污染 → 删
+    ]
+    deleted, updated = [], []
+
+    async def list_tcs(db, sid):
+        return list(tcs)
+
+    async def delete_raw(db, row_id):
+        deleted.append(row_id)
+        return True
+
+    async def update_raw(db, row_id, fields):
+        updated.append((row_id, fields))
+        return None
+
+    monkeypatch.setattr(chat_gen.crud, "list_gen_test_cases", list_tcs)
+    monkeypatch.setattr(chat_gen.crud, "delete_gen_test_case_raw", delete_raw)
+    monkeypatch.setattr(chat_gen.crud, "update_gen_test_case_raw", update_raw)
+
+    record = SimpleNamespace(id="s1", project_description="浏览器探索生成（会话 #1）")
+    removed = await chat_gen._cleanup_completed_drafts(None, record)
+
+    assert removed == 5
+    assert deleted == [2, 3, 5, 6, 7]
+    assert updated and updated[0][0] == 4 and updated[0][1]["title"] == "按价格排序商品列表"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_meta_markers_for_normal_generation(monkeypatch):
+    """普通（非探索）生成不套用元信息噪声过滤——「站内链接」可能是站点真实功能。"""
+    from types import SimpleNamespace
+
+    class TC:
+        def __init__(self, id, title, steps):
+            self.id = id
+            self.title = title
+            self.test_steps = steps
+
+    tcs = [TC(1, "站内链接校验", "1. 打开站内链接页面\n2. 断言页面包含【站内链接】")]
+    deleted = []
+
+    async def list_tcs(db, sid):
+        return list(tcs)
+
+    async def delete_raw(db, row_id):
+        deleted.append(row_id)
+        return True
+
+    monkeypatch.setattr(chat_gen.crud, "list_gen_test_cases", list_tcs)
+    monkeypatch.setattr(chat_gen.crud, "delete_gen_test_case_raw", delete_raw)
+
+    record = SimpleNamespace(id="s2", project_description="对话生成（会话 #1）")
+    removed = await chat_gen._cleanup_completed_drafts(None, record)
+
+    assert removed == 0 and deleted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_near_duplicate_merge_browse(monkeypatch):
+    """近重复合并（仅探索来源）：核心步骤等价/包含、标题相似度、空心用例。
+
+    用 2026-10-19 实测样本（会话 76）构造：
+    - 「执行报告批次对比结果查看」vs「执行报告顶部点击对比批次入口」：核心步骤等价 → 留厚者；
+    - 「查看执行报告列表列与状态标签」⊂「执行报告列表字段展示」：包含 → 留厚者；
+    - 「项目管理页项目列表展示」vs「打开项目管理并查看项目列表」：标题相似 → 合并；
+    - 「全部通过状态标签展示」vs「全部失败状态标签展示」：不同断言 → 都保留；
+    - 空心「顶栏语言入口切换界面语言」（仅 1 步打开首页）→ 删。
+    """
+    from types import SimpleNamespace
+
+    class TC:
+        def __init__(self, id, title, steps):
+            self.id = id
+            self.title = title
+            self.test_steps = steps
+
+    tcs = [
+        TC(1, "执行报告批次对比结果查看", "1. 打开【执行报告】\n2. 点击【对比批次】\n3. 断言【对比批次】可见"),
+        TC(2, "执行报告顶部点击对比批次入口", "1. 打开【执行报告】\n2. 点击【对比批次】\n3. 断言【对比批次】可见"),
+        TC(3, "查看执行报告列表列与状态标签", "1. 打开【执行报告】\n2. 断言页面包含【批次】\n3. 断言页面包含【状态】"),
+        TC(4, "执行报告列表字段展示", "1. 打开【执行报告列表】\n2. 断言页面包含【批次】\n3. 断言页面包含【项目】\n4. 断言页面包含【状态】"),
+        TC(5, "项目管理页项目列表展示", "1. 打开【项目管理】\n2. 断言页面包含【项目管理】"),
+        TC(6, "打开项目管理并查看项目列表", "1. 打开【项目管理】\n2. 断言【项目管理】可见"),
+        TC(7, "全部通过状态标签展示", "1. 打开【执行报告列表】\n2. 等待【状态】出现\n3. 断言页面包含【全部通过】"),
+        TC(8, "全部失败状态标签展示", "1. 打开【执行报告列表】\n2. 等待【状态】出现\n3. 断言页面包含【全部失败】"),
+        TC(9, "顶栏语言入口切换界面语言", "1. 打开首页"),
+    ]
+    deleted = []
+
+    async def list_tcs(db, sid):
+        return [t for t in tcs if t.id not in deleted]
+
+    async def delete_raw(db, row_id):
+        deleted.append(row_id)
+        return True
+
+    async def update_raw(db, row_id, fields):
+        return None
+
+    monkeypatch.setattr(chat_gen.crud, "list_gen_test_cases", list_tcs)
+    monkeypatch.setattr(chat_gen.crud, "delete_gen_test_case_raw", delete_raw)
+    monkeypatch.setattr(chat_gen.crud, "update_gen_test_case_raw", update_raw)
+
+    record = SimpleNamespace(id="s9", project_description="浏览器探索生成（会话 #9）")
+    removed = await chat_gen._cleanup_completed_drafts(None, record)
+
+    assert 9 in deleted          # 空心用例删
+    assert 2 in deleted          # 核心步骤等价 → 留厚者（同长取最早=1）
+    assert 3 in deleted          # 包含 → 留厚者 4
+    assert 5 in deleted or 6 in deleted  # 标题相似 → 合并
+    assert 7 not in deleted and 8 not in deleted  # 不同断言都保留
+    assert removed == len(deleted) == 4
+
+
+@pytest.mark.asyncio
+async def test_cleanup_near_duplicate_not_applied_to_normal_source(monkeypatch):
+    """普通（非探索）来源不套用近重复合并（文档生成的多条相似用例可能是刻意变体）。"""
+    from types import SimpleNamespace
+
+    class TC:
+        def __init__(self, id, title, steps):
+            self.id = id
+            self.title = title
+            self.test_steps = steps
+
+    tcs = [
+        TC(1, "项目管理页项目列表展示", "1. 打开【项目管理】\n2. 断言页面包含【项目管理】"),
+        TC(2, "打开项目管理并查看项目列表", "1. 打开【项目管理】\n2. 断言【项目管理】可见"),
+    ]
+    deleted = []
+
+    async def list_tcs(db, sid):
+        return list(tcs)
+
+    async def delete_raw(db, row_id):
+        deleted.append(row_id)
+        return True
+
+    monkeypatch.setattr(chat_gen.crud, "list_gen_test_cases", list_tcs)
+    monkeypatch.setattr(chat_gen.crud, "delete_gen_test_case_raw", delete_raw)
+
+    record = SimpleNamespace(id="s10", project_description="对话生成（会话 #9）")
+    removed = await chat_gen._cleanup_completed_drafts(None, record)
+    assert removed == 0 and deleted == []

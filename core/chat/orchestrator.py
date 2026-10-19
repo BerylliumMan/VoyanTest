@@ -132,6 +132,13 @@ async def _maybe_update_summary(db, conversation, messages, llm) -> tuple[Option
     settings = get_settings()
     max_chars = int(getattr(settings, "chat_context_max_chars", 24000) or 24000)
     keep = int(getattr(settings, "chat_summary_keep_messages", 12) or 12)
+    try:
+        from app.runtime_config import chat_browse_config as _cb
+
+        max_chars = int(getattr(_cb, "context_max_chars", max_chars) or max_chars)
+        keep = int(getattr(_cb, "context_keep_messages", keep) or keep)
+    except Exception:
+        pass
     total = context.estimate_context_chars(messages)
     if total <= max_chars:
         return conversation.summary, list(messages)
@@ -266,7 +273,7 @@ async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None)
             ]
         except Exception:
             logger.debug("load chat suites failed", exc_info=True)
-    return context.build_llm_messages(
+    msgs = context.build_llm_messages(
         system_prompt=system_prompt,
         summary=summary,
         messages=inject_messages,
@@ -277,6 +284,18 @@ async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None)
         suites=suites,
         settings_block=settings_block,
     )
+    # 最后一道防线：装配后仍超预算 → 压缩较早消息内容（增量摘要之外的兜底）
+    return context.compact_messages(msgs, _context_budget_chars())
+
+
+def _context_budget_chars() -> int:
+    """对话上下文预算（运行时配置优先，回退环境默认）。"""
+    try:
+        from app.runtime_config import chat_browse_config as _cb
+
+        return int(getattr(_cb, "context_max_chars", 24000) or 24000)
+    except Exception:
+        return int(getattr(get_settings(), "chat_context_max_chars", 24000) or 24000)
 
 
 async def _execute_decision(db, conversation, user_id: int, decision: dict, llm) -> tuple:

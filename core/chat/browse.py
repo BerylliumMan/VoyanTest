@@ -119,6 +119,9 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
    弹窗/遮挡、加载是否完成、图形验证码等内容；但元素动作仍必须使用【候选元素】列表中的 ref，
    截图不作为元素定位依据（截图与快照冲突时，以快照候选为准）。
 1. 只能操作【候选元素】列表中真实存在的元素（用其 ref）；禁止编造元素、禁止猜测选择器；
+1b.（文案点击兜底）当目标控件在候选里没有自己的 ref（span/div 包裹的非标准控件、候选里只有
+   承载它的容器）时：给 click 加 "text" 字段——值必须与【页面文本】/快照中的按钮文案逐字一致
+   （如 "text": "新增"）；系统会按该文案定位真实元素并点击。text 不在当前快照中会被拒绝；
 2. 禁止用 JS 注入或修改 URL 来改变页面状态；goto 只允许回到起始地址或站内已访问过的地址；
 3. 禁止破坏性操作：点击名称含「退出/注销/删除/移除/清空/支付/付款/下单/结算/购买」的元素一律不做，改为记录并跳过；
 4. 需要登录时：在登录表单里用 <<USERNAME>> 填账号、<<PASSWORD>> 填密码（占位符原样输出，系统会替换；绝不输出真实凭据），然后点击登录按钮，并确认登录成功（地址变化 / 出现导航菜单 / 出现用户名）；**登录表单优先用 fill_form 一次填完账号+密码（避免分步填写期间验证码/页面过期）**；
@@ -148,6 +151,7 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
   "thinking": "1-3 句：当前页面是什么、下一步做什么及原因",
   "action": "goto|click|fill|press|select|scroll|hover|check|fill_form|dialog|navigate_back|tabs|js_probe|wait|solve_captcha|done",
   "ref": "元素动作必填：候选列表中的 ref（如 e12）；solve_captcha 填验证码输入框的 ref；fill_form 不需要（见 fields）",
+  "text": "click 可选兜底：目标控件的按钮文案（必须与页面文本逐字一致；仅当候选里没有该控件的 ref、只有承载容器时使用，如 \"新增\"）",
   "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数；scroll=像素数|up|down；dialog=accept|dismiss；tabs=list|new|select:N|close；js_probe=links|nav|storage_keys|frameworks；solve_captcha 不需要 value",
   "fields": "fill_form 专用：JSON 数组，一次填写多个字段，如 [{\"target\":\"e11\",\"name\":\"用户名\",\"type\":\"textbox\",\"value\":\"<<USERNAME>>\"},{\"target\":\"e13\",\"name\":\"密码\",\"type\":\"textbox\",\"value\":\"<<PASSWORD>>\"}]（type 可为 textbox/checkbox/radio/combobox/slider；凭据用占位符）",
   "url": "action=goto 时的目标地址",
@@ -447,10 +451,18 @@ def parse_decision(text: str | None) -> Optional[dict]:
 
 
 def _render_candidates(candidates) -> str:
+    from core.locator_candidates import prioritize_candidates
+
+    selected, omitted = prioritize_candidates(tuple(candidates), _MAX_CANDIDATES_IN_PROMPT)
     lines: list[str] = []
-    for idx, c in enumerate(candidates[:_MAX_CANDIDATES_IN_PROMPT], start=1):
+    for idx, c in enumerate(selected, start=1):
         label = (c.name or c.text or "").strip().replace("\n", " ")[:60]
         lines.append(f"[{idx}] {c.ref} | {c.role} | \"{label}\"")
+    if omitted:
+        lines.append(
+            f"（候选共 {len(candidates)} 个，此处显示 {len(selected)} 个："
+            f"优先列出按钮/输入框等操作控件，被省略的多为列表行内链接/复选框）"
+        )
     return "\n".join(lines) if lines else "（无可见可操作元素）"
 
 
@@ -494,7 +506,8 @@ def _round_prompt(cfg: BrowseConfig, *, page: dict, candidates, journal: list[di
 【页面文本（节选，供如实记录提示/校验/数据文案；不要推测未出现的文本）】
 {page_text or '（无）'}
 
-【候选元素】（只能引用这些 ref）
+【候选元素】（只能引用这些 ref；若某目标文案在【页面文本】出现却不在候选里，
+多为非标准控件或候选过多被省略——先重新观察/滚动，禁止编造 ref）
 {_render_candidates(candidates)}
 
 【最近动作】
@@ -655,56 +668,67 @@ def _auto_summary(journal: list[dict], pages: dict, stopped: str) -> str:
     return base
 
 
+def _dedupe_seq(seq) -> list:
+    """去重（空白/标点/序号归一后比较），保持原顺序。"""
+    seen: set[str] = set()
+    out: list = []
+    for item in seq or []:
+        key = re.sub(r"[\s\d\.、，,：:；;（）()【】\[\]「」『』\-—_]+", "", str(item or "")).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 def build_report_materials(report: dict) -> str:
-    """观察报告 → 生成管线材料（需求文档风格，标注来源为自动观察）。"""
+    """观察报告 → 生成管线材料（2026-10-19 二次重写：切断元信息污染源）。
+
+    第一版修复后实测仍漏两类污染：① 模型把「### 探索过程（节选）」「### 网络请求异常」
+    章节标题当作页面名，造出「打开【探索过程】」类步骤；② 控制台/网络噪声被当成
+    「用例」（如「静态资源请求失败记录状态校验」）。根因是原始过程记录进材料后，
+    模型总能把其中的标题/行文当成页面元素。本次直接**不再输出**过程/控制台/网络/
+    链接等原始记录——材料只保留：生成要求 + 站点与结论 + 已观察页面（去重）+
+    主要功能点（去重）；功能点为空时给出「宁少勿滥」的诚实提示。
+    """
+    pages: list[tuple[str, str]] = []
+    seen_pages: set[tuple[str, str]] = set()
+    for p in report.get("pages") or []:
+        url = str(p.get("url") or "").strip()
+        title = str(p.get("title") or "").strip() or "(无标题)"
+        if not url:
+            continue
+        key = (url, title)
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+        pages.append((title, url))
+    features = _dedupe_seq([str(f).strip() for f in (report.get("features") or []) if str(f or "").strip()])
+
     lines = [
-        "# 页面探索观察报告（自动生成，内容均来自真实页面操作，未做推测）",
+        "# UI 自动化测试用例生成材料（来源：浏览器探索观察）",
         "",
-        f"- 探索方式：{report.get('browser_label') or '服务端无头浏览器'}",
-        f"- 目标：{report.get('goal') or ''}",
+        "【生成要求 — 优先遵守】",
+        "1. 本材料是一份「页面观察记录」，不是需求文档：只根据下方「主要功能点」与「已观察页面」生成用例；",
+        "2. 禁止把本材料的标题、章节名、元信息（如「页面探索观察报告」「起始站点」「探索过程」「网络请求异常」「站内链接」等字样）当作页面元素、步骤目标或断言对象；",
+        "3. 用例标题必须具体（动作 + 对象，如「按价格排序商品列表」），禁止「打开首页」这类无信息量标题；同一页面最多一条「打开」步骤，且只在用例需要时保留；",
+        "4. 相同或高度相似的用例只保留一条；重复的功能点合并为一条用例；",
+        "5. 只写实际观察到的页面与功能，不得编造未观察到的弹窗、数据或流程；",
+        f"6. 主要功能点共 {len(features)} 条——请为每条功能点生成 1 条最完整的用例（总数控制在 {len(features)} 条上下）；同一功能点不要生成多条相似用例；已观察页面不必单独生成「打开页面」用例（登录跳转作为必要前置除外）。",
+        "",
         f"- 起始站点：{report.get('started_url') or ''}",
         f"- 探索结论：{report.get('summary') or '（未总结）'}",
-        f"- 结束原因：{report.get('stopped_reason') or ''}",
         "",
-        "## 页面清单",
+        "## 已观察页面",
     ]
-    for p in report.get("pages") or []:
-        lines.append(f"- {p.get('title') or '(无标题)'}：{p.get('url') or ''}")
+    for title, url in pages:
+        lines.append(f"- {title}：{url}")
     lines.append("")
     lines.append("## 主要功能点")
-    for f in report.get("features") or []:
+    for f in features:
         lines.append(f"- {f}")
-    lines.append("")
-    lines.append("## 探索过程（节选）")
-    for st in (report.get("steps") or [])[-20:]:
-        mark = "成功" if st.get("ok") else "失败"
-        seg = f"- {st.get('action')}"
-        if st.get("target"):
-            seg += f" [{st['target']}]"
-        if st.get("value"):
-            seg += f" {st['value']}"
-        seg += f"（{mark}"
-        if st.get("note"):
-            seg += f"；记录：{st['note']}"
-        if st.get("error"):
-            seg += f"；{str(st['error'])[:80]}"
-        seg += "）"
-        lines.append(seg)
-    if report.get("console"):
-        lines.append("")
-        lines.append("## 页面控制台错误（供用例设计参考，可能不算缺陷）")
-        for e in report["console"][:10]:
-            lines.append(f"- {e}")
-    if report.get("network"):
-        lines.append("")
-        lines.append("## 网络请求异常（自动采集：FAILED/4xx/5xx，供排查参考）")
-        for e in report["network"][:10]:
-            lines.append(f"- {e}")
-    if report.get("link_map"):
-        lines.append("")
-        lines.append("## 站内链接（只读探针采集，未逐一访问，供用例设计参考）")
-        for u in report["link_map"][:40]:
-            lines.append(f"- {u}")
+    if not features:
+        lines.append("（本次探索未及总结主要功能点：请仅依据上述已观察页面与探索结论生成基础用例，不得编造未观察到的功能；宁少勿滥。）")
     return "\n".join(lines)
 
 
@@ -979,7 +1003,15 @@ async def run_exploration(
                 probe_name = str(decision.get("value") or "links").strip().lower()
                 from app.config import get_settings as _gs_jp
 
-                if not bool(getattr(_gs_jp(), "chat_browse_js_probe", True)):
+                def _js_probe_on() -> bool:
+                    try:
+                        from app.runtime_config import chat_browse_config as _cb
+
+                        return bool(getattr(_cb, "js_probe", getattr(_gs_jp(), "chat_browse_js_probe", True)))
+                    except Exception:
+                        return bool(getattr(_gs_jp(), "chat_browse_js_probe", True))
+
+                if not _js_probe_on():
                     journal.append({
                         "action": "js_probe", "target": probe_name, "ok": False,
                         "error": "只读探针已关闭（系统设置 chat_browse_js_probe）",
@@ -1035,8 +1067,7 @@ async def run_exploration(
 
             # 元素动作的 ref 校验（防编造）
             action = {"action": action_name}
-            if action_name in ("click", "fill", "press", "select", "hover", "check", "fill_form"):
-                # B1：fill_form 的 fields 走独立字段（内部 target 逐个校验）
+            if action_name in ("click", "fill", "press", "select", "hover", "check", "fill_form"):                # B1：fill_form 的 fields 走独立字段（内部 target 逐个校验）
                 if action_name == "fill_form":
                     fields = decision.get("fields")
                     if not isinstance(fields, list) or not fields:
@@ -1087,24 +1118,52 @@ async def run_exploration(
                         page = obs["page"]
                     continue
                 ref = str(decision.get("ref") or "").strip()
+                click_text_used: str | None = None
                 candidate_refs = {c.ref for c in obs["candidates"]}
-                if ref not in candidate_refs:
-                    journal.append({
-                        "action": action_name, "target": ref or None,
-                        "ok": False, "error": "ref 不在当前候选元素中，请重新观察",
-                    })
-                    continue
-                if action_name == "click":
-                    cand = next((c for c in obs["candidates"] if c.ref == ref), None)
-                    label_check = f"{cand.name or ''} {cand.text or ''}" if cand else ""
-                    if _DANGEROUS_RE.search(label_check):
+                if (
+                    ref not in candidate_refs
+                    and action_name == "click"
+                    and str(decision.get("text") or "").strip()
+                ):
+                    # 文案点击兜底（2026-10-19 实测第三种形态）：span 包文本的按钮在
+                    # 快照里没有自己的 ref（只有承载容器甚至无 ref）——用页面真实存在的
+                    # 文案点击（必须与当前快照逐字一致；仅 click，防编造）。
+                    click_text = str(decision.get("text") or "").strip()
+                    if click_text not in (obs.get("snapshot") or ""):
                         journal.append({
-                            "action": action_name, "target": ref, "ok": False,
-                            "error": f"禁止破坏性操作（{label_check.strip()[:30]}），请跳过",
+                            "action": "click", "target": f"text:{click_text[:30]}",
+                            "ok": False,
+                            "error": "text 不在当前页面快照中（必须与页面文本逐字一致）",
+                        })
+                        continue
+                    if _DANGEROUS_RE.search(click_text):
+                        journal.append({
+                            "action": "click", "target": f"text:{click_text[:30]}",
+                            "ok": False,
+                            "error": f"禁止破坏性操作（{click_text[:30]}），请跳过",
                             "note": note or None,
                         })
                         continue
-                action["selector"] = ref
+                    click_text_used = click_text
+                    action["selector"] = f"text={click_text}"
+                else:
+                    if ref not in candidate_refs:
+                        journal.append({
+                            "action": action_name, "target": ref or None,
+                            "ok": False, "error": "ref 不在当前候选元素中，请重新观察",
+                        })
+                        continue
+                    if action_name == "click":
+                        cand = next((c for c in obs["candidates"] if c.ref == ref), None)
+                        label_check = f"{cand.name or ''} {cand.text or ''}" if cand else ""
+                        if _DANGEROUS_RE.search(label_check):
+                            journal.append({
+                                "action": action_name, "target": ref, "ok": False,
+                                "error": f"禁止破坏性操作（{label_check.strip()[:30]}），请跳过",
+                                "note": note or None,
+                            })
+                            continue
+                    action["selector"] = ref
                 if action_name in ("fill", "press", "select"):
                     action["value"] = str(decision.get("value") or "")
             elif action_name == "goto":
@@ -1146,7 +1205,10 @@ async def run_exploration(
             ok = bool(res.get("success"))
             step = {
                 "action": action_name,
-                "target": _cand_label(action.get("selector"), obs["candidates"]),
+                "target": (
+                    f"text:{click_text_used}" if click_text_used
+                    else _cand_label(action.get("selector"), obs["candidates"])
+                ),
                 # 含凭据的值一律打码，不落日志/卡片
                 "value": _masked_value(action, cfg),
                 "ok": ok,

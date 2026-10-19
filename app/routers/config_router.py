@@ -369,8 +369,10 @@ def _pt_to_response(pt: Any) -> PromptTemplateResponse:
 
 
 from app.runtime_config import (
+    ChatBrowseConfig,
     ExecutionBackendConfig,
     HealingConfig,
+    chat_browse_config as _chat_browse_config,
     execution_backend_config as _execution_backend_config,
     healing_config as _healing_config,
 )
@@ -404,6 +406,27 @@ async def update_healing_config(cfg: HealingConfig, admin=Depends(require_admin)
 async def get_execution_backend(admin=Depends(require_admin)) -> ExecutionBackendConfig:
     """获取执行后端配置（仅 ota）。"""
     return _execution_backend_config
+
+
+@router.get("/chat-browse", response_model=ChatBrowseConfig)
+async def get_chat_browse_config(admin=Depends(require_admin)) -> ChatBrowseConfig:
+    """获取对话与探索配置（浏览器探索上限/开关 + 对话上下文预算）。"""
+    return _chat_browse_config
+
+
+@router.put("/chat-browse", response_model=ChatBrowseConfig)
+async def update_chat_browse_config(
+    cfg: ChatBrowseConfig, admin=Depends(require_admin),
+) -> ChatBrowseConfig:
+    """更新对话与探索配置（持久化 data/chat_browse.json）。"""
+    from app.runtime_config import (
+        chat_browse_config as _rt,
+        save_chat_browse_config as _save,
+    )
+    for _field in cfg.model_fields_set:
+        setattr(_rt, _field, getattr(cfg, _field))
+    _save(_rt)
+    return _rt
 
 
 @router.put("/execution-backend", response_model=ExecutionBackendConfig)
