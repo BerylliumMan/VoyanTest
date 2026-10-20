@@ -262,7 +262,8 @@ async def test_cleanup_completed_drafts_dedupes_filters_and_derives(monkeypatch)
 
     assert removed == 5
     assert deleted == [2, 3, 5, 6, 7]
-    assert updated and updated[0][0] == 4 and updated[0][1]["title"] == "按价格排序商品列表"
+    assert any(row_id == 4 and fields.get("title") == "按价格排序商品列表" for row_id, fields in updated)
+    assert any(row_id == 1 and fields.get("module") == "通用功能" for row_id, fields in updated)
 
 
 @pytest.mark.asyncio

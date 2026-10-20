@@ -255,13 +255,15 @@ def test_build_report_materials():
         "steps": [{"action": "click", "target": "button:登录", "ok": True, "note": "进入首页"}],
         "console": ["[ERROR] x"],
     })
-    assert "# UI 自动化测试用例生成材料" in text
-    assert "【生成要求" in text  # 防元信息污染：顶部生成要求
-    assert "禁止把本材料的标题、章节名、元信息" in text
-    assert "主要功能点" in text and "- 登录" in text
-    assert text.count("- A 页") == 1  # 页面去重
+    assert "UI 自动化测试用例生成材料" in text
+    assert "生成要求（以下为元信息" in text  # 防元信息污染：顶部生成要求
+    assert "禁止把本材料任何标题" in text
+    assert "## A 页" in text and "- 登录" in text
+    assert "## 主要功能点" not in text and "## 已观察页面" not in text
+    assert text.count("## A 页") == 1  # 页面去重
     assert text.count("- 登录") == 1  # 功能点去重
-    assert "A 页" in text and "客户端「本机」的浏览器" not in text  # 探索方式不再进材料
+    assert text.count("- 报表") == 1
+    assert "客户端「本机」的浏览器" not in text  # 探索方式不再进材料
     # 二次修复：过程/控制台/网络等原始记录不再进材料（切断「打开【探索过程】」类污染源）
     assert "[ERROR] x" not in text
     assert "### 探索过程" not in text and "### 网络请求异常" not in text
@@ -274,7 +276,9 @@ def test_build_report_materials_features_empty_honest_note():
         "pages": [{"url": "http://site.local/a", "title": "A 页"}],
         "features": [],
     })
-    assert "未及总结主要功能点" in text and "宁少勿滥" in text
+    assert "宁少勿滥" in text and "本次未提炼功能点" in text
+    assert "## A 页" in text
+    assert "## 主要功能点" not in text
 
 
 def test_build_report_materials_feature_count_directive():
@@ -283,7 +287,7 @@ def test_build_report_materials_feature_count_directive():
         "pages": [{"url": "http://site.local/a", "title": "A 页"}],
         "features": ["功能一", "功能二", "功能三"],
     })
-    assert "主要功能点共 3 条" in text and "每条功能点生成 1 条" in text
+    assert "功能点共 3 条" in text and "每条功能点生成 1 条" in text
 
 
 # ----------------------------

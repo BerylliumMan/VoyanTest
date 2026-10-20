@@ -2,9 +2,14 @@
 """
 Playwright MCP 服务器子进程管理器。
 
-通过 npx @playwright/mcp@latest 启动 MCP 服务，使用 MCP Python SDK
-的 stdio_client + ClientSession 通信。LLM 生成工具调用，通过 MCP
+通过本地已安装的 @playwright/mcp（node cli.js）启动 MCP 服务，使用 MCP
+Python SDK 的 stdio_client + ClientSession 通信。LLM 生成工具调用，通过 MCP
 客户端执行浏览器操作。
+
+启动策略（离线优先）：
+1. ``VT_MCP_CLI`` 环境变量指向 cli.js（最高优先级）；
+2. 常见全局 node_modules 根 / 项目内 node_modules；
+3. 都找不到时才回退 ``npx -y @playwright/mcp``（需要网络，仅开发机）。
 """
 
 import asyncio
@@ -19,6 +24,41 @@ from mcp import ClientSession
 logger = logging.getLogger(__name__)
 
 SUPPORTED_BROWSERS = {'chromium', 'firefox', 'webkit'}
+
+
+def resolve_mcp_cli() -> str:
+    """定位本地 @playwright/mcp 的 cli.js（离线部署必需）。
+
+    优先级：``VT_MCP_CLI`` 环境变量 → 常见全局 node_modules 根 →
+    项目内 node_modules。找不到返回空串（调用方回退 npx）。
+    """
+    explicit = os.environ.get("VT_MCP_CLI") or os.environ.get("PLAYWRIGHT_MCP_CLI")
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    roots = [
+        "/usr/lib/node_modules",                      # Debian/Ubuntu (nodesource)
+        "/usr/local/lib/node_modules",                # macOS / 官方 Node 安装包
+        os.path.expanduser("~/.npm-global/lib/node_modules"),
+        os.path.expanduser("~/.local/lib/node_modules"),
+        os.path.expanduser("~/AppData/Roaming/npm/node_modules"),  # Windows
+        os.path.join(here, "node_modules"),           # 项目内安装
+        os.path.join(here, "frontend", "node_modules"),
+    ]
+    for root in roots:
+        candidate = os.path.join(root, "@playwright", "mcp", "cli.js")
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def build_mcp_launch(cli_path: str, mcp_args: list[str]) -> tuple[str, list[str]]:
+    """返回 (command, args)：有本地 cli.js 时用 node 直启，否则 npx 回退。"""
+    if cli_path:
+        node = os.environ.get("VT_NODE_BIN") or "node"
+        return node, [cli_path, *mcp_args]
+    return "npx", ["-y", "@playwright/mcp", *mcp_args]
+
 
 # MCP 工具名映射（LLM 输出 action → MCP 工具名）
 from core.mcp_args import TOOL_MAP as ACTION_TOOL_MAP
@@ -210,8 +250,6 @@ class PlaywrightMCPManager:
                 _executable_args = ['--executable-path', _chrome_bins[-1]]
 
         args = [
-            '-y',
-            '@playwright/mcp',
             browser_arg,
             '--isolated',
             '--allow-unrestricted-file-access',
@@ -245,9 +283,18 @@ class PlaywrightMCPManager:
         self._mcp_config_path = _cfg_path
         args.extend(['--config', _cfg_path])
 
+        cli_path = resolve_mcp_cli()
+        command, launch_args = build_mcp_launch(cli_path, args)
+        if cli_path:
+            logger.info("Using local @playwright/mcp CLI: %s", cli_path)
+        else:
+            logger.warning(
+                "Local @playwright/mcp CLI not found; falling back to npx "
+                "(requires network). Set VT_MCP_CLI to cli.js for offline installs."
+            )
         server_params = StdioServerParameters(
-            command='npx',
-            args=args,
+            command=command,
+            args=launch_args,
         )
 
         self._context = stdio_client(server_params)
@@ -255,7 +302,15 @@ class PlaywrightMCPManager:
 
         self._session = ClientSession(self._read, self._write)
         await self._session.__aenter__()
-        await self._session.initialize()
+        try:
+            await self._session.initialize()
+        except Exception as exc:  # noqa: BLE001 - 启动失败统一转可读错误
+            launcher = cli_path or "@playwright/mcp (npx)"
+            raise RuntimeError(
+                f"@playwright/mcp 启动失败（{launcher}）：{exc}。"
+                "离线部署请确认镜像内已安装 @playwright/mcp，"
+                "或设置 VT_MCP_CLI 指向其 cli.js。"
+            ) from exc
 
         logger.info("@playwright/mcp session initialized (shared_cdp=%s).", self.shared_cdp)
         return self._session

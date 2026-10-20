@@ -528,22 +528,28 @@ const ChatPage: React.FC = () => {
     if (activeId == null) return;
     const text = input.trim();
     if (!text && attachments.length === 0) return;
+    // 立即清空输入框（POST 会阻塞到本轮回复完成，等响应再清会让用户一直看到旧内容）
+    const draft = { text: input, attachments, refs: refCases };
     setSending(true);
+    setInput('');
+    setAttachments([]);
+    setRefCases([]);
     try {
       const r = await axios.post(`/api/chat/conversations/${activeId}/messages`, {
         content: text,
-        refs: refCases.length
-          ? refCases.map((c) => ({ type: 'case', id: c.id, label: c.name, case_kind: (c as any).case_kind || 'ui' }))
+        refs: draft.refs.length
+          ? draft.refs.map((c) => ({ type: 'case', id: c.id, label: c.name, case_kind: (c as any).case_kind || 'ui' }))
           : undefined,
-        attachments: attachments.length ? attachments : undefined,
+        attachments: draft.attachments.length ? draft.attachments : undefined,
       });
-      setInput('');
-      setAttachments([]);
-      setRefCases([]);
       const { user_message, assistant_message, stopped } = r.data;
       appendMessages([user_message, assistant_message]);
       if (stopped) Message.info('已停止本轮回复');
     } catch (e: any) {
+      // 失败（如上一轮仍在处理中 409）时恢复草稿，避免用户输入丢失
+      setInput(draft.text);
+      setAttachments(draft.attachments);
+      setRefCases(draft.refs);
       Message.error(e?.response?.data?.detail || '发送失败');
     } finally {
       setSending(false);

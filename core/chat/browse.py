@@ -151,6 +151,7 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
    最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
 8. 步数有限：先做最有价值的事（登录 → 主菜单 → 核心功能页 2-4 个）；
 9. 目标达成或主要功能已覆盖 → 立即返回 done，并在 summary/features 给出结论；禁止虚构没看到的功能；
+9a. features 每条都要带 module：module 取页面标题 / 顶部导航 / 侧边菜单里的**业务名称原文**（如「函件录入」「事端处理」）；禁止把「已观察页面」「主要功能点」「生成要求」「探索过程」等报告标题或元信息当作 module；
 9b.（只读探针）js_probe 不修改页面，用于补齐「看不到的」结构信息：
     links=页面全部链接（含折叠菜单/隐藏入口，可发现快照里没有的页面）；nav=导航区链接；
     storage_keys=localStorage/sessionStorage 的键名（不含值）；frameworks=框架/脚本线索。
@@ -168,7 +169,7 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
   "refresh": "solve_captcha 可选：true=先点击验证码图片刷新再识别（验证码错误重试时使用）",
   "note": "本步观察到的重要信息（页面功能点，一句话，可选）",
   "summary": "action=done 时必填：中文探索结论（站点、登录结果、主要功能概述、是否发现问题）",
-  "features": ["功能点1", "功能点2"]
+  "features": [{"module": "所属业务模块（用页面标题/导航原文的业务名，如「函件录入」「事端处理」；禁止用「已观察页面」「主要功能点」「生成要求」等报告标题）", "text": "功能点"}]
 }"""
 
 
@@ -677,15 +678,38 @@ def _dedupe_seq(seq) -> list:
     return out
 
 
-def build_report_materials(report: dict) -> str:
-    """观察报告 → 生成管线材料（2026-10-19 二次重写：切断元信息污染源）。
+_BROWSE_META_MODULE_MARKERS = (
+    "生成要求",
+    "已观察页面",
+    "主要功能点",
+    "探索过程",
+    "网络请求异常",
+    "起始站点",
+    "站内链接",
+    "页面探索观察报告",
+    "结束原因",
+    "探索结论",
+)
 
-    第一版修复后实测仍漏两类污染：① 模型把「### 探索过程（节选）」「### 网络请求异常」
-    章节标题当作页面名，造出「打开【探索过程】」类步骤；② 控制台/网络噪声被当成
-    「用例」（如「静态资源请求失败记录状态校验」）。根因是原始过程记录进材料后，
-    模型总能把其中的标题/行文当成页面元素。本次直接**不再输出**过程/控制台/网络/
-    链接等原始记录——材料只保留：生成要求 + 站点与结论 + 已观察页面（去重）+
-    主要功能点（去重）；功能点为空时给出「宁少勿滥」的诚实提示。
+
+def _clean_module_name(name: str) -> str:
+    """业务模块名归一：去标题符号；元信息/空 → 空串（由调用方兜底）。"""
+    n = re.sub(r"^[#\s]+", "", str(name or "")).strip(" ：:—-\t")
+    if not n or any(m in n for m in _BROWSE_META_MODULE_MARKERS):
+        return ""
+    return n[:60]
+
+
+def build_report_materials(report: dict) -> str:
+    """观察报告 → 生成管线材料（2026-10-20 第三版：按业务模块分组）。
+
+    用户实测：用例模块显示成「生成要求 / 已观察页面 / 主要」——因为旧材料把
+    报告的元信息章节写成了 markdown 标题，生成管线按标题切模块，元信息标题就
+    成了业务模块。本版：
+    ① 元信息（生成要求/起始站点/结论）一律用普通行文，**不再出现 `#` 标题**；
+    ② 每个业务模块一个 `## <页面/导航业务名>`，功能点挂在对应模块下；
+    ③ 模型给出的 feature.module 优先；缺失时按页面标题匹配、单页兜底；
+    ④ 无功能点时按页面标题给出空模块（宁少勿滥），模块名仍是业务名。
     """
     pages: list[tuple[str, str]] = []
     seen_pages: set[tuple[str, str]] = set()
@@ -699,33 +723,69 @@ def build_report_materials(report: dict) -> str:
             continue
         seen_pages.add(key)
         pages.append((title, url))
-    features = _dedupe_seq([str(f).strip() for f in (report.get("features") or []) if str(f or "").strip()])
+    features = _dedupe_seq(
+        [str(f).strip() for f in (report.get("features") or []) if str(f or "").strip()]
+    )
+    items: list[dict] = []
+    for it in report.get("feature_items") or []:
+        if isinstance(it, dict) and str(it.get("text") or "").strip():
+            items.append({
+                "module": str(it.get("module") or "").strip(),
+                "text": str(it.get("text") or "").strip(),
+            })
+    if not items:
+        items = [{"module": "", "text": t} for t in features]
+
+    page_titles = [t for t, _ in pages]
+    single_title = page_titles[0] if len(page_titles) == 1 else ""
+
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for it in items:
+        text = it["text"]
+        module = _clean_module_name(it.get("module", ""))
+        if not module:
+            for title in page_titles:
+                key = title.strip()
+                if key and key != "(无标题)" and key in text:
+                    module = _clean_module_name(key)
+                    break
+        if not module:
+            module = _clean_module_name(single_title) or "通用功能"
+        if module not in groups:
+            groups[module] = []
+            order.append(module)
+        groups[module].append(text)
+
+    if not order:
+        # 无功能点：按已观察页面给出业务模块（模块名仍是页面标题）
+        for title, url in pages:
+            module = _clean_module_name(title) or "通用功能"
+            if module not in groups:
+                groups[module] = []
+                order.append(module)
+            groups[module].append(f"已访问页面：{url}（本次未提炼功能点，宁少勿滥）")
 
     lines = [
-        "# UI 自动化测试用例生成材料（来源：浏览器探索观察）",
+        "UI 自动化测试用例生成材料（来源：浏览器探索观察）",
         "",
-        "【生成要求 — 优先遵守】",
-        "1. 本材料是一份「页面观察记录」，不是需求文档：只根据下方「主要功能点」与「已观察页面」生成用例；",
-        "2. 禁止把本材料的标题、章节名、元信息（如「页面探索观察报告」「起始站点」「探索过程」「网络请求异常」「站内链接」等字样）当作页面元素、步骤目标或断言对象；",
-        "3. 用例标题必须具体（动作 + 对象，如「按价格排序商品列表」），禁止「打开首页」这类无信息量标题；同一页面最多一条「打开」步骤，且只在用例需要时保留；",
-        "4. 相同或高度相似的用例只保留一条；重复的功能点合并为一条用例；",
-        "5. 只写实际观察到的页面与功能，不得编造未观察到的弹窗、数据或流程；",
-        f"6. 主要功能点共 {len(features)} 条——请为每条功能点生成 1 条最完整的用例（总数控制在 {len(features)} 条上下）；同一功能点不要生成多条相似用例；已观察页面不必单独生成「打开页面」用例（登录跳转作为必要前置除外）。",
+        "生成要求（以下为元信息，不是模块名、不是页面名，也禁止提取为测试项）：",
+        "（1）本材料是「页面观察记录」，不是需求文档：只根据各业务模块下的功能点生成用例；",
+        "（2）禁止把本材料任何标题、说明文字、元信息当作页面元素、步骤目标或断言对象；",
+        "（3）用例标题必须具体（动作 + 对象），禁止「打开首页」类无信息量标题；同一页面最多一条「打开」步骤；",
+        "（4）相同或高度相似的用例只保留一条；只写实际观察到的内容，不得编造；",
+        f"（5）功能点共 {len(items)} 条——每条功能点生成 1 条最完整用例（总数 {len(items)} 条上下），同一功能点不要拆成多条；",
         "",
-        f"- 起始站点：{report.get('started_url') or ''}",
-        f"- 探索结论：{report.get('summary') or '（未总结）'}",
+        f"起始站点：{report.get('started_url') or ''}",
+        f"探索结论：{report.get('summary') or '（未总结）'}",
         "",
-        "## 已观察页面",
     ]
-    for title, url in pages:
-        lines.append(f"- {title}：{url}")
-    lines.append("")
-    lines.append("## 主要功能点")
-    for f in features:
-        lines.append(f"- {f}")
-    if not features:
-        lines.append("（本次探索未及总结主要功能点：请仅依据上述已观察页面与探索结论生成基础用例，不得编造未观察到的功能；宁少勿滥。）")
-    return "\n".join(lines)
+    for module in order:
+        lines.append(f"## {module}")
+        for text in _dedupe_seq(groups[module]):
+            lines.append(f"- {text}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # ----------------------------
@@ -964,10 +1024,30 @@ async def run_exploration(
                 )
                 feats = decision.get("features")
                 if isinstance(feats, list):
-                    report["features"] = [
-                        redact_text(str(f).strip()[:200], [cfg.username, cfg.password])
-                        for f in feats if str(f).strip()
-                    ][:30]
+                    texts: list[str] = []
+                    items: list[dict] = []
+                    for f in feats:
+                        if isinstance(f, dict):
+                            mod = redact_text(
+                                str(f.get("module") or "").strip()[:60],
+                                [cfg.username, cfg.password],
+                            )
+                            txt = redact_text(
+                                str(f.get("text") or f.get("feature") or "").strip()[:200],
+                                [cfg.username, cfg.password],
+                            )
+                        else:
+                            mod = ""
+                            txt = redact_text(
+                                str(f or "").strip()[:200],
+                                [cfg.username, cfg.password],
+                            )
+                        if not txt:
+                            continue
+                        texts.append(txt)
+                        items.append({"module": mod, "text": txt})
+                    report["features"] = texts[:30]
+                    report["feature_items"] = items[:30]
                 stopped = "done"
                 break
 

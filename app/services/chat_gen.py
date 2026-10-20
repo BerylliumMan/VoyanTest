@@ -309,6 +309,33 @@ _BROWSE_META_MARKERS = (
     "生成要求",
 )
 
+# 模块名兜底：元信息标题 / 空 / 文档开头 → 从步骤派生业务名
+_BROWSE_BAD_MODULES = {"", "文档开头", "通用", "主要", "主要功能", "未分类", "通用功能"}
+
+
+def _derive_module_from_steps(steps: list[str]) -> str:
+    """从步骤里取第一个页面/业务名（仅认【】内的页面名，避免把「打开首页」拆成怪词）。"""
+    import re as _re
+
+    for s in steps or []:
+        m = _re.search(r"(?:打开|访问|进入)【([^】]{1,40})】", str(s))
+        if m:
+            name = m.group(1).strip()
+            if name not in ("首页", "主页", "首頁"):
+                return _re.sub(r"(页面|页)$", "", name) or name
+    return ""
+
+
+def _normalize_draft_module(module: str, steps: list[str]) -> str:
+    """草稿模块名归一：元信息/空值 → 由步骤派生，派不出则「通用功能」。"""
+    mod = (module or "").strip()
+    if mod in _BROWSE_BAD_MODULES or any(m in mod for m in _BROWSE_META_MARKERS):
+        derived = _derive_module_from_steps(steps)
+        if derived and not any(m in derived for m in _BROWSE_META_MARKERS):
+            return derived
+        return "通用功能"
+    return mod[:60]
+
 
 def _norm_sig_text(s) -> str:
     """签名归一：去空白/标点/序号，仅保留有效字符（用于重复判定）。"""
@@ -426,6 +453,13 @@ async def _cleanup_completed_drafts(db, record) -> int:
             derived = _re.sub(r"^\d+[\.、]\s*", "", steps[0])[:60]
             await crud.update_gen_test_case_raw(db, tc.id, {"title": derived})
             title = derived
+        if browse_src:
+            # 模块名归一（2026-10-20 用户实测：模块显示「生成要求/已观察页面/主要」）
+            current_module = getattr(tc, "module", "") or ""
+            fixed_module = _normalize_draft_module(current_module, steps)
+            if fixed_module != current_module:
+                await crud.update_gen_test_case_raw(db, tc.id, {"module": fixed_module})
+                tc.module = fixed_module
         sig = _draft_signature(title, tc.test_steps or "")
         if sig in seen:
             await crud.delete_gen_test_case_raw(db, tc.id)
