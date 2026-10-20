@@ -268,6 +268,32 @@ def test_resolve_pending_act_rejects_late_observe_result():
         loop.close()
 
 
+def test_resolve_pending_act_rejects_run_start_ready_ack():
+    """037 冷启动：RUN_START 的 ready ACK（snapshot_result 形状、带 ready 键）不得
+    被当作随后的 act 结果——否则首个冷启动运行会被误判「导航失败 unknown」。"""
+    import asyncio
+
+    from agent.manager import AgentManager
+
+    mgr = object.__new__(AgentManager)
+    mgr._pending = {}
+    loop = asyncio.new_event_loop()
+    try:
+        fut = loop.create_future()
+        mgr._pending["r5"] = _pending_entry(
+            fut, lambda r: "snapshot" not in r and "ready" not in r
+        )
+        mgr.resolve_pending(
+            "r5", {"text": "(browser ready)", "ready": True, "error": None}
+        )
+        assert not fut.done()
+        mgr.resolve_pending("r5", {"success": True, "error": "", "screenshot_b64": ""})
+        assert fut.done()
+        assert fut.result().get("success") is True
+    finally:
+        loop.close()
+
+
 def test_resolve_pending_legacy_structure_still_works():
     import asyncio
 

@@ -74,6 +74,8 @@ class UnitOutcome:
     error: str | None = None
     # 032-exec-evidence：失败步属于"派发后不确定（可能已生效）"时为 True
     uncertain: bool = False
+    # 037：调用方主动提前停止（验证码断点头段就绪）时为 True
+    stopped_early: bool = False
 
     @property
     def executed_count(self) -> int:
@@ -311,9 +313,15 @@ async def run_unit(
     retry_delays: tuple[float, ...] = (0.6, 1.5),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     probe: Callable[[str], Awaitable[tuple[list[str], dict[str, Any]]]] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> UnitOutcome:
-    """顺序执行单元；任一步最终失败即停止（已完成的步骤照常入账）。"""
+    """顺序执行单元；任一步最终失败即停止（已完成的步骤照常入账）。
+
+    ``should_stop``：每步成功入账后询问是否提前收束（037 验证码断点：头段就绪即停，
+    剩余子动作由尾段回放承担）；提前停止不计失败。
+    """
     executed: list[dict[str, Any]] = []
+    stopped = False
     for step in steps:
         ok = False
         uncertain = False
@@ -342,8 +350,12 @@ async def run_unit(
                 executed.append(attempt_action)
                 if on_step_ok is not None:
                     await _maybe_await(on_step_ok(attempt_action, result))
+                if should_stop is not None and should_stop():
+                    stopped = True
                 break
             last = result
+        if stopped:
+            break
         # 静态回退用尽 → DOM 探针（真实 DOM 找目标 + 派生确定性定位符，只试一轮）
         # 032：uncertain（可能已生效）时跳过探针——不再重复执行副作用动作
         if not ok and not uncertain and probe is not None:
@@ -389,4 +401,4 @@ async def run_unit(
                 error=str(last.get("error") or "unknown") + probe_note,
                 uncertain=uncertain,
             )
-    return UnitOutcome(success=True, executed=executed)
+    return UnitOutcome(success=True, executed=executed, stopped_early=stopped)

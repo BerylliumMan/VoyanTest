@@ -44,6 +44,16 @@ logger = logging.getLogger(__name__)
 _REFUSE_DONE_LIMIT = 5
 
 
+def _exec_vision_enabled() -> bool:
+    """037：执行链视觉总开关（读不到配置时默认开，与探索链口径一致）。"""
+    try:
+        from app.config import get_settings
+
+        return bool(getattr(get_settings(), "exec_vision", True))
+    except Exception:
+        return True
+
+
 def pick_checklist_index(
     steps: list[dict] | None,
     covered_orders: set[int],
@@ -88,6 +98,21 @@ class AgentBridge:
         self.db = db
         self.agent_def = agent_def
         self._notify_user_id: int | None = None
+        # 037：视觉运行时状态（网关拒绝图片后置 True → 本 run 剩余轮次纯文本）
+        self._vision_off: bool = False
+        # 037：验证码断点状态（orchestrate 装载 meta；头段实时 OTA → 尾段固化回放）
+        self._breakpoint_until: int | None = None
+        self._breakpoint_tail_script: str | None = None
+        self._breakpoint_tail_steps: list[dict] = []
+        self._breakpoint_replay_logs: list[dict] = []
+        # 037 US3：失败现场截图（b64 缓存；下一轮决策无新帧时回喂模型自诊断）
+        self._pending_failure_shot_b64: str | None = None
+
+    def _vision_on(self) -> bool:
+        """037：本轮是否附视觉帧（exec_vision 开关 + 运行时降级）。"""
+        if self._vision_off:
+            return False
+        return _exec_vision_enabled()
 
     # ── 主入口 ─────────────────────────────────────────────────────────────
 
@@ -119,6 +144,11 @@ class AgentBridge:
         # 记录本次执行所属的客户端（execution_mode=client:<agent> 用；此前只在回放分支里设置，
         # 导致回放路径写出 client:unknown）
         self._active_agent_id = agent_id or getattr(self, "_active_agent_id", None)
+        # 037：验证码断点状态装载（meta 存在且开关开 → 头段实时 / 尾段回放）
+        try:
+            await self._load_breakpoint_state(case_id)
+        except Exception:
+            logger.debug("breakpoint state load skipped", exc_info=True)
 
         self._notify_user_id = notify_user_id
         if existing_run_id:
@@ -158,6 +188,7 @@ class AgentBridge:
         self._batch_id: int | None = existing_batch_id
         # _fail 已同步置败的预创建 TestRun（_save_report 复用之，防重复 run）
         self._synced_test_run_ids: list[int] = []
+        # 注意：037 断点状态在 __init__ 初始化、orchestrate 装载（此处不得重置）
 
         # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
         # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
@@ -193,7 +224,12 @@ class AgentBridge:
                 "type": "run_start", "run_id": run_id_str,
                 "description": "AI Agent execution",
                 "num_steps": 0,
-                "backend": "playwright_mcp",
+                # 037：验证码断点模式用 hybrid 后端——MCP 附着共享 CDP Chromium，
+                # 头段（实时登录）与尾段（固化回放 connect_over_cdp）在同一浏览器，
+                # 登录态得以延续（实测：plain MCP 与 CDP 浏览器是两个实例，尾段必败）
+                "backend": (
+                    "hybrid" if getattr(self, "_breakpoint_until", None) else "playwright_mcp"
+                ),
                 "reuse_existing_browser": bool(
                     getattr(self, "_reuse_browser_session", False)
                 ),
@@ -599,7 +635,11 @@ class AgentBridge:
                 timeout=30,
             )
             if isinstance(obs, dict):
-                return self._save_screenshot(obs.get("screenshot_b64"), name)
+                b64 = obs.get("screenshot_b64")
+                if b64:
+                    # 037 US3：保留失败帧供下一轮决策回喂（无新帧时消费一次）
+                    self._pending_failure_shot_b64 = b64
+                return self._save_screenshot(b64, name)
         except Exception:
             logger.debug(
                 "Bridge failure screenshot capture skipped (%s)", name, exc_info=True,
@@ -732,6 +772,9 @@ class AgentBridge:
             )
             # 036+：诊断脚本证据行（执行中写代码取证；标题/耗时/计数）
             logs += script_evidence_rows(tool_rows)
+            # 037：验证码断点尾段回放行（头段用例步骤 + 尾段回放行同屏）
+            if getattr(self, "_breakpoint_replay_logs", None):
+                logs += list(self._breakpoint_replay_logs)
         else:
             logs = tool_rows
 
@@ -951,6 +994,8 @@ class AgentBridge:
                 self._collect_journal_entry(sub_action, turn)
             except Exception:
                 logger.debug("Bridge unit journal 记录跳过", exc_info=True)
+            # 037：记录最近子动作（断点 should_stop 判定用）
+            _last_sub["name"] = str(sub_action.get("action") or "").lower()
             # 步骤级证据（红线：每动作落库）：逐子动作写 agent_tool_calls，
             # 报告步骤列表与单动作路径口径一致（此前只进合成 journal，报告缺步骤）
             try:
@@ -1005,7 +1050,22 @@ class AgentBridge:
 
         _probe_arg = _probe if bool(getattr(s, "action_unit_probe", True)) else None
 
-        outcome = await run_unit(steps, _exec, on_step_ok=_on_ok, probe=_probe_arg)
+        # 037：验证码断点——头段（含验证码）就绪且本子动作为"提交类"（click/press/
+        # solve_captcha/dialog/select）时提前收束，剩余子动作由尾段回放承担
+        _last_sub: dict[str, str] = {"name": ""}
+
+        def _should_stop() -> bool:
+            if not getattr(self, "_breakpoint_until", None):
+                return False
+            if not self._journal_head_covered():
+                return False
+            if len(self._journal_covered) >= len(self._run_steps or []):
+                return False  # 尾段也已覆盖：走常规完成路径
+            return _last_sub["name"] in ("click", "press_key", "solve_captcha", "dialog", "select")
+
+        outcome = await run_unit(
+            steps, _exec, on_step_ok=_on_ok, probe=_probe_arg, should_stop=_should_stop,
+        )
         if outcome.success:
             logger.info(
                 "Bridge unit: %d 步执行成功（run #%d turn %d，%.1fs）",
@@ -1025,6 +1085,8 @@ class AgentBridge:
                     str((outcome.executed[-1] or {}).get("action") or "")
                     if outcome.executed else ""
                 ),
+                # 037：验证码断点提前收束标记（头段就绪，尾段走回放）
+                "stopped_early": bool(getattr(outcome, "stopped_early", False)),
             }
 
         # 失败子动作也落库（步骤级证据：报告可定位失败的具体步骤）
@@ -1102,6 +1164,17 @@ class AgentBridge:
         子动作是断言/等待（浏览器已实际验证）。满足则立即完成，省掉后续
         observe→think 往返。
         """
+        # 037：验证码断点——头段（含验证码）覆盖完毕 → 尾段固化回放（成功=完成 run）
+        #   完成信号：单元提前收束（stopped_early，提交类动作触发）或末动作为断言/等待；
+        #   仅 fill 覆盖头段时不得触发（实测：两次 fill 曾误触发，登录未完成即回放必败）
+        if (
+            getattr(self, "_breakpoint_until", None)
+            and self._journal_head_covered()
+            and len(self._journal_covered) < len(case_steps or [])
+        ):
+            _unit_last = str(unit_out.get("last_action") or "")
+            if unit_out.get("stopped_early") or _unit_last in ("assert_text", "wait"):
+                return await self._on_breakpoint_head_ready(run, turn)
         if not case_steps or len(self._journal_covered) < len(case_steps):
             return False
         if str(unit_out.get("last_action") or "") not in ("assert_text", "wait"):
@@ -1139,6 +1212,21 @@ class AgentBridge:
             if case_requires_run_script(steps):
                 logger.info("Bridge 编译先行：含诊断脚本步骤，跳过 case=%s（走 OTA）", run.case_id)
                 return False
+            # 037：断点已装载（meta 回放路径）→ 无需重复合成
+            if getattr(self, "_breakpoint_until", None):
+                return False
+            # 037：验证码用例 → 只合成尾段（验证码步骤实时），武装断点后回落 OTA 跑头段
+            from core.script_synthesize import case_requires_captcha
+
+            if case_requires_captcha(steps):
+                try:
+                    from app.config import get_settings as _gs_bp
+
+                    if not bool(getattr(_gs_bp(), "exec_captcha_breakpoint", True)):
+                        return False
+                except Exception:
+                    return False
+                return await self._try_compile_first_captcha_tail(run, steps)
             from app.crud import get_test_case
 
             tc = await get_test_case(self.db, run.case_id)
@@ -1215,6 +1303,26 @@ class AgentBridge:
         script = (script_override or stored).strip()
         if not script:
             return False
+        # 037：验证码断点尾段脚本不走常规整案回放（由断点流程：头段实时 → 尾段回放）
+        if getattr(self, "_breakpoint_until", None):
+            logger.info(
+                "Bridge 固化回放：验证码断点模式（尾段脚本），跳过常规回放 case=%s", run.case_id,
+            )
+            return False
+        # 037：验证码用例的"整案脚本"不可信（合成无法真实处理验证码，可能假通过）——
+        # 无断点尾段 meta 时一律跳过回放，走 OTA/断点流程（步骤改动会自然触发重合成）
+        try:
+            from core.script_synthesize import case_requires_captcha
+
+            _steps_for_cap = await self._load_case_steps(run.case_id)
+            if case_requires_captcha(_steps_for_cap):
+                logger.info(
+                    "Bridge 固化回放：验证码用例（无断点尾段 meta），跳过整案回放 case=%s（走 OTA）",
+                    run.case_id,
+                )
+                return False
+        except Exception:
+            logger.debug("captcha replay guard skipped", exc_info=True)
         steps = await self._load_case_steps(run.case_id)
         if not steps:
             return False
@@ -1309,6 +1417,189 @@ class AgentBridge:
         ]
         await self._complete(run.id, 1)
         return True
+
+    # ── 037：验证码断点（头段实时 OTA → 尾段固化回放）────────────────────────
+
+    async def _load_breakpoint_state(self, case_id: int) -> None:
+        """装载验证码断点状态（meta + 尾段脚本 + 尾段步骤）。
+
+        装载条件（任一不满足 → 保持未武装，走常规流程）：
+        - 开关 ``exec_captcha_breakpoint`` 开
+        - 用例含验证码步骤且存在尾段步骤
+        - ``compiled_script_meta.captcha_segment_start`` 与脚本/哈希匹配当前步骤
+        - 非 run_script 用例（036+ 优先级：含脚本步骤全实时）
+        - 尾段脚本覆盖尾段步骤意图（check_script_covers_intents）
+        """
+        self._breakpoint_until = None
+        self._breakpoint_tail_script = None
+        self._breakpoint_tail_steps = []
+        try:
+            from app.config import get_settings
+
+            if not bool(getattr(get_settings(), "exec_captcha_breakpoint", True)):
+                return
+            from app.crud import get_test_case
+
+            tc = await get_test_case(self.db, case_id)
+            if tc is None:
+                return
+            meta = getattr(tc, "compiled_script_meta", None) or {}
+            seg = int(meta.get("captcha_segment_start") or 0) if isinstance(meta, dict) else 0
+            script = (getattr(tc, "compiled_script", None) or "").strip()
+            if not seg or not script:
+                return
+            steps = await self._load_case_steps(case_id)
+            if not steps:
+                return
+            from core.script_synthesize import (
+                captcha_tail_steps,
+                case_requires_run_script,
+                check_script_covers_intents,
+            )
+
+            if case_requires_run_script(steps):
+                return
+            from core.compiled_script import steps_content_hash
+
+            if (getattr(tc, "compiled_script_hash", None) or "") != steps_content_hash(steps):
+                logger.info("Bridge 断点：hash 不匹配 case=%s — 忽略尾段脚本", case_id)
+                return
+            tail = captcha_tail_steps(steps)
+            if not tail:
+                return
+            missing = check_script_covers_intents(script, tail)
+            if missing:
+                logger.info(
+                    "Bridge 断点：尾段脚本覆盖不足 %s case=%s — 忽略", missing, case_id,
+                )
+                return
+            self._breakpoint_until = seg
+            self._breakpoint_tail_script = script
+            self._breakpoint_tail_steps = tail
+            logger.info(
+                "Bridge 断点已装载 case=%s segment_start=%s tail_steps=%s",
+                case_id, seg, len(tail),
+            )
+        except Exception:
+            logger.debug("breakpoint state load failed", exc_info=True)
+
+    def _journal_head_covered(self) -> bool:
+        """断点头段（step_order ≤ segment_start）是否已被 journal 全覆盖。"""
+        until = getattr(self, "_breakpoint_until", None)
+        if not until:
+            return False
+        head = [o for o in self._ordered_step_numbers() if o <= int(until)]
+        return bool(head) and all(o in self._journal_covered for o in head)
+
+    async def _on_breakpoint_head_ready(self, run: AgentRun, turn: int) -> bool:
+        """头段覆盖完毕：尝试尾段固化回放。成功=完成 run；失败=清尾段+关断点续 OTA。"""
+        if not getattr(self, "_breakpoint_until", None) or not getattr(
+            self, "_breakpoint_tail_script", None
+        ):
+            return False
+        logger.info("Bridge 断点：头段覆盖完毕（run #%d turn %d）→ 尾段回放", run.id, turn)
+        ok = False
+        try:
+            ok = await self._replay_breakpoint_tail(run)
+        except Exception:
+            logger.warning("Bridge 断点尾段回放异常（回落 OTA）", exc_info=True)
+        if ok:
+            try:
+                await crud_agent_run.create_message(
+                    self.db, run.id, turn, "assistant",
+                    f"验证码断点：头段实时执行完成，尾段固化脚本回放成功"
+                    f"（{len(getattr(self, '_breakpoint_replay_logs', []) or [])} 步）",
+                )
+            except Exception:
+                logger.debug("breakpoint success message skipped", exc_info=True)
+            await self._complete(run.id, turn)
+            return True
+        # 尾段回放失败 → 清除坏尾段脚本 + 关闭断点 → 继续 OTA 完成尾段
+        await self._clear_breakpoint_artifacts(run.case_id)
+        self._breakpoint_until = None
+        self._breakpoint_tail_script = None
+        try:
+            await crud_agent_run.create_message(
+                self.db, run.id, turn, "assistant",
+                "验证码断点：尾段固化回放未通过，改由智能执行继续完成剩余步骤",
+            )
+        except Exception:
+            logger.debug("breakpoint failure message skipped", exc_info=True)
+        return False
+
+    async def _replay_breakpoint_tail(self, run: AgentRun) -> bool:
+        """把尾段脚本交给客户端回放（skip_initial_goto：浏览器已停在登录后页面）。"""
+        agent_id = getattr(self, "_active_agent_id", None)
+        run_id_str = getattr(self, "_active_run_id_str", None)
+        if not (agent_id and run_id_str):
+            return False
+        from app.crud import get_test_case
+
+        tc = await get_test_case(self.db, run.case_id)
+        if tc is None:
+            return False
+        base_url = await self._resolve_base_url(run.case_id)
+        # 尾段步骤（回放结果按尾段渲染；头段已由 OTA 覆盖，不得重复计入）
+        tail_steps = list(getattr(self, "_breakpoint_tail_steps", []) or [])
+        steps = tail_steps or (self._run_steps or await self._load_case_steps(run.case_id))
+        res = await self.agent_manager._try_run_compiled_script(
+            agent_id,
+            run_id_str,
+            tc.name or f"Case #{run.case_id}",
+            steps,
+            script=getattr(self, "_breakpoint_tail_script", None) or "",
+            base_url=base_url,
+            case_id=run.case_id,
+            steps_hash=(getattr(tc, "compiled_script_hash", None) or ""),
+            headless=None,
+            keep_browser=True,
+            skip_initial_goto=True,
+        )
+        ok = (
+            bool(res)
+            and not any(r.get("compiled_script_failed") for r in res)
+            and all(r.get("success") for r in res)
+        )
+        if not ok:
+            logger.info(
+                "Bridge 断点：尾段回放失败 case=%s — 回落 OTA 完成尾段", run.case_id,
+            )
+            return False
+        # 尾段步骤入 journal 覆盖（真实执行过）→ 报告按用例步骤口径渲染
+        for s in getattr(self, "_breakpoint_tail_steps", []) or []:
+            o = int(s.get("step_order") or 0)
+            if o:
+                self._journal_covered.add(o)
+        self._breakpoint_replay_logs = [
+            {
+                "step_id": None,
+                "level": "info",
+                "message": (
+                    f"固化脚本回放（验证码断点尾段）："
+                    f"{r.get('original_description') or ''} — 通过"
+                ),
+                "screenshot_path": None,
+            }
+            for r in res
+        ]
+        logger.info(
+            "Bridge 断点：尾段回放成功 case=%s steps=%s", run.case_id, len(res),
+        )
+        return True
+
+    async def _clear_breakpoint_artifacts(self, case_id: int) -> None:
+        """清除坏尾段脚本（meta+script），防下次执行继续命中。"""
+        try:
+            from app.crud import get_test_case
+            from core.compiled_script import clear_compiled_script
+
+            tc = await get_test_case(self.db, case_id)
+            if tc is not None and getattr(tc, "compiled_script_meta", None):
+                clear_compiled_script(tc)
+                await self.db.commit()
+                logger.info("Bridge 断点：坏尾段脚本已清除 case=%s", case_id)
+        except Exception:
+            logger.debug("breakpoint artifacts clear skipped", exc_info=True)
 
     async def _load_case_steps(self, case_id: int) -> list[dict]:
         from app import crud as _crud
@@ -1507,6 +1798,28 @@ class AgentBridge:
         if case_requires_run_script(steps):
             logger.info("Bridge: synthesis skipped case=%s (contains run_script step)", case_id)
             return
+        # 037：验证码用例 → 只固化"尾段"（验证码之后的步骤）+ 断点 meta；
+        # 断点开关关闭时不固化（全实时执行）。
+        from core.script_synthesize import (
+            captcha_breakpoint_index,
+            captcha_tail_steps,
+            case_requires_captcha,
+        )
+
+        if case_requires_captcha(steps):
+            try:
+                from app.config import get_settings as _gs_bp
+
+                if not bool(getattr(_gs_bp(), "exec_captcha_breakpoint", True)):
+                    logger.info(
+                        "Bridge: synthesis skipped case=%s (captcha case, breakpoint disabled)",
+                        case_id,
+                    )
+                    return
+            except Exception:
+                pass
+            await self._synthesize_captcha_tail_script(run, case_id, steps)
+            return
         tc = await get_test_case(self.db, case_id)
         if tc is None:
             return
@@ -1540,6 +1853,156 @@ class AgentBridge:
             "Bridge: synthesized compiled_script case=%s bytes=%s (journal=%s)",
             case_id, len(script), len(self._journal),
         )
+
+    async def _synthesize_captcha_tail_script(self, run: AgentRun, case_id: int, steps: list[dict]) -> None:
+        """037：验证码用例的尾段固化（journal 法；尾段=最后一个验证码步骤之后）。
+
+        与整案固化的区别：只固化尾段（验证码步骤本身由实时 solve_captcha 承担），
+        脚本带 meta={"captcha_segment_start": N}；回放时 skip_initial_goto（浏览器已登录）。
+        """
+        from app.crud import get_test_case
+        from core.compiled_script import persist_compiled_script, steps_content_hash
+        from core.llm_wrapper import _resolve_config as _llm_resolve_config
+        from core.script_synthesize import (
+            captcha_breakpoint_index,
+            captcha_tail_steps,
+            synthesize_playwright_script,
+        )
+
+        seg = captcha_breakpoint_index(steps)
+        tail = captcha_tail_steps(steps)
+        if not seg or not tail:
+            logger.info("Bridge: captcha tail synthesis skipped case=%s (no tail)", case_id)
+            return
+        tc = await get_test_case(self.db, case_id)
+        if tc is None:
+            return
+        tail_orders = {int(s.get("step_order") or 0) for s in tail}
+        journal_tail = [
+            e for e in (self._journal or [])
+            if int(e.get("checklist_index") or 0) in tail_orders
+        ]
+        case_name = tc.name or f"Case #{case_id}"
+        steps_text = "\n".join(
+            f"  {i + 1}. {s.get('description') or ''}" for i, s in enumerate(tail)
+        )
+        goal_text = (
+            f"执行测试用例「{case_name}」（验证码断点尾段：浏览器已登录并停在当前页面）\n"
+            f"步骤：\n{steps_text}"
+        )
+        client = await create_openai_client(agent_type="execution")
+        _, _, model = await _llm_resolve_config(agent_type="execution")
+        try:
+            script = await synthesize_playwright_script(
+                client=client,
+                model=model,
+                case_id=case_id,
+                case_name=case_name,
+                goal_text=goal_text,
+                journal=journal_tail,
+                steps=tail,
+                base_url=self._case_url or None,
+                no_navigation=True,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Bridge: captcha tail synth rejected case=%s problems=%s", case_id, exc,
+            )
+            return
+        if not script or not script.strip():
+            logger.info("Bridge: captcha tail synth produced empty script case=%s", case_id)
+            return
+        persist_compiled_script(
+            tc,
+            script=script,
+            steps_hash=steps_content_hash(steps),
+            meta={"captcha_segment_start": int(seg)},
+        )
+        await self.db.commit()
+        logger.info(
+            "Bridge: synthesized captcha tail script case=%s bytes=%s tail_steps=%s (journal=%s)",
+            case_id, len(script), len(tail), len(journal_tail),
+        )
+
+    async def _try_compile_first_captcha_tail(self, run: AgentRun, steps: list[dict]) -> bool:
+        """037 编译先行·验证码尾段：合成尾段脚本 → 落库 + 武装断点（返回 False 继续 OTA 头段）。
+
+        首次执行即可走"头段实时 + 尾段回放"最快路径；合成失败静默回落（跑完 OTA 后
+        由 journal 合成兜底）。
+        """
+        from app.crud import get_test_case
+        from core.compiled_script import persist_compiled_script, steps_content_hash
+        from core.llm_wrapper import _resolve_config as _llm_resolve_config
+        from core.llm_wrapper import create_openai_client
+        from core.script_synthesize import (
+            captcha_breakpoint_index,
+            captcha_tail_steps,
+            synthesize_script_from_steps,
+        )
+
+        seg = captcha_breakpoint_index(steps)
+        tail = captcha_tail_steps(steps)
+        if not seg or not tail:
+            return False
+        tc = await get_test_case(self.db, run.case_id)
+        if tc is None:
+            return False
+        base_url = await self._resolve_base_url(run.case_id)
+        llm_client = await create_openai_client(agent_type="execution")
+        try:
+            _, _, model = await _llm_resolve_config(agent_type="execution")
+        except Exception:
+            model = ""
+        try:
+            script = await synthesize_script_from_steps(
+                client=llm_client,
+                model=model or "",
+                case_id=run.case_id,
+                case_name=(getattr(tc, "name", None) or ""),
+                steps=tail,
+                base_url=base_url or None,
+                no_navigation=True,
+            )
+        except Exception:
+            logger.warning(
+                "Bridge 编译先行（验证码尾段）：合成异常 case=%s", run.case_id, exc_info=True,
+            )
+            return False
+        if not script:
+            logger.info(
+                "Bridge 编译先行（验证码尾段）：未产出可用脚本 case=%s（回落 OTA）", run.case_id,
+            )
+            return False
+        try:
+            persist_compiled_script(
+                tc,
+                script=script,
+                steps_hash=steps_content_hash(steps),
+                meta={"captcha_segment_start": int(seg)},
+            )
+            await self.db.commit()
+        except Exception:
+            logger.warning(
+                "Bridge 编译先行（验证码尾段）：落库失败 case=%s", run.case_id, exc_info=True,
+            )
+            return False
+        # 武装断点：本次头段（含验证码，实时）跑完后由断点流程回放尾段
+        self._breakpoint_until = seg
+        self._breakpoint_tail_script = script
+        self._breakpoint_tail_steps = tail
+        logger.info(
+            "Bridge 编译先行（验证码尾段）：脚本已落库并武装断点 case=%s segment_start=%s tail=%s",
+            run.case_id, seg, len(tail),
+        )
+        try:
+            await crud_agent_run.create_message(
+                self.db, run.id, 1, "assistant",
+                f"编译先行（验证码断点）：尾段脚本已生成（{len(script)} 字节）；"
+                f"头段（含验证码）实时执行，完成后自动回放尾段",
+            )
+        except Exception:
+            logger.debug("compile-first captcha message skipped", exc_info=True)
+        return False
 
     # ── 内部：AgentRun 生命周期 ────────────────────────────────────────────
 
@@ -1786,13 +2249,13 @@ class AgentBridge:
                 failed_turns + 1, max_failed_turns, turn, max_total_turns, run.id,
             )
 
-            # ── 1. Observe: WS 取快照（失败轮/困难页按需截图）──
+            # ── 1. Observe: WS 取快照（037：exec_vision 开启时每轮附截图；失败轮/困难页兜底）──
             if carried_obs is not None:
                 obs = carried_obs
                 carried_obs = None
                 logger.debug("Bridge reusing post-act snapshot (turn %d)", turn)
             else:
-                want_shot = failed_turns > 0
+                want_shot = failed_turns > 0 or self._vision_on()
                 try:
                     obs = await asyncio.wait_for(
                         self.agent_manager.send_observe(
@@ -1926,6 +2389,15 @@ class AgentBridge:
 
             # 检查停止信号
             if action.get("_done"):
+                # 037：验证码断点——头段覆盖完毕时的 done 走断点完成路径
+                if (
+                    getattr(self, "_breakpoint_until", None)
+                    and self._journal_head_covered()
+                    and len(self._journal_covered) < len(case_steps or [])
+                ):
+                    if await self._on_breakpoint_head_ready(run, turn):
+                        return
+                    # 尾段回放失败 → 断点已关闭，落入下方门禁（按全量步骤拒绝该 done）
                 if _has_close_step and _close_refs:
                     logger.info(
                         "Bridge refusing premature done: %d close controls "
@@ -2052,6 +2524,9 @@ class AgentBridge:
                 if _act_kind == "run_script":
                     # 036+：执行链诊断脚本（服务端沙箱执行，不经客户端；结果文本回喂模型）
                     result = await self._execute_script_action(action)
+                elif _act_kind == "solve_captcha":
+                    # 037：执行链验证码（模型读图识别；拆解为既有 evaluate/fill 基础动作 → 旧客户端可用）
+                    result = await self._execute_captcha_action(agent_id, run_id_str, action)
                 elif _act_kind == "fetch":
                     # 036：fetch 由 bridge 驱动（既有 evaluate 动作序列 + 分块回传；
                     # 证据字节在服务端落盘——客户端无需新增动作）
@@ -2260,6 +2735,23 @@ class AgentBridge:
 
             await self._record_turn(run.id, turn, snapshot, action, result)
 
+            # 037 US3：失败现场视觉自诊断——本帧无截图时补拍（元素级优先），
+            # b64 缓存后由下一轮 _llm_decide 回喂（有新鲜帧时不消费）
+            if not result.get("success") and not (obs.get("screenshot_b64") or "").strip():
+                try:
+                    _sel = action.get("selector")
+                    await self._capture_failure_screenshot(
+                        agent_id, run_id_str,
+                        name=f"fail_turn_{turn:02d}",
+                        target=(
+                            str(_sel)
+                            if _sel and not str(_sel).startswith(("text=", "css="))
+                            else None
+                        ),
+                    )
+                except Exception:
+                    logger.debug("failure vision capture skipped", exc_info=True)
+
             # ── 5. 更新上下文 ──
             action_name = action.get("name", action.get("action", "?"))
             context_messages.append({
@@ -2392,6 +2884,33 @@ class AgentBridge:
                 f"\n第一步操作：使用 goto / browser_navigate 打开 {case_url}"
             )
 
+        # 037 US3：无新帧时回喂失败现场截图（一次性消费；有新帧则作废陈旧失败帧）
+        if screenshot_b64:
+            self._pending_failure_shot_b64 = None
+        elif getattr(self, "_pending_failure_shot_b64", None):
+            screenshot_b64 = self._pending_failure_shot_b64
+            self._pending_failure_shot_b64 = None
+
+        # 037：视觉帧压缩（PNG b64 → JPEG data URL；控 token；异常时原样兜底）
+        if screenshot_b64:
+            logger.info(
+                "Bridge turn %d: vision frame attached (%d bytes b64)", turn, len(screenshot_b64),
+            )
+            try:
+                from core.vision_frame import b64_to_frame_data_url
+
+                try:
+                    from app.config import get_settings
+
+                    _max_w = int(getattr(get_settings(), "exec_vision_max_width", 1152) or 1152)
+                except Exception:
+                    _max_w = 1152
+                screenshot_b64 = (
+                    b64_to_frame_data_url(screenshot_b64, max_width=_max_w) or screenshot_b64
+                )
+            except Exception:
+                logger.debug("vision frame compress skipped", exc_info=True)
+
         step_description = (
             f"GOAL: {goal}\n\n"
             f"TEST CASE STEPS (complete ALL of them; when consecutive steps are mechanical — you already know the target and value — group them into ONE 'unit' array instead of one action per turn):\n{steps_text}\n\n"
@@ -2442,9 +2961,30 @@ class AgentBridge:
                 screenshot_b64=screenshot_b64,
                 replace_system_prompt=True,
             )
-        except Exception:
-            logger.exception("LLM decision failed at turn %d", turn)
-            return None
+        except Exception as exc:
+            if screenshot_b64:
+                # 037：网关/模型不支持图片 → 纯文本重试一次并关闭本 run 视觉（探索链同口径）
+                logger.warning(
+                    "Vision decision failed at turn %d, retry text-only: %s", turn, str(exc)[:200]
+                )
+                self._vision_off = True
+                try:
+                    tool_call = await generate_tool_call(
+                        step_description=step_description.replace(
+                            "\n\nA VIEWPORT SCREENSHOT is attached for this turn.", ""
+                        ),
+                        dom_snapshot=snapshot,
+                        client=llm_client,
+                        system_prompt=system_prompt,
+                        screenshot_b64=None,
+                        replace_system_prompt=True,
+                    )
+                except Exception:
+                    logger.exception("LLM decision failed at turn %d", turn)
+                    return None
+            else:
+                logger.exception("LLM decision failed at turn %d", turn)
+                return None
 
         tc_dict = tool_call.model_dump()
         action_name = tc_dict.get("action", "")
@@ -2542,6 +3082,56 @@ class AgentBridge:
         else:
             text = f"{head}失败：{res.get('error') or '未知错误'}"
         return {"success": True, "text": text[:3000], "script": res}
+
+    async def _execute_captcha_action(
+        self, agent_id: str, run_id_str: str, action: dict,
+    ) -> dict:
+        """037：执行链验证码识别与填写（客户端链）。
+
+        - 开关 exec_captcha_enabled（默认开）；关闭 = 拒绝并给出配置提示
+        - 识别器：make_model_captcha_solver（模型读图，无本地 OCR；执行 Agent 模型通道）
+        - 浏览器适配：ClientBrowser（复用既有 evaluate/fill/click 基础动作 → 旧客户端无需升级）
+        """
+        try:
+            from app.config import get_settings
+
+            if not bool(getattr(get_settings(), "exec_captcha_enabled", True)):
+                return {"success": False, "error": "验证码动作已关闭（exec_captcha_enabled=false）"}
+        except Exception:
+            pass
+        try:
+            from core.captcha import make_model_captcha_solver, solve_captcha_via_browser
+            from core.chat.browse import ClientBrowser
+
+            browser = ClientBrowser(self.agent_manager, str(agent_id), run_id_str)
+
+            async def _captcha_llm(messages):
+                from app.gen.model_client import call_model
+
+                return await call_model(messages, agent_type="execution")
+
+            solve_fn = make_model_captcha_solver(_captcha_llm)
+            # 037 US5：整页截图兜底（非常规验证码：CSS 背景图/SVG/div 装扮）
+            page_solve_fn = make_model_captcha_solver(_captcha_llm, page_mode=True)
+            ref = action.get("selector") or action.get("ref") or None
+            refresh = bool(action.get("refresh") or action.get("value") == "refresh")
+            res = await solve_captcha_via_browser(
+                browser, input_ref=ref, refresh=refresh, solve_fn=solve_fn,
+                page_solve_fn=page_solve_fn,
+            )
+            if isinstance(res, dict) and res.get("ok"):
+                note = str(res.get("note") or "").strip()
+                text = f"验证码已识别并填写（{int(res.get('text_len') or 0)} 位）"
+                if note:
+                    text += f"；{note}"
+                return {"success": True, "text": text}
+            return {
+                "success": False,
+                "error": str((res or {}).get("error") or "验证码处理失败")[:200],
+            }
+        except Exception as exc:
+            logger.exception("captcha action failed")
+            return {"success": False, "error": f"验证码处理异常: {str(exc)[:160]}"}
 
     async def _execute_fetch_action(
         self, agent_id: str, run_id_str: str, action: dict,

@@ -41,6 +41,8 @@ class TestCase(Base):
     compiled_script = Column(Text, nullable=True, default=None)
     compiled_script_hash = Column(String(64), nullable=True, default=None)
     compiled_at = Column(DateTime(timezone=True), nullable=True, default=None)
+    # 037：验证码断点元数据（{"segment_start_step": N}；无验证码用例为 NULL）
+    compiled_script_meta = Column(JSON, nullable=True, default=None)
 
     steps = relationship("TestStep", backref="test_case", lazy="selectin", cascade="all, delete-orphan", order_by="TestStep.step_order")
 

@@ -277,11 +277,17 @@ def persist_compiled_script(
     *,
     script: str,
     steps_hash: str,
+    meta: dict | None = None,
 ) -> None:
-    """Write script fields onto ORM TestCase (caller commits)."""
+    """Write script fields onto ORM TestCase (caller commits).
+
+    037：``meta``（如 {"captcha_segment_start": N}）标注脚本为验证码断点尾段；
+    None 表示整案脚本（同时清掉旧 meta，防陈旧标注）。
+    """
     case.compiled_script = script
     case.compiled_script_hash = steps_hash
     case.compiled_at = datetime.now(timezone.utc)
+    case.compiled_script_meta = dict(meta) if meta else None
 
 
 def clear_compiled_script(case) -> bool:
@@ -290,10 +296,12 @@ def clear_compiled_script(case) -> bool:
         getattr(case, "compiled_script", None)
         or getattr(case, "compiled_script_hash", None)
         or getattr(case, "compiled_at", None)
+        or getattr(case, "compiled_script_meta", None)
     )
     case.compiled_script = None
     case.compiled_script_hash = None
     case.compiled_at = None
+    case.compiled_script_meta = None
     return changed
 
 

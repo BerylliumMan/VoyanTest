@@ -221,3 +221,17 @@ def test_parse_console_messages_skips_count_headers():
     # 非零计数头行同为空转噪声（条目本身才是证据；favicon 过滤后头行更显突兀）
     text2 = 'Returning 2 messages for level "error"\n[ERROR] real1\n[ERROR] real2'
     assert parse_console_messages(text2) == ["[ERROR] real1", "[ERROR] real2"]
+
+
+def test_script_evidence_failed_script_is_info_not_green_pass():
+    """诊断脚本 ok=false 时动作层 success=True，徽标不能显示绿色「通过」→ 信息。"""
+    from core.step_logs import script_evidence_rows
+
+    rows = [{
+        "tool": "run_script", "level": "info", "screenshot_path": None,
+        "message": "诊断脚本：失败（25ms，DB 0 / HTTP 0） — 脚本包含不允许的语法：import",
+    }]
+    out = script_evidence_rows(rows)
+    assert len(out) == 1 and out[0]["level"] == "warning"
+    ok_rows = [{"tool": "run_script", "level": "info", "message": "诊断脚本「查库」：成功（22ms，DB 1 / HTTP 0）"}]
+    assert script_evidence_rows(ok_rows)[0]["level"] == "info"

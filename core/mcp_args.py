@@ -179,6 +179,7 @@ ACTION_DESCRIPTIONS = {
     # 036：页面 API 调用（系统级窗口/下载受阻时的替代路径；报告会如实标注「以 API 方式完成」）
     "fetch": "在页面上下文调用页面 API（value=JSON：method/url/headers?/body?/evidence?/filename?；自动携带页面会话；evidence=true 时响应体存为报告证据）",
     "run_script": "执行诊断脚本（Python 沙箱：db 只读查询/HTTP/平台查询/读 data·reports 文件；用于核对数据与取证；value=脚本代码，element_desc=可读标题）",
+    "solve_captcha": "识别并填写图形验证码（模型读图；selector=验证码输入框 ref（可空），value=null，refresh=true 先刷新验证码；失败/被拒后刷新重试一次）",
 }
 
 
@@ -767,6 +768,9 @@ SIDE_EFFECT_ACTIONS = frozenset({
     "fill_form", "mouse_down", "mouse_up", "close", "run_code",
     # 036：页面 API 调用（写方法派发后可能已生效；传输级超时按 uncertain 不盲重试）
     "fetch",
+    # 037：验证码识别填写（派发后可能已生效；识别失败语义是"刷新换图"，
+    # 由识别器内部重试，不做盲重试）
+    "solve_captcha",
 })
 
 _UNCERTAIN_FAILURE_RE = re.compile(

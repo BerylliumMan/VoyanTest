@@ -201,6 +201,10 @@ def script_evidence_rows(tool_rows: list[dict]) -> list[dict]:
         if key and key in seen:
             continue
         seen.add(key)
+        # 诊断脚本自身 ok=false 时动作层可能仍算 success（工具执行成功），
+        # 报告徽标不应显示绿色「通过」——降为「信息」徽标，文案已含失败原因。
+        if "诊断脚本：失败" in key:
+            r = {**r, "level": "warning"}
         out.append(r)
     return out
 

@@ -641,3 +641,29 @@ async def test_runner_action_unit_records_failed_subaction(monkeypatch):
     assert out.get("success") is False
     assert [(n, s) for n, s, _ in calls] == [("fill", True), ("click", False)]
     assert "strict mode violation" in calls[1][2]
+
+
+# ==================== 037 US3：失败现场截图落盘 ====================
+
+
+class TestFailureScreenshot:
+    @pytest.mark.asyncio
+    async def test_observe_saves_failure_screenshot(self, tmp_path, monkeypatch):
+        from core.agent_runner import runner as R
+
+        mcp = MagicMock()
+        mcp.get_dom_snapshot = AsyncMock(return_value='- button "X" [ref=e1]')
+        mcp.call_tool = AsyncMock(return_value={"success": True, "text": "http://x"})
+        monkeypatch.setattr(R, "capture_screenshot_b64", AsyncMock(return_value="aGVsbG8="))
+        monkeypatch.setattr(R, "should_capture_screenshot", lambda *a, **k: True)
+
+        r = R.AgentRunner(
+            mcp_manager=mcp, goal="g", llm_client=MagicMock(),
+            screenshot_dir=str(tmp_path),
+        )
+        r._consecutive_act_failures = 1
+        await r.observe()
+        files = list(tmp_path.glob("turn_*_fail.png"))
+        assert files, "失败轮截图必须落盘（报告步骤附图）"
+        assert files[0].read_bytes() == b"hello"
+        assert r.last_failure_screenshot == str(files[0])

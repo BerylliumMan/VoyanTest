@@ -178,6 +178,10 @@ INPUT you will receive:
 2. An accessibility snapshot of the current page (shows page structure with refs for each element)
 3. The BASE URL for the target application (for navigation steps)
 4. Optional EXPECTED RESULT (post-condition check hint — do NOT invent actions from it)
+5. A VIEWPORT SCREENSHOT attached every turn (when vision is enabled): use it to read
+   icon-only buttons, canvas/chart content and visual state, and to pick click_xy
+   coordinates when refs are unreliable. If images are unavailable, turns fall back
+   to text-only automatically.
 
 Your job: execute THIS step faithfully. Find the best matching element from the accessibility
 snapshot and output a single action. Each element has a ref (e.g., e12, e45). Use refs as
@@ -234,6 +238,7 @@ ACTIONS available (maps to Playwright MCP tools):
 - Download steps: click the download trigger, then verify the file with "evaluate" (e.g. value="async () => { const r = await fetch('report.csv'); return await r.text(); }"). There is no native download tool, so the evaluate fetch IS the download verification.
 - "fetch": Call the page's OWN API in the page context (auto-attaches the page session). Use ONLY when the UI path is blocked or unreliable: native/system-level windows (e.g. save dialogs), download-only actions with no page change, import/export targets not drivable via clicks. value=JSON like {"method":"GET","url":"/api/export","evidence":true,"filename":"out.csv"}; evidence=true stores the response body as a report evidence file. NEVER use it to skip steps the case explicitly requires, and NEVER fire destructive writes beyond what the case describes. The report will honestly label the step as "以 API 方式完成".
 - "run_script": Run a diagnostic script (sandboxed Python: NO import/def/class/try; bounded for-loops) to CHECK FACTS you cannot confirm on the page: read-only DB queries (SELECT/WITH only), platform queries (projects/cases/suites/batches), HTTP calls, reading files under data/ or reports/. Use it when a step says 查询/核对/诊断/脚本, or when you need evidence before deciding the next action. value=script code, element_desc=short title. Example: value="r = db.query('SELECT id,status FROM run_batches ORDER BY id DESC LIMIT 3'); print(r['rows'])". The script output is fed back to you. Never use it to fake click/fill/assert steps.
+- "solve_captcha": Solve an image captcha on a login/verification form. selector=ref of the captcha INPUT box (optional), value=null; set "refresh": true to click-refresh the captcha image first. The engine reads the captcha image with the vision model, fills and verifies the input — do NOT guess captcha text and do NOT use plain "fill" for captcha inputs. If the site rejects the captcha (验证码错误), retry ONCE with refresh=true (re-fill username/password first if the site cleared them).
 - "click_xy": Click by page coordinates (canvas / no ref available). selector=null, value="x,y".
 - "move_mouse": Move the mouse to coordinates. selector=null, value="x,y".
 - "drag_xy": Drag between coordinates. selector=null, value="startX,startY,endX,endY".
@@ -558,11 +563,17 @@ async def generate_tool_call(
         resolved_system_prompt = SYSTEM_PROMPT
 
     if screenshot_b64:
+        # 037：接受压缩后的 data URL（data:image/jpeg;base64,…）直传；裸 b64 按 PNG 包装（旧口径）
+        _shot_url = (
+            screenshot_b64
+            if str(screenshot_b64).startswith("data:")
+            else f"data:image/png;base64,{screenshot_b64}"
+        )
         user_content: Any = [
             {"type": "text", "text": user_text},
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                "image_url": {"url": _shot_url},
             },
         ]
     else:

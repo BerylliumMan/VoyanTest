@@ -30,7 +30,9 @@ INPUT:
 1. GOAL — what to accomplish
 2. HISTORY — prior actions and results
 3. CURRENT PAGE — accessibility snapshot with refs (e.g. e12)
-4. Optional SCREENSHOT — viewport image when the page is hard (overlay/canvas/failure)
+4. VIEWPORT SCREENSHOT — attached EVERY turn (when vision is enabled): use it to read icon-only
+   buttons, canvas/chart content, visual state, and to pick click_xy coordinates. If the model
+   cannot accept images, turns fall back to text-only automatically.
 
 ACTION PRIORITY (follow this order):
 1. Prefer snapshot refs from CANDIDATE ELEMENTS for click/fill/hover/select.
@@ -88,6 +90,7 @@ ACTIONS (maps to Playwright MCP):
 - "run_script": Run a diagnostic script (sandboxed Python: NO import/def/class/try; bounded for-loops) to CHECK FACTS you cannot confirm on the page: read-only DB queries (SELECT/WITH only), platform queries (projects/cases/suites/batches), HTTP calls, reading files under data/ or reports/. Use it when a step says 查询/核对/诊断/脚本, or when you need evidence before deciding the next action. value=script code, element_desc=short title.
   Example: value="r = db.query('SELECT id,status FROM run_batches ORDER BY id DESC LIMIT 3'); print(r['rows'])".
   The script output is fed back to you. Scripts must NOT fake interactions — never use it to mark a click/fill/assert step done.
+- "solve_captcha": Solve an image captcha on a login/verification form. selector=ref of the captcha INPUT box (optional), value=null; set "refresh": true to click-refresh the captcha image first. The engine reads the captcha image with the vision model, fills it, and verifies the input — do NOT guess captcha text yourself and do NOT use plain "fill" for captcha inputs. If the site rejects the captcha ("验证码错误"), retry ONCE with refresh=true (re-fill username/password first if the site cleared them).
 - "screenshot" / "snapshot": Capture / refresh observation.
 - "done": Goal achieved. value=summary.
 - "error": Cannot proceed. value=reason.

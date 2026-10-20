@@ -352,6 +352,11 @@ async def _run_startup_init():
             "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS compiled_at TIMESTAMPTZ",
             "test_cases.compiled_at 迁移",
         )
+        # 037：验证码断点元数据（JSONB；无验证码用例为 NULL）
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS compiled_script_meta JSONB",
+            "test_cases.compiled_script_meta 迁移",
+        )
         await _ddl(
             "ALTER TABLE test_cases ALTER COLUMN case_kind SET DEFAULT 'functional'",
             "test_cases.case_kind 默认值改为 functional",

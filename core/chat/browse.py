@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
+from core.vision_frame import frame_to_data_url  # 037：帧压缩抽取至公共模块（browse/bridge/runner 共用）
+
 logger = logging.getLogger(__name__)
 
 ACTION_WHITELIST = (
@@ -42,6 +44,8 @@ ACTION_WHITELIST = (
     "scroll", "hover", "check", "fill_form", "dialog", "navigate_back", "tabs",
     # B5 只读探针（2026-10-15）：links/nav/storage_keys/frameworks 固定只读 JS
     "js_probe",
+    # 037 US4：坐标/鼠标操作（点选验证码、滑块；信任模型 Q2，仅校验坐标格式）
+    "click_xy", "move_mouse", "drag_xy", "mouse_down", "mouse_up",
     "wait", "solve_captcha", "done",
 )
 
@@ -137,6 +141,12 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
    若附有页面截图且验证码清晰可读：也可以直接用 fill 把读到的字符填进验证码输入框（截图可直接读图）；
    不确定或读不清时优先 solve_captcha（系统读图分析更可靠）；
 6. 浏览策略：优先点击顶部导航 / 侧边菜单等入口，逐个访问主要功能页面；每到一个新页面，用 note 记录「页面标题：主要功能点」；
+6b.（坐标/鼠标操作）点选类验证码（「点击图中的 X」）或滑块拖动等无法用 ref 点击的场景，用坐标操作：
+   click_xy（点击坐标，value="x,y"）、move_mouse（移动，value="x,y"）、drag_xy（拖拽，value="x1,y1,x2,y2"）、
+   mouse_down / mouse_up（按住/松开，value=left|right|middle，配合 move_mouse 完成滑块）。
+   坐标从页面截图读出（左上角为 0,0，给出截图像素坐标即可——系统会按截图缩放自动换算为页面坐标）；
+   一次点击后系统会给出新截图与新快照，按结果继续；
+   坐标只作用于当前页面（不要用来点会跳转到站外的元素）；坐标动作同样禁止破坏性目标（按文案判断）。
 7. 操作失败时先重新观察（看最新快照）再决定，不要重复同样的动作；点击失败时系统会自动做遮挡诊断（步骤记录里会附「被遮挡/在视口外/禁用」等结论）——按诊断提示处理（关闭/移开遮挡层、滚动到目标、等动画结束）后再试，不要原样重复点击；动作（点击/提交/跳转）完成后系统会自动给出
    最新页面快照（含跳转结果），不要用 wait 步骤等待页面加载或跳转结果；wait 仅用于页面内延时场景（如等提示出现），值用秒数；
 8. 步数有限：先做最有价值的事（登录 → 主菜单 → 核心功能页 2-4 个）；
@@ -149,10 +159,10 @@ C. 提供【参考文档】时：文档内容即测试要求（来自用户上�
 【输出格式 — 只输出一个 JSON 对象，不要任何其他文字、不要代码块】
 {
   "thinking": "1-3 句：当前页面是什么、下一步做什么及原因",
-  "action": "goto|click|fill|press|select|scroll|hover|check|fill_form|dialog|navigate_back|tabs|js_probe|wait|solve_captcha|done",
+  "action": "goto|click|fill|press|select|scroll|hover|check|fill_form|dialog|navigate_back|tabs|js_probe|click_xy|move_mouse|drag_xy|mouse_down|mouse_up|wait|solve_captcha|done",
   "ref": "元素动作必填：候选列表中的 ref（如 e12）；solve_captcha 填验证码输入框的 ref；fill_form 不需要（见 fields）",
   "text": "click 可选兜底：目标控件的按钮文案（必须与页面文本逐字一致；仅当候选里没有该控件的 ref、只有承载容器时使用，如 \"新增\"）",
-  "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数；scroll=像素数|up|down；dialog=accept|dismiss；tabs=list|new|select:N|close；js_probe=links|nav|storage_keys|frameworks；solve_captcha 不需要 value",
+  "value": "fill=输入值（凭据用占位符）；press=按键（如 Enter）；select=选项文本；wait=等待文本或秒数；scroll=像素数|up|down；dialog=accept|dismiss；tabs=list|new|select:N|close；js_probe=links|nav|storage_keys|frameworks；click_xy/move_mouse=坐标 \"x,y\"；drag_xy=\"x1,y1,x2,y2\"；mouse_down/mouse_up=left|right|middle；solve_captcha 不需要 value",
   "fields": "fill_form 专用：JSON 数组，一次填写多个字段，如 [{\"target\":\"e11\",\"name\":\"用户名\",\"type\":\"textbox\",\"value\":\"<<USERNAME>>\"},{\"target\":\"e13\",\"name\":\"密码\",\"type\":\"textbox\",\"value\":\"<<PASSWORD>>\"}]（type 可为 textbox/checkbox/radio/combobox/slider；凭据用占位符）",
   "url": "action=goto 时的目标地址",
   "refresh": "solve_captcha 可选：true=先点击验证码图片刷新再识别（验证码错误重试时使用）",
@@ -565,31 +575,6 @@ def _cand_label(ref: str | None, candidates) -> Optional[str]:
     return f"{cand.role}:{label}" if label else cand.role
 
 
-def frame_to_data_url(path: str, max_width: int = 1152, quality: int = 72) -> Optional[str]:
-    """截图文件 → data URL（JPEG 压缩降 token；PIL 不可用时原样 base64 兜底）。"""
-    try:
-        with open(path, "rb") as fh:
-            raw = fh.read()
-    except Exception:
-        return None
-    if not raw:
-        return None
-    try:
-        import io as _io
-
-        from PIL import Image
-
-        im = Image.open(_io.BytesIO(raw)).convert("RGB")
-        if im.width > max_width:
-            im = im.resize((max_width, int(im.height * max_width / im.width)), Image.LANCZOS)
-        buf = _io.BytesIO()
-        im.save(buf, format="JPEG", quality=quality)
-        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-    except Exception:
-        mime = "image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-        return f"data:{mime};base64," + base64.b64encode(raw).decode()
-
-
 def _masked_value(action: dict, cfg: BrowseConfig) -> Optional[str]:
     value = action.get("value")
     if value is None:
@@ -617,6 +602,17 @@ def _action_label(action_name: str, decision: dict, candidates) -> str:
         return "浏览器后退"
     if action_name == "tabs":
         return f"标签页 {str(decision.get('value') or 'list')[:20]}"
+    # 037 US4：坐标/鼠标操作标签
+    if action_name == "click_xy":
+        return f"坐标点击 {str(decision.get('value') or '')[:24]}"
+    if action_name == "move_mouse":
+        return f"移动鼠标 {str(decision.get('value') or '')[:24]}"
+    if action_name == "drag_xy":
+        return f"坐标拖拽 {str(decision.get('value') or '')[:32]}"
+    if action_name == "mouse_down":
+        return f"按住鼠标（{str(decision.get('value') or 'left')[:8]}）"
+    if action_name == "mouse_up":
+        return f"松开鼠标（{str(decision.get('value') or 'left')[:8]}）"
     ref = str(decision.get("ref") or "")
     label = _cand_label(ref, candidates) or ref
     if action_name == "click":
@@ -744,6 +740,7 @@ async def run_exploration(
     screenshot_dir: Optional[str] = None,
     on_event: Optional[Callable[[dict], Awaitable[None]]] = None,
     captcha_solver: Optional[Callable] = None,
+    captcha_page_solver: Optional[Callable] = None,
     max_shots: int = _MAX_SHOTS,
 ) -> dict:
     """执行有界浏览器探索，返回观察报告（任何异常都收敛为报告，不向上抛）。
@@ -806,6 +803,10 @@ async def run_exploration(
         }
 
     vision_state = {"on": bool(cfg.vision)}
+    # 037 US4 修复：截图为压缩图（≤max_width）——模型读图坐标是"图像像素"，
+    # 点击执行用"页面坐标"；记录换算比例（图像→页面），派发坐标动作前换算
+    vision_scale = {"x": 1.0, "y": 1.0}
+    vision_meta = {"path": ""}
 
     async def _vision_frame() -> Optional[str]:
         """当前页面截图 → data URL（视觉决策用）；失败静默返回 None。"""
@@ -819,7 +820,27 @@ async def run_exploration(
             return None
         if not shot:
             return None
+        vision_meta["path"] = str(shot)
         return frame_to_data_url(str(shot), max_width=int(cfg.vision_max_width or 1152))
+
+    async def _refresh_vision_scale() -> None:
+        """图像宽高 vs 视口宽高 → 图像坐标换算到页面坐标的比例（失败保持 1.0）。"""
+        path = vision_meta.get("path") or ""
+        if not path:
+            return
+        try:
+            from PIL import Image
+
+            with Image.open(path) as im:
+                iw, ih = im.size
+            vp = await browser.evaluate_json("() => [window.innerWidth, window.innerHeight]")
+            if isinstance(vp, (list, tuple)) and len(vp) == 2 and iw and ih:
+                vw, vh = float(vp[0]), float(vp[1])
+                if vw > 0 and vh > 0:
+                    vision_scale["x"] = vw / float(iw)
+                    vision_scale["y"] = vh / float(ih)
+        except Exception:
+            logger.debug("vision scale probe skipped", exc_info=True)
 
     try:
         if owns_browser:
@@ -873,6 +894,8 @@ async def run_exploration(
                 page_text=obs.get("page_text") or "",
             )
             frame = await _vision_frame() if vision_state["on"] else None
+            if frame:
+                await _refresh_vision_scale()
             user_content = prompt
             if frame:
                 user_content = [
@@ -971,6 +994,7 @@ async def run_exploration(
                 result = await solve_captcha_via_browser(
                     browser, input_ref=(ref or None), refresh=refresh,
                     solve_fn=captcha_solver,
+                    page_solve_fn=captcha_page_solver,
                     username=cfg.username or "", password=cfg.password or "",
                 )
                 captcha_ok = bool(result.get("ok"))
@@ -1068,8 +1092,79 @@ async def run_exploration(
                 })
                 continue
 
+            # 037 US4：坐标/鼠标操作（信任模型 Q2——不做元素名称反解拦截；
+            # 仅校验坐标格式，防无效值派发；坐标动作不进 ref 校验段）
+            if action_name in ("click_xy", "move_mouse", "drag_xy", "mouse_down", "mouse_up"):
+                if action_name in ("mouse_down", "mouse_up"):
+                    _btn = str(decision.get("value") or "left").strip().lower()
+                    if _btn not in ("left", "right", "middle"):
+                        _btn = "left"
+                    action = {"action": action_name, "value": _btn}
+                else:
+                    _val = str(decision.get("value") or "").strip()
+                    _nums = re.findall(r"-?\d+(?:\.\d+)?", _val)
+                    _need = 4 if action_name == "drag_xy" else 2
+                    if len(_nums) < _need:
+                        journal.append({
+                            "action": action_name,
+                            "target": _val[:40] or None,
+                            "ok": False,
+                            "error": (
+                                f"坐标格式无效（需 {_need} 个数字，如 \"120,340\"）——"
+                                f"请按截图读出坐标后重试"
+                            ),
+                        })
+                        continue
+                    # 037 US4：图像像素坐标 → 页面坐标（截图压缩比例换算）
+                    try:
+                        _sx = float(vision_scale.get("x") or 1.0)
+                        _sy = float(vision_scale.get("y") or 1.0)
+                        _pts = [float(n) for n in _nums[:_need]]
+                        if _need == 4:
+                            _conv = [
+                                _pts[0] * _sx, _pts[1] * _sy,
+                                _pts[2] * _sx, _pts[3] * _sy,
+                            ]
+                        else:
+                            _conv = [_pts[0] * _sx, _pts[1] * _sy]
+                        _coord_str = ",".join(
+                            str(int(round(c)) if abs(c - round(c)) < 0.05 else round(c, 1))
+                            for c in _conv
+                        )
+                    except Exception:
+                        _coord_str = ",".join(_nums[:_need])
+                    action = {"action": action_name, "value": _coord_str}
+                label = _action_label(action_name, decision, obs["candidates"])
+                executed = _substitute_credentials(action, cfg)
+                res = await browser.act(executed)
+                ok = bool(res.get("success"))
+                journal.append({
+                    "action": action_name,
+                    "target": str(action.get("value"))[:40],
+                    "value": None,
+                    "ok": ok,
+                    "error": (str(res.get("error"))[:160] if not ok else None),
+                    "note": note or None,
+                })
+                await _emit({
+                    "kind": "step",
+                    "label": label,
+                    "url": page.get("url"),
+                    "step_count": len(journal),
+                    "ok": ok,
+                    "elapsed": round(time.time() - start_ts, 1),
+                })
+                if ok:
+                    await asyncio.sleep(0.5)
+                    obs = await _observe()
+                    page = obs["page"]
+                continue
+
             # 元素动作的 ref 校验（防编造）
             action = {"action": action_name}
+            # 修复（既有 bug）：click_text_used 此前只在元素分支初始化，scroll/goto 等
+            # 公共路径在步骤记录处引用会 NameError（"cannot access local variable"）→ 统一前置
+            click_text_used: str | None = None
             if action_name in ("click", "fill", "press", "select", "hover", "check", "fill_form"):                # B1：fill_form 的 fields 走独立字段（内部 target 逐个校验）
                 if action_name == "fill_form":
                     fields = decision.get("fields")
@@ -1121,7 +1216,6 @@ async def run_exploration(
                         page = obs["page"]
                     continue
                 ref = str(decision.get("ref") or "").strip()
-                click_text_used: str | None = None
                 candidate_refs = {c.ref for c in obs["candidates"]}
                 if (
                     ref not in candidate_refs

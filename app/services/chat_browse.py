@@ -282,6 +282,8 @@ async def _run_browse_task(
         from core.captcha import make_model_captcha_solver
 
         _captcha_solver = make_model_captcha_solver(_captcha_llm)
+        # 037 US5：整页截图兜底识别器（非常规验证码）
+        _captcha_page_solver = make_model_captcha_solver(_captcha_llm, page_mode=True)
 
         cfg = BrowseConfig(
             url=url, goal=goal, username=username, password=password,
@@ -326,6 +328,7 @@ async def _run_browse_task(
             screenshot_dir=_browse_dir(conversation_id, browse_id),
             on_event=_on_event,
             captcha_solver=_captcha_solver,
+            captcha_page_solver=_captcha_page_solver,
         )
         report["browser_mode"] = browser_mode
         report["agent_name"] = agent_name

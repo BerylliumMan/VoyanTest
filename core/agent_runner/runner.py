@@ -233,6 +233,7 @@ class AgentRunner:
         db=None,
         run_id: int | None = None,
         evidence_dir: str | None = None,
+        screenshot_dir: str | None = None,
     ):
         """初始化 AgentRunner。
 
@@ -261,8 +262,13 @@ class AgentRunner:
         self._run_id = run_id
         # 036：运行证据目录（fetch 存证落盘用；缺省跳过落盘并如实标注）
         self._evidence_dir = evidence_dir
+        # 037 US3：失败现场截图落盘（报告步骤附带现场图；服务端链此前只回喂模型不落盘）
+        self._screenshot_dir = screenshot_dir
+        self.last_failure_screenshot: str | None = None
         # 036+：执行链 run_script 的批次/身份（首次调用时从批次解析并缓存）
         self._script_user_id: int | None = None
+        # 037 US3：失败现场截图（b64 缓存；下一轮 think 无新帧时回喂模型自诊断）
+        self._pending_failure_shot_b64: str | None = None
 
         self.tool_registry = ToolRegistry(mcp_manager)
         self.context = AgentContext(max_turns=context_max_turns)
@@ -322,11 +328,44 @@ class AgentRunner:
             consecutive_failures=self._consecutive_act_failures,
             force=force_screenshot or self._force_next_screenshot,
             pending_hint=self._pending_hint,
-        )
+        ) or self._vision_on()
         self._force_next_screenshot = False
         screenshot_b64 = None
         if want_shot:
             screenshot_b64 = await capture_screenshot_b64(self._mcp_manager)
+            # 037 US3：失败现场截图落盘（失败轮/强制截图的下一轮），供报告步骤附图
+            if (
+                screenshot_b64
+                and self._screenshot_dir
+                and (self._consecutive_act_failures > 0 or force_screenshot)
+            ):
+                try:
+                    import base64 as _b64
+                    import os as _os
+
+                    _os.makedirs(self._screenshot_dir, exist_ok=True)
+                    _name = f"turn_{self.turns_used:02d}_fail.png"
+                    _path = _os.path.join(self._screenshot_dir, _name)
+                    _raw = str(screenshot_b64)
+                    if _raw.startswith("data:"):
+                        _raw = _raw.split(",", 1)[-1]
+                    with open(_path, "wb") as _fh:
+                        _fh.write(_b64.b64decode(_raw))
+                    self.last_failure_screenshot = _path
+                except Exception:
+                    logger.debug("failure screenshot save skipped", exc_info=True)
+
+        # 037：视觉帧压缩（PNG b64 → JPEG data URL，控 token；异常原样兜底）
+        if screenshot_b64:
+            try:
+                from core.vision_frame import b64_to_frame_data_url
+
+                screenshot_b64 = (
+                    b64_to_frame_data_url(screenshot_b64, max_width=self._vision_max_width())
+                    or screenshot_b64
+                )
+            except Exception:
+                logger.debug("vision frame compress skipped", exc_info=True)
 
         return {
             "snapshot": snapshot,
@@ -335,6 +374,25 @@ class AgentRunner:
             "snapshot_version": snapshot_version(snapshot or ""),
             "candidates": candidates,
         }
+
+    def _vision_max_width(self) -> int:
+        try:
+            from app.config import get_settings
+
+            return int(getattr(get_settings(), "exec_vision_max_width", 1152) or 1152)
+        except Exception:
+            return 1152
+
+    def _vision_on(self) -> bool:
+        """037：本 run 是否附视觉帧（exec_vision 开关 + 运行时降级）。"""
+        if getattr(self, "_vision_off", False):
+            return False
+        try:
+            from app.config import get_settings
+
+            return bool(getattr(get_settings(), "exec_vision", True))
+        except Exception:
+            return True
 
     async def think(self, observation: dict[str, Any]) -> dict[str, Any]:
         """LLM 根据目标 + 上下文 + 观察（含可选截图）决定下一步动作。"""
@@ -352,12 +410,23 @@ class AgentRunner:
             f"press_key/wait/assert_text with optional fallbacks) — "
             f"to move towards the GOAL. If the goal is already achieved, use action='done'."
         )
+        # 037 US3：无新帧时回喂失败现场截图（一次性消费；有新帧则作废陈旧失败帧）
+        if observation.get("screenshot_b64"):
+            self._pending_failure_shot_b64 = None
+        elif getattr(self, "_pending_failure_shot_b64", None):
+            observation = {**observation, "screenshot_b64": self._pending_failure_shot_b64}
+            self._pending_failure_shot_b64 = None
+
         from core.locator_candidates import serialize_candidates
         step_description += (
             f"\n\nCANDIDATE ELEMENTS (choose selector only from this list):\n"
             f"{serialize_candidates(observation.get('candidates', ())) or '(none)'}"
         )
         if observation.get("screenshot_b64"):
+            logger.info(
+                "Runner: vision frame attached (%d bytes b64)",
+                len(observation.get("screenshot_b64") or ""),
+            )
             step_description += (
                 "\n\nA VIEWPORT SCREENSHOT is attached for this turn. "
                 "Prefer snapshot refs first; use click_xy from the image when refs are unreliable."
@@ -389,6 +458,50 @@ class AgentRunner:
                 "thinking": "思考超时",
                 "next_goal": None,
             }
+        except Exception as exc:
+            # 037：网关/模型不支持图片 → 纯文本重试一次并关闭本 run 视觉（探索链同口径）
+            if observation.get("screenshot_b64"):
+                logger.warning(
+                    "Vision think() failed, retry text-only: %s", str(exc)[:200]
+                )
+                self._vision_off = True
+                retry_desc = step_description.replace(
+                    "\n\nA VIEWPORT SCREENSHOT is attached for this turn. "
+                    "Prefer snapshot refs first; use click_xy from the image when refs are unreliable.",
+                    "",
+                )
+                try:
+                    tool_call = await asyncio.wait_for(
+                        generate_tool_call(
+                            step_description=retry_desc,
+                            dom_snapshot=snapshot,
+                            client=self._llm_client,
+                            model=self._model,
+                            system_prompt=self._system_prompt,
+                            base_url=self.base_url,
+                            screenshot_b64=None,
+                            replace_system_prompt=True,
+                        ),
+                        timeout=100,
+                    )
+                except Exception:
+                    logger.exception("LLM think() 调用失败")
+                    return {
+                        "action": "error",
+                        "selector": None,
+                        "value": "LLM 调用失败",
+                        "thinking": "思考失败",
+                        "next_goal": None,
+                    }
+            else:
+                logger.exception("LLM think() 调用失败")
+                return {
+                    "action": "error",
+                    "selector": None,
+                    "value": "LLM 调用失败",
+                    "thinking": "思考失败",
+                    "next_goal": None,
+                }
 
         action = tool_call.model_dump()
         from core.locator_candidates import is_snapshot_ref, validate_candidate_ref
@@ -429,6 +542,10 @@ class AgentRunner:
         if str(action_name).lower() in ("run_script", "browser_run_script"):
             return await self._execute_script_action(action)
 
+        # 037：执行链验证码（模型读图识别；服务端链经 ServerBrowser 适配复用识别器）
+        if str(action_name).lower() in ("solve_captcha", "browser_solve_captcha"):
+            return await self._execute_captcha_action(action)
+
         result = await self._execute_action_once(action)
         if result.get("success"):
             await self._resolve_coordinate_target(action, result)
@@ -452,6 +569,18 @@ class AgentRunner:
                         break
         # 036：fetch 证据落盘（bytes → 证据文件；路径写回 result.fetch 供 tool_args 记录）
         self._persist_fetch_evidence(result)
+        # 037 US3：失败现场截图缓存（b64 压缩后存；下一轮 think 无新帧时回喂自诊断）
+        if not result.get("success"):
+            try:
+                from core.vision_frame import b64_to_frame_data_url
+
+                _raw = await capture_screenshot_b64(self._mcp_manager)
+                if _raw:
+                    self._pending_failure_shot_b64 = (
+                        b64_to_frame_data_url(_raw, max_width=self._vision_max_width()) or _raw
+                    )
+            except Exception:
+                logger.debug("runner failure vision capture skipped", exc_info=True)
         return result
 
     async def _act_or_unit(
@@ -540,6 +669,55 @@ class AgentRunner:
         else:
             text = f"{head}失败：{res.get('error') or '未知错误'}"
         return {"success": True, "text": text[:3000], "script": res}
+
+    async def _execute_captcha_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        """037：执行链验证码识别与填写（服务端链）。
+
+        - 开关 exec_captcha_enabled（默认开）；关闭 = 拒绝并给出配置提示
+        - 识别器：make_model_captcha_solver（模型读图，无本地 OCR；执行 Agent 模型通道）
+        - 浏览器适配：ServerBrowser(mcp_manager)（复用既有 evaluate/fill/click）
+        """
+        try:
+            from app.config import get_settings
+
+            if not bool(getattr(get_settings(), "exec_captcha_enabled", True)):
+                return {"success": False, "error": "验证码动作已关闭（exec_captcha_enabled=false）"}
+        except Exception:
+            pass
+        try:
+            from core.captcha import make_model_captcha_solver, solve_captcha_via_browser
+            from core.chat.browse import ServerBrowser
+
+            browser = ServerBrowser(mcp_manager=self._mcp_manager, headless=True)
+            await browser.start()  # 构建 ToolRegistry（act 需要；mcp 已在运行，start 为轻量）
+
+            async def _captcha_llm(messages):
+                from app.gen.model_client import call_model
+
+                return await call_model(messages, agent_type="execution")
+
+            solve_fn = make_model_captcha_solver(_captcha_llm)
+            # 037 US5：整页截图兜底（非常规验证码：CSS 背景图/SVG/div 装扮）
+            page_solve_fn = make_model_captcha_solver(_captcha_llm, page_mode=True)
+            ref = action.get("selector") or action.get("ref") or None
+            refresh = bool(action.get("refresh") or action.get("value") == "refresh")
+            res = await solve_captcha_via_browser(
+                browser, input_ref=ref, refresh=refresh, solve_fn=solve_fn,
+                page_solve_fn=page_solve_fn,
+            )
+            if isinstance(res, dict) and res.get("ok"):
+                note = str(res.get("note") or "").strip()
+                text = f"验证码已识别并填写（{int(res.get('text_len') or 0)} 位）"
+                if note:
+                    text += f"；{note}"
+                return {"success": True, "text": text}
+            return {
+                "success": False,
+                "error": str((res or {}).get("error") or "验证码处理失败")[:200],
+            }
+        except Exception as exc:
+            logger.exception("captcha action failed")
+            return {"success": False, "error": f"验证码处理异常: {str(exc)[:160]}"}
 
     async def _execute_action_once(self, action: dict[str, Any]) -> dict[str, Any]:
         try:

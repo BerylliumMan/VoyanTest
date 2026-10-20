@@ -275,6 +275,8 @@ async def run_test_case_via_agent(
     evidence_dir = os.path.join(
         "reports", f"agent_{run.id}_{tz_now().strftime('%Y%m%d_%H%M%S')}", "evidence",
     )
+    # 037 US3：失败现场截图目录（报告步骤附图）
+    screenshot_dir = os.path.join(os.path.dirname(evidence_dir), "screenshots")
     video_state: dict = {"started": False, "filename": None}
     try:
         from app.config import get_settings as _gs_v
@@ -307,6 +309,7 @@ async def run_test_case_via_agent(
         db=db,
         run_id=run.id,
         evidence_dir=evidence_dir,
+        screenshot_dir=screenshot_dir,
     )
 
     try:
@@ -396,6 +399,13 @@ async def run_test_case_via_agent(
         )
         # 036+：诊断脚本证据行（执行中写代码取证；标题/耗时/计数）
         logs += script_evidence_rows(tool_rows)
+        # 037 US3：失败步骤附带现场截图（服务端链；客户端链由 bridge 的 resolve_screenshot 提供）
+        if case_status != "passed" and getattr(runner, "last_failure_screenshot", None):
+            _shot = os.path.relpath(runner.last_failure_screenshot).replace(os.sep, "/")
+            for _row in logs:
+                if str(_row.get("level") or "").lower() in ("error", "critical"):
+                    _row["screenshot_path"] = _shot
+                    break
     else:
         logs = tool_rows
     if not logs:

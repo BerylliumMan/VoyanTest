@@ -1650,6 +1650,8 @@ class AgentClient:
         base_url = (payload.get("base_url") or "").strip()
         case_id = payload.get("case_id") or 0
         keep_browser = bool(payload.get("keep_browser"))
+        # 037：验证码断点尾段——浏览器已停在登录后页面，跳过起始导航
+        skip_initial_goto = bool(payload.get("skip_initial_goto"))
         t0 = _time.monotonic()
         # 032 US2：console 错误证据（回放窗口内采集；随结果回传）
         _console_errors: list[str] = []
@@ -1778,7 +1780,7 @@ class AgentClient:
                 except Exception:
                     page.set_default_timeout(30_000)
                     page.set_default_navigation_timeout(60_000)
-                if base_url and not script_nav:
+                if base_url and not script_nav and not skip_initial_goto:
                     await page.goto(
                         base_url, wait_until="domcontentloaded", timeout=60000
                     )

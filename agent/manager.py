@@ -315,6 +315,7 @@ class AgentManager:
         steps_hash: str,
         headless: Optional[bool] = None,
         keep_browser: bool = False,
+        skip_initial_goto: bool = False,
     ) -> Optional[list]:
         """Ask agent to run solidified Playwright script. None = fall back.
 
@@ -322,6 +323,8 @@ class AgentManager:
           - ``None``: agent uses its own GUI/CLI setting (user-facing runs → usually headed)
           - ``True``/``False``: force mode (e.g. headed/headless override)
         ``keep_browser``: batch/init→main — run on shared CDP and do not close Chromium.
+        ``skip_initial_goto``（037 验证码断点）: browser is already on the correct page
+          (a real-time segment just ran in the same session) — do not navigate.
         """
         session = await self.get_session(agent_id)
         if not session:
@@ -343,6 +346,8 @@ class AgentManager:
                 "steps_hash": steps_hash,
                 "case_name": case_name,
                 "keep_browser": bool(keep_browser),
+                # 037：验证码断点尾段回放——浏览器已停在登录后页面，跳过起始导航
+                "skip_initial_goto": bool(skip_initial_goto),
                 "enhance": {
                     "trace_on_fail": bool(
                         getattr(cfg, "compiled_trace_on_fail", True)
@@ -675,7 +680,9 @@ class AgentManager:
             "element_screenshot": bool(tool_call.get("_element_screenshot")),
         }, timeout=120,
             # 032：拒收迟到的 observe 结果（串扰）；act 结果（无 snapshot 键）照常解析
-            matcher=lambda r: "snapshot" not in r)
+            # 037 冷启动修复：RUN_START 的 ready ACK 也是 snapshot_result（带 ready 键、
+            # 无 snapshot 键）——它先于 act 结果到达时会被误当作动作结果（"unknown"）。
+            matcher=lambda r: "snapshot" not in r and "ready" not in r)
 
 
     # ---- cross-worker pending execution polling ----

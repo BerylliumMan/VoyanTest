@@ -156,6 +156,25 @@ def test_sanity_allows_legitimate_frame_loop():
     assert check_script_sanity(script) == []
 
 
+def test_sanity_rejects_unawaited_playwright_assertion():
+    """037：漏 await 的 expect(...).to_be_visible() 不执行断言 → 假通过，必须拒收。"""
+    script = (
+        "async def test_case_1(page) -> None:\n"
+        "    expect(page.get_by_text(\"登录成功\").first).to_be_visible()\n"
+    )
+    problems = check_script_sanity(script)
+    assert any("un-awaited Playwright assertion" in p for p in problems), problems
+
+
+def test_sanity_accepts_awaited_assertion():
+    script = (
+        "from playwright.async_api import expect\n"
+        "async def test_case_1(page) -> None:\n"
+        "    await expect(page.get_by_text(\"登录成功\").first).to_be_visible()\n"
+    )
+    assert check_script_sanity(script) == []
+
+
 def test_fixed_waits_are_warnings_not_rejections():
     script = (
         "async def test_case_1(page) -> None:\n"

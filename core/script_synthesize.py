@@ -310,6 +310,44 @@ def case_requires_run_script(steps: list[dict[str, Any]] | None) -> bool:
     return False
 
 
+# 037：验证码断点（captcha breakpoint）——含验证码步骤的用例不能整案固化
+# （合成脚本无法真实识别验证码，会造假/必败）。策略：验证码步骤之后的部分（尾段）
+# 可固化回放；验证码及之前的部分（头段）每次实时执行（solve_captcha 模型读图）。
+_CAPTCHA_STEP_RE = re.compile(r"验证码|captcha|图形码|校验码|识别码", re.I)
+
+
+def captcha_breakpoint_index(steps: list[dict[str, Any]] | None) -> int | None:
+    """最后一个含验证码语义步骤的 step_order（无则 None）。"""
+    last: int | None = None
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        desc = str(s.get("description") or s.get("original_description") or "")
+        order = int(s.get("step_order") or s.get("step_number") or 0)
+        if order and _CAPTCHA_STEP_RE.search(desc):
+            last = max(last or 0, order)
+    return last
+
+
+def case_requires_captcha(steps: list[dict[str, Any]] | None) -> bool:
+    """用例是否含验证码语义步骤（true → 断点策略：头段实时 + 尾段回放）。"""
+    return captcha_breakpoint_index(steps) is not None
+
+
+def captcha_tail_steps(steps: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """验证码断点之后的步骤（尾段；无验证码步骤或尾段为空 → []）。"""
+    idx = captcha_breakpoint_index(steps)
+    if idx is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for s in steps or []:
+        if not isinstance(s, dict):
+            continue
+        if int(s.get("step_order") or s.get("step_number") or 0) > idx:
+            out.append(s)
+    return out
+
+
 # 选择器类 API：参数就是 Playwright selector，绝不能是快照 ref
 _SELECTOR_CALL_RE = re.compile(
     r"""\.(?:locator|wait_for_selector|query_selector|frame_locator|
@@ -379,6 +417,20 @@ def check_script_sanity(script: str) -> list[str]:
         key = m.group(2)
         if not is_valid_press_key(key):
             problems.append(f"invalid key press: {key!r}")
+
+    # 037 实测：LLM 合成脚本可能漏 await（RuntimeWarning: coroutine was never awaited），
+    # 断言实际不执行 → 回放"通过"是假的。凡未包在 await 里的 to_* 断言调用一律拒收。
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Expr):
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if isinstance(func, ast.Attribute) and func.attr.startswith("to_"):
+            problems.append(
+                f"un-awaited Playwright assertion: .{func.attr}() never awaited"
+            )
 
     # 未定义的 frame / self.frame 变量
     assigned: set[str] = set()
@@ -621,6 +673,7 @@ async def synthesize_playwright_script(
     steps: list[dict[str, Any]] | None = None,
     base_url: str | None = None,
     temperature: float = 0.1,
+    no_navigation: bool = False,
 ) -> str:
     """Generate Playwright Python from successful journal (template-first)."""
     checklist = _checklist_for_synth(steps)
@@ -702,7 +755,16 @@ async def synthesize_playwright_script(
     resp = await client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYNTH_SYSTEM},
+            {"role": "system", "content": (
+                SYNTH_SYSTEM
+                + (
+                    "\nIMPORTANT (segment script): the browser is ALREADY on the correct page "
+                    "state — a previous real-time segment (including login/captcha) has just "
+                    "completed in the SAME browser session. Do NOT include any page.goto / "
+                    "navigation calls; start from the current page state.\n"
+                    if no_navigation else ""
+                )
+            )},
             {"role": "user", "content": user},
         ],
         temperature=temperature,
@@ -832,6 +894,7 @@ async def synthesize_script_from_steps(
     goal_text: str = "",
     temperature: float = 0.1,
     use_llm: bool = True,
+    no_navigation: bool = False,
 ) -> str | None:
     """编译先行：从「用例步骤」直接生成可执行脚本（模板直译 → LLM 兜底 → 同一套质量闸）。
 
@@ -857,7 +920,8 @@ async def synthesize_script_from_steps(
     templated, unmapped = build_script_from_steps(
         case_id=int(case_id), case_name=case_name, steps=steps, base_url=base_url
     )
-    if templated and not unmapped:
+    # 037：尾段脚本（验证码断点）不得导航——模板含 goto，直接走 LLM 并附加禁导航规则
+    if not no_navigation and templated and not unmapped:
         try:
             script = harden_locators_with_first(_ensure_entrypoint(templated, int(case_id)))
             script = _accept_synthesized_script(script, case_id=int(case_id), steps=steps)
@@ -871,9 +935,12 @@ async def synthesize_script_from_steps(
         except ValueError as exc:
             logger.info("precompile: 模板未过闸 case=%s — %s（转 LLM）", case_id, exc)
     else:
-        logger.info(
-            "precompile: 模板未完全覆盖 case=%s unmapped=%s（转 LLM）", case_id, unmapped
-        )
+        if no_navigation:
+            logger.info("precompile: 尾段脚本（禁导航）跳过模板直译 case=%s（转 LLM）", case_id)
+        else:
+            logger.info(
+                "precompile: 模板未完全覆盖 case=%s unmapped=%s（转 LLM）", case_id, unmapped
+            )
 
     if not use_llm:
         return None
@@ -902,7 +969,16 @@ async def synthesize_script_from_steps(
         resp = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYNTH_FROM_STEPS_SYSTEM},
+                {"role": "system", "content": (
+                    SYNTH_FROM_STEPS_SYSTEM
+                    + (
+                        "\nIMPORTANT (segment script): the browser is ALREADY on the correct page "
+                        "state — a previous real-time segment (including login/captcha) has just "
+                        "completed in the SAME browser session. Do NOT include any page.goto / "
+                        "navigation calls; start from the current page state.\n"
+                        if no_navigation else ""
+                    )
+                )},
                 {"role": "user", "content": user},
             ],
             temperature=temperature,

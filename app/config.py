@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     chat_script_enabled: bool = True
     # - 执行链诊断脚本动作（run_script：用例执行中写 Python 查库/调接口/核对数据）
     exec_script_enabled: bool = True
+    # 037 执行链视觉与验证码：
+    # - 执行链每轮决策附当前页面截图（多模态读图；探索链同款压缩口径；模型不支持图片自动降级）
+    exec_vision: bool = True
+    # - 视觉帧压缩长边上限（px；控 token）
+    exec_vision_max_width: int = 1152
+    # - 执行链验证码动作（solve_captcha：模型读图识别并填写；关闭=动作被拒绝）
+    exec_captcha_enabled: bool = True
+    # - 验证码断点混合执行（含验证码用例：登录/验证码段实时→尾段固化回放；关闭=全实时 OTA）
+    exec_captcha_breakpoint: bool = True
     # - 诊断脚本执行超时上限（毫秒；接口测试脚本的既有 2000ms 语义不变）
     chat_script_timeout_ms: int = 30000
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）

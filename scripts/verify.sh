@@ -59,18 +59,20 @@ SMOKE_OK=false
 TS=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z')
 
 # ── 路径映射: app/*.py→/app/app/*.py  core/**/*.py→/app/core/**/*.py
+#              agent/*.py→/app/agent/*.py（服务端 manager/router 也跑在容器内）
 #              frontend/dist/**→/app/app/static/**
 map_to_container() {
     case "$1" in
         app/*)           echo "/app/$1" ;;
         core/*)          echo "/app/$1" ;;
+        agent/*)         echo "/app/$1" ;;
         frontend/dist/*) echo "/app/app/static/${1#frontend/dist/}" ;;
         *)               echo "" ;;
     esac
 }
 
-# ── 文件过滤: 仅 .py (app/, core/) 和 frontend/dist/ ────────────────────────
-is_target() { [[ "$1" =~ ^app/.*\.py$ ]] || [[ "$1" =~ ^core/.*\.py$ ]] || [[ "$1" =~ ^frontend/dist/ ]]; }
+# ── 文件过滤: 仅 .py (app/, core/, agent/) 和 frontend/dist/ ────────────────
+is_target() { [[ "$1" =~ ^app/.*\.py$ ]] || [[ "$1" =~ ^core/.*\.py$ ]] || [[ "$1" =~ ^agent/.*\.py$ ]] || [[ "$1" =~ ^frontend/dist/ ]]; }
 
 # ── 前置检查: 容器必须运行 ──────────────────────────────────────────────────
 if ! docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null | grep -q true; then

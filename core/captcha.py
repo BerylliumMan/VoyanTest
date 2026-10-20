@@ -74,7 +74,18 @@ _CAPTURE_JS_TMPL = """async () => {
     if (cur) { try { cur.click(); } catch (e) {} await new Promise((r) => setTimeout(r, 1200)); }
   }
   const img = pickInfo && pickInfo.el;
-  if (!img) return { ok: false, error: '未找到验证码图片（img/canvas）' };
+  if (!img) {
+    if (__IMAGE_OPTIONAL__) {
+      let ml0 = 0;
+      if (capInput) {
+        ml0 = parseInt(capInput.getAttribute('maxlength') || '0', 10) || 0;
+        capInput.setAttribute('data-vt-cap', '1');
+        capInput.setAttribute('autocomplete', 'off');
+      }
+      return { ok: true, img: '', has_input: !!capInput, maxlength: ml0 };
+    }
+    return { ok: false, error: '未找到验证码图片（img/canvas）' };
+  }
   // 图片未加载完成时等待（上限 1.5s）
   if (img.tagName === 'IMG' && (!img.complete || !img.naturalWidth)) {
     const t0 = Date.now();
@@ -171,11 +182,12 @@ _REFILL_JS_TMPL = """() => { /* vt-refill */
 }"""
 
 
-def _capture_js(refresh: bool) -> str:
+def _capture_js(refresh: bool, image_optional: bool = False) -> str:
     return (
         _CAPTURE_JS_TMPL
         .replace("__CAPRE__", _CAPTCHA_KEY_RE)
         .replace("__REFRESH__", "true" if refresh else "false")
+        .replace("__IMAGE_OPTIONAL__", "true /*vt-imgopt*/" if image_optional else "false")
     )
 
 
@@ -199,6 +211,13 @@ def _refill_js(username: str, password: str) -> str:
 # 模型读图分析（ZCode 方式，2026-10-19）：验证码图片直接交给多模态大模型。
 # 不保留本地 OCR 组件；识别失败由探索流程如实报告并刷新重试。
 # ----------------------------
+
+_CAPTCHA_PAGE_VISION_PROMPT = (
+    "这是一张网页整页截图。页面中有一个验证码图片/区域（通常在登录表单附近；可能是 "
+    "img/canvas/div 背景图/SVG 等任意形式），内容可能是数字、字母或算术题。\n"
+    "请在整页截图中找到验证码区域并读出内容：若是算术题（如 3+5=?）只回复计算结果（如 8）；"
+    "若是字符只回复字符本身（区分大小写）。\n只回复验证码内容本身，不要任何其他文字、解释或标点。"
+)
 
 _CAPTCHA_VISION_PROMPT = (
     "这是一张验证码图片。请分析图片内容，并只回复需要填入输入框的答案：\n"
@@ -243,12 +262,15 @@ def _parse_model_captcha_reply(raw: str, prefer_len: int | None = None) -> str:
     return value
 
 
-def make_model_captcha_solver(llm):
+def make_model_captcha_solver(llm, *, page_mode: bool = False):
     """构造「模型读图」验证码识别器（ZCode 方式）。
 
     ``llm(messages) -> str``：多模态模型调用（messages 支持 image_url content part）。
+    ``page_mode=True``（037 US5）：整页截图模式——提示词改为「在整页截图中找验证码并读出」，
+    供找图失败兜底路径使用（``page_solve_fn``）。
     无本地 OCR 兜底：模型调用失败或未读出答案时如实返回错误（由探索流程刷新重试）。
     """
+    _prompt = _CAPTCHA_PAGE_VISION_PROMPT if page_mode else _CAPTCHA_VISION_PROMPT
 
     async def _solve(img_data_url: str, *, prefer_len: int | None = None) -> tuple[str, str]:
         hint = f"\n（提示：输入框最多 {int(prefer_len)} 个字符）" if prefer_len else ""
@@ -258,7 +280,7 @@ def make_model_captcha_solver(llm):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": _CAPTCHA_VISION_PROMPT + hint},
+                        {"type": "text", "text": _prompt + hint},
                         {"type": "image_url", "image_url": {"url": img_data_url}},
                     ],
                 },
@@ -280,10 +302,14 @@ async def solve_captcha_via_browser(
     input_ref: Optional[str] = None,
     refresh: bool = False,
     solve_fn: Optional[Callable[..., tuple[str, str]]] = None,
+    page_solve_fn: Optional[Callable[[str], tuple[str, str]]] = None,
     username: str = "",
     password: str = "",
 ) -> dict:
     """识别并填写验证码；返回 ``{"ok": bool, "note"/"error": str, "text_len": int}``。
+
+    ``page_solve_fn``（037 US5）：找图失败（非常规验证码：CSS 背景图/SVG/div 装扮）时的
+    整页截图兜底识别器——整页截图交模型找验证码并读出答案（data URL 入参）。
 
     ``browser`` 需实现 ``evaluate_json(fn)`` 与 ``act(action)``（服务端/客户端通用）。
     ``solve_fn``：验证码识别器（ZCode 方式=模型读图，``make_model_captcha_solver``；异步函数亦可）。
@@ -313,10 +339,85 @@ async def solve_captcha_via_browser(
             refilled["user"] = refilled["user"] or bool(r.get("user"))
             refilled["pass"] = refilled["pass"] or bool(r.get("pass"))
 
-    async def _capture(with_refresh: bool) -> dict:
+    async def _capture(with_refresh: bool, image_optional: bool = False) -> dict:
         await _refill()  # 重试/首次都先补回空白的账号密码（实测：站点重试会重置表单）
-        cap = await browser.evaluate_json(_capture_js(with_refresh))
+        cap = await browser.evaluate_json(_capture_js(with_refresh, image_optional))
         return cap if isinstance(cap, dict) else {}
+
+    async def _page_fallback() -> Optional[dict]:
+        """037 US5：整页截图 → 模型找验证码读答案 → 填入（find 失败场景专用）。"""
+        import inspect as _inspect
+        import os as _os
+        import tempfile as _tf
+
+        # 1) 标记输入框（找图失败时仍可定位输入框：image_optional 模式）
+        cap0 = await _capture(False, image_optional=True)
+        has_input = bool(cap0.get("has_input")) if cap0.get("ok") else False
+        try:
+            ml0 = int(cap0.get("maxlength") or 0)
+        except (TypeError, ValueError):
+            ml0 = 0
+        # 2) 整页截图 → data URL
+        path = _os.path.join(_tf.gettempdir(), f"vt_cap_page_{_os.getpid()}.png")
+        try:
+            shot = await browser.screenshot(path)
+        except Exception:
+            shot = None
+        if not shot:
+            return {"ok": False, "error": "整页截图失败（无法读取验证码）"}
+        try:
+            from core.vision_frame import frame_to_data_url
+
+            data_url = frame_to_data_url(str(shot), max_width=1152) or ""
+        except Exception:
+            data_url = ""
+        if not data_url:
+            return {"ok": False, "error": "整页截图处理失败（无法读取验证码）"}
+        # 3) 模型读整页图
+        try:
+            out = page_solve_fn(data_url)
+            if _inspect.isawaitable(out):
+                out = await out
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"整页截图兜底识别失败（{type(exc).__name__}）"}
+        text, err = (out if isinstance(out, tuple) else ("", "识别器返回异常"))
+        text = str(text or "").strip()
+        if not text:
+            return {"ok": False, "error": f"整页截图兜底：{err or '模型未能从整页截图中读出验证码'}"}
+        if ml0 and len(text) > ml0:
+            text = text[:ml0]
+        # 4) 填入（input_ref 优先 → JS 校验/回退）
+        filled = False
+        if input_ref:
+            try:
+                res = await browser.act({"action": "fill", "selector": input_ref, "value": text})
+                filled = bool(res.get("success"))
+            except Exception:
+                filled = False
+        if has_input:
+            try:
+                verified = await browser.evaluate_json(_verify_js(text))
+            except Exception:
+                verified = None
+            if not (isinstance(verified, dict) and verified.get("ok")):
+                try:
+                    js_fill = await browser.evaluate_json(_fill_js(text))
+                except Exception:
+                    js_fill = None
+                if isinstance(js_fill, dict) and js_fill.get("ok"):
+                    filled = True
+                elif not filled:
+                    return {"ok": False, "error": "验证码已识别但填写失败"}
+            else:
+                filled = True
+        if not filled and not has_input:
+            return {"ok": False, "error": "验证码已识别但未找到输入框（可先点击验证码输入框后重试）"}
+        return {
+            "ok": True,
+            "note": f"已识别并自动填写验证码（{len(text)} 位，整页截图兜底）",
+            "text_len": len(text),
+            "source": "page",
+        }
 
     async def _solve(img_data_url: str, prefer: int | None) -> tuple[str, str]:
         import inspect as _inspect
@@ -341,6 +442,11 @@ async def solve_captcha_via_browser(
         last_err = str(cap.get("error") or last_err)
 
     if not cap.get("ok"):
+        # 037 US5：找图失败（非常规验证码）→ 整页截图交模型读图兜底
+        if page_solve_fn is not None and "未找到验证码图片" in last_err:
+            fb = await _page_fallback()
+            if fb is not None:
+                return fb
         return {"ok": False, "error": last_err}
 
     try:
