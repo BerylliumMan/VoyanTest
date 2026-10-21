@@ -245,6 +245,8 @@ async def _pace_calls() -> None:
 async def call_model(
     messages: list,
     temperature: float | None = None,
+    *,
+    skip_pace: bool = False,
     stream_callback=None,
     reasoning_callback=None,
     agent_type: str | None = None,
@@ -293,7 +295,8 @@ async def call_model(
     if tools is not None:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    await _pace_calls()
+    if not skip_pace:
+        await _pace_calls()
 
     if stream_callback:
         payload["stream"] = True

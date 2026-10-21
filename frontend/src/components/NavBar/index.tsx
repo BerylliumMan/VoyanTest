@@ -15,9 +15,11 @@ import useLocale from '@/utils/useLocale';
 import logger from '@/utils/logger';
 import Logo from '@/assets/logo.svg';
 import IconButton from './IconButton';
-import Settings from '../Settings';
 import styles from './style/index.module.less';
 import defaultLocale from '@/locale';
+
+// 038 US6：设置抽屉按需加载（不在首屏入口 chunk）
+const Settings = React.lazy(() => import('../Settings'));
 
 function Navbar({
   show,
@@ -77,11 +79,13 @@ function Navbar({
   if (!show) {
     return (
       <div className={styles['fixed-settings']}>
-        <Settings
-          trigger={
-            <Button icon={<IconSettings />} type="primary" size="large" />
-          }
-        />
+        <React.Suspense fallback={null}>
+          <Settings
+            trigger={
+              <Button icon={<IconSettings />} type="primary" size="large" />
+            }
+          />
+        </React.Suspense>
       </div>
     );
   }

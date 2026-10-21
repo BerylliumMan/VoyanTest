@@ -308,6 +308,7 @@ async def run_test_case_via_agent(
         base_url=base_url,
         db=db,
         run_id=run.id,
+        batch_id=batch_id,
         evidence_dir=evidence_dir,
         screenshot_dir=screenshot_dir,
     )

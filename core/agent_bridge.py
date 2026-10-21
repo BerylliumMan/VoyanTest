@@ -65,15 +65,28 @@ def pick_checklist_index(
     动作才算覆盖（wait/截图 不得冒充 click 步骤），宁缺毋滥 —— 错配条目在
     ``sanitize_journal_for_synth`` 里也会被丢弃。
     """
-    from core.goal_agent_loop import journal_entry_covers_checklist
+    from core.goal_agent_loop import coverage_reason, journal_entry_covers_checklist
 
+    first_uncovered: tuple[int, str] | None = None
     for i, s in enumerate(steps or []):
         order = int(s.get("step_order") or s.get("step_number") or i + 1)
         if order in covered_orders:
             continue
         desc = str(s.get("description") or s.get("original_description") or "")
+        if first_uncovered is None:
+            first_uncovered = (order, desc)
         if journal_entry_covers_checklist(entry, step_description=desc):
             return order
+    if first_uncovered is not None:
+        # 038 FR-010：拒绝覆盖不静默（诊断原因可查；不影响判定）
+        logger.debug(
+            "coverage rejected: action=%s reason=%s step=%s desc=%r target=%r",
+            entry.get("action"),
+            coverage_reason(entry, step_description=first_uncovered[1]),
+            first_uncovered[0],
+            first_uncovered[1][:80],
+            str(entry.get("element_desc") or entry.get("value") or "")[:80],
+        )
     return None
 
 
@@ -107,6 +120,8 @@ class AgentBridge:
         self._breakpoint_replay_logs: list[dict] = []
         # 037 US3：失败现场截图（b64 缓存；下一轮决策无新帧时回喂模型自诊断）
         self._pending_failure_shot_b64: str | None = None
+        # 038 US1：坐标回读连续未命中计数
+        self._coord_miss_streak = 0
 
     def _vision_on(self) -> bool:
         """037：本轮是否附视觉帧（exec_vision 开关 + 运行时降级）。"""
@@ -186,9 +201,24 @@ class AgentBridge:
         self._active_agent_id: str | None = None
         self._active_run_id_str: str | None = None
         self._batch_id: int | None = existing_batch_id
+        # 038 US3：批次停止观察器（进程内标志 + DB 轮询）
+        from core.run_control import BatchStopWatcher
+
+        self._stop_watcher = BatchStopWatcher(self.db, self._batch_id)
         # _fail 已同步置败的预创建 TestRun（_save_report 复用之，防重复 run）
         self._synced_test_run_ids: list[int] = []
         # 注意：037 断点状态在 __init__ 初始化、orchestrate 装载（此处不得重置）
+
+        # 038 US3：进入任何执行分支前先看是否已被停止（回放/编译先行也要让位）
+        if await self._stop_watcher.should_stop():
+            await self._cancel(
+                run, "已停止（用户取消）", agent_id=agent_id, run_id_str=run_id_str,
+            )
+            try:
+                await self._save_report(run, case_id)
+            except Exception:
+                logger.exception("Bridge cancelled report save failed for run #%d", run.id)
+            return run
 
         # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
         # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
@@ -483,6 +513,44 @@ class AgentBridge:
         except Exception:
             logger.debug("Bridge 坐标回解跳过", exc_info=True)
 
+    async def _append_coord_feedback(
+        self, agent_id: str, run_id_str: str,
+        action: dict[str, Any], result: dict[str, Any],
+        context_messages: list[dict[str, str]],
+    ) -> None:
+        """038 US1：坐标回读结果注入下一轮决策（含连续点偏提示）。"""
+        from core.coordinate_feedback import (
+            COORD_ACTIONS, build_feedback_text, parse_coordinates, probe_via_act,
+        )
+
+        name = str(action.get("name") or action.get("action") or "").strip().lower()
+        if name not in COORD_ACTIONS:
+            return
+        args = action.get("args") if isinstance(action.get("args"), dict) else action
+        nums = parse_coordinates(args.get("value"))
+        if len(nums) < 2:
+            return
+        try:
+            async def _send(sub_action: dict[str, Any]) -> dict[str, Any]:
+                return await asyncio.wait_for(
+                    self.agent_manager.send_act(agent_id, run_id_str, sub_action),
+                    timeout=30,
+                )
+
+            info, failed = await probe_via_act(_send, nums[0], nums[1])
+        except Exception:
+            info, failed = None, True
+        if info:
+            self._coord_miss_streak = 0
+        elif not failed:
+            self._coord_miss_streak += 1
+        text = build_feedback_text(
+            info, nums[0], nums[1], streak=self._coord_miss_streak, read_failed=failed,
+        )
+        action.setdefault("args", {})["_hit"] = info or {"hit": False}
+        result["text"] = (str(result.get("text") or "") + f"\nCOORD FEEDBACK: {text}").strip()
+        context_messages.append({"role": "user", "content": f"COORD FEEDBACK: {text}"})
+
     async def _enrich_failure_evidence(
         self, agent_id: str, run_id_str: str, action: dict[str, Any],
         result: dict[str, Any], snapshot: str | None = None,
@@ -693,16 +761,26 @@ class AgentBridge:
 
         # 创建或更新 RunBatch
         tc = await get_test_case(self.db, case_id)
-        run_status_map = "passed" if run.status in ("completed", "passed") else "failed"
+        if run.status in ("completed", "passed"):
+            run_status_map = "passed"
+        elif run.status in ("cancelled", "stopped"):
+            run_status_map = "cancelled"
+        else:
+            run_status_map = "failed"
+        batch = None
         if self._batch_id:
             from sqlalchemy import select as _sl
             from app.db_models import RunBatch as _RB
             r = await self.db.execute(_sl(_RB).where(_RB.id == self._batch_id))
             batch = r.scalar_one_or_none()
             if batch:
-                batch.status = run_status_map
-                batch.passed = 1 if run_status_map == "passed" else 0
-                batch.failed = 1 if run_status_map == "failed" else 0
+                # 038 US3：已被用户停止的批次不得被本 run 的终态覆盖
+                if batch.status in ("cancelled", "stopping"):
+                    run_status_map = "cancelled"
+                else:
+                    batch.status = run_status_map
+                    batch.passed = 1 if run_status_map == "passed" else 0
+                    batch.failed = 1 if run_status_map == "failed" else 0
         if not self._batch_id or not batch:
             batch = RunBatch(
                 status=run_status_map,
@@ -2092,6 +2170,53 @@ class AgentBridge:
             logger.warning("同步预创建 TestRun 失败", exc_info=True)
         logger.warning("AgentRun #%d failed: %s", run_id, error)
 
+    async def _cancel(
+        self, run: "AgentRun", reason: str, *,
+        agent_id: str | None = None, run_id_str: str | None = None,
+    ) -> None:
+        """标记 run 为 cancelled（038 US3：用户停止，不当作失败）。"""
+        # 通知客户端停止（best-effort；客户端在两个动作之间检查）
+        if agent_id and run_id_str:
+            try:
+                await self.agent_manager.send(
+                    agent_id, {"type": "cancel_run", "run_id": run_id_str},
+                )
+            except Exception:
+                logger.debug("cancel_run 通知客户端失败", exc_info=True)
+        await crud_agent_run.update_agent_run_status(
+            self.db, run.id, "cancelled", error=reason,
+            completed_at=datetime.now(timezone.utc),
+        )
+        try:
+            from sqlalchemy import text as _text
+
+            case_id = getattr(run, "case_id", None)
+            batch_id = getattr(self, "_batch_id", None)
+            if case_id and batch_id:
+                res = await self.db.execute(
+                    _text(
+                        "UPDATE test_runs SET status='cancelled', end_time=now() "
+                        "WHERE case_id=:c AND batch_id=:b "
+                        "AND status IN ('running','pending') RETURNING id"
+                    ),
+                    {"c": case_id, "b": batch_id},
+                )
+                tr_ids = [r[0] for r in res.fetchall()]
+                if tr_ids:
+                    self._synced_test_run_ids = list(tr_ids)
+                    for tr_id in tr_ids:
+                        await self.db.execute(
+                            _text(
+                                "INSERT INTO run_logs (run_id, level, message, timestamp) "
+                                "VALUES (:rid, 'warning', :msg, now())"
+                            ),
+                            {"rid": tr_id, "msg": "已停止（用户取消）"},
+                        )
+                await self.db.commit()
+        except Exception:
+            logger.warning("取消预创建 TestRun 失败", exc_info=True)
+        logger.info("AgentRun #%d cancelled: %s", run.id, reason)
+
     # ── OTA 主循环 ─────────────────────────────────────────────────────────
 
     async def _ota_loop(
@@ -2235,6 +2360,12 @@ class AgentBridge:
         turn = 0
         failed_turns = 0
         while turn < max_total_turns:
+            # 038 US3：每轮开始前检查停止（跨 worker 走 DB 轮询，同进程走内存标志）
+            if await self._stop_watcher.should_stop():
+                await self._cancel(
+                    run, "已停止（用户取消）", agent_id=agent_id, run_id_str=run_id_str,
+                )
+                return
             if failed_turns >= max_failed_turns:
                 await self._fail(
                     run.id,
@@ -2732,6 +2863,9 @@ class AgentBridge:
             # 032 US5：坐标动作成功后回解命中元素（语义信息入账；失败静默）
             if result.get("success"):
                 await self._resolve_coordinate_target(agent_id, run_id_str, action, result)
+                await self._append_coord_feedback(
+                    agent_id, run_id_str, action, result, context_messages,
+                )
 
             await self._record_turn(run.id, turn, snapshot, action, result)
 

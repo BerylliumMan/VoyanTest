@@ -511,7 +511,10 @@ async def stop_batch(batch_id: int, user=Depends(get_current_user), db: AsyncSes
     if batch.status not in ("running", "paused"):
         raise HTTPException(status_code=409, detail=f"仅 running/paused 可停止，当前为 {batch.status}")
     await execution_control.request_stop(batch_id)
-    n = await crud.cancel_remaining_batch_runs(db, batch_id, message="用户停止执行")
+    # 038 US3：在途 run 也标记为 cancelled（执行循环会在下一检查点退出）
+    n = await crud.cancel_remaining_batch_runs(
+        db, batch_id, message="用户停止执行", include_running=True,
+    )
     batch.status = "cancelled"
     batch.finished_at = tz_now()
     await db.commit()

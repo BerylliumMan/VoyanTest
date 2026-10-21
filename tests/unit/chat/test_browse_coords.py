@@ -191,3 +191,47 @@ async def test_common_path_actions_do_not_crash():
     assert "scroll" in kinds and "navigate_back" in kinds
     assert report.get("stopped_reason") in ("done", "max_steps", "timeout"), report
     assert "cannot access local variable" not in str(report.get("error") or "")
+
+
+# ── 038 T004：evaluate_json 返回契约（dict/list/标量）──
+
+class _FakeEvalMCP:
+    def __init__(self, text: str):
+        self.text = text
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, tool: str, args: dict):
+        self.calls.append((tool, dict(args)))
+        return {"success": True, "text": self.text}
+
+
+@pytest.mark.asyncio
+async def test_server_evaluate_json_accepts_list():
+    """038 回归：视口尺寸是 list，此前被 _decode_json_text 丢弃 → 缩放恒 1.0。"""
+    from core.chat.browse import ServerBrowser
+
+    mcp = _FakeEvalMCP('### Result\n"[1920,1080]"\n### Ran Playwright code')
+    browser = ServerBrowser(mcp_manager=mcp)
+    vp = await browser.evaluate_json("() => [window.innerWidth, window.innerHeight]")
+    assert vp == [1920, 1080]
+
+
+@pytest.mark.asyncio
+async def test_server_evaluate_json_accepts_scalar_and_dict():
+    from core.chat.browse import ServerBrowser
+
+    b1 = ServerBrowser(mcp_manager=_FakeEvalMCP("### Result\n42\n###"))
+    assert await b1.evaluate_json("() => 42") == 42
+    b2 = ServerBrowser(mcp_manager=_FakeEvalMCP('### Result\n{"url":"u","title":"t"}\n###'))
+    assert await b2.evaluate_json("() => ({})") == {"url": "u", "title": "t"}
+
+
+def test_compute_vision_scale():
+    from core.chat.browse import compute_vision_scale
+
+    assert compute_vision_scale(1152, 648, [1920, 1080]) == pytest.approx(
+        {"x": 1920 / 1152, "y": 1080 / 648}
+    )
+    assert compute_vision_scale(0, 648, [1920, 1080]) == {}
+    assert compute_vision_scale(1152, 648, None) == {}
+    assert compute_vision_scale(1152, 648, [0, 1080]) == {}

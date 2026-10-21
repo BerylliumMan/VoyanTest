@@ -1113,6 +1113,8 @@ class AgentClient:
         role: str | None = None,
         field_type: str | None = None,
     ) -> dict:
+        if getattr(self, "_cancel_requested", False):
+            return {"success": False, "error": "已停止（用户取消）"}
         from core.blank_click import execute_blank_click, should_use_blank_click
         from core.mcp_tabs import (
             list_tab_count,
@@ -2270,6 +2272,9 @@ class AgentClient:
         {"success": ..., "screenshot_b64": ..., "error": ...}
         """
         run_id = msg.run_id
+        if getattr(self, "_cancel_requested", False):
+            await self.send_result(run_id, {"success": False, "error": "已停止（用户取消）"})
+            return
         p = msg.payload or {}
         tc = p.get("tool_call", {}) or p
         action = tc.get("action") or p.get("action") or ""

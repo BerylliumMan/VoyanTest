@@ -107,3 +107,21 @@ def fake_mcp_caller() -> FakeMCPCaller:
 @pytest.fixture
 def fake_agent_manager() -> FakeAgentManager:
     return FakeAgentManager()
+
+
+@pytest.fixture
+def execution_control_state():
+    """038 US3：隔离 execution_control 进程内标志（测试后恢复）。"""
+    from app import execution_control as ec
+
+    saved_stopped = set(ec._stopped)
+    saved_paused = set(ec._paused)
+    ec._stopped.clear()
+    ec._paused.clear()
+    try:
+        yield ec
+    finally:
+        ec._stopped.clear()
+        ec._stopped.update(saved_stopped)
+        ec._paused.clear()
+        ec._paused.update(saved_paused)

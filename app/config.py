@@ -121,6 +121,15 @@ class Settings(BaseSettings):
     exec_captcha_breakpoint: bool = True
     # - 诊断脚本执行超时上限（毫秒；接口测试脚本的既有 2000ms 语义不变）
     chat_script_timeout_ms: int = 30000
+    # 038 质量兜底与性能优化：
+    # - 坐标点击后回读命中元素（探索链 + 执行链；关闭=基线）
+    exec_click_feedback: bool = True
+    # - 连续点偏提示阈值（次）
+    exec_click_feedback_max_misses: int = 3
+    # - 批次停止状态轮询间隔（毫秒；越小停止越快，DB 查询越频繁）
+    exec_stop_poll_ms: int = 1000
+    # - 生成用例批次并发上限（1=串行基线）
+    gen_parallel_max: int = 3
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

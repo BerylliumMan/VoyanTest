@@ -232,6 +232,7 @@ class AgentRunner:
         base_url: str | None = None,
         db=None,
         run_id: int | None = None,
+        batch_id: int | None = None,
         evidence_dir: str | None = None,
         screenshot_dir: str | None = None,
     ):
@@ -260,6 +261,11 @@ class AgentRunner:
 
         self._db = db
         self._run_id = run_id
+        # 038 US3：批次停止观察器（DB 轮询 + 进程内标志）
+        from core.run_control import BatchStopWatcher
+
+        self._batch_id = batch_id
+        self._stop_watcher = BatchStopWatcher(db, batch_id)
         # 036：运行证据目录（fetch 存证落盘用；缺省跳过落盘并如实标注）
         self._evidence_dir = evidence_dir
         # 037 US3：失败现场截图落盘（报告步骤附带现场图；服务端链此前只回喂模型不落盘）
@@ -269,6 +275,8 @@ class AgentRunner:
         self._script_user_id: int | None = None
         # 037 US3：失败现场截图（b64 缓存；下一轮 think 无新帧时回喂模型自诊断）
         self._pending_failure_shot_b64: str | None = None
+        # 038 US1：坐标回读连续未命中计数
+        self._coord_miss_streak = 0
 
         self.tool_registry = ToolRegistry(mcp_manager)
         self.context = AgentContext(max_turns=context_max_turns)
@@ -549,6 +557,7 @@ class AgentRunner:
         result = await self._execute_action_once(action)
         if result.get("success"):
             await self._resolve_coordinate_target(action, result)
+            await self._append_coord_feedback(action, result)
         if not result.get("success"):
             from core.mcp_args import annotate_uncertain, is_transient_action_error
 
@@ -615,6 +624,32 @@ class AgentRunner:
             (fetch.get("api") or {}).get("content_type") or "",
         )
         fetch.update(saved)
+
+    async def _append_coord_feedback(self, action: dict[str, Any], result: dict[str, Any]) -> None:
+        """038 US1：坐标回读结果写入上下文（下一轮 think 可见）。"""
+        from core.coordinate_feedback import (
+            COORD_ACTIONS, build_feedback_text, parse_coordinates, probe_via_mcp,
+        )
+
+        name = str(action.get("action") or action.get("name") or "").strip().lower()
+        if name not in COORD_ACTIONS:
+            return
+        nums = parse_coordinates(action.get("value"))
+        if len(nums) < 2:
+            return
+        info, failed = None, True
+        if self._mcp_manager is not None:
+            info, failed = await probe_via_mcp(self._mcp_manager.call_tool, nums[0], nums[1])
+        if info:
+            self._coord_miss_streak = 0
+        elif not failed:
+            self._coord_miss_streak += 1
+        text = build_feedback_text(
+            info, nums[0], nums[1], streak=self._coord_miss_streak, read_failed=failed,
+        )
+        action["_hit"] = info or {"hit": False}
+        result["text"] = (str(result.get("text") or "") + f"\nCOORD FEEDBACK: {text}").strip()
+        self.context.add_turn("user", f"COORD FEEDBACK: {text}")
 
     async def _resolve_coordinate_target(
         self, action: dict[str, Any], result: dict[str, Any],
@@ -1000,6 +1035,18 @@ class AgentRunner:
         self.context.add_turn("user", f"目标: {self.goal}")
 
         for turn in range(1, self.max_turns + 1):
+            # 038 US3：每轮开始前检查批次停止（跨 worker 走 DB 轮询）
+            if await self._stop_watcher.should_stop():
+                logger.info(
+                    "AgentRunner: batch %s stopped by user at turn %s",
+                    self._batch_id, turn,
+                )
+                return {
+                    "status": "cancelled",
+                    "turns_used": turn - 1,
+                    "error": "已停止（用户取消）",
+                    "result": None,
+                }
             self.turns_used = turn
             self._click_xy_fallback_used = False  # one bbox→xy retry per turn
             logger.info("━━━ Turn %d/%d ━━━", turn, self.max_turns)
@@ -1411,7 +1458,7 @@ class AgentRunner:
             for key in (
                 "selector", "target", "candidate_ref", "snapshot_version",
                 "value", "element_desc", "key", "path", "url", "text",
-                "_resolved",
+                "_resolved", "_hit",
             )
             if action.get(key) is not None
         }

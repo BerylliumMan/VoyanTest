@@ -210,7 +210,13 @@ class ServerBrowser:
     async def snapshot(self) -> str:
         return await self._mcp.get_dom_snapshot()
 
-    async def evaluate_json(self, fn: str) -> Optional[dict]:
+    async def evaluate_json(self, fn: str):
+        """执行只读 JS 并解析返回值。
+
+        返回 JSON 原值（dict/list/标量）；调用方按预期形状取用。
+        038 修复：此前只接受 dict，导致 `[innerWidth, innerHeight]`
+        被丢弃、截图坐标换算恒为 1.0（点选验证码坐标漂移的根因之一）。
+        """
         try:
             result = await self._mcp.call_tool("browser_evaluate", {"function": fn})
         except Exception as exc:
@@ -225,9 +231,11 @@ class ServerBrowser:
         facts = await self.evaluate_json(
             "() => JSON.stringify({url: window.location.href, title: document.title})"
         )
+        if not isinstance(facts, dict):
+            facts = {}
         return {
-            "url": str((facts or {}).get("url") or ""),
-            "title": str((facts or {}).get("title") or ""),
+            "url": str(facts.get("url") or ""),
+            "title": str(facts.get("title") or ""),
         }
 
     async def act(self, action: dict) -> dict:
@@ -316,7 +324,8 @@ class ClientBrowser:
     async def page_facts(self) -> dict:
         return dict(self._last_page)
 
-    async def evaluate_json(self, fn: str) -> Optional[dict]:
+    async def evaluate_json(self, fn: str):
+        """执行只读 JS 并解析返回值（dict/list/标量；038 起支持 list）。"""
         try:
             res = await asyncio.wait_for(
                 self._manager.send_act(
@@ -395,8 +404,26 @@ class ClientBrowser:
             return []
 
 
-def _decode_json_text(text: str) -> Optional[dict]:
-    """容错解析 evaluate 文本（playwright-mcp 的 ### Result 块 + 双重 JSON 编码）。"""
+def compute_vision_scale(iw, ih, viewport) -> dict:
+    """图像像素 → 页面坐标比例（非法输入返回 {}，由调用方保持 1.0）。"""
+    try:
+        w, h = float(iw), float(ih)
+        if not (isinstance(viewport, (list, tuple)) and len(viewport) == 2):
+            return {}
+        vw, vh = float(viewport[0]), float(viewport[1])
+    except (TypeError, ValueError):
+        return {}
+    if w <= 0 or h <= 0 or vw <= 0 or vh <= 0:
+        return {}
+    return {"x": vw / w, "y": vh / h}
+
+
+def _decode_json_text(text: str):
+    """容错解析 evaluate 文本（playwright-mcp 的 ### Result 块 + 双重 JSON 编码）。
+
+    返回 JSON 原值（dict/list/标量）。038 修复：此前非 dict 一律返回 None，
+    导致视口尺寸（list）读取失败、截图坐标换算恒为 1.0。
+    """
     raw = str(text or "")
     if "### Result" in raw:
         raw = raw.split("### Result", 1)[1].split("###", 1)[0].strip()
@@ -411,7 +438,7 @@ def _decode_json_text(text: str) -> Optional[dict]:
             data = json.loads(data)
         except (json.JSONDecodeError, ValueError):
             return None
-    return data if isinstance(data, dict) else None
+    return data
 
 
 # ----------------------------
@@ -810,6 +837,7 @@ async def run_exploration(
     """
     owns_browser = browser is None
     journal: list[dict] = []
+    coord_miss_streak = 0
     pages: dict[str, dict] = {}
     console: list[str] = []
     report: dict = {
@@ -894,11 +922,9 @@ async def run_exploration(
             with Image.open(path) as im:
                 iw, ih = im.size
             vp = await browser.evaluate_json("() => [window.innerWidth, window.innerHeight]")
-            if isinstance(vp, (list, tuple)) and len(vp) == 2 and iw and ih:
-                vw, vh = float(vp[0]), float(vp[1])
-                if vw > 0 and vh > 0:
-                    vision_scale["x"] = vw / float(iw)
-                    vision_scale["y"] = vh / float(ih)
+            _scale = compute_vision_scale(iw, ih, vp)
+            if _scale:
+                vision_scale.update(_scale)
         except Exception:
             logger.debug("vision scale probe skipped", exc_info=True)
 
@@ -1218,13 +1244,36 @@ async def run_exploration(
                 executed = _substitute_credentials(action, cfg)
                 res = await browser.act(executed)
                 ok = bool(res.get("success"))
+                # 038 US1：坐标动作回读实际命中（只读；结果作为本步记录进入下一轮上下文）
+                feedback = None
+                if ok and action_name in ("click_xy", "drag_xy", "move_mouse"):
+                    try:
+                        from core.coordinate_feedback import (
+                            build_feedback_text,
+                            parse_coordinates,
+                            read_target,
+                        )
+
+                        _coords = parse_coordinates(action.get("value"))
+                        if len(_coords) >= 2:
+                            _info, _failed = await read_target(browser, _coords[0], _coords[1])
+                            if _info:
+                                coord_miss_streak = 0
+                            elif not _failed:
+                                coord_miss_streak += 1
+                            feedback = build_feedback_text(
+                                _info, _coords[0], _coords[1],
+                                streak=coord_miss_streak, read_failed=_failed,
+                            )
+                    except Exception:
+                        logger.debug("坐标回读反馈跳过", exc_info=True)
                 journal.append({
                     "action": action_name,
                     "target": str(action.get("value"))[:40],
                     "value": None,
                     "ok": ok,
                     "error": (str(res.get("error"))[:160] if not ok else None),
-                    "note": note or None,
+                    "note": feedback or note or None,
                 })
                 await _emit({
                     "kind": "step",

@@ -86,7 +86,9 @@ def conversation_to_markdown(conversation, messages) -> str:
         lines.append(f"## {who} · {ts}")
         lines.append("")
         if m.content:
-            lines.append(m.content)
+            from core.chat.mask import mask_text
+
+            lines.append(mask_text(m.content))
             lines.append("")
         for r in m.refs or []:
             if isinstance(r, dict) and r.get("type") != "file":

@@ -433,6 +433,7 @@ async def _generate_batch_once(
     content_parts: list[dict[str, Any]] | None = None,
     flow_mode: bool = False,
     page_inventory: str | None = None,
+    skip_pace: bool = False,
 ) -> list[TestCase]:
     fp_descriptions = _fp_descriptions(batch)
     csv_header = " | ".join(CSV_HEADER)
@@ -500,6 +501,7 @@ async def _generate_batch_once(
                 agent_type=agent_type,
                 agent_id=agent_id,
                 enable_thinking=None,
+                skip_pace=skip_pace,
             )
             tcs = _parse_tcs_from_text(content, start_index=tc_counter)
             if tcs:
@@ -532,6 +534,140 @@ async def _generate_batch_once(
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(RETRY_DELAY * (attempt + 1))
     return tcs
+
+
+def _build_batch_user_hint(
+    batch: list[FunctionalPoint], *, per_item: int, flow_mode: bool,
+    has_images: bool,
+) -> str:
+    """038：单批生成提示（串行/并行共用，避免两套口径漂移）。"""
+    if flow_mode:
+        return (
+            f"本批操作流程共 {len(batch)} 个：\n"
+            + _fp_descriptions(batch)
+            + f"\n请为以上每个流程各生成约 {per_item} 条文档主路径 UI 用例；"
+            f"scenario_type 填「文档流程」；禁止扩异常/边界。"
+            f"每条 module 必须与对应流程的「模块」字段逐字一致。"
+            f"expected 只能摘录文档/截图中已写明的断言；"
+            f"文档未写明则该步 expected 用空字符串。"
+        )
+    return (
+        f"本批测试项共 {len(batch)} 个：\n"
+        + _fp_descriptions(batch)
+        + f"\n请为以上每个测试项至少生成 1 条可执行 UI 用例（每项最多 {max(2, per_item)} 条）；"
+        f"若没有明确控件文案，步骤使用自然语言目标，不要编造按钮/菜单名称；"
+        f"**禁止**机械凑「正常/异常/边界」；文档/截图未写明的场景不要编造。"
+        f"每条必须带 fp_name，且 module 与测试项「模块」字段逐字一致。"
+        + ("控件文案必须在附图中可见。" if has_images else "")
+    )
+
+
+def _canonicalize_batch_tcs(tcs: list[TestCase], batch: list[FunctionalPoint]) -> None:
+    by_name = {
+        (fp.name or "").strip(): normalize_module_path(fp.module or "")
+        for fp in batch if (fp.name or "").strip()
+    }
+    for tc in tcs:
+        fp_name = (getattr(tc, "fp_name", None) or "").strip()
+        if fp_name and fp_name in by_name:
+            tc.module = by_name[fp_name]
+        else:
+            tc.module = normalize_module_path(tc.module or "")
+            if (not tc.module or tc.module == "通用") and len(batch) == 1:
+                tc.module = normalize_module_path(batch[0].module or "")
+    apply_canonical_modules(tcs)
+
+
+async def _parallel_generate_batches(
+    batches: list[list[FunctionalPoint]],
+    *,
+    tc_prompt: str,
+    project_description: str,
+    agent_type: str,
+    agent_id: int | None,
+    per_item: int,
+    content_parts: list[dict[str, Any]] | None,
+    page_inventory: str | None,
+    progress_callback,
+    phase1_offset: int,
+    total_steps: int,
+    cancel_checker,
+    parallel: int,
+) -> dict:
+    """038 US5：有界并行的批次生成（仅非 flow 模式；flow 保持串行）。"""
+    sem = asyncio.Semaphore(max(1, parallel))
+    processed = 0
+    counter_lock = asyncio.Lock()
+    has_images = _has_images(content_parts)
+
+    async def _one(idx: int, batch: list[FunctionalPoint]):
+        nonlocal processed
+        async with sem:
+            if cancel_checker and cancel_checker():
+                raise GenAnalysisCancelled()
+            # 每批分配独立编号段，合并后统一重排；避免并发重号
+            tcs = await _generate_batch_once(
+                batch=batch,
+                tc_prompt=tc_prompt,
+                project_description=project_description,
+                agent_type=agent_type,
+                agent_id=agent_id,
+                tc_counter=idx * 1000,
+                user_hint=_build_batch_user_hint(
+                    batch, per_item=per_item, flow_mode=False, has_images=has_images,
+                ),
+                content_parts=content_parts,
+                flow_mode=False,
+                page_inventory=page_inventory,
+                skip_pace=True,
+            )
+            _canonicalize_batch_tcs(tcs, batch)
+            async with counter_lock:
+                processed += 1
+                if progress_callback:
+                    progress_callback(
+                        phase1_offset + processed,
+                        total_steps,
+                        f"已完成 {processed}/{len(batches)} 批用例生成",
+                    )
+            return idx, tcs
+
+    results = list(await asyncio.gather(*[_one(i, b) for i, b in enumerate(batches)]))
+    # 038 US5：并行批次为空/失败 → 串行降级重试一次（带全局节流），不整体失败
+    has_images = _has_images(content_parts)
+    for pos, (idx, tcs) in enumerate(results):
+        if tcs:
+            continue
+        if cancel_checker and cancel_checker():
+            raise GenAnalysisCancelled()
+        retry = await _generate_batch_once(
+            batch=batches[idx],
+            tc_prompt=tc_prompt,
+            project_description=project_description,
+            agent_type=agent_type,
+            agent_id=agent_id,
+            tc_counter=idx * 1000,
+            user_hint=_build_batch_user_hint(
+                batches[idx], per_item=per_item, flow_mode=False, has_images=has_images,
+            ),
+            content_parts=content_parts,
+            flow_mode=False,
+            page_inventory=page_inventory,
+            skip_pace=False,
+        )
+        if retry:
+            _canonicalize_batch_tcs(retry, batches[idx])
+        results[pos] = (idx, retry)
+    all_tcs: list[TestCase] = []
+    warnings: list[str] = []
+    for idx, tcs in sorted(results, key=lambda x: x[0]):
+        if not tcs:
+            names = ", ".join(fp.name for fp in batches[idx][:3])
+            warnings.append(f"Batch {idx + 1} ({names}) returned no test cases")
+        all_tcs.extend(tcs)
+    for i, tc in enumerate(all_tcs):
+        tc.test_case_id = f"TC-{i + 1:03d}"
+    return {"test_cases": all_tcs, "warnings": warnings}
 
 
 async def generate_test_cases_for_fps(
@@ -569,6 +705,33 @@ async def generate_test_cases_for_fps(
         # Pipeline / TCGenerator 未传 total_steps 时，与 image 两阶段路径一致
         total_steps = phase1_offset + num_batches
 
+    # 038 US5：非 flow 模式可并行（flow 有跨批顺序语义，保持串行）
+    try:
+        from app.config import get_settings as _gs_par
+
+        _parallel = max(1, int(getattr(_gs_par(), "gen_parallel_max", 3) or 1))
+    except Exception:
+        _parallel = 1
+    if _parallel > 1 and not flow_mode and len(batches) > 1:
+        logger.info(
+            "generate_test_cases: parallel batches=%d limit=%d", len(batches), _parallel,
+        )
+        return await _parallel_generate_batches(
+            batches,
+            tc_prompt=tc_prompt,
+            project_description=project_description,
+            agent_type=agent_type,
+            agent_id=agent_id,
+            per_item=per_item,
+            content_parts=content_parts,
+            page_inventory=page_inventory,
+            progress_callback=progress_callback,
+            phase1_offset=phase1_offset,
+            total_steps=total_steps,
+            cancel_checker=cancel_checker,
+            parallel=_parallel,
+        )
+
     for idx, batch in enumerate(batches):
         if cancel_checker and cancel_checker():
             raise GenAnalysisCancelled()
@@ -582,26 +745,10 @@ async def generate_test_cases_for_fps(
             progress_callback(step, total_steps, msg)
 
         min_needed = len(batch) * per_item
-        if flow_mode:
-            user_hint = (
-                f"本批操作流程共 {len(batch)} 个：\n"
-                + _fp_descriptions(batch)
-                + f"\n请为以上每个流程各生成约 {per_item} 条文档主路径 UI 用例；"
-                f"scenario_type 填「文档流程」；禁止扩异常/边界。"
-                f"每条 module 必须与对应流程的「模块」字段逐字一致。"
-                f"expected 只能摘录文档/截图中已写明的断言；"
-                f"文档未写明则该步 expected 用空字符串。"
-            )
-        else:
-            user_hint = (
-                f"本批测试项共 {len(batch)} 个：\n"
-                + _fp_descriptions(batch)
-                + f"\n请为以上每个测试项至少生成 1 条可执行 UI 用例（每项最多 {max(2, per_item)} 条）；"
-                f"若没有明确控件文案，步骤使用自然语言目标，不要编造按钮/菜单名称；"
-                f"**禁止**机械凑「正常/异常/边界」；文档/截图未写明的场景不要编造。"
-                f"每条必须带 fp_name，且 module 与测试项「模块」字段逐字一致。"
-                + ("控件文案必须在附图中可见。" if _has_images(content_parts) else "")
-            )
+        user_hint = _build_batch_user_hint(
+            batch, per_item=per_item, flow_mode=flow_mode,
+            has_images=_has_images(content_parts),
+        )
         tcs = await _generate_batch_once(
             batch=batch,
             tc_prompt=tc_prompt,

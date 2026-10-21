@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { maskSecrets } from '../../utils/maskSecrets';
 import {
   Button,
   Checkbox,
@@ -1395,7 +1396,7 @@ const ChatPage: React.FC = () => {
                                 {live ? (live.reply ? '思考过程' : '思考中…') : '思考过程'}
                               </summary>
                               <div className={styles.thinkingBody}>
-                                {thinkingText}
+                                {maskSecrets(thinkingText || '')}
                                 {live && !live.reply ? <span className={styles.cursor}>▍</span> : null}
                               </div>
                             </details>
@@ -1403,13 +1404,13 @@ const ChatPage: React.FC = () => {
                           {live ? (
                             live.reply ? (
                               <div className={`${styles.bubble} ${styles.assistantBubble}`}>
-                                {live.reply}
+                                {maskSecrets(live.reply)}
                                 <span className={styles.cursor}>▍</span>
                               </div>
                             ) : null
                           ) : (
                             <div className={`${styles.bubble} ${m.role === 'user' ? styles.userBubble : styles.assistantBubble}`}>
-                              {m.content}
+                              {maskSecrets(m.content)}
                             </div>
                           )}
                         </>

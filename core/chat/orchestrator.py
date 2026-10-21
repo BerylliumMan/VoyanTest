@@ -628,7 +628,11 @@ async def handle_user_message(
                 await emit(conversation.id, {"type": "message.created", "message": serialize_message(assistant_msg)})
                 return user_msg, assistant_msg
         # 工具循环正常完成：落库（卡片/工具行/任务句柄来自循环）
-        reply = tool_outcome.reply
+        # 038 US4：回复/思考落库前做显示层密码打码（模型可能复述用户消息里的密码）
+        from core.chat.mask import mask_text
+
+        reply = mask_text(tool_outcome.reply)
+        tool_thinking = mask_text(tool_thinking)
         if dropped_refs:
             reply = (reply + f"\n（失效引用已剔除：{'、'.join(dropped_refs[:3])}）").strip()
         assistant_msg = await chat_crud.create_message(

@@ -71,9 +71,11 @@ axios.interceptors.response.use(
 );
 import PageLayout from './layout';
 import { GlobalContext } from './context';
-import Login from './pages/login';
-import ChangePassword from './pages/change-password';
-import Setup from './pages/setup';
+
+// 038 US6：登录/初始化/改密按需加载（不进入首屏入口 chunk）
+const Login = React.lazy(() => import('./pages/login'));
+const ChangePassword = React.lazy(() => import('./pages/change-password'));
+const Setup = React.lazy(() => import('./pages/setup'));
 import checkLogin from './utils/checkLogin';
 import changeTheme from './utils/changeTheme';
 import useStorage from './utils/useStorage';
@@ -164,12 +166,14 @@ function Index() {
       >
         <Provider store={store}>
           <GlobalContext.Provider value={contextValue}>
-            <Switch>
-              <Route path="/setup" component={Setup} />
-              <Route path="/login" component={Login} />
-              <Route path="/change-password" component={ChangePassword} />
-              <Route path="/" component={PageLayout} />
-            </Switch>
+            <React.Suspense fallback={<div style={{ padding: 24 }}>Loading…</div>}>
+              <Switch>
+                <Route path="/setup" component={Setup} />
+                <Route path="/login" component={Login} />
+                <Route path="/change-password" component={ChangePassword} />
+                <Route path="/" component={PageLayout} />
+              </Switch>
+            </React.Suspense>
           </GlobalContext.Provider>
         </Provider>
       </ConfigProvider>

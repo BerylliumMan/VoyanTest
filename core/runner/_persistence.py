@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def effective_run_status(existing: str | None, incoming: str) -> str:
+    """038 US3：已取消的 run 不被后续终态覆盖。"""
+    if existing == "cancelled" and incoming != "cancelled":
+        return "cancelled"
+    return incoming
+
+
 async def save_run_results(
     case_id: int | None,
     status: str,
@@ -57,6 +64,8 @@ async def save_run_results(
                 )
                 db_run = result.scalar_one_or_none()
                 if db_run:
+                    # 038 US3：已被停止的 run 不得被后续终态覆盖
+                    status = effective_run_status(db_run.status, status)
                     db_run.status = status
                     db_run.start_time = start_time
                     db_run.end_time = end_time

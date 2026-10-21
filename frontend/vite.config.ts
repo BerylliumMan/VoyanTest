@@ -39,6 +39,21 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // 038 US6：第三方依赖单独分包（长缓存；首屏只加载必需 vendor）
+        manualChunks: function (id: string) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('@arco-design')) return 'arco';
+          if (id.includes('/react') || id.includes('scheduler') || id.includes('react-router')) {
+            return 'react-vendor';
+          }
+          if (id.includes('lodash') || id.includes('axios')) return 'vendor-utils';
+          // 其余第三方库不强行归并：仅被某个页面使用的重库（如图表）随页面异步 chunk 加载
+          return undefined;
+        },
+      },
+    },
   },
   test: {
     environment: 'jsdom',

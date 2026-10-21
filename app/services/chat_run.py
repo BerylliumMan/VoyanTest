@@ -530,6 +530,10 @@ async def _watch_run(conversation_id: int, batch_id: int, *, max_iterations: int
                 missing_card = 0
 
                 status = batch.status or "running"
+                # 038 US3：用户已取消的卡片不得被后续轮询改回运行中/通过
+                if str(card.get("status") or "") in ("canceled", "cancelled") \
+                        and status not in _TERMINAL_BATCH_STATUS:
+                    return
                 done = int(batch.passed or 0) + int(batch.failed or 0)
                 card = {
                     **card,

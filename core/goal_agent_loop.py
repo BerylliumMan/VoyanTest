@@ -355,10 +355,19 @@ def journal_entry_covers_checklist(
     if action == "screenshot":
         return False
 
-    # 036：fetch（以 API 方式完成）可覆盖「导出/下载/导入/提交」类交互步骤；
-    # 断言/等待类步骤不得被覆盖（报告已如实标注 API 方式，且此处保持诚实口径）
+    # 036：fetch（以 API 方式完成）只覆盖「导出/下载/导入/提交/接口」类交互步骤；
+    # 038 收紧：无关业务描述（如「整理交付材料」）不得被一次任意 fetch 冒充覆盖。
     if action in ("fetch", "browser_fetch"):
-        return not is_wait_assert_checklist_step(desc)
+        if is_wait_assert_checklist_step(desc):
+            return False
+        if not desc:
+            return False
+        if re.search(
+            r"导出|下载|导入|提交|上传|接口|API|报表|文件|附件|数据同步|拉取|获取",
+            desc, re.I,
+        ):
+            return True
+        return _literal_overlap(desc, entry)
 
     # 036+：诊断脚本只覆盖「脚本/查询/核对」类步骤；交互/断言类不得被冒充
     if action in ("run_script", "browser_run_script"):
@@ -371,6 +380,12 @@ def journal_entry_covers_checklist(
             return True
         if action in ("evaluate", "browser_evaluate", "js", "eval"):
             return _evaluate_is_real_click_action(entry)
+        # 038：坐标点击只有在回读命中元素与描述字面一致时才可覆盖点击步骤
+        if action in (
+            "click_xy", "browser_mouse_click_xy",
+            "drag_xy", "browser_mouse_drag_xy",
+        ):
+            return _literal_overlap(desc, entry)
         return False
 
     if is_fill_checklist_step(desc):
@@ -398,7 +413,120 @@ def journal_entry_covers_checklist(
     if is_wait_assert_checklist_step(desc):
         return False
 
-    return True
+    # 038：坐标/鼠标动作可覆盖「点选/拖动」类未分类步骤（动作类型与意图一致；
+    # 是否真的点中目标由后续断言/页面状态兜底）。
+    if action in (
+        "click_xy", "browser_mouse_click_xy", "drag_xy", "browser_mouse_drag_xy",
+        "mouse_down", "browser_mouse_down", "mouse_up", "browser_mouse_up",
+    ) and re.search(r"点击|点选|单击|双击|右键|拖动|拖拽|滑动|图形|验证码", desc):
+        return True
+
+    # 038：未分类的业务描述不再被"任意成功动作"兜底覆盖。
+    # 只有显式声明 checklist_index，或动作目标/文案/URL 与描述存在字面依据时才可覆盖；
+    # 否则保持未覆盖（宁可继续尝试或如实失败，也不假通过）。
+    # 注意：journal 里的 checklist_index 是覆盖后回填的推断值，不能当作"显式声明"；
+    # 仅识别调用方显式标注的 _explicit_checklist（模型明确指定步骤号时由调用方写入）。
+    if entry.get("_explicit_checklist") is not None:
+        return True
+    if not desc:
+        return False
+    return _literal_overlap(desc, entry)
+
+
+_GENERIC_STEP_TOKENS = {
+    "查看", "检查", "确认", "验证", "页面", "功能", "主要", "进行", "操作",
+    "显示", "正确", "数据", "状态", "成功", "列表", "信息", "系统", "当前",
+    "是否", "以及", "相关", "所有", "一个", "一下", "内容", "测试", "用例",
+    "步骤", "结果", "完成", "正常", "可以", "需要", "支持", "包含", "出现",
+}
+
+
+def _entry_haystack(entry: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("element_desc", "value", "selector", "target", "url"):
+        v = entry.get(key)
+        if isinstance(v, str) and v:
+            parts.append(v)
+    resolved = entry.get("resolved")
+    if isinstance(resolved, dict):
+        for key in ("name", "text", "selector", "role", "tag"):
+            v = resolved.get(key)
+            if isinstance(v, str) and v:
+                parts.append(v)
+    return "\n".join(parts)
+
+
+def _longest_common_substring(a: str, b: str) -> str:
+    """最长公共子串（短文本 DP；用于中文描述与目标文案的字面比对）。"""
+    a, b = a[:200], b[:400]
+    prev = [0] * (len(b) + 1)
+    best_len = 0
+    best_end = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best_len:
+                    best_len = cur[j]
+                    best_end = i
+        prev = cur
+    return a[best_end - best_len:best_end]
+
+
+def _literal_overlap(description: str, entry: dict[str, Any]) -> bool:
+    """描述与动作目标是否存在可核对的重合（中文≥3 字公共子串 / 英文整词）。
+
+    用于未分类步骤与坐标动作的覆盖判定：没有重合 = 无法证明做了这件事。
+    纯泛词（验证/列表/数据…）不算依据。
+    """
+    haystack = _entry_haystack(entry)
+    if not haystack:
+        return False
+    hay = haystack.lower()
+    desc = str(description or "").lower()
+    for run in re.findall(r"[\u4e00-\u9fff]{2,}", desc):
+        if run in _GENERIC_STEP_TOKENS:
+            continue
+        if len(run) <= 2:
+            if run in hay:
+                return True
+            continue
+        common = _longest_common_substring(run, hay)
+        if len(common) >= 3 and common not in _GENERIC_STEP_TOKENS:
+            return True
+    for word in re.findall(r"[a-z][a-z0-9_-]{2,}", desc):
+        if word in _GENERIC_STEP_TOKENS:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", hay):
+            return True
+    return False
+
+
+def coverage_reason(entry: dict[str, Any], *, step_description: str | None = None) -> str:
+    """覆盖被拒绝的粗粒度原因（诊断用，不改变判定结果）。"""
+    if not entry.get("success"):
+        return "action_failed"
+    desc = (step_description or "").strip()
+    if entry.get("_explicit_checklist") is not None:
+        return "explicit_checklist"
+    if not desc:
+        return "no_description"
+    if is_click_checklist_step(desc):
+        return "click_mismatch"
+    if is_fill_checklist_step(desc):
+        return "fill_mismatch"
+    if is_select_checklist_step(desc):
+        return "select_mismatch"
+    if is_close_messages_checklist_step(desc):
+        return "close_mismatch"
+    if is_press_key_checklist_step(desc):
+        return "press_mismatch"
+    if is_wait_assert_checklist_step(desc):
+        return "assert_mismatch"
+    if _OPEN_NAV_STEP_RE.search(desc):
+        return "nav_mismatch"
+    return "literal_match" if _literal_overlap(desc, entry) else "unclassified_no_evidence"
 
 
 def close_messages_step_orders(steps: list[dict[str, Any]] | None) -> list[int]:
