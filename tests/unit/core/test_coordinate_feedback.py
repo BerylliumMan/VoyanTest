@@ -66,3 +66,76 @@ def test_feedback_from_result():
                                 {"success": True}) is not None  # miss 也有反馈
     assert feedback_from_result({"name": "click", "args": {}}, {"success": True}) is None
     assert feedback_from_result(action, {"success": False}) is None
+
+
+# ── T043：关闭开关 = 基线（不回读、不注入、不落 _hit） ──
+
+def _off_settings(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.config as cfg
+
+    monkeypatch.setattr(
+        cfg, "get_settings",
+        lambda: SimpleNamespace(exec_click_feedback=False, exec_click_feedback_max_misses=3),
+    )
+
+
+def test_feedback_enabled_respects_switch(monkeypatch):
+    from core.coordinate_feedback import feedback_enabled
+
+    _off_settings(monkeypatch)
+    assert feedback_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_bridge_feedback_skipped_when_disabled(monkeypatch):
+    _off_settings(monkeypatch)
+    from core.agent_bridge import AgentBridge
+
+    class _M:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_act(self, *a, **kw):
+            self.calls += 1
+            return {}
+
+    bridge = AgentBridge.__new__(AgentBridge)
+    bridge.agent_manager = _M()
+    bridge._coord_miss_streak = 0
+    action = {"name": "click_xy", "args": {"value": "10,20"}}
+    result: dict = {}
+    msgs: list = []
+    await bridge._append_coord_feedback("agent", "run", action, result, msgs)
+    assert bridge.agent_manager.calls == 0
+    assert "_hit" not in action["args"]
+    assert msgs == []
+    assert "COORD FEEDBACK" not in str(result.get("text") or "")
+
+
+@pytest.mark.asyncio
+async def test_runner_feedback_skipped_when_disabled(monkeypatch):
+    _off_settings(monkeypatch)
+    from core.agent_runner.runner import AgentRunner
+
+    class _M:
+        def __init__(self):
+            self.calls = 0
+
+        async def call_tool(self, *a, **kw):
+            self.calls += 1
+            return {"success": True, "text": ""}
+
+    runner = AgentRunner.__new__(AgentRunner)
+    runner._mcp_manager = _M()
+    runner._coord_miss_streak = 0
+    turns: list = []
+    runner.context = type("C", (), {"add_turn": staticmethod(lambda *a: turns.append(a))})()
+    action = {"action": "click_xy", "value": "10,20"}
+    result: dict = {}
+    await runner._append_coord_feedback(action, result)
+    assert runner._mcp_manager.calls == 0
+    assert "_hit" not in action
+    assert turns == []
+    assert "COORD FEEDBACK" not in str(result.get("text") or "")

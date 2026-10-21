@@ -520,9 +520,12 @@ class AgentBridge:
     ) -> None:
         """038 US1：坐标回读结果注入下一轮决策（含连续点偏提示）。"""
         from core.coordinate_feedback import (
-            COORD_ACTIONS, build_feedback_text, parse_coordinates, probe_via_act,
+            COORD_ACTIONS, build_feedback_text, feedback_enabled,
+            parse_coordinates, probe_via_act,
         )
 
+        if not feedback_enabled():
+            return
         name = str(action.get("name") or action.get("action") or "").strip().lower()
         if name not in COORD_ACTIONS:
             return

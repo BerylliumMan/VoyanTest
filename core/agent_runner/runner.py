@@ -628,9 +628,12 @@ class AgentRunner:
     async def _append_coord_feedback(self, action: dict[str, Any], result: dict[str, Any]) -> None:
         """038 US1：坐标回读结果写入上下文（下一轮 think 可见）。"""
         from core.coordinate_feedback import (
-            COORD_ACTIONS, build_feedback_text, parse_coordinates, probe_via_mcp,
+            COORD_ACTIONS, build_feedback_text, feedback_enabled,
+            parse_coordinates, probe_via_mcp,
         )
 
+        if not feedback_enabled():
+            return
         name = str(action.get("action") or action.get("name") or "").strip().lower()
         if name not in COORD_ACTIONS:
             return

@@ -26,13 +26,18 @@ def parse_coordinates(value: Any) -> list[int]:
     return nums
 
 
-def _enabled() -> bool:
+def feedback_enabled() -> bool:
+    """038 开关：坐标点击回读是否启用（关闭=基线，不回读、不注入提示）。"""
     try:
         from app.config import get_settings
 
         return bool(getattr(get_settings(), "exec_click_feedback", True))
     except Exception:
         return True
+
+
+# 兼容旧名（内部使用）
+_enabled = feedback_enabled
 
 
 def _miss_limit() -> int:

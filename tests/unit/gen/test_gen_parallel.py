@@ -87,3 +87,36 @@ def test_batch_hint_contains_rules():
     assert "禁止" in hint and "fp_name" in hint
     flow = fe._build_batch_user_hint(_fps(2), per_item=2, flow_mode=True, has_images=False)
     assert "文档流程" in flow
+
+
+@pytest.mark.asyncio
+async def test_parallel_limit_one_runs_serial(monkeypatch):
+    """T043：gen_parallel_max=1 时退化为串行基线，编号与顺序不变。"""
+    import app.gen.feature_extractor as fe
+
+    active = {"now": 0, "peak": 0}
+
+    async def _fake_batch_once(**kwargs):
+        active["now"] += 1
+        active["peak"] = max(active["peak"], active["now"])
+        try:
+            out = []
+            for fp in kwargs["batch"]:
+                tc = TestCase(title=f"TC {fp.name}", module=fp.module)
+                tc.fp_name = fp.name
+                out.append(tc)
+            return out
+        finally:
+            active["now"] -= 1
+
+    monkeypatch.setattr(fe, "_generate_batch_once", _fake_batch_once)
+    out = await fe._parallel_generate_batches(
+        [_fps(2, 0), _fps(2, 2)],
+        tc_prompt="p", project_description="", agent_type="generation", agent_id=None,
+        per_item=1, content_parts=None, page_inventory=None,
+        progress_callback=None, phase1_offset=1, total_steps=3,
+        cancel_checker=None, parallel=1,
+    )
+    assert active["peak"] == 1  # 串行
+    assert [tc.title for tc in out["test_cases"]] == ["TC FP0", "TC FP1", "TC FP2", "TC FP3"]
+    assert [tc.test_case_id for tc in out["test_cases"]] == [f"TC-{i:03d}" for i in range(1, 5)]

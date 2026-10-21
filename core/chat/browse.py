@@ -1250,11 +1250,15 @@ async def run_exploration(
                     try:
                         from core.coordinate_feedback import (
                             build_feedback_text,
+                            feedback_enabled,
                             parse_coordinates,
                             read_target,
                         )
 
-                        _coords = parse_coordinates(action.get("value"))
+                        if not feedback_enabled():
+                            _coords = []
+                        else:
+                            _coords = parse_coordinates(action.get("value"))
                         if len(_coords) >= 2:
                             _info, _failed = await read_target(browser, _coords[0], _coords[1])
                             if _info:

@@ -88,3 +88,16 @@ async def test_bridge_cancel_marks_run_and_test_runs(monkeypatch):
     sql = "\n".join(str(c.args[0]) for c in bridge.db.execute.await_args_list if c.args)
     assert "cancelled" in sql
     assert bridge._synced_test_run_ids == [11]
+
+
+def test_stop_poll_default_and_clamp(monkeypatch):
+    """T043：停止轮询默认 1000ms；非法值下限 100ms。"""
+    import app.config as cfg
+    from core.run_control import BatchStopWatcher
+
+    monkeypatch.setattr(
+        cfg, "get_settings", lambda: SimpleNamespace(exec_stop_poll_ms=1000)
+    )
+    assert BatchStopWatcher(None, 1)._poll_s == 1.0
+    assert BatchStopWatcher(None, 1, poll_ms=0)._poll_s == 0.1
+    assert BatchStopWatcher(None, 1, poll_ms=250)._poll_s == 0.25
