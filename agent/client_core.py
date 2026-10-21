@@ -1686,7 +1686,17 @@ class AgentClient:
                 "expect": _playwright_expect,
             }
             code = compile(script, tmp_path, "exec")
-            exec(code, ns, ns)
+            import os as _os
+            import json as _json
+            _prev_env = _os.environ.get("VT_SCRIPT_PARAMS")
+            _os.environ["VT_SCRIPT_PARAMS"] = _json.dumps(payload.get("params") or {})
+            try:
+                exec(code, ns, ns)
+            finally:
+                if _prev_env is None:
+                    _os.environ.pop("VT_SCRIPT_PARAMS", None)
+                else:
+                    _os.environ["VT_SCRIPT_PARAMS"] = _prev_env
             fn = ns.get(f"test_case_{int(case_id)}")
             if not callable(fn):
                 for k, v in ns.items():
@@ -1818,8 +1828,20 @@ class AgentClient:
                     "traces",
                 )
 
+                _script_params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+                _accepts_params = False
+                try:
+                    import inspect as _inspect
+                    _sig = _inspect.signature(fn)
+                    _accepts_params = "params" in _sig.parameters or len(_sig.parameters) >= 2
+                except (TypeError, ValueError):
+                    _accepts_params = False
+
                 async def _once():
-                    await fn(page)
+                    if _accepts_params:
+                        await fn(page, _script_params)
+                    else:
+                        await fn(page)
 
                 async def _run_enhanced():
                     retries = int(enhance.get("settle_retry", 1) or 0)
@@ -2251,7 +2273,8 @@ class AgentClient:
             # 032 US6：上报 MCP 工具能力（browser_find 等按连接探测一次）
             caps = await self._get_mcp_caps()
             if caps:
-                result["caps"] = caps
+                # 039：声明本客户端支持参数化固化脚本（回放时按组传 params）
+                result["caps"] = list(caps) + ["compiled_script_params"]
 
             result["success"] = True
         except asyncio.TimeoutError:

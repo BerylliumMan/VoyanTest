@@ -28,7 +28,10 @@ from app.database import AsyncSessionLocal
 from core.runner._api_execution import run_api_case_server
 from core.runner._persistence import (
     build_batch_execution_queue,
+    build_dataset_execution_queue,
     mark_run_failed,
+    mark_run_skipped,
+    precreate_dataset_runs,
     precreate_pending_runs,
     save_run_results,
 )
@@ -43,6 +46,14 @@ _OTA_NOT_READY_MSG = (
     "OTA Agent 未就绪：请配置并启用 execution AgentDefinition 的工具列表；"
     "服务端 UI 执行已不再回退 legacy MCP / browser_use。"
 )
+
+
+class DatasetExecutionError(ValueError):
+    """039：数据集预检失败（消息可读，应在创建批次前抛出）。"""
+
+    def __init__(self, errors: list[str]):
+        self.errors = list(errors)
+        super().__init__("；".join(self.errors[:5]) or "数据集预检失败")
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +100,7 @@ async def _synthesize_and_persist_compiled_script(
             logger.info("固化跳过 case=%s（无成功动作日志）", case_id)
             return
         from core.compiled_script import persist_compiled_script, steps_content_hash
-        from core.script_synthesize import case_requires_run_script, synthesize_playwright_script
+        from core.script_synthesize import case_requires_run_script, case_is_parameterized, synthesize_playwright_script
 
         # 036+：含诊断脚本步骤的用例不固化（Playwright 脚本无法忠实覆盖 run_script）
         _steps_dicts = [
@@ -99,6 +110,10 @@ async def _synthesize_and_persist_compiled_script(
             }
             for s in (steps or [])
         ]
+        # 039：参数化用例不固化（用某一组数据固化的脚本跑其他组会失真）
+        if case_is_parameterized(_steps_dicts) or getattr(tc, "parameters", None):
+            logger.info("固化跳过 case=%s（参数化用例）", case_id)
+            return
         if case_requires_run_script(_steps_dicts):
             logger.info("固化跳过 case=%s（含诊断脚本步骤）", case_id)
             return
@@ -216,6 +231,8 @@ async def run_test_case_via_agent(
     base_url: str | None = None,
     batch_id: int | None = None,
     run_id: int | None = None,
+    dataset_group: int | None = None,
+    dataset_row: dict | None = None,
 ) -> dict | None:
     """使用 AgentRunner OTA 循环执行单条测试用例。
 
@@ -231,6 +248,7 @@ async def run_test_case_via_agent(
     start_time = tz_now()
     goal_text = str(agent_def.goal or "执行测试用例")
     steps: list = []
+    rendered_steps: list[dict] = []
     try:
         tc = await crud.get_test_case(db, case_id)
         if tc:
@@ -239,11 +257,25 @@ async def run_test_case_via_agent(
                 goal_text += f"\n描述: {tc.description}"
             steps = list(getattr(tc, "steps", None) or [])
             steps.sort(key=lambda s: getattr(s, "step_order", 0) or 0)
-            if steps:
+            if dataset_row is not None:
+                from core.dataset_variables import render_steps
+
+                rendered_steps = render_steps(steps, dataset_row)
+            else:
+                rendered_steps = [
+                    {
+                        "step_order": int(getattr(s, "step_order", 0) or 0),
+                        "description": getattr(s, "description", "") or "",
+                        "parsed_result": getattr(s, "parsed_result", None) or "",
+                        "structured_step": getattr(s, "structured_step", None),
+                    }
+                    for s in steps
+                ]
+            if rendered_steps:
                 goal_text += "\n\n请严格按以下测试步骤执行（可观测预期写在括号内）："
-                for s in steps:
-                    line = f"\n{getattr(s, 'step_order', '?')}. {getattr(s, 'description', '') or ''}"
-                    expected = (getattr(s, "parsed_result", None) or "").strip()
+                for s in rendered_steps:
+                    line = f"\n{s.get('step_order', '?')}. {s.get('description', '') or ''}"
+                    expected = (s.get("parsed_result") or "").strip()
                     if expected:
                         line += f"（预期: {expected}）"
                     goal_text += line
@@ -267,7 +299,13 @@ async def run_test_case_via_agent(
     run = await create_agent_run(db, AgentRunCreate(
         agent_definition_id=agent_def.id,
         case_id=case_id,
-        goal={"goal": goal_text, "case_id": case_id, "batch_id": batch_id},
+        goal={
+            "goal": goal_text,
+            "case_id": case_id,
+            "batch_id": batch_id,
+            "test_run_id": run_id,
+            "dataset_group": dataset_group,
+        },
     ))
     await update_agent_run_status(db, run.id, "running")
 
@@ -296,11 +334,11 @@ async def run_test_case_via_agent(
         mcp_manager=mcp_manager,
         case_steps=[
             {
-                "step_order": int(getattr(st, "step_order", 0) or 0),
-                "description": getattr(st, "description", "") or "",
-                "parsed_result": getattr(st, "parsed_result", None) or "",
+                "step_order": int(s.get("step_order", 0) or 0),
+                "description": s.get("description", "") or "",
+                "parsed_result": s.get("parsed_result") or "",
             }
-            for st in (steps or [])
+            for s in (rendered_steps or [])
         ],
         goal=goal_text,
         llm_client=llm_client,
@@ -377,10 +415,10 @@ async def run_test_case_via_agent(
 
         case_steps = [
             {
-                "step_order": int(getattr(st, "step_order", 0) or 0),
-                "description": getattr(st, "description", "") or "",
+                "step_order": int(s.get("step_order", 0) or 0),
+                "description": s.get("description", "") or "",
             }
-            for st in steps
+            for s in (rendered_steps or steps)
         ]
         logs = build_case_step_logs(
             case_steps,
@@ -693,6 +731,13 @@ async def run_batch_test_cases(
     # 033（US10）：用例间隔（毫秒）与首个失败即停止
     delay_ms: int = 0,
     stop_on_error: bool = False,
+    # 039：UI 参数化覆盖（不写回用例）
+    dataset_id: int | None = None,
+    dataset_mode: str | None = None,
+    loop_count: int | None = None,
+    dataset_fail_fast: bool | None = None,
+    # 039：仅失败重跑——按 (case_id, 组号) 过滤已展开的数据行
+    dataset_group_filter: dict[int, list[int]] | None = None,
 ):
     """Execute multiple test cases sequentially in a single browser.
 
@@ -723,8 +768,61 @@ async def run_batch_test_cases(
     from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
 
-    exec_queue = build_batch_execution_queue(case_ids, init_case_ids, init_policy)
-    total_cases = len(exec_queue)
+    # 039：在创建批次之前完成数据集预检/展开（避免孤儿批次）
+    dataset_plan = None
+    dataset_rows: dict[int, list[dict]] = {}
+    dataset_group_numbers: dict[int, list[int]] = {}
+    _plan_ids = list(dict.fromkeys([*(init_case_ids or []), *case_ids]))
+    if _plan_ids:
+        try:
+            async with AsyncSessionLocal() as _plan_db:
+                _plan_cases = []
+                for _cid in _plan_ids:
+                    _tc = await crud.get_test_case(_plan_db, _cid)
+                    if _tc is not None:
+                        _plan_cases.append(_tc)
+                from app.services.dataset_execution import plan_batch_datasets
+
+                dataset_plan = await plan_batch_datasets(
+                    _plan_db,
+                    _plan_cases,
+                    dataset_id=dataset_id,
+                    dataset_mode=dataset_mode,
+                    loop_count=loop_count,
+                    dataset_fail_fast=dataset_fail_fast,
+                )
+        except DatasetExecutionError:
+            raise
+        except Exception:
+            logger.warning("数据集预检失败，按未绑定数据集执行", exc_info=True)
+            dataset_plan = None
+        if dataset_plan is not None and not dataset_plan.ok:
+            raise DatasetExecutionError(dataset_plan.errors)
+        if dataset_plan is not None:
+            dataset_rows = {
+                cid: rows for cid, rows in dataset_plan.rows_by_case.items() if rows
+            }
+            if dataset_group_filter:
+                for _cid, _groups in dataset_group_filter.items():
+                    _rows = dataset_rows.get(int(_cid))
+                    if not _rows:
+                        continue
+                    _keep = {int(g) for g in (_groups or [])}
+                    _kept_pairs = [
+                        (idx, row) for idx, row in enumerate(_rows, start=1) if idx in _keep
+                    ]
+                    dataset_rows[int(_cid)] = [row for _, row in _kept_pairs]
+                    dataset_group_numbers[int(_cid)] = [idx for idx, _ in _kept_pairs]
+                dataset_rows = {cid: rows for cid, rows in dataset_rows.items() if rows}
+
+    if dataset_rows:
+        exec_queue = build_dataset_execution_queue(
+            case_ids, init_case_ids, init_policy, dataset_rows, dataset_group_numbers
+        )
+        total_cases = len(exec_queue)
+    else:
+        exec_queue = build_batch_execution_queue(case_ids, init_case_ids, init_policy)
+        total_cases = len(exec_queue)
 
     # 创建批次（如果未提供 batch_id）
     if batch_id is None:
@@ -798,17 +896,28 @@ async def run_batch_test_cases(
 
             # 先预创建所有 pending TestRun 记录（在浏览器启动之前），
             # 确保即使浏览器启动失败，报告页面也能看到用例执行记录
-            precreated_runs = await precreate_pending_runs(
-                batch_db, case_ids, batch_id,
-                init_case_ids=init_case_ids, init_policy=init_policy,
-            )
+            if dataset_rows:
+                precreated_runs = await precreate_dataset_runs(
+                    batch_db, case_ids, batch_id,
+                    init_case_ids=init_case_ids, init_policy=init_policy,
+                    dataset_rows=dataset_rows,
+                    dataset_group_numbers=dataset_group_numbers,
+                )
+            else:
+                precreated_runs = [
+                    (cid, rid, is_init, None, None)
+                    for cid, rid, is_init in await precreate_pending_runs(
+                        batch_db, case_ids, batch_id,
+                        init_case_ids=init_case_ids, init_policy=init_policy,
+                    )
+                ]
 
             # ── API 用例分发：加载 case_kind 映射 ──────────────────
             # case_kind='api' 的用例短路到 run_api_case_server，不走浏览器；
             # 全部为 api 时跳过浏览器创建（避免无浏览器环境启动失败）。
             case_kinds: dict[int, str] = {}
             try:
-                for _cid, _rid, _is_init in precreated_runs:
+                for _cid, _rid, _is_init, _group, _row in precreated_runs:
                     _tc = await crud.get_test_case(batch_db, _cid)
                     case_kinds[_cid] = (
                         getattr(_tc, "case_kind", None) or "functional"
@@ -818,23 +927,29 @@ async def run_batch_test_cases(
                 logger.warning("加载 case_kind 映射失败，api 用例将走浏览器路径", exc_info=True)
             all_api = bool(precreated_runs) and all(
                 case_kinds.get(cid, "functional") == "api"
-                for cid, _, _ in precreated_runs
+                for cid, *_ in precreated_runs
             )
             has_ui = any(
                 case_kinds.get(cid, "functional") != "api"
-                for cid, _, _ in precreated_runs
+                for cid, *_ in precreated_runs
             )
 
             async def _abort_remaining_from(start_idx: int, message: str) -> None:
                 for j in range(start_idx, len(precreated_runs)):
-                    _, rid, _ = precreated_runs[j]
+                    _, rid, *_ = precreated_runs[j]
                     await mark_run_failed(batch_db, rid, message, batch_id=batch_id)
+
+            async def _skip_groups_after(case_id: int, start_idx: int, message: str) -> None:
+                for j in range(start_idx, len(precreated_runs)):
+                    cid2, rid2, _init2, group2, _row2 = precreated_runs[j]
+                    if cid2 == case_id and group2 is not None:
+                        await mark_run_skipped(batch_db, rid2, message, batch_id=batch_id)
 
             # UI 用例需要 OTA；未就绪则明确失败，不回退 legacy
             if has_ui and not use_agent_runner:
                 fail_msg = agent_init_error or _OTA_NOT_READY_MSG
                 results = []
-                for case_id, _rid, is_init in precreated_runs:
+                for case_id, _rid, is_init, _group, _row in precreated_runs:
                     if case_kinds.get(case_id) == "api":
                         result = await run_api_case_server(
                             case_id, db=batch_db, batch_id=batch_id, run_id=_rid,
@@ -882,7 +997,7 @@ async def run_batch_test_cases(
                     # "browser startup failed" so all pre-created pending TestRun
                     # records get marked as failed consistently.
                     logger.exception("Failed to start browser for batch %s", batch_id)
-                    for _cid, _rid, _is_init in precreated_runs:
+                    for _cid, _rid, _is_init, _group, _row in precreated_runs:
                         await _record_batch_case_failure(
                             batch_db, _rid, batch_id,
                             message=f"Browser startup failed: {exc}",
@@ -893,8 +1008,11 @@ async def run_batch_test_cases(
                 await mcp_manager.clear_cookies()
 
             results = []
-            for idx, (case_id, _rid, is_init) in enumerate(precreated_runs):
+            _skip_case_groups: set[int] = set()
+            for idx, (case_id, _rid, is_init, _group, _row) in enumerate(precreated_runs):
                 from app import execution_control
+                if _group is not None and case_id in _skip_case_groups:
+                    continue
                 await execution_control.wait_if_paused(batch_id)
                 if execution_control.is_stopped(batch_id):
                     await crud.cancel_remaining_batch_runs(
@@ -919,12 +1037,20 @@ async def run_batch_test_cases(
                             session_reuse=session_reuse,
                         )
                     else:
+                        # 039：每个数据组从干净会话开始（避免上一组登录态串组）
+                        if _group is not None and mcp_manager is not None:
+                            try:
+                                await mcp_manager.clear_cookies()
+                            except Exception:  # noqa: BLE001 - 清理失败不应中断组执行
+                                logger.warning("清 cookie 失败（组隔离）case=%s", case_id, exc_info=True)
                         result = await run_test_case_via_agent(
                             case_id, mcp_manager, batch_db, agent_def,
                             llm_client=agent_llm_client,
                             base_url=base_url_override,
                             batch_id=batch_id,
                             run_id=_rid,
+                            dataset_group=_group,
+                            dataset_row=_row,
                         )
                         if result is None:
                             fail_msg = "OTA AgentRunner 不可用（执行中返回 None）"
@@ -952,6 +1078,17 @@ async def run_batch_test_cases(
                             idx + 1, f"因初始化用例 {case_id} 失败而跳过",
                         )
                         break
+                    # 039：组间失败策略（只跳过同一用例的后续数据组）
+                    if (
+                        status == "failed"
+                        and _group is not None
+                        and dataset_plan is not None
+                        and dataset_plan.fail_fast.get(case_id)
+                    ):
+                        await _skip_groups_after(
+                            case_id, idx + 1, "前序数据组失败（fail_fast）"
+                        )
+                        _skip_case_groups.add(case_id)
                     # 033（US10）：首个失败即停止（剩余标记跳过）
                     if stop_on_error and not is_init and status == "failed":
                         logger.info(

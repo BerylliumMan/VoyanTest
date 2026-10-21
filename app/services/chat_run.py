@@ -389,6 +389,7 @@ async def start_run(
         "mode": mode,
         "agent_id": agent_id,
         "agent_name": agent_name,
+        "dataset_total": None,
         "case_ids": [c.id for c in cases],
         "case_titles": [c.name for c in cases],
         "suite_id": int(suite_id) if suite_name else None,
@@ -403,6 +404,12 @@ async def start_run(
         "env_warning": env_warning or None,
         "agent_warning": agent_warning or None,
     }
+    try:
+        _batch = await crud.get_run_batch(db, batch_id)
+        if _batch is not None and getattr(_batch, "dataset_total", None):
+            card["dataset_total"] = int(_batch.dataset_total)
+    except Exception:  # noqa: BLE001 - 卡片信息缺失不影响执行
+        logger.debug("读取批次数据集组数失败 batch=%s", batch_id, exc_info=True)
     asyncio.create_task(_watch_run(conversation.id, batch_id))
     return card, "", str(batch_id)
 
@@ -609,6 +616,8 @@ async def run_case_handler(db, conversation, action: dict, ctx: dict) -> ActionO
         f"{lead}（环境：{env_name}），进度与结果会实时回显。"
         if env_name else f"{lead}，进度与结果会实时回显。"
     )
+    if card.get("dataset_total"):
+        note += f"该用例绑定了数据集，本次按 {card['dataset_total']} 组数据执行。"
     if card.get("env_warning"):
         note += f"注意：{card['env_warning']}"
     if card.get("agent_warning"):

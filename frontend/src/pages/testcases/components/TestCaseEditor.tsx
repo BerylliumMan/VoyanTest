@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Modal, Form, Input, Select, Message, Tag, Button, Space,
 } from '@arco-design/web-react';
 import axios from 'axios';
 import { Step, Module, TestCase, CaseKind } from '../types';
 import StepList from './StepList';
+import ParameterPanel, { DatasetBinding, DatasetOption, ParameterDef } from './ParameterPanel';
 import styles from '../style/components.module.less';
 
 interface StepItem { step_order: number; description: string; }
@@ -25,15 +26,20 @@ interface TestCaseEditorProps {
   setSteps: React.Dispatch<React.SetStateAction<Step[]>>;
   caseKind?: CaseKind;
   onCompiledScriptCleared?: () => void;
+  parameters: ParameterDef[];
+  setParameters: React.Dispatch<React.SetStateAction<ParameterDef[]>>;
+  datasetBinding: DatasetBinding;
+  setDatasetBinding: React.Dispatch<React.SetStateAction<DatasetBinding>>;
 }
 
 const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   visible, editingCase, onCancel, onSubmit, modules, projectId, t, form, steps, setSteps, caseKind = 'ui',
-  onCompiledScriptCleared,
+  onCompiledScriptCleared, parameters, setParameters, datasetBinding, setDatasetBinding,
 }) => {
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
   const [scriptModalVisible, setScriptModalVisible] = useState(false);
   const [clearingScript, setClearingScript] = useState(false);
+  const [datasets, setDatasets] = useState<DatasetOption[]>([]);
   const kindLabel = caseKind === 'functional'
     ? (t['menu.testcases.functional'] || '功能测试用例')
     : caseKind === 'api'
@@ -43,6 +49,19 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   const isApi = caseKind === 'api';
 
   const hasCompiledScript = Boolean(editingCase?.compiled_script);
+
+  // 039：加载项目内 UI 数据集（仅 UI 用例编辑时）
+  const datasetProjectId = projectId || editingCase?.project_id || null;
+  useEffect(() => {
+    if (!visible || !datasetProjectId || caseKind !== 'ui') return;
+    axios
+      .get('/api/api-test/datasets', { params: { project_id: datasetProjectId, purpose: 'ui' } })
+      .then((res) => {
+        const items = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+        setDatasets(items);
+      })
+      .catch(() => setDatasets([]));
+  }, [visible, datasetProjectId, caseKind]);
 
   const handleClearCompiledScript = async () => {
     if (!editingCase?.id) return;
@@ -186,6 +205,19 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
           </Form.Item>
         ) : (
           <Form.Item label={t['case.steps']}>
+            {caseKind === 'ui' ? (
+              <ParameterPanel
+                steps={steps}
+                parameters={parameters}
+                onParametersChange={setParameters}
+                datasets={datasets}
+                binding={datasetBinding}
+                onBindingChange={setDatasetBinding}
+                projectId={datasetProjectId}
+                onDatasetCreated={(dataset) => setDatasets((prev) => [dataset, ...prev])}
+                t={t}
+              />
+            ) : null}
             <StepList
               steps={steps}
               onAdd={addStep}

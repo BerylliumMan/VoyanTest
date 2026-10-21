@@ -77,6 +77,12 @@ class TestCaseBase(BaseModel):
     api_spec: Optional[dict] = None
     api_definition_id: Optional[int] = None
     definition_version: Optional[int] = None
+    # 039：UI 用例参数化（参数声明 + 数据集绑定；v1 一个数据集）
+    parameters: Optional[list[dict]] = None
+    dataset_id: Optional[int] = None
+    dataset_mode: Optional[str] = Field("sequential", pattern="^(sequential|random|loop)$")
+    loop_count: Optional[int] = Field(1, ge=1, le=100)
+    fail_fast: Optional[bool] = False
 
 class TestStepBase(BaseModel):
     case_id: int
@@ -159,6 +165,22 @@ class TestCaseUpdate(BaseModel):
     priority: Optional[str] = None
     case_kind: Optional[str] = Field(None, pattern="^(functional|ui|api)$")
     api_spec: Optional[dict] = None
+    # 039：数据集绑定（None 表示未提供；显式 null 通过专用端点解绑）
+    parameters: Optional[list[dict]] = None
+    dataset_id: Optional[int] = None
+    dataset_mode: Optional[str] = Field(None, pattern="^(sequential|random|loop)$")
+    loop_count: Optional[int] = Field(None, ge=1, le=100)
+    fail_fast: Optional[bool] = None
+
+
+class TestCaseDatasetUpdate(BaseModel):
+    """039：专用数据集绑定更新（未提供的字段保持不变）。"""
+
+    parameters: Optional[list[dict]] = None
+    dataset_id: Optional[int] = None
+    dataset_mode: Optional[str] = Field(None, pattern="^(sequential|random|loop)$")
+    loop_count: Optional[int] = Field(None, ge=1, le=100)
+    fail_fast: Optional[bool] = None
 
 class TestStepCreatePayload(BaseModel):
     step_order: int = Field(..., gt=0)
@@ -206,7 +228,14 @@ class TestCase(TestCaseBase):
     api_spec: Optional[dict] = None
     compiled_script: Optional[str] = None
     compiled_script_hash: Optional[str] = None
+    compiled_script_meta: Optional[dict] = None
     compiled_at: Optional[datetime] = None
+    # 039：参数化绑定
+    parameters: Optional[list[dict]] = None
+    dataset_id: Optional[int] = None
+    dataset_mode: Optional[str] = None
+    loop_count: Optional[int] = None
+    fail_fast: Optional[bool] = None
 
     model_config = {"from_attributes": True}
 
@@ -897,6 +926,7 @@ class ApiDatasetPayload(BaseModel):
     columns: List[str] = []
     rows: List[dict[str, Any]] = []
     source: str = "manual"
+    purpose: str = "api"
 
 
 class ApiDatasetResponse(BaseModel):
@@ -906,6 +936,7 @@ class ApiDatasetResponse(BaseModel):
     columns: List[str] = []
     rows: List[dict[str, Any]] = []
     source: str = "manual"
+    purpose: str = "api"
     updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

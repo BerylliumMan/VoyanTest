@@ -32,6 +32,7 @@ def _serialize(obj) -> dict:
         "columns": obj.columns or [],
         "rows": obj.rows or [],
         "source": obj.source,
+        "purpose": obj.purpose or "api",
         "updated_at": obj.updated_at.isoformat() if obj.updated_at else None,
     }
 
@@ -39,12 +40,13 @@ def _serialize(obj) -> dict:
 @router.get("/datasets")
 async def list_datasets(
     project_id: int,
+    purpose: str | None = None,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
-    """项目内数据集列表。"""
+    """项目内数据集列表（可按 purpose=api/ui 过滤）。"""
     _ensure_project_access(user, project_id)
-    items = await crud_dataset.list_datasets(db, project_id)
+    items = await crud_dataset.list_datasets(db, project_id, purpose=purpose)
     return {"total": len(items), "items": [_serialize(d) for d in items]}
 
 
@@ -128,14 +130,14 @@ async def export_dataset(
 @router.post("/datasets/import")
 async def import_datasets(
     file: UploadFile = File(...),
+    purpose: str = "api",
     user=Depends(get_current_user),
 ) -> dict:
-    """CSV → ``{columns, rows}``（只解析不落库，前端确认后再 POST /datasets 保存）。
-
-    上限：文件 2MB、数据行 1000；空文件/缺表头/列不一致 → 400。
-    """
+    """CSV → ``{columns, rows, purpose}``（只解析不落库，前端确认后再 POST /datasets 保存）。"""
     content = await file.read(crud_dataset.MAX_CSV_BYTES + 1)
     try:
-        return crud_dataset.parse_csv_dataset(content)
+        parsed = crud_dataset.parse_csv_dataset(content)
     except DatasetValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    parsed["purpose"] = purpose if purpose in ("api", "ui") else "api"
+    return parsed

@@ -40,6 +40,40 @@ def _validate_api_case_spec(case) -> None:
         )
 
 
+def _validate_parameters_for_save(parameters, steps) -> None:
+    """039：保存时校验未声明参数（有声明才校验，兼容存量用例）。"""
+    if parameters is None:
+        return
+    from core.dataset_variables import validate_parameters
+
+    errors = validate_parameters(steps or [], parameters)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "参数校验未通过", "problems": errors[:8]},
+        )
+
+
+async def _validate_dataset_binding(db, db_case, dataset_id, steps) -> None:
+    """039：绑定校验（同项目、用途=ui、列覆盖步骤参数）。"""
+    if dataset_id is None:
+        return
+    from app.crud.api_dataset import get_dataset
+    from core.dataset_variables import missing_columns
+
+    dataset = await get_dataset(db, dataset_id)
+    if dataset is None or dataset.project_id != db_case.project_id:
+        raise HTTPException(status_code=404, detail="数据集不存在或不属于当前项目")
+    if (getattr(dataset, "purpose", None) or "api") != "ui":
+        raise HTTPException(status_code=400, detail="该数据集不是 UI 数据集，不能绑定到 UI 用例")
+    missing = missing_columns(steps or [], dataset.columns or [])
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail="数据集缺少列：" + "、".join(missing),
+        )
+
+
 @router.post("/", response_model=models.TestCase)
 async def create_test_case(case: models.TestCaseCreate, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     allowed_ids = get_user_project_filter(user)
@@ -53,6 +87,10 @@ async def create_test_case(case: models.TestCaseCreate, user=Depends(get_current
         raise HTTPException(status_code=404, detail=f"Project with id {case.project_id} not found")
 
     _validate_api_case_spec(case)
+    _validate_parameters_for_save(getattr(case, "parameters", None), getattr(case, "steps", []))
+    await _validate_dataset_binding(
+        db, case, getattr(case, "dataset_id", None), getattr(case, "steps", [])
+    )
 
     try:
         return await crud.create_test_case(db, case)
@@ -269,6 +307,78 @@ async def get_case_compiled_script(
     }
 
 
+@router.get("/{case_id}/parameters")
+async def get_case_parameters(
+    case_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """039：返回用例声明的参数、步骤中发现的参数与校验错误。"""
+    from core.dataset_variables import discover_parameters, validate_parameters
+
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    declared = getattr(db_case, "parameters", None) or []
+    discovered = discover_parameters(db_case.steps or [])
+    return {
+        "case_id": case_id,
+        "declared": declared,
+        "discovered": discovered,
+        "errors": validate_parameters(db_case.steps or [], declared) if declared else [],
+    }
+
+
+@router.put("/{case_id}/dataset", response_model=models.TestCase)
+async def update_case_dataset(
+    case_id: int,
+    payload: models.TestCaseDatasetUpdate,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> models.TestCase:
+    """039：专用数据集绑定端点（绑定/解绑/模式/循环/失败策略/参数声明）。"""
+    from app.auth import log_audit
+
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed_ids = get_user_project_filter(user)
+    if allowed_ids is not None and db_case.project_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+
+    fields = getattr(payload, "model_fields_set", set()) or set()
+    steps = db_case.steps or []
+    if "parameters" in fields:
+        _validate_parameters_for_save(payload.parameters, steps)
+    if "dataset_id" in fields:
+        await _validate_dataset_binding(db, db_case, payload.dataset_id, steps)
+
+    kwargs: dict[str, Any] = {}
+    for name in ("parameters", "dataset_id", "dataset_mode", "loop_count", "fail_fast"):
+        if name in fields:
+            kwargs[name] = getattr(payload, name)
+    updated, previous_dataset_id = await crud.update_case_dataset(db, case_id, **kwargs)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+
+    action = "case.dataset_unbind" if payload.dataset_id is None and "dataset_id" in fields else "case.dataset_bind"
+    await log_audit(
+        db,
+        user.id,
+        action,
+        details={
+            "case_id": case_id,
+            "dataset_id": updated.dataset_id,
+            "previous_dataset_id": previous_dataset_id,
+            "mode": updated.dataset_mode,
+            "loop_count": updated.loop_count,
+            "fail_fast": bool(updated.fail_fast),
+        },
+    )
+    return updated
+
+
 @router.put("/{case_id}", response_model=models.TestCase)
 async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> models.TestCase:
     """
@@ -283,6 +393,12 @@ async def update_test_case(case_id: int, case: models.TestCaseUpdate, user=Depen
 
     try:
         _validate_api_case_spec(case)
+        _fields = getattr(case, "model_fields_set", set()) or set()
+        _params = case.parameters if "parameters" in _fields else db_case.parameters
+        _steps = case.steps or db_case.steps
+        _validate_parameters_for_save(_params, _steps)
+        if "dataset_id" in _fields:
+            await _validate_dataset_binding(db, db_case, case.dataset_id, _steps)
         return await crud.update_test_case(
             db, case_id, case,
             # 034：页面编辑同样留痕（FR-015；source=page）

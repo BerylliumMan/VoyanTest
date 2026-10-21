@@ -44,6 +44,18 @@ class TestCase(Base):
     # 037：验证码断点元数据（{"segment_start_step": N}；无验证码用例为 NULL）
     compiled_script_meta = Column(JSON, nullable=True, default=None)
 
+    # 039：UI 用例参数化与数据集绑定（v1 一个用例绑定一个数据集）
+    # - 显式声明参数 [{"name": "...", "description": "..."}]
+    parameters = Column(JSON, nullable=True, default=None)
+    # - 绑定的数据集（仅 purpose='ui'；NULL=未绑定）
+    dataset_id = Column(Integer, nullable=True, index=True)
+    # - sequential / random / loop
+    dataset_mode = Column(String(16), nullable=True, default="sequential")
+    # - loop 模式的重复次数（1~100）
+    loop_count = Column(Integer, nullable=True, default=1)
+    # - 组间失败策略：false=继续执行其余组（默认）；true=首组失败后其余组 skipped
+    fail_fast = Column(Boolean, nullable=True, default=False)
+
     steps = relationship("TestStep", backref="test_case", lazy="selectin", cascade="all, delete-orphan", order_by="TestStep.step_order")
 
 

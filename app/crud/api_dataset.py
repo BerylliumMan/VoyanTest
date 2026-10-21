@@ -125,13 +125,17 @@ async def list_datasets(
     db: AsyncSession,
     project_id: int,
     *,
+    purpose: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[db_models.ApiDataset]:
-    """列出项目内数据集（新的在前）。"""
+    """列出项目内数据集（新的在前）；039 支持按用途过滤。"""
+    conditions = [db_models.ApiDataset.project_id == project_id]
+    if purpose:
+        conditions.append(db_models.ApiDataset.purpose == purpose)
     stmt = (
         select(db_models.ApiDataset)
-        .where(db_models.ApiDataset.project_id == project_id)
+        .where(*conditions)
         .order_by(db_models.ApiDataset.id.desc())
         .limit(max(1, min(limit, 1000)))
         .offset(max(0, offset))
@@ -157,6 +161,7 @@ async def create_dataset(db: AsyncSession, data: dict) -> db_models.ApiDataset:
         columns=columns,
         rows=rows,
         source=str(data.get("source") or "manual"),
+        purpose=str(data.get("purpose") or "api"),
     )
     db.add(obj)
     await db.commit()
@@ -180,6 +185,8 @@ async def update_dataset(
         obj.rows = list(rows)
     if patch.get("source"):
         obj.source = str(patch["source"])
+    if patch.get("purpose") in ("api", "ui"):
+        obj.purpose = str(patch["purpose"])
     await db.commit()
     await db.refresh(obj)
     return obj

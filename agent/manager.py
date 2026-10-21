@@ -316,6 +316,7 @@ class AgentManager:
         headless: Optional[bool] = None,
         keep_browser: bool = False,
         skip_initial_goto: bool = False,
+        params: Optional[dict] = None,
     ) -> Optional[list]:
         """Ask agent to run solidified Playwright script. None = fall back.
 
@@ -348,6 +349,7 @@ class AgentManager:
                 "keep_browser": bool(keep_browser),
                 # 037：验证码断点尾段回放——浏览器已停在登录后页面，跳过起始导航
                 "skip_initial_goto": bool(skip_initial_goto),
+                "params": dict(params or {}),
                 "enhance": {
                     "trace_on_fail": bool(
                         getattr(cfg, "compiled_trace_on_fail", True)

@@ -53,6 +53,8 @@ async def save_run_results(
     run_id: Optional[int] = None,
     is_init: bool = False,
     display_name: Optional[str] = None,
+    dataset_group: Optional[int] = None,
+    dataset_row: Optional[dict] = None,
 ) -> int | None:
     async with db_mod.AsyncSessionLocal() as db:
         try:
@@ -78,12 +80,15 @@ async def save_run_results(
             # 复用同批次下预创建的 pending/running 行，避免 OTA/批量路径重复建 run。
             # case_id 为空的场景步骤不能按 NULL 匹配，否则会串到别的自定义步骤。
             if not run_id and batch_id and case_id is not None:
+                _conditions = [
+                    db_models.TestRun.batch_id == batch_id,
+                    db_models.TestRun.case_id == case_id,
+                    db_models.TestRun.status.in_(("pending", "running")),
+                ]
+                if dataset_group is not None:
+                    _conditions.append(db_models.TestRun.dataset_group == dataset_group)
                 result = await db.execute(
-                    select(db_models.TestRun).where(
-                        db_models.TestRun.batch_id == batch_id,
-                        db_models.TestRun.case_id == case_id,
-                        db_models.TestRun.status.in_(("pending", "running")),
-                    ).limit(1)
+                    select(db_models.TestRun).where(*_conditions).limit(1)
                 )
                 db_run = result.scalar_one_or_none()
                 if db_run:
@@ -94,6 +99,10 @@ async def save_run_results(
                     db_run.duration = duration
                     db_run.report_path = report_path
                     db_run.log_path = log_path
+                    if dataset_group is not None:
+                        db_run.dataset_group = dataset_group
+                    if dataset_row is not None:
+                        db_run.dataset_row = dataset_row
 
             if not run_id:
                 db_run = db_models.TestRun(
@@ -107,6 +116,8 @@ async def save_run_results(
                     log_path=log_path,
                     is_init=is_init,
                     display_name=display_name,
+                    dataset_group=dataset_group,
+                    dataset_row=dataset_row,
                 )
                 db.add(db_run)
                 await db.commit()
@@ -213,6 +224,47 @@ async def mark_run_failed(
             try:
                 await db.rollback()
             except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
+                pass
+
+
+async def mark_run_skipped(
+    db: AsyncSession,
+    run_id: int,
+    message: str,
+    batch_id: int | None = None,
+) -> None:
+    """039：将 TestRun 标记为 skipped（前序数据组失败等），并追加日志。"""
+    from app import db_models
+    from app.tz import now as tz_now
+
+    async def _apply() -> None:
+        _now = tz_now()
+        stmt = (
+            update(db_models.TestRun)
+            .where(db_models.TestRun.id == run_id)
+            .values(status="skipped", start_time=_now, end_time=_now, duration=0.0)
+        )
+        await db.execute(stmt)
+        db.add(
+            db_models.RunLog(
+                run_id=run_id, step_id=None, level="WARNING",
+                message=message, screenshot_path=None,
+            )
+        )
+        await db.commit()
+
+    try:
+        await _apply()
+    except SQLAlchemyError:
+        logger.exception("Failed to mark run %s as skipped", run_id)
+        try:
+            await db.rollback()
+            await _apply()
+        except Exception:  # noqa: BLE001 - 重试仍失败时不再抛错
+            logger.debug("retry mark_run_skipped failed run=%s", run_id, exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
                 pass
 
 
@@ -342,6 +394,87 @@ async def precreate_pending_runs(
         await db.commit()
     except SQLAlchemyError:
         logger.exception("Failed to pre-create TestRun records")
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错
+            pass
+    return precreated
+
+
+def build_dataset_execution_queue(
+    case_ids: list[int],
+    init_case_ids: list[int] | None = None,
+    init_policy: str = "once",
+    dataset_rows: dict[int, list[dict]] | None = None,
+    dataset_group_numbers: dict[int, list[int]] | None = None,
+) -> list[tuple[int, bool, int | None, dict | None]]:
+    """039：按数据组展开执行队列。
+
+    ``dataset_rows``: case_id -> 该用例展开后的数据行列表（每组一行）。
+    返回 ``[(case_id, is_init, dataset_group, dataset_row), ...]``；
+    未绑定数据集的用例保持单组（group=None, row=None）。
+    """
+    inits = list(init_case_ids or [])
+    mains = list(case_ids or [])
+    rows_map = dataset_rows or {}
+
+    def _items(cid: int, is_init: bool):
+        rows = rows_map.get(cid)
+        if not rows:
+            yield (cid, is_init, None, None)
+            return
+        _numbers = (dataset_group_numbers or {}).get(cid)
+        for index, row in enumerate(rows, start=1):
+            group = int(_numbers[index - 1]) if _numbers and index - 1 < len(_numbers) else index
+            yield (cid, is_init, group, row)
+
+    queue: list[tuple[int, bool, int | None, dict | None]] = []
+    if init_policy == "before_each" and inits:
+        for main_id in mains:
+            for init_id in inits:
+                queue.extend(_items(init_id, True))
+            queue.extend(_items(main_id, False))
+    else:
+        for init_id in inits:
+            queue.extend(_items(init_id, True))
+        for main_id in mains:
+            queue.extend(_items(main_id, False))
+    return queue
+
+
+async def precreate_dataset_runs(
+    db: AsyncSession,
+    case_ids: list[int],
+    batch_id: int,
+    init_case_ids: list[int] | None = None,
+    init_policy: str = "once",
+    dataset_rows: dict[int, list[dict]] | None = None,
+    dataset_group_numbers: dict[int, list[int]] | None = None,
+) -> list[tuple[int, int, bool, int | None, dict | None]]:
+    """039：预创建带数据组身份的 pending TestRun。
+
+    Returns ``[(case_id, run_id, is_init, dataset_group, dataset_row), ...]``。
+    失败会 rollback 并返回已创建的部分列表（best-effort）。
+    """
+    from app import db_models
+
+    queue = build_dataset_execution_queue(
+        case_ids, init_case_ids, init_policy, dataset_rows, dataset_group_numbers
+    )
+    precreated: list[tuple[int, int, bool, int | None, dict | None]] = []
+    try:
+        for cid, is_init, group, row in queue:
+            pending_run = db_models.TestRun(
+                case_id=cid, batch_id=batch_id, status="pending",
+                start_time=None, end_time=None, is_init=is_init,
+                dataset_group=group, dataset_row=row,
+            )
+            db.add(pending_run)
+            await db.flush()
+            precreated.append((cid, pending_run.id, is_init, group, row))
+        await db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to pre-create dataset TestRun records")
         try:
             await db.rollback()
         except Exception:  # noqa: BLE001 - rollback 自身已失败，避免再次抛错

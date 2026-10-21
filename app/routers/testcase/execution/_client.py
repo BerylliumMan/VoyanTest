@@ -63,6 +63,8 @@ async def _create_pending_execution(
     is_init: bool = False,
     seq: int | None = None,
     reuse_browser_session: bool = False,
+    dataset_group: int | None = None,
+    dataset_row: dict | None = None,
 ) -> dict:
     """在 DB 中创建待执行 OTA 记录，由拥有 Agent WS 连接的 worker 轮询接管。"""
     from app.db_models import AgentRun
@@ -83,6 +85,10 @@ async def _create_pending_execution(
         goal["seq"] = int(seq)
     if reuse_browser_session:
         goal["reuse_browser_session"] = True
+    if dataset_group is not None:
+        goal["dataset_group"] = int(dataset_group)
+    if dataset_row is not None:
+        goal["dataset_row"] = dataset_row
 
     ar = AgentRun(
         agent_definition_id=def_id,
@@ -194,7 +200,12 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     from agent.manager import agent_manager
     from app.runtime_config import normalize_execution_backend
     from core.agent_bridge import AgentBridge
-    from core.runner._persistence import build_batch_execution_queue, precreate_pending_runs
+    from core.runner._persistence import (
+        build_batch_execution_queue,
+        build_dataset_execution_queue,
+        precreate_dataset_runs,
+        precreate_pending_runs,
+    )
 
     body.backend = normalize_execution_backend(body.backend)
 
@@ -239,11 +250,43 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             body.agent_name = agent_name
             agent = None
 
-    exec_queue = build_batch_execution_queue(list(case_ids), list(init_case_ids), init_policy)
+    # 039：数据集预检/展开（在创建批次之前）
+    from app.services.dataset_execution import plan_batch_datasets
+
+    _plan_cases = []
+    for _cid in dict.fromkeys([*case_ids, *init_case_ids]):
+        _tc = await crud.get_test_case(db, _cid)
+        if _tc is not None:
+            _plan_cases.append(_tc)
+    dataset_plan = await plan_batch_datasets(
+        db,
+        _plan_cases,
+        dataset_id=getattr(body, "dataset_id", None),
+        dataset_mode=getattr(body, "dataset_mode", None),
+        loop_count=getattr(body, "loop_count", None),
+        dataset_fail_fast=getattr(body, "dataset_fail_fast", None),
+    )
+    if not dataset_plan.ok:
+        raise HTTPException(status_code=400, detail="；".join(dataset_plan.errors[:5]))
+    dataset_rows = {
+        cid: rows for cid, rows in dataset_plan.rows_by_case.items() if rows
+    }
+
+    if dataset_rows:
+        exec_queue = build_dataset_execution_queue(
+            list(case_ids), list(init_case_ids), init_policy, dataset_rows
+        )
+    else:
+        exec_queue = [
+            (cid, is_init, None, None)
+            for cid, is_init in build_batch_execution_queue(
+                list(case_ids), list(init_case_ids), init_policy
+            )
+        ]
 
     # 加载用例基本信息（权限 / 批次名）；步骤由 Bridge 自行加载
     case_infos: list[dict] = []
-    for cid, is_init in exec_queue:
+    for cid, is_init, group, row in exec_queue:
         tc = await crud.get_test_case(db, cid)
         if tc:
             case_infos.append({
@@ -251,6 +294,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                 "name": tc.name,
                 "project_id": tc.project_id,
                 "is_init": is_init,
+                "dataset_group": group,
+                "dataset_row": row,
             })
     if not case_infos:
         raise HTTPException(status_code=400, detail="No valid test cases found")
@@ -276,9 +321,28 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         db.add(batch)
         await db.commit()
         await db.refresh(batch)
+        if dataset_plan.total_groups:
+            batch.dataset_total = dataset_plan.total_groups
+            await db.commit()
+            from app.auth import log_audit
+
+            await log_audit(
+                db,
+                getattr(user, "id", None),
+                "batch.dataset_override",
+                details={
+                    "batch_id": batch.id,
+                    "case_ids": [int(c.id) for c in cases],
+                    "dataset_id": getattr(body, "dataset_id", None),
+                    "mode": getattr(body, "dataset_mode", None),
+                    "loop_count": getattr(body, "loop_count", None),
+                    "dataset_fail_fast": getattr(body, "dataset_fail_fast", None),
+                    "groups": dataset_plan.total_groups,
+                },
+            )
 
         queued = []
-        for seq, (cid, is_init) in enumerate(exec_queue):
+        for seq, (cid, is_init, group, row) in enumerate(exec_queue):
             tc = await crud.get_test_case(db, cid)
             if tc:
                 await _create_pending_execution(
@@ -287,6 +351,8 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     environment_id=body.environment_id,
                     is_init=is_init, seq=seq,
                     reuse_browser_session=reuse_session,
+                    dataset_group=group,
+                    dataset_row=row,
                 )
                 queued.append(cid)
         if queued:
@@ -313,12 +379,27 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         db, project_id=project_id, name=_batch_name,
         total_cases=len(case_infos), triggered_by=getattr(user, "username", None),
     )
+    if dataset_plan.total_groups:
+        batch.dataset_total = dataset_plan.total_groups
+        await db.commit()
 
+    precreated_map: dict[tuple[int, int | None], int] = {}
     async with db_mod.AsyncSessionLocal() as _pr_db:
-        await precreate_pending_runs(
-            _pr_db, list(case_ids), batch.id,
-            init_case_ids=list(init_case_ids), init_policy=init_policy,
-        )
+        if dataset_rows:
+            _precreated = await precreate_dataset_runs(
+                _pr_db, list(case_ids), batch.id,
+                init_case_ids=list(init_case_ids), init_policy=init_policy,
+                dataset_rows=dataset_rows,
+            )
+            for _cid, _rid, _is_init, _group, _row in _precreated:
+                precreated_map[(int(_cid), _group)] = int(_rid)
+        else:
+            _precreated = await precreate_pending_runs(
+                _pr_db, list(case_ids), batch.id,
+                init_case_ids=list(init_case_ids), init_policy=init_policy,
+            )
+            for _cid, _rid, _is_init in _precreated:
+                precreated_map[(int(_cid), None)] = int(_rid)
 
     async def _run_batch() -> None:
         from app import execution_control
@@ -375,6 +456,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                                     "seq": idx,
                                     "is_init": info.get("is_init", False),
                                     "reuse_browser_session": reuse_session,
+                                    "dataset_group": info.get("dataset_group"),
+                                    "dataset_row": info.get("dataset_row"),
+                                    "test_run_id": precreated_map.get(
+                                        (int(case_id), info.get("dataset_group"))
+                                    ),
                                 },
                                 environment_id=body.environment_id,
                                 existing_batch_id=batch.id,

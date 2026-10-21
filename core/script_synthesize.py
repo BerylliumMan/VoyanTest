@@ -883,6 +883,65 @@ Rules:
 """
 
 
+_PARAM_RE = re.compile(r"\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}")
+
+
+def case_is_parameterized(steps: list[dict] | None) -> bool:
+    """039：用例是否含参数占位符（参数化用例不做固化，避免用单组数据固化）。"""
+    for step in steps or []:
+        text = " ".join(
+            str(part or "")
+            for part in (
+                step.get("description"),
+                step.get("parsed_result"),
+                step.get("expected_result"),
+                step.get("structured_step"),
+            )
+        )
+        if _PARAM_RE.search(text):
+            return True
+    return False
+
+
+
+def _param_synth_steps(steps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """039：把 {{name}} 换为合成期哨兵值（保证质量闸有字面值可查）。"""
+    from core.dataset_variables import discover_parameters
+    names = discover_parameters(steps)
+    mapping = {n: f"__VTP_{n}__" for n in names}
+    if not mapping:
+        return [dict(s) for s in steps], []
+
+    def _sub(value: Any) -> Any:
+        if isinstance(value, str):
+            import re as _re
+            for name, token in mapping.items():
+                value = _re.sub(r"\{\{\s*" + _re.escape(name) + r"\s*\}\}", token, value)
+            # 模板只识别带引号的输入值：给合成期哨兵补引号（仅输入类步骤）
+            value = _re.sub(
+                r"(输入|填写|填入|键入)\s*(__VTP_[A-Za-z0-9_]+__)",
+                r"\1「\2」",
+                value,
+            )
+            return value
+        if isinstance(value, dict):
+            return {k: _sub(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_sub(v) for v in value]
+        return value
+
+    return [_sub(dict(step)) for step in steps], list(mapping.values())
+
+
+def _restore_param_tokens(script: str | None, steps: list[dict[str, Any]], tokens: list[str]) -> str | None:
+    if not script or not tokens:
+        return script
+    for token in tokens:
+        if token.startswith("__VTP_") and token.endswith("__"):
+            name = token[len("__VTP_"):-2]
+            script = script.replace(token, "{{" + name + "}}")
+    return script
+
 async def synthesize_script_from_steps(
     *,
     client: AsyncOpenAI,
@@ -895,6 +954,7 @@ async def synthesize_script_from_steps(
     temperature: float = 0.1,
     use_llm: bool = True,
     no_navigation: bool = False,
+    parameterized: bool = False,
 ) -> str | None:
     """编译先行：从「用例步骤」直接生成可执行脚本（模板直译 → LLM 兜底 → 同一套质量闸）。
 
@@ -905,6 +965,9 @@ async def synthesize_script_from_steps(
     steps = list(steps or [])
     if not steps:
         return None
+    _param_tokens: list[str] = []
+    if parameterized:
+        steps, _param_tokens = _param_synth_steps(steps)
 
     from core.script_precompile import (
         build_script_from_steps,
@@ -930,6 +993,10 @@ async def synthesize_script_from_steps(
                 raise ValueError("缺少必需字面值: " + ", ".join(_missing_lit))
             if _assert_steps and "expect(" not in script:
                 raise ValueError("缺少断言（用例有断言步骤，脚本无 expect）")
+            if parameterized:
+                script = _restore_param_tokens(script, steps, _param_tokens)
+                from core.script_parameterize import parameterize_script
+                script = parameterize_script(script, case_id=int(case_id))
             logger.info("precompile: 模板直译通过 case=%s bytes=%s", case_id, len(script))
             return script
         except ValueError as exc:
@@ -948,15 +1015,27 @@ async def synthesize_script_from_steps(
     checklist = _checklist_for_synth(steps)
     required_literals = extract_step_literals(steps)
     literal_rule = (
-        "HARD RULE: these literals MUST appear verbatim in the code: "
+        "HARD RULE: these literals MUST appear verbatim in the code (never replace {{name}} placeholders): "
         + json.dumps(required_literals, ensure_ascii=False)
         + "\n"
         if required_literals
         else ""
     )
+    _param_rule = ""
+    if parameterized:
+        from core.dataset_variables import discover_parameters
+        _names = discover_parameters(steps)
+        _param_rule = (
+            "PARAMETERIZED CASE: the entry MUST be "
+            f"async def test_case_{int(case_id)}(page, params=None); "
+            "all values for placeholders MUST be read from the params dict, e.g. "
+            "`params.get('username', '')` (never os.environ, never hardcoded). "
+            f"Available params: {json.dumps(_names, ensure_ascii=False)}.\n"
+        )
     user = (
         f"Write the first-run Playwright script for case_id={int(case_id)}.\n"
         f"Function name MUST be: async def test_case_{int(case_id)}(page)\n"
+        f"{_param_rule}"
         f"base_url: {base_url or ''}\n"
         f"case_name: {case_name}\n"
         f"{literal_rule}\n"
@@ -1016,6 +1095,10 @@ async def synthesize_script_from_steps(
                 raise ValueError("缺少必需字面值: " + ", ".join(_missing_lit))
             if _assert_steps and "expect(" not in script:
                 raise ValueError("缺少断言（用例有断言步骤，脚本无 expect）")
+        if parameterized:
+            script = _restore_param_tokens(script, steps, _param_tokens)
+            from core.script_parameterize import parameterize_script
+            script = parameterize_script(script, case_id=int(case_id))
         logger.info("precompile: LLM 生成通过 case=%s bytes=%s", case_id, len(script))
         return script
     except Exception:  # noqa: BLE001 — 编译失败一律回落 OTA，不阻断执行

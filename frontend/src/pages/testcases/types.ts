@@ -2,6 +2,7 @@ export type CaseKind = 'functional' | 'ui' | 'api';
 
 export interface TestCase {
   id: number;
+  project_id?: number;
   project_case_number: number;
   name: string;
   description: string;
@@ -11,6 +12,12 @@ export interface TestCase {
   compiled_script?: string | null;
   compiled_script_hash?: string | null;
   compiled_at?: string | null;
+  // 039：参数化
+  parameters?: { name: string; description?: string }[] | null;
+  dataset_id?: number | null;
+  dataset_mode?: 'sequential' | 'random' | 'loop' | null;
+  loop_count?: number | null;
+  fail_fast?: boolean | null;
   steps: { step_order: number; description: string; parsed_result?: string; retry_max?: number; retry_delay?: number; healed_selector?: string; learned_locator?: Record<string, unknown> | null; structured_step?: Record<string, unknown> | null; cacheable?: boolean }[];
 }
 

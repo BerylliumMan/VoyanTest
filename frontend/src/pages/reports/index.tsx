@@ -479,12 +479,22 @@ const Reports: React.FC = () => {
                       >
                         {expanded ? <IconDown /> : <IconRight />}
                         <span className={styles['batch-name']}>{run.case_name}</span>
+                        {run.dataset_group ? (
+                          <Tag color="arcoblue" size="small">
+                            {`第 ${run.dataset_group} 组`}
+                          </Tag>
+                        ) : null}
                         {getStatusTag(run.status, isRunning)}
                         <span className={styles['batch-time']}>
                           {run.status === 'running' ? t['step.executing'] : run.duration ? `${run.duration.toFixed(1)}s` : ''}
                           {!isRunning && run.steps?.length ? ` · ${t['steps'].replace('{count}', String(run.steps.length))}` : ''}
                         </span>
                       </div>
+                      {expanded && run.dataset_row && (
+                        <div style={{ fontSize: 12, color: 'var(--color-text-3)', margin: '4px 0 8px 24px' }}>
+                          {`数据：${Object.entries(run.dataset_row).map(([k, v]) => `${k}=${String(v)}`).join(' · ')}`}
+                        </div>
+                      )}
                       {expanded && run.steps && run.steps.length > 0 && (
                         <div className={styles.stepTopMargin}>
                           {run.steps.map((step: StepDetail, idx: number) => (

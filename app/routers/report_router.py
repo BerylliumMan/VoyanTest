@@ -311,7 +311,7 @@ async def list_batches(
 
 
 @router.get("/batches/{batch_id}")
-async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """获取批次详情，包含所有用例运行结果"""
     batch = await crud.get_run_batch(db, batch_id)
     if not batch:
@@ -338,6 +338,8 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
     related = await crud.get_batch_detail_with_related(db, batch_id)
     runs = related["runs"]
     cases = related["cases"]
+    if dataset_group is not None:
+        runs = [r for r in runs if getattr(r, "dataset_group", None) == dataset_group]
 
     # 032-fix：历史批次 started_at 可能为空（旧版客户端链路未写入）——
     # 回退到最早一条用例的 start_time，保证报告「开始时间」恒有值
@@ -360,6 +362,8 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
             "duration": run.duration,
             "started_at": run.start_time.isoformat() if run.start_time else None,
             "finished_at": run.end_time.isoformat() if run.end_time else None,
+            "dataset_group": getattr(run, "dataset_group", None),
+            "dataset_row": getattr(run, "dataset_row", None),
             "steps": [],
         }
 
@@ -389,6 +393,7 @@ async def get_batch_detail(batch_id: int, user=Depends(get_current_user), db: As
         "total_cases": batch.total_cases,
         "passed": batch.passed,
         "failed": batch.failed,
+        "dataset_total": getattr(batch, "dataset_total", None),
         "created_at": batch.created_at.isoformat() if batch.created_at else None,
         "started_at": _batch_started_at.isoformat() if _batch_started_at else None,
         "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
@@ -575,6 +580,10 @@ async def export_batch(
             },
         )
 
+    runs = detail.get("runs") or []
+    for run_info in runs:
+        if not run_info.get("steps"):
+            run_info["steps"] = await _fallback_steps_from_run_logs(db, run_info.get("run_id"))
     html = await asyncio.to_thread(render_batch_report_html, detail)
     filename = f"batch_{batch_id}_{tz_now().strftime('%Y%m%d_%H%M%S')}.html"
     # RFC 5987 文件名，兼容中文批次名场景
@@ -665,17 +674,33 @@ async def rerun_failed_batch(
         .all()
     )
     failed_case_ids: list[int] = []
+    failed_groups: dict[int, list[int]] = {}
     for run in rows:
-        if str(run.status or "") == "failed" and run.case_id:
-            if run.case_id not in failed_case_ids:
-                failed_case_ids.append(run.case_id)
+        if str(run.status or "") != "failed" or not run.case_id:
+            continue
+        if run.case_id not in failed_case_ids:
+            failed_case_ids.append(run.case_id)
+        group = getattr(run, "dataset_group", None)
+        if group is not None:
+            failed_groups.setdefault(int(run.case_id), []).append(int(group))
     if not failed_case_ids:
         raise HTTPException(status_code=409, detail="该批次没有失败用例，无需重跑")
 
     from app.crud import run as crud_run
-    from core.runner._persistence import build_batch_execution_queue
+    from core.runner._persistence import build_batch_execution_queue, build_dataset_execution_queue
 
-    total = len(build_batch_execution_queue(failed_case_ids, [], "before_each"))
+    if failed_groups:
+        # 039：仅失败的 (case_id, group) 重跑；未带组的用例按整案
+        _groups_map = {cid: list(dict.fromkeys(groups)) for cid, groups in failed_groups.items()}
+        total = len(
+            build_dataset_execution_queue(
+                failed_case_ids, [], "before_each",
+                {cid: [{} for _ in groups] for cid, groups in _groups_map.items()},
+            )
+        )
+    else:
+        _groups_map = None
+        total = len(build_batch_execution_queue(failed_case_ids, [], "before_each"))
     name = f"{(batch.name or f'批次 #{batch_id}')} · 仅失败重跑"
     new_batch = await crud_run.create_run_batch(
         db,
@@ -697,6 +722,7 @@ async def rerun_failed_batch(
                 failed_case_ids,
                 batch.project_id,
                 batch_id=new_batch.id,
+                dataset_group_filter=_groups_map,
             )
         finally:
             user_id = getattr(user, "id", None)

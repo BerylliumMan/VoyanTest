@@ -1,6 +1,6 @@
 # app/models/batch.py
 # 运行批次、用例执行、执行日志 ORM 模型
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Float, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -27,6 +27,8 @@ class RunBatch(Base):
     source_id = Column(Integer, nullable=True, index=True)
     # 「仅失败重跑」来源批次（031 US5）；NULL=普通批次
     parent_batch_id = Column(Integer, nullable=True, index=True)
+    # 039：本批次展开的数据组总数（非参数化批次为 NULL）
+    dataset_total = Column(Integer, nullable=True)
 
     runs = relationship("TestRun", backref="batch")
 
@@ -48,6 +50,9 @@ class TestRun(Base):
     log_path = Column(String, nullable=True)
     execution_mode = Column(String, default="server", nullable=False)
     is_init = Column(Boolean, default=False, nullable=False)  # 是否初始化用例
+    # 039：数据组执行身份（非参数化执行为 NULL）
+    dataset_group = Column(Integer, nullable=True, index=True)
+    dataset_row = Column(JSON, nullable=True)
 
 
 class RunLog(Base):

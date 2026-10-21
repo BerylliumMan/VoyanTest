@@ -29,6 +29,11 @@ class BatchRunRequest(BaseModel):
     # 033（US10）：用例间隔（毫秒，0 = 不等待）与首个失败即停止
     delay_ms: Optional[int] = None
     stop_on_error: Optional[bool] = None
+    # 039：UI 用例参数化覆盖（不写回用例；dataset_fail_fast 只影响同一用例后续数据组）
+    dataset_id: Optional[int] = None
+    dataset_mode: Optional[str] = None  # sequential | random | loop
+    loop_count: Optional[int] = None
+    dataset_fail_fast: Optional[bool] = None
 
 
 def validate_delay_ms(value: Optional[int], max_ms: int) -> int:
@@ -52,6 +57,11 @@ class BatchCaseIdsRequest(BaseModel):
     backend: Optional[str] = None  # ota only (legacy values normalized)
     # 列表批跑默认 before_each；用例集入口应显式传 once
     init_policy: InitPolicy = "before_each"
+    # 039：UI 用例参数化覆盖
+    dataset_id: Optional[int] = None
+    dataset_mode: Optional[str] = None
+    loop_count: Optional[int] = None
+    dataset_fail_fast: Optional[bool] = None
 
 
 class DebugRunRequest(BaseModel):

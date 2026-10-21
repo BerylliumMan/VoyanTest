@@ -39,6 +39,14 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const [editingCase, setEditingCase] = useState<TestCase | null>(null);
   const [form] = Form.useForm();
   const [steps, setSteps] = useState<Step[]>([]);
+  // 039：参数声明 + 数据集绑定
+  const [parameters, setParameters] = useState<{ name: string; description?: string }[]>([]);
+  const [datasetBinding, setDatasetBinding] = useState<{
+    dataset_id: number | null;
+    dataset_mode: 'sequential' | 'random' | 'loop';
+    loop_count: number;
+    fail_fast: boolean;
+  }>({ dataset_id: null, dataset_mode: 'sequential', loop_count: 1, fail_fast: false });
   const [moduleVisible, setModuleVisible] = useState(false);
   const [moduleForm] = Form.useForm();
   const [editingModule, setEditingModule] = useState<Module | null>(null);
@@ -68,6 +76,12 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   // 033（US10）：批量运行器选项（用例间隔 / 首个失败即停止）
   const [batchRunDelayMs, setBatchRunDelayMs] = useState<number | undefined>(undefined);
   const [batchRunStopOnError, setBatchRunStopOnError] = useState(false);
+  // 039：本次执行的数据集覆盖（不写回用例）
+  const [batchDatasets, setBatchDatasets] = useState<{ id: number; name: string; rows: unknown[] }[]>([]);
+  const [batchDatasetId, setBatchDatasetId] = useState<number | undefined>(undefined);
+  const [batchDatasetMode, setBatchDatasetMode] = useState<'sequential' | 'random' | 'loop'>('sequential');
+  const [batchLoopCount, setBatchLoopCount] = useState(1);
+  const [batchDatasetFailFast, setBatchDatasetFailFast] = useState(false);
   const [batchRunInitCaseIds, setBatchRunInitCaseIds] = useState<number[]>([]);
   const [batchRunLoading, setBatchRunLoading] = useState(false);
   const batchRunModeRef = useRef<'server' | 'client'>('server');
@@ -159,9 +173,16 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   };
   const handleDeleteEnv = async (id: number) => { try { await axios.delete(`/api/environments/${id}`); Message.success(t['environment.delete_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleSetDefaultEnv = async (id: number) => { try { await axios.put(`/api/environments/${id}/default`); Message.success(t['environment.set_default_success']); fetchEnvironments(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
-  const openCreate = () => { setEditingCase(null); form.resetFields(); if (selectedModuleId) form.setFieldsValue({ module_id: selectedModuleId }); setSteps([{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0, cacheable: true, structured_step: caseKind === 'ui' ? { action: 'click' } : null }]); setVisible(true); };
+  const openCreate = () => { setEditingCase(null); form.resetFields(); if (selectedModuleId) form.setFieldsValue({ module_id: selectedModuleId }); setParameters([]); setDatasetBinding({ dataset_id: null, dataset_mode: 'sequential', loop_count: 1, fail_fast: false }); setSteps([{ step_order: 1, description: '', parsed_result: '', retry_max: 0, retry_delay: 1.0, cacheable: true, structured_step: caseKind === 'ui' ? { action: 'click' } : null }]); setVisible(true); };
   const openEdit = (tc: TestCase) => {
     setEditingCase(tc);
+    setParameters(Array.isArray(tc.parameters) ? tc.parameters : []);
+    setDatasetBinding({
+      dataset_id: tc.dataset_id ?? null,
+      dataset_mode: (tc.dataset_mode as 'sequential' | 'random' | 'loop') || 'sequential',
+      loop_count: tc.loop_count || 1,
+      fail_fast: Boolean(tc.fail_fast),
+    });
     form.setFieldsValue({ name: tc.name, description: tc.description, module_id: tc.module_id });
     // UI 步骤：历史数据常只有 Instant description，structured_step 为空 → 输入框空白而预览有文案
     setSteps(
@@ -209,7 +230,7 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
       .catch(() => Message.error('用例不存在或无权访问'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const handleSubmit = async () => { try { const values = await form.validate(); const payload = { project_id: selectedProject, module_id: values.module_id || null, name: values.name, description: values.description, case_kind: caseKind, steps: steps.filter((s) => s.description.trim() || !!(s.structured_step && (s.structured_step as any).target_name)).map((s) => ({ step_order: s.step_order, description: s.description || '步骤', parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0, learned_locator: s.learned_locator ?? null, structured_step: s.structured_step ?? null, healed_selector: s.healed_selector, cacheable: s.cacheable !== false })) }; if (editingCase) { const { case_kind: _ck, ...updatePayload } = payload; await axios.put(`/api/testcases/${editingCase.id}`, updatePayload); Message.success(t['update.success']); } else { await axios.post('/api/testcases/', payload); Message.success(t['create.success']); } setVisible(false); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; if (err.response?.data?.detail) Message.error(err.response.data.detail); } };
+  const handleSubmit = async () => { try { const values = await form.validate(); const payload = { project_id: selectedProject, module_id: values.module_id || null, name: values.name, description: values.description, case_kind: caseKind, parameters: parameters.filter((p) => p.name.trim()).map((p) => ({ name: p.name.trim(), description: p.description || '' })), dataset_id: datasetBinding.dataset_id, dataset_mode: datasetBinding.dataset_mode, loop_count: datasetBinding.loop_count, fail_fast: datasetBinding.fail_fast, steps: steps.filter((s) => s.description.trim() || !!(s.structured_step && (s.structured_step as any).target_name)).map((s) => ({ step_order: s.step_order, description: s.description || '步骤', parsed_result: s.parsed_result || '', retry_max: s.retry_max ?? 0, retry_delay: s.retry_delay ?? 1.0, learned_locator: s.learned_locator ?? null, structured_step: s.structured_step ?? null, healed_selector: s.healed_selector, cacheable: s.cacheable !== false })) }; if (editingCase) { const { case_kind: _ck, ...updatePayload } = payload; await axios.put(`/api/testcases/${editingCase.id}`, updatePayload); Message.success(t['update.success']); } else { await axios.post('/api/testcases/', payload); Message.success(t['create.success']); } setVisible(false); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; if (err.response?.data?.detail) Message.error(err.response.data.detail); } };
   const handleDelete = async (id: number) => { try { await axios.delete(`/api/testcases/${id}`); Message.success(t['deleted']); fetchData(); } catch (err: unknown) { const e = err as { response?: { data?: { detail?: string } } }; Message.error(e?.response?.data?.detail || '操作失败'); } };
   const handleBatchDelete = async () => { if (selectedRowKeys.length === 0) return; try { await Promise.all(selectedRowKeys.map((id) => axios.delete(`/api/testcases/${id}`))); Message.success(t['delete.batch'].replace('{count}', String(selectedRowKeys.length))); setSelectedRowKeys([]); fetchData(); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['operate.failed']); } };
   const handleRun = async (id: number) => { try { const params: { environment_id?: number } = {}; if (selectedEnvironment) params.environment_id = selectedEnvironment; await axios.post(`/api/testcases/${id}/run`, null, { params }); Message.success(t['run.triggered']); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
@@ -232,6 +253,14 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
       else { Message.error(t['delete.failed']); }
     }
   }, [selectedModuleId, t]);
+  // 039：批量执行弹窗打开时加载项目内 UI 数据集
+  useEffect(() => {
+    if (!batchRunVisible || !selectedProject || caseKind !== 'ui') return;
+    axios
+      .get('/api/api-test/datasets', { params: { project_id: selectedProject, purpose: 'ui' } })
+      .then((res) => setBatchDatasets(Array.isArray(res.data) ? res.data : (res.data?.items || [])))
+      .catch(() => setBatchDatasets([]));
+  }, [batchRunVisible, selectedProject, caseKind]);
   const handleRunModule = async (id: number) => { try { const params: { environment_id?: number } = {}; if (selectedEnvironment) params.environment_id = selectedEnvironment; await axios.post(`/api/testcases/module/${id}/run`, null, { params }); Message.success(t['run.triggered']); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
   const handleRunAll = async () => { if (!selectedProject) return; try { const params: { environment_id?: number } = {}; if (selectedEnvironment) params.environment_id = selectedEnvironment; await axios.post(`/api/testcases/project/${selectedProject}/run`, null, { params }); Message.success(t['run.triggered']); } catch (e: unknown) { const err = e as { response?: { data?: { detail?: string } } }; Message.error(err.response?.data?.detail || t['run.failed']); } };
 
@@ -247,6 +276,10 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
         session_reuse?: boolean;
         delay_ms?: number;
         stop_on_error?: boolean;
+        dataset_id?: number;
+        dataset_mode?: string;
+        loop_count?: number;
+        dataset_fail_fast?: boolean;
       } = { case_ids: selectedRowKeys, init_policy: 'before_each' };
       if (selectedEnvironment) payload.environment_id = selectedEnvironment;
       if (batchRunIncludeInit && initCaseIds.length > 0) payload.init_case_ids = initCaseIds;
@@ -255,6 +288,12 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
       // 033（US10）：运行器选项
       if (batchRunDelayMs && batchRunDelayMs > 0) payload.delay_ms = batchRunDelayMs;
       if (batchRunStopOnError) payload.stop_on_error = true;
+      if (batchDatasetId) {
+        payload.dataset_id = batchDatasetId;
+        payload.dataset_mode = batchDatasetMode;
+        payload.loop_count = batchLoopCount;
+        payload.dataset_fail_fast = batchDatasetFailFast;
+      }
       await axios.post('/api/testcases/batch-run', payload);
       Message.success(t['run.triggered']);
       setBatchRunVisible(false);
@@ -273,9 +312,19 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
         environment_id?: number;
         init_case_ids?: number[];
         init_policy: 'before_each';
+        dataset_id?: number;
+        dataset_mode?: string;
+        loop_count?: number;
+        dataset_fail_fast?: boolean;
       } = { case_ids: selectedRowKeys, agent_name: selectedAgent, init_policy: 'before_each' };
       if (selectedEnvironment) payload.environment_id = selectedEnvironment;
       if (batchRunIncludeInit && initCaseIds.length > 0) payload.init_case_ids = initCaseIds;
+      if (batchDatasetId) {
+        payload.dataset_id = batchDatasetId;
+        payload.dataset_mode = batchDatasetMode;
+        payload.loop_count = batchLoopCount;
+        payload.dataset_fail_fast = batchDatasetFailFast;
+      }
       await axios.post('/api/testcases/batch-run-client', payload);
       Message.success(t['run.triggered']);
       setBatchRunVisible(false);
@@ -466,6 +515,10 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
           steps={steps}
           setSteps={setSteps}
           caseKind={caseKind}
+          parameters={parameters}
+          setParameters={setParameters}
+          datasetBinding={datasetBinding}
+          setDatasetBinding={setDatasetBinding}
           onCompiledScriptCleared={() => {
             if (editingCase) {
               setEditingCase({
@@ -576,6 +629,51 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
             <span className={styles.switchLabel}>{t['batch.stop_on_error']}</span>
           </div>
           <div className={styles.initNoneText}>{t['batch.stop_on_error.hint']}</div>
+          {/* 039：本次执行的数据集覆盖（不写回用例） */}
+          {caseKind === 'ui' && (
+            <>
+              <div className={styles.initSwitchRow} style={{ marginTop: 12 }}>
+                <span className={styles.switchLabel}>{t['param.dataset'] || '数据集（本次执行）'}</span>
+                <Select
+                  allowClear
+                  style={{ width: 220, marginLeft: 8 }}
+                  placeholder={t['param.dataset.select'] || '不绑定（按用例配置）'}
+                  value={batchDatasetId}
+                  onChange={(v) => setBatchDatasetId(v as number | undefined)}
+                  options={batchDatasets.map((d) => ({
+                    label: `${d.name}（${d.rows.length} 行）`,
+                    value: d.id,
+                  }))}
+                />
+                <Select
+                  style={{ width: 110, marginLeft: 8 }}
+                  value={batchDatasetMode}
+                  onChange={(v) => setBatchDatasetMode(v as 'sequential' | 'random' | 'loop')}
+                  options={[
+                    { label: t['param.mode.sequential'] || '顺序', value: 'sequential' },
+                    { label: t['param.mode.random'] || '随机', value: 'random' },
+                    { label: t['param.mode.loop'] || '循环', value: 'loop' },
+                  ]}
+                />
+                {batchDatasetMode === 'loop' && (
+                  <InputNumber
+                    min={1}
+                    max={100}
+                    value={batchLoopCount}
+                    onChange={(v) => setBatchLoopCount(Number(v) || 1)}
+                    style={{ width: 90, marginLeft: 8 }}
+                  />
+                )}
+              </div>
+              <div className={styles.initSwitchRow}>
+                <Switch
+                  checked={batchDatasetFailFast}
+                  onChange={(v) => setBatchDatasetFailFast(v)}
+                />
+                <span className={styles.switchLabel}>{t['param.fail_fast'] || '同一用例首组失败即停'}</span>
+              </div>
+            </>
+          )}
         </Modal>
       </div>
     </>

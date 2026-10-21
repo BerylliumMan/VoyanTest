@@ -357,6 +357,47 @@ async def _run_startup_init():
             "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS compiled_script_meta JSONB",
             "test_cases.compiled_script_meta 迁移",
         )
+        # ── 039-ui-case-parameterization：UI 用例参数化与数据集绑定 ──
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS parameters JSONB",
+            "test_cases.parameters 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS dataset_id INTEGER",
+            "test_cases.dataset_id 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS dataset_mode VARCHAR(16) DEFAULT 'sequential'",
+            "test_cases.dataset_mode 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS loop_count INTEGER DEFAULT 1",
+            "test_cases.loop_count 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS fail_fast BOOLEAN DEFAULT FALSE",
+            "test_cases.fail_fast 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE api_datasets ADD COLUMN IF NOT EXISTS purpose VARCHAR(16) NOT NULL DEFAULT 'api'",
+            "api_datasets.purpose 迁移",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_api_datasets_purpose ON api_datasets (purpose)",
+            "api_datasets.purpose 索引",
+        )
+        await _ddl(
+            "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS dataset_group INTEGER",
+            "test_runs.dataset_group 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS dataset_row JSONB",
+            "test_runs.dataset_row 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS dataset_total INTEGER",
+            "run_batches.dataset_total 迁移",
+        )
         await _ddl(
             "ALTER TABLE test_cases ALTER COLUMN case_kind SET DEFAULT 'functional'",
             "test_cases.case_kind 默认值改为 functional",
@@ -929,13 +970,26 @@ async def lifespan(app: FastAPI):
                     if not tc:
                         logger.error("定时任务用例不存在: %s", target_id)
                         return
+                    from app.scheduler import task_environment_id
+                    from app.services.dataset_execution import plan_batch_datasets
+
+                    env_id = task_environment_id(task)
+                    # 039：UI 参数化用例按数据集展开（不再固定 total=1）
+                    plan = await plan_batch_datasets(db, [tc]) if (tc.case_kind or "") != "api" else None
+                    if plan is not None and not plan.ok:
+                        logger.error("定时任务数据集预检失败: %s", "; ".join(plan.errors))
+                        return
+                    total = (plan.total_groups if plan and plan.total_groups else 1)
                     batch = await crud.create_run_batch(
-                        db, project_id=tc.project_id, total_cases=1,
+                        db, project_id=tc.project_id, total_cases=total,
                         triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
                     )
                     batch_id, case_id = batch.id, tc.id
                     await db.commit()
-                    await _exec.run_test_case(case_id, batch_id)
+                    await _exec.run_batch_test_cases(
+                        [case_id], tc.project_id, batch_id=batch_id,
+                        environment_id=env_id,
+                    )
                     return {"batch_id": batch_id}
                 elif task_type == "module":
                     mod = await crud.get_module(db, int(target_id))

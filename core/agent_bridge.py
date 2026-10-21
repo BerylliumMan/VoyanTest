@@ -122,6 +122,11 @@ class AgentBridge:
         self._pending_failure_shot_b64: str | None = None
         # 038 US1：坐标回读连续未命中计数
         self._coord_miss_streak = 0
+        # 039：数据集渲染视图（原始步骤另存 _raw_steps，用于哈希/合成）
+        self._raw_steps: list[dict] = []
+        self._dataset_row: dict | None = None
+        self._dataset_group: int | None = None
+        self._test_run_id: int | None = None
 
     def _vision_on(self) -> bool:
         """037：本轮是否附视觉帧（exec_vision 开关 + 运行时降级）。"""
@@ -219,6 +224,13 @@ class AgentBridge:
             except Exception:
                 logger.exception("Bridge cancelled report save failed for run #%d", run.id)
             return run
+
+        # 039：先装载数据组（回放/编译先行需要按组注入 params）
+        _goal = run.goal if isinstance(getattr(run, "goal", None), dict) else {}
+        self._dataset_group = _goal.get("dataset_group")
+        self._dataset_row = (
+            _goal.get("dataset_row") if isinstance(_goal.get("dataset_row"), dict) else None
+        )
 
         # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
         # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
@@ -944,7 +956,9 @@ class AgentBridge:
             log_path=None,
             logs=logs,
             batch_id=batch.id,
-            run_id=_reuse_run_id,
+            run_id=_reuse_run_id or self._test_run_id,
+            dataset_group=self._dataset_group,
+            dataset_row=self._dataset_row,
         )
         # 2026-09-30 修复：客户端执行的报告此前 execution_mode 落到列默认值 "server"（实际跑在客户端）。
         # 与 029 接口客户端执行同一约定：client:<agent>。
@@ -1284,6 +1298,8 @@ class AgentBridge:
 
             if not getattr(get_settings(), "compile_first_enabled", False):
                 return False
+            # 039：参数化用例允许编译先行，脚本按组注入 params
+            _param = getattr(self, "_dataset_row", None) is not None
             steps = await self._load_case_steps(run.case_id)
             if not steps or len(steps) < 2:
                 return False
@@ -1334,6 +1350,7 @@ class AgentBridge:
                 case_name=(getattr(tc, "name", None) or "") if tc else "",
                 steps=steps,
                 base_url=base_url or None,
+                parameterized=_param,
             )
             if not script:
                 logger.info("Bridge 编译先行：未产出可用脚本 case=%s（回落 OTA）", run.case_id)
@@ -1342,6 +1359,7 @@ class AgentBridge:
             ok = await self._try_replay_compiled_script(
                 run, agent_id, run_id_str,
                 script_override=script, persist_on_success=True,
+                parameterized=_param,
             )
             if not ok:
                 logger.info(
@@ -1370,6 +1388,7 @@ class AgentBridge:
         self, run: AgentRun, agent_id: str, run_id_str: str, *,
         script_override: str | None = None,
         persist_on_success: bool = False,
+        parameterized: bool = False,
     ) -> bool:
         """回放固化脚本；成功即完成 run（返回 True），失败/不支持返回 False 交给 OTA。
 
@@ -1383,6 +1402,14 @@ class AgentBridge:
         stored = (getattr(tc, "compiled_script", None) or "").strip() if tc else ""
         script = (script_override or stored).strip()
         if not script:
+            return False
+
+        # 039：参数化回放门控——脚本必须带 parameterized meta，且客户端声明能力
+        _meta = getattr(tc, "compiled_script_meta", None) or {} if tc else {}
+        _param_mode = bool(parameterized or _meta.get("parameterized"))
+        _row = getattr(self, "_dataset_row", None)
+        if _row is not None and not _param_mode:
+            logger.info("Bridge 固化回放：无参数化 meta，回退 OTA case=%s", run.case_id)
             return False
         # 037：验证码断点尾段脚本不走常规整案回放（由断点流程：头段实时 → 尾段回放）
         if getattr(self, "_breakpoint_until", None):
@@ -1442,6 +1469,7 @@ class AgentBridge:
             steps_hash=stored_hash or current_hash,
             headless=None,
             keep_browser=True,
+            params=_row if _param_mode else None,
         )
         ok = (
             bool(res)
@@ -1470,7 +1498,8 @@ class AgentBridge:
             try:
                 from core.compiled_script import persist_compiled_script
 
-                persist_compiled_script(tc, script=script, steps_hash=current_hash)
+                _meta = {"parameterized": True} if parameterized else None
+                persist_compiled_script(tc, script=script, steps_hash=current_hash, meta=_meta)
                 await self.db.commit()
                 logger.info(
                     "Bridge 编译先行：脚本已落库 case=%s bytes=%s（下次直接回放）",
@@ -1873,6 +1902,9 @@ class AgentBridge:
         if not steps:
             logger.info("Bridge: synthesis skipped case=%s (no steps loaded)", case_id)
             return
+        if getattr(self, "_dataset_row", None) is not None:
+            logger.info("Bridge: synthesis skipped case=%s (parameterized)", case_id)
+            return
         # 036+：含诊断脚本步骤的用例不固化（Playwright 脚本无法忠实覆盖 run_script）
         from core.script_synthesize import case_requires_run_script
 
@@ -2253,14 +2285,24 @@ class AgentBridge:
         case_steps: list[str] = []
         case_url: str = ""
         case_name: str = ""
+        _goal = run.goal if isinstance(getattr(run, "goal", None), dict) else {}
+        self._dataset_group = _goal.get("dataset_group")
+        self._dataset_row = _goal.get("dataset_row") if isinstance(_goal.get("dataset_row"), dict) else None
+        self._test_run_id = _goal.get("test_run_id")
         if run.case_id:
             try:
                 from app import crud as _crud
                 _tc = await _crud.get_test_case(self.db, run.case_id)
                 if _tc:
                     _steps = await _crud.get_steps_for_case(self.db, run.case_id)
-                    for s in _steps:
-                        desc = getattr(s, 'description', '') or ''
+                    self._raw_steps = self._steps_to_dicts(_steps)
+                    if self._dataset_row is not None:
+                        from core.dataset_variables import render_steps
+                        self._run_steps = render_steps(self._raw_steps, self._dataset_row)
+                    else:
+                        self._run_steps = self._raw_steps
+                    for s in self._run_steps:
+                        desc = s.get("description") or ""
                         case_steps.append(desc)
                         if '打开' in desc or '导航' in desc or 'http' in desc.lower():
                             import re as _re
@@ -2268,7 +2310,6 @@ class AgentBridge:
                             if _m:
                                 case_url = _m.group(0)
                     case_name = _tc.name or f"Case #{run.case_id}"
-                    self._run_steps = self._steps_to_dicts(_steps)
             except Exception:
                 logger.warning("Could not load steps for case %s", run.case_id, exc_info=True)
 

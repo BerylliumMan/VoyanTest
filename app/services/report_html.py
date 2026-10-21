@@ -173,7 +173,7 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
             <div class="case-title">
               <span class="chevron" aria-hidden="true"></span>
               <span class="case-index">{idx:02d}</span>
-              <h2>{_esc(run.get('case_name') or f"Case #{run.get('case_id')}")}</h2>
+              <h2>{_esc((run.get('case_name') or f"Case #{run.get('case_id')}") + (f" · 第 {run.get('dataset_group')} 组" if run.get('dataset_group') else ""))}</h2>
             </div>
             <div class="case-meta">
               <span class="pill {_status_class(r_status)}">{_esc(r_status)}</span>
@@ -192,7 +192,9 @@ def render_batch_report_html(detail: dict[str, Any]) -> str:
 
     toc_items: list[str] = []
     for i, r in enumerate(runs, start=1):
-        case_label = r.get("case_name") or f"Case #{r.get('case_id')}"
+        case_label = (r.get("case_name") or f"Case #{r.get('case_id')}") + (
+            f" · 第 {r.get('dataset_group')} 组" if r.get("dataset_group") else ""
+        )
         toc_items.append(
             f'<li><a href="#case-{i}" data-jump-case="{i}">{_esc(case_label)}</a>'
             f' <span class="pill {_status_class(r.get("status"))}">{_esc(r.get("status") or "—")}</span></li>'

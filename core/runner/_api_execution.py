@@ -279,6 +279,10 @@ async def run_api_case_server(
             ds = None
         if ds is None:
             logger.warning("数据集不存在，按单次执行 dataset_id=%s", dataset_id)
+        elif (getattr(ds, "purpose", None) or "api") != "api":
+            raise RuntimeError(
+                f"数据集 #{dataset_id} 不是接口数据集（purpose={getattr(ds, 'purpose', None)}），拒绝执行"
+            )
         else:
             dataset = {"id": ds.id, "columns": list(ds.columns or []), "rows": list(ds.rows or [])}
 

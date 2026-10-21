@@ -219,8 +219,36 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
             if tc.project_id != project_id:
                 raise HTTPException(status_code=400, detail=f"Init case {tc.id} is not in the same project")
 
-    from core.runner._persistence import build_batch_execution_queue
-    total = len(build_batch_execution_queue(case_ids, init_case_ids, init_policy))
+    from core.runner._persistence import (
+        build_batch_execution_queue,
+        build_dataset_execution_queue,
+    )
+
+    # 039：数据集预检/展开（必须在创建批次之前）
+    from app.services.dataset_execution import plan_batch_datasets
+
+    _plan_cases = list(test_cases) + (list(init_tcs) if init_case_ids else [])
+    dataset_plan = await plan_batch_datasets(
+        db,
+        _plan_cases,
+        dataset_id=getattr(req, "dataset_id", None),
+        dataset_mode=getattr(req, "dataset_mode", None),
+        loop_count=getattr(req, "loop_count", None),
+        dataset_fail_fast=getattr(req, "dataset_fail_fast", None),
+    )
+    if not dataset_plan.ok:
+        raise HTTPException(status_code=400, detail="；".join(dataset_plan.errors[:5]))
+    dataset_rows = {
+        cid: rows for cid, rows in dataset_plan.rows_by_case.items() if rows
+    }
+    if dataset_rows:
+        total = len(
+            build_dataset_execution_queue(
+                case_ids, init_case_ids, init_policy, dataset_rows
+            )
+        )
+    else:
+        total = len(build_batch_execution_queue(case_ids, init_case_ids, init_policy))
 
     # 033（US10）：用例间隔与首个失败即停止——**必须先于批次创建校验**，
     # 否则 400 会留下 running 但 0 run 的孤儿批次（2026-10-09 页面实测发现）
@@ -236,6 +264,25 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
     batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total, triggered_by=getattr(user, 'username', None))
     from app.routers.testcase import execution as _exec
     batch_id = batch.id
+    if dataset_plan.total_groups:
+        batch.dataset_total = dataset_plan.total_groups
+        await db.commit()
+        from app.auth import log_audit
+
+        await log_audit(
+            db,
+            getattr(user, "id", None),
+            "batch.dataset_override",
+            details={
+                "batch_id": batch_id,
+                "case_ids": case_ids,
+                "dataset_id": getattr(req, "dataset_id", None),
+                "mode": getattr(req, "dataset_mode", None),
+                "loop_count": getattr(req, "loop_count", None),
+                "dataset_fail_fast": getattr(req, "dataset_fail_fast", None),
+                "groups": dataset_plan.total_groups,
+            },
+        )
     user_id = getattr(user, "id", None)
 
     # 031（US9）：接口用例的数据驱动执行参数（执行侧覆盖用例绑定）
@@ -261,6 +308,11 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
                 # 033（US10）：运行器选项
                 delay_ms=delay_ms,
                 stop_on_error=stop_on_error,
+                # 039：数据集覆盖（不写回用例）
+                dataset_id=getattr(req, "dataset_id", None),
+                dataset_mode=getattr(req, "dataset_mode", None),
+                loop_count=getattr(req, "loop_count", None),
+                dataset_fail_fast=getattr(req, "dataset_fail_fast", None),
             )
         finally:
             if user_id:

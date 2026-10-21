@@ -72,4 +72,7 @@ export interface RunItem {
   finished_at: string;
   steps: StepDetail[];
   logs?: string;
+  /** 039：数据组序号与数据（行） */
+  dataset_group?: number | null;
+  dataset_row?: Record<string, unknown> | null;
 }

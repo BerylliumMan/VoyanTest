@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     exec_stop_poll_ms: int = 1000
     # - 生成用例批次并发上限（1=串行基线）
     gen_parallel_max: int = 3
+    # 039 UI 用例参数化与数据集驱动：
+    # - 单次执行展开的数据组上限（行数 × 循环次数；超过在执行前拒绝）
+    ui_dataset_max_groups: int = 100
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

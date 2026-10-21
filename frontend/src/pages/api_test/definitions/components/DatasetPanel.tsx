@@ -10,6 +10,7 @@ import {
   Space,
   Spin,
   Table,
+  Tabs,
   Typography,
   Upload,
 } from '@arco-design/web-react';
@@ -78,6 +79,8 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
   onChanged,
 }) => {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
+  // 039：数据集用途（接口 / UI 用例参数化）
+  const [purpose, setPurpose] = useState<'api' | 'ui'>('api');
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [draft, setDraft] = useState<DatasetDraft | null>(null);
@@ -101,7 +104,7 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
     setListError(null);
     try {
       const data = await apiRequest<Dataset[]>(
-        { method: 'GET', url: '/api/api-test/datasets', params: { project_id: projectId } },
+        { method: 'GET', url: '/api/api-test/datasets', params: { project_id: projectId, purpose } },
         { showError: false }
       );
       // 契约：列表端点是分页形状 {total, items}（与项目其他列表一致），不是裸数组
@@ -113,7 +116,7 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, purpose]);
 
   useEffect(() => {
     if (visible) {
@@ -238,7 +241,7 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
         );
       } else {
         await apiRequest(
-          { method: 'POST', url: '/api/api-test/datasets', data: { ...payload, project_id: projectId } },
+          { method: 'POST', url: '/api/api-test/datasets', data: { ...payload, project_id: projectId, purpose } },
           { successMessage: '数据集已创建' }
         );
       }
@@ -286,6 +289,7 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
           url: '/api/api-test/datasets/import',
           data: formData,
           headers: { 'Content-Type': 'multipart/form-data' },
+          params: { purpose },
         },
         { showError: false }
       );
@@ -388,6 +392,15 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
 
   return (
     <Drawer width={880} title="数据集管理" visible={visible} onCancel={onClose} footer={null} unmountOnExit>
+      <Tabs
+        activeTab={purpose}
+        onChange={(key) => setPurpose(key as 'api' | 'ui')}
+        type="rounded"
+        style={{ marginBottom: 12 }}
+      >
+        <Tabs.TabPane key="api" title="接口数据集" />
+        <Tabs.TabPane key="ui" title="UI 数据集" />
+      </Tabs>
       {draft ? (
         <div className={styles.datasetEditor}>
           <div className={styles.datasetFieldRow}>

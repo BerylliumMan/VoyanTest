@@ -125,3 +125,88 @@ def execution_control_state():
         ec._stopped.update(saved_stopped)
         ec._paused.clear()
         ec._paused.update(saved_paused)
+
+
+# ── 039-ui-case-parameterization：数据集/绑定/队列夹具 ──────────────────────
+
+
+@pytest.fixture
+def make_ui_dataset():
+    """构造 UI 数据集快照（不落库）。"""
+
+    def _make(rows=None, columns=("username", "password"), purpose="ui", dataset_id=1):
+        return {
+            "id": dataset_id,
+            "purpose": purpose,
+            "columns": list(columns),
+            "rows": list(rows or [{"username": "u1", "password": "p1"}]),
+        }
+
+    return _make
+
+
+@pytest.fixture
+def make_bound_case():
+    """在 db 中创建一条绑定数据集的 UI 用例并返回 ORM 对象。"""
+
+    async def _make(
+        db,
+        *,
+        project_id=24,
+        name="参数化用例",
+        steps=None,
+        dataset_id=1,
+        dataset_mode="sequential",
+        loop_count=1,
+        fail_fast=False,
+        parameters=None,
+    ):
+        from app import db_models
+
+        case = db_models.TestCase(
+            project_id=project_id,
+            name=name,
+            case_kind="ui",
+            dataset_id=dataset_id,
+            dataset_mode=dataset_mode,
+            loop_count=loop_count,
+            fail_fast=fail_fast,
+            parameters=parameters or [{"name": "username"}, {"name": "password"}],
+        )
+        db.add(case)
+        await db.flush()
+        for index, text in enumerate(
+            steps
+            or [
+                "打开登录页",
+                "用账号 {{username}}、密码 {{password}} 登录",
+                "断言页面出现【Welcome】",
+            ],
+            start=1,
+        ):
+            db.add(
+                db_models.TestStep(
+                    case_id=case.id,
+                    step_order=index,
+                    description=text,
+                )
+            )
+        await db.commit()
+        await db.refresh(case)
+        return case
+
+    return _make
+
+
+@pytest.fixture
+def make_expanded_queue():
+    """构造按组展开的执行队列。"""
+
+    def _make(case_ids, dataset_rows, init_case_ids=None, init_policy="once"):
+        from core.runner._persistence import build_dataset_execution_queue
+
+        return build_dataset_execution_queue(
+            list(case_ids), list(init_case_ids or []), init_policy, dataset_rows
+        )
+
+    return _make

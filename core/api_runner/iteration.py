@@ -5,11 +5,15 @@
 from __future__ import annotations
 
 import random as _random
-from typing import Any, Optional
+from typing import Optional
 
-# 031（US9）：loop 模式重复上限（防放大）
-MAX_LOOP_COUNT = 100
-ALLOWED_DATASET_MODES = ("sequential", "random", "loop")
+from core.dataset_iteration import (  # noqa: F401（对外 API 兼容再导出）
+    ALLOWED_DATASET_MODES,
+    MAX_LOOP_COUNT,
+    normalize_rows,
+    stringify_row,
+    stringify_value,
+)
 
 
 def dataset_mode_notes(dataset_mode: str) -> list[str]:
@@ -19,46 +23,17 @@ def dataset_mode_notes(dataset_mode: str) -> list[str]:
     return []
 
 
-def stringify_value(value: Any) -> str:
-    return "" if value is None else str(value)
-
-
-def stringify_row(row: dict) -> dict[str, str]:
-    return {str(key): stringify_value(value) for key, value in row.items()}
-
-
 def expand_iteration_rows(
     dataset: Optional[dict], dataset_row: Optional[dict]
 ) -> list[dict[str, str]]:
-    """把数据集快照展开成「每行一个变量字典」的迭代列表。
+    """把数据集快照展开成「每行一个变量字典」的迭代列表（接口侧宽松语义）。
 
     - 显式 ``dataset_row``（单行绑定，debug/兼容路径）优先，只产生一个迭代
     - 无数据集 / 数据集无行 → 单迭代空行（保持单次执行语义，行为与未绑定一致）
-    - 兼容两种行形状：dict（T044 CSV/手工）与 list（data-model §1.3，按 columns 映射）
     """
     if dataset_row is not None:
         return [stringify_row(dataset_row)]
-    if not isinstance(dataset, dict):
-        return [{}]
-    rows = dataset.get("rows")
-    if not isinstance(rows, list) or not rows:
-        return [{}]
-    columns = [str(column) for column in (dataset.get("columns") or [])]
-    out: list[dict[str, str]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            out.append(stringify_row(row))
-        elif isinstance(row, (list, tuple)):
-            out.append(
-                {
-                    columns[index]: stringify_value(value)
-                    for index, value in enumerate(row)
-                    if index < len(columns)
-                }
-            )
-        else:
-            out.append({})
-    return out
+    return normalize_rows(dataset) or [{}]
 
 
 def plan_iterations(

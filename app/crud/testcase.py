@@ -81,6 +81,12 @@ async def create_test_case(db: AsyncSession, case: models.TestCaseCreate) -> db_
         api_spec=getattr(case, "api_spec", None),
         api_definition_id=getattr(case, "api_definition_id", None),
         definition_version=getattr(case, "definition_version", None),
+        # 039：参数声明与数据集绑定
+        parameters=getattr(case, "parameters", None),
+        dataset_id=getattr(case, "dataset_id", None),
+        dataset_mode=getattr(case, "dataset_mode", None) or "sequential",
+        loop_count=getattr(case, "loop_count", None) or 1,
+        fail_fast=bool(getattr(case, "fail_fast", False)),
     )
     db.add(db_case)
     await db.flush()
@@ -267,6 +273,19 @@ async def update_test_case(
     if getattr(case, "api_spec", None) is not None:
         db_case.api_spec = case.api_spec
 
+    # 039：参数声明/数据集绑定（仅更新请求中显式出现的字段，避免全量 PUT 误清）
+    fields_set = getattr(case, "model_fields_set", set()) or set()
+    if "parameters" in fields_set:
+        db_case.parameters = case.parameters
+    if "dataset_id" in fields_set:
+        db_case.dataset_id = case.dataset_id
+    if "dataset_mode" in fields_set:
+        db_case.dataset_mode = case.dataset_mode or "sequential"
+    if "loop_count" in fields_set:
+        db_case.loop_count = case.loop_count or 1
+    if "fail_fast" in fields_set:
+        db_case.fail_fast = bool(case.fail_fast)
+
     # Preserve learned locators across step rewrite (match by step_order)
     old_learned = {
         s.step_order: getattr(s, "learned_locator", None)
@@ -380,6 +399,53 @@ async def get_init_test_cases(
         .order_by(db_models.TestCase.created_at.desc())
     )
     return result.scalars().all()
+
+
+_UNSET = object()
+
+
+async def update_case_dataset(
+    db: AsyncSession,
+    case_id: int,
+    *,
+    parameters=_UNSET,
+    dataset_id=_UNSET,
+    dataset_mode=_UNSET,
+    loop_count=_UNSET,
+    fail_fast=_UNSET,
+) -> tuple[db_models.TestCase | None, int | None]:
+    """039：专用数据集绑定更新（不重建步骤）。
+
+    Returns ``(case, previous_dataset_id)``；未提供任何字段时视为无变化。
+    任何绑定/参数变化都会清除固化脚本（含 meta）。
+    """
+    from core.compiled_script import clear_compiled_script
+
+    db_case = await get_test_case(db, case_id)
+    if not db_case:
+        return None, None
+    previous_dataset_id = db_case.dataset_id
+    changed = False
+    if parameters is not _UNSET:
+        db_case.parameters = parameters
+        changed = True
+    if dataset_id is not _UNSET:
+        db_case.dataset_id = dataset_id
+        changed = True
+    if dataset_mode is not _UNSET:
+        db_case.dataset_mode = dataset_mode or "sequential"
+        changed = True
+    if loop_count is not _UNSET:
+        db_case.loop_count = loop_count or 1
+        changed = True
+    if fail_fast is not _UNSET:
+        db_case.fail_fast = bool(fail_fast)
+        changed = True
+    if changed:
+        clear_compiled_script(db_case)
+    await db.commit()
+    await db.refresh(db_case)
+    return db_case, previous_dataset_id
 
 
 async def delete_test_case(db: AsyncSession, case_id: int) -> dict[str, str] | None:

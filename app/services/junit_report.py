@@ -25,6 +25,7 @@ _SKIP_HINTS = (
     "而跳过",
     "用户停止执行",
     "已取消",
+    "前序数据组失败",
 )
 
 
@@ -72,6 +73,9 @@ def build_junit_xml(batch: dict, runs: list[dict]) -> str:
         suite_name = str(
             run.get("case_name") or run.get("display_name") or run.get("run_id") or "用例"
         )
+        _group = run.get("dataset_group")
+        if _group:
+            suite_name = f"{suite_name} [第 {_group} 组]"
         suite = ET.SubElement(root, "testsuite")
         suite.set("name", _clean(suite_name))
         start_time = run.get("start_time")

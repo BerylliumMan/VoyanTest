@@ -27,7 +27,7 @@ from .schemas import (  # noqa: F401
     EnvironmentBase, EnvironmentCreate, EnvironmentUpdate, Environment,
     ModuleBase, ModuleCreate, ModuleUpdate, Module,
     # testcase
-    TestCaseBase, TestCaseCreate, TestCaseUpdate, TestCase, TestCasePage,
+    TestCaseBase, TestCaseCreate, TestCaseUpdate, TestCaseDatasetUpdate, TestCase, TestCasePage,
     TestStepBase, TestStepCreate, TestStepCreatePayload, TestStepUpdate, TestStep,
     # batch
     RunBatchCreate, RunBatch, RunBatchUpdate, TestRun,

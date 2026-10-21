@@ -87,6 +87,8 @@ class ApiDataset(Base):
     columns = Column(JSON, default=list, nullable=False)  # ["username","password"]
     rows = Column(JSON, default=list, nullable=False)  # [["u1","p1"], ...]
     source = Column(String(16), default="manual", nullable=False)  # manual / csv
+    # 039：数据集用途（api=接口测试；ui=UI 用例参数化）；存量行默认 api
+    purpose = Column(String(16), default="api", nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 

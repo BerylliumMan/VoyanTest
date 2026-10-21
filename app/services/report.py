@@ -342,6 +342,8 @@ class ReportService:
                     "duration": run.duration,
                     "started_at": run.start_time.isoformat() if run.start_time else None,
                     "finished_at": run.end_time.isoformat() if run.end_time else None,
+                    "dataset_group": getattr(run, "dataset_group", None),
+                    "dataset_row": getattr(run, "dataset_row", None),
                     "steps": _load_report_steps(run.report_path),
                 }
             )

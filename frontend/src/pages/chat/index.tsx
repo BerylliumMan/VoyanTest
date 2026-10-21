@@ -1091,6 +1091,9 @@ const ChatPage: React.FC = () => {
                   <Tag size="small" color="gray">环境 {envName}</Tag>
                 </span>
               ) : null}
+              {card.dataset_total ? (
+                <Tag size="small" color="arcoblue">{`数据集 ${card.dataset_total} 组`}</Tag>
+              ) : null}
               <Tag size="small" color={tag.color}>{tag.text}</Tag>
             </div>
             <Text type="secondary" style={{ fontSize: 12 }}>

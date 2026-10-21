@@ -1267,6 +1267,28 @@ class AgentRunner:
                 self._consecutive_act_failures = 0
                 # 成功动作入 journal（服务端 OTA 的固化合成输入，形状与 AgentBridge 对齐）
                 self._collect_journal_entry(action, turn)
+                # 039：引擎完成判定——所有步骤已覆盖（含断言快照自动覆盖）即收尾，
+                # 不依赖模型主动 done（参数化组/长页面模型常忘记 done）。
+                if self._run_steps:
+                    _all_orders = [
+                        int(s.get("step_order") or idx + 1)
+                        for idx, s in enumerate(self._run_steps)
+                    ]
+                    _uncovered = [o for o in _all_orders if o not in self._journal_covered]
+                    if _uncovered:
+                        self._cover_assertions_from_snapshot(
+                            _uncovered, (observation or {}).get("snapshot") or "",
+                        )
+                    if len(self._journal_covered) >= len(self._run_steps):
+                        logger.info(
+                            "AgentRunner engine-done: all %d steps covered at turn %d",
+                            len(self._run_steps), turn,
+                        )
+                        return self._make_result(
+                            "completed", turn,
+                            result="所有步骤已完成（引擎判定）",
+                            start_time=start_time,
+                        )
             else:
                 self._consecutive_act_failures += 1
                 self._force_next_screenshot = True
