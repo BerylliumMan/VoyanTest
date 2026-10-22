@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Checkbox,
@@ -14,12 +14,13 @@ import {
   Table,
   Tag,
 } from '@arco-design/web-react';
-import { IconDelete, IconDragDotVertical, IconEdit, IconPlayArrow, IconPlus } from '@arco-design/web-react/icon';
+import { IconCaretDown, IconCaretRight, IconDelete, IconDragDotVertical, IconEdit, IconPlayArrow, IconPlus, IconSearch } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
 import logger from '@/utils/logger';
 import styles from '../index.module.less';
+import { buildModuleCaseTree, collectNodeCaseIds, type ModuleNode } from './groupCases';
 
 interface Project {
   id: number;
@@ -53,6 +54,13 @@ interface CaseOption {
   id: number;
   name: string;
   is_init?: boolean;
+  module_id?: number | null;
+}
+
+interface ModuleOption {
+  id: number;
+  name: string;
+  parent_id?: number | null;
 }
 
 const SuitesPage: React.FC = () => {
@@ -74,6 +82,9 @@ const SuitesPage: React.FC = () => {
   const [editDesc, setEditDesc] = useState('');
   const [orderedCases, setOrderedCases] = useState<SuiteCaseItem[]>([]);
   const [allCases, setAllCases] = useState<CaseOption[]>([]);
+  const [modules, setModules] = useState<ModuleOption[]>([]);
+  const [caseSearch, setCaseSearch] = useState('');
+  const [collapsedModules, setCollapsedModules] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
   const dragIndexRef = useRef<number | null>(null);
 
@@ -129,6 +140,10 @@ const SuitesPage: React.FC = () => {
     }
     fetchSuites(selectedProject, caseKind);
     axios
+      .get(`/api/projects/${selectedProject}/modules`)
+      .then((res) => setModules(Array.isArray(res.data) ? res.data : []))
+      .catch(() => setModules([]));
+    axios
       .get(`/api/projects/${selectedProject}/environments`)
       .then((res) => {
         const envs: Environment[] = res.data || [];
@@ -153,7 +168,7 @@ const SuitesPage: React.FC = () => {
         params: { page: 1, size: 500, case_kind: kind },
       });
       const items = res.data?.items || res.data || [];
-      setAllCases((Array.isArray(items) ? items : []).map((c: CaseOption) => ({ id: c.id, name: c.name })));
+      setAllCases((Array.isArray(items) ? items : []).map((c: CaseOption) => ({ id: c.id, name: c.name, module_id: c.module_id ?? null })));
     } catch {
       setAllCases([]);
     }
@@ -165,6 +180,8 @@ const SuitesPage: React.FC = () => {
     setEditName('');
     setEditDesc('');
     setOrderedCases([]);
+    setCaseSearch('');
+    setCollapsedModules(new Set());
     await loadProjectCases(selectedProject, caseKind);
     setEditVisible(true);
   };
@@ -173,6 +190,8 @@ const SuitesPage: React.FC = () => {
     setEditing(suite);
     setEditName(suite.name);
     setEditDesc(suite.description || '');
+    setCaseSearch('');
+    setCollapsedModules(new Set());
     try {
       const res = await axios.get(`/api/suites/${suite.id}`);
       const detail: TestSuite = res.data;
@@ -318,6 +337,97 @@ const SuitesPage: React.FC = () => {
   };
 
   const selectedCaseIdSet = new Set(orderedCases.map((c) => c.case_id));
+  const caseQuery = caseSearch.trim();
+  const caseTree = useMemo(
+    () => buildModuleCaseTree(allCases, modules, caseSearch, t['suite.module.ungrouped'] || '未分类'),
+    [allCases, modules, caseSearch, t],
+  );
+
+  const toggleModuleCollapsed = (id: number) => {
+    setCollapsedModules((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleModuleCases = (node: ModuleNode<CaseOption>, checked: boolean) => {
+    const ids = new Set(collectNodeCaseIds(node));
+    if (checked) {
+      setOrderedCases((prev) => {
+        const have = new Set(prev.map((c) => c.case_id));
+        const added = node.allCases
+          .filter((c) => !have.has(c.id))
+          .map((c) => ({ case_id: c.id, order_index: 0, name: c.name }));
+        return [...prev, ...added].map((c, i) => ({ ...c, order_index: i }));
+      });
+    } else {
+      setOrderedCases((prev) =>
+        prev.filter((c) => !ids.has(c.case_id)).map((c, i) => ({ ...c, order_index: i })),
+      );
+    }
+  };
+
+  const renderModuleNode = (node: ModuleNode<CaseOption>) => {
+    const total = node.allCases.length;
+    const selected = node.allCases.filter((c) => selectedCaseIdSet.has(c.id)).length;
+    const collapsed = caseQuery === '' && node.id != null && collapsedModules.has(node.id);
+    return (
+      <div key={node.key} style={{ paddingLeft: node.level > 0 ? 18 : 0 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '3px 0',
+            background: node.level === 0 ? 'var(--color-fill-1)' : undefined,
+            borderRadius: 4,
+          }}
+        >
+          {node.id != null ? (
+            <Button
+              type="text"
+              size="mini"
+              style={{ padding: '0 2px', height: 20 }}
+              onClick={() => toggleModuleCollapsed(node.id as number)}
+              aria-label={collapsed ? '展开模块' : '折叠模块'}
+            >
+              {collapsed ? <IconCaretRight /> : <IconCaretDown />}
+            </Button>
+          ) : (
+            <span style={{ width: 22 }} />
+          )}
+          <Checkbox
+            checked={total > 0 && selected === total}
+            indeterminate={selected > 0 && selected < total}
+            disabled={total === 0}
+            onChange={(checked) => toggleModuleCases(node, checked)}
+          >
+            <span style={{ fontSize: 13, fontWeight: node.level === 0 ? 600 : 500 }}>{node.name}</span>
+          </Checkbox>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-3)' }}>
+            {selected}/{total}
+          </span>
+        </div>
+        {!collapsed && (
+          <div>
+            {node.cases.map((c) => (
+              <div key={c.id} style={{ paddingLeft: 28, marginBottom: 2 }}>
+                <Checkbox
+                  checked={selectedCaseIdSet.has(c.id)}
+                  onChange={(checked) => toggleCaseInSuite(c.id, checked)}
+                >
+                  {c.name}
+                </Checkbox>
+              </div>
+            ))}
+            {node.children.map(renderModuleNode)}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 70 },
@@ -396,7 +506,7 @@ const SuitesPage: React.FC = () => {
           ))}
         </Select>
         <Button type="primary" icon={<IconPlus />} disabled={!selectedProject} onClick={openCreate}>
-          {t['suite.save']}
+          {t['suite.create']}
         </Button>
       </Space>
 
@@ -411,7 +521,7 @@ const SuitesPage: React.FC = () => {
 
       <Drawer
         width={520}
-        title={editing ? t['suite.edit'] : t['suite.save']}
+        title={editing ? t['suite.edit'] : t['suite.create']}
         visible={editVisible}
         onCancel={() => setEditVisible(false)}
         footer={
@@ -428,18 +538,20 @@ const SuitesPage: React.FC = () => {
           <Form.Item label={t['description']}>
             <Input.TextArea value={editDesc} onChange={setEditDesc} autoSize={{ minRows: 2 }} />
           </Form.Item>
-          <Form.Item label={t['suite.select.cases']}>
-            <div style={{ maxHeight: 180, overflow: 'auto', border: '1px solid var(--color-border-2)', padding: 8 }}>
-              {allCases.map((c) => (
-                <div key={c.id} style={{ marginBottom: 4 }}>
-                  <Checkbox
-                    checked={selectedCaseIdSet.has(c.id)}
-                    onChange={(checked) => toggleCaseInSuite(c.id, checked)}
-                  >
-                    {c.name}
-                  </Checkbox>
-                </div>
-              ))}
+          <Form.Item label={`${t['suite.select.cases']} (${orderedCases.length})`}>
+            <Input
+              allowClear
+              prefix={<IconSearch />}
+              placeholder={t['suite.search.cases']}
+              value={caseSearch}
+              onChange={setCaseSearch}
+              style={{ marginBottom: 8 }}
+            />
+            <div style={{ maxHeight: 280, overflow: 'auto', border: '1px solid var(--color-border-2)', padding: 8 }}>
+              {caseTree.length === 0 && (
+                <div style={{ color: 'var(--color-text-3)', padding: 8 }}>{t['suite.cases.empty']}</div>
+              )}
+              {caseTree.map(renderModuleNode)}
             </div>
           </Form.Item>
           <Form.Item label={t['suite.reorder.hint']}>
