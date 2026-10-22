@@ -1,4 +1,13 @@
 # ============================================================
+# 可选：浏览器缓存（避免重复下载 ~622MB Chromium）
+# 默认 python 基础镜像（空目录，走正常下载）；
+# 打包时可用 --build-arg BROWSER_CACHE_IMAGE=voyantest:latest 复用现有镜像缓存。
+# ============================================================
+ARG BROWSER_CACHE_IMAGE=python:3.11-slim
+FROM ${BROWSER_CACHE_IMAGE} AS browser-cache
+RUN mkdir -p /root/.cache/ms-playwright
+
+# ============================================================
 # Stage 1: Build frontend
 # ============================================================
 FROM node:20-alpine AS frontend-builder
@@ -53,6 +62,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Playwright 浏览器：优先复用 BROWSER_CACHE_IMAGE 里的缓存（若存在）
+COPY --from=browser-cache /root/.cache/ms-playwright /root/.cache/ms-playwright
 
 # Install Playwright browsers
 RUN python -m playwright install chromium && \
