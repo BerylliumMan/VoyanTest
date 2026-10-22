@@ -1,4 +1,4 @@
-__pycache__
+**/__pycache__
 *.pyc
 .env
 .git
@@ -8,6 +8,7 @@ venv
 *.db
 *.db-wal
 *.db-shm
+**/node_modules
 node_modules
 reports/*
 !reports/.gitkeep
