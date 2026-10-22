@@ -8,7 +8,7 @@ PORT="${VOYANTEST_PORT:-8002}"
 HEALTH_URL="http://localhost:${PORT}/health"
 SMOKE_URL="http://localhost:${PORT}/api/setup/status"
 EVIDENCE_LOG=".omo/verify-log.jsonl"
-MAX_RETRIES=10
+MAX_RETRIES=20
 RETRY_DELAY=3
 
 # ── 颜色输出 ────────────────────────────────────────────────────────────────
