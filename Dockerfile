@@ -20,6 +20,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# 先取前端产物：强制后端阶段等待前端构建完成，避免 BuildKit 并行跑
+# npm build 与 apt/pip/playwright 安装，在 4 核机器上互相抢 CPU
+# （实测：前端单独构建 49s，并行被挤到 547s）。app/static 在 .dockerignore
+# 中排除，后面的 COPY app/ 不会覆盖这里。
+COPY --from=frontend-builder /build/static/ app/static/
+
 # Install system dependencies for Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -69,9 +75,6 @@ COPY core/ core/
 COPY agent/ agent/
 COPY alembic/ alembic/
 COPY alembic.ini voyan_cli.py ./
-
-# Copy built frontend from stage 1
-COPY --from=frontend-builder /build/static/ app/static/
 
 # Create required directories
 RUN mkdir -p data reports logs
