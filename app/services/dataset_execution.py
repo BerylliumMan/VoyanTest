@@ -11,9 +11,42 @@ from typing import Iterable, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.dataset_iteration import DatasetPlanError, validate_dataset_plan
-from core.dataset_variables import discover_parameters, missing_columns, validate_parameters
+from core.dataset_variables import discover_parameters
 
 logger = logging.getLogger(__name__)
+
+
+def environment_values(items) -> tuple[dict, list[str]]:
+    """把环境变量列表转成 ``{key: value}``（跳过禁用项，解密 secret）。
+
+    返回 ``(values, errors)``；errors 为解密失败的变量名（不静默使用密文）。
+    """
+    from app.security.secret_vars import decrypt_variables_safe
+
+    decrypted, failed = decrypt_variables_safe(items)
+    values: dict = {}
+    for item in decrypted:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        if item.get("enable") is False:
+            continue
+        values[key] = item.get("value")
+    return values, failed
+
+
+async def load_environment_values(db: AsyncSession, environment_id: Optional[int]) -> tuple[dict, list[str]]:
+    """读取环境变量（供 UI 用例 {{参数}} 渲染）。"""
+    if not environment_id:
+        return {}, []
+    from app.crud.environment import get_environment
+
+    env = await get_environment(db, int(environment_id))
+    if env is None:
+        return {}, [f"环境 #{environment_id} 不存在"]
+    return environment_values(getattr(env, "variables", None))
 
 
 @dataclass
@@ -49,6 +82,7 @@ async def plan_batch_datasets(
     loop_count: Optional[int] = None,
     dataset_fail_fast: Optional[bool] = None,
     max_groups: Optional[int] = None,
+    env_values: Optional[dict] = None,
 ) -> DatasetExecutionPlan:
     """校验并展开 UI 用例的数据集（创建批次之前）。
 
@@ -64,6 +98,7 @@ async def plan_batch_datasets(
 
     plan = DatasetExecutionPlan()
     dataset_cache: dict[int, object] = {}
+    env_values = dict(env_values or {})
 
     for case in cases or []:
         cid = getattr(case, "id", None)
@@ -90,14 +125,15 @@ async def plan_batch_datasets(
         plan.fail_fast[cid] = effective_fail_fast
 
         steps = list(getattr(case, "steps", None) or [])
-        declared = getattr(case, "parameters", None)
+        discovered = discover_parameters(steps)
+        missing_env = [name for name in discovered if name not in env_values]
 
         if not effective_dataset_id:
-            # 未绑定数据集：若有占位符则拒绝（不能把 {{x}} 原样发给模型）
-            discovered = discover_parameters(steps)
-            if discovered:
+            # 未绑定数据集：参数由环境变量提供；缺一个都拒绝（不能把 {{x}} 原样发给模型）
+            if missing_env:
                 plan.errors.append(
-                    f"用例 #{cid} 引用了参数（{', '.join(discovered)}）但未绑定数据集"
+                    f"用例 #{cid} 引用了参数（{', '.join(missing_env)}），"
+                    f"当前环境变量未提供"
                 )
                 continue
             plan.rows_by_case[cid] = None
@@ -118,10 +154,10 @@ async def plan_batch_datasets(
             plan.errors.append(f"数据集 #{effective_dataset_id} 不是 UI 数据集（用例 #{cid}）")
             continue
 
-        if declared:
-            for error in validate_parameters(steps, declared):
-                plan.errors.append(f"用例 #{cid}：{error}")
-        missing = missing_columns(steps, list(getattr(dataset, "columns", None) or []))
+        missing = [
+            name for name in discovered
+            if name not in set(getattr(dataset, "columns", None) or []) and name not in env_values
+        ]
         if missing:
             plan.errors.append(
                 f"用例 #{cid}：数据集 #{effective_dataset_id} 缺少列 {'、'.join(missing)}"
@@ -148,4 +184,9 @@ async def plan_batch_datasets(
     return plan
 
 
-__all__ = ["DatasetExecutionPlan", "plan_batch_datasets"]
+__all__ = [
+    "DatasetExecutionPlan",
+    "environment_values",
+    "load_environment_values",
+    "plan_batch_datasets",
+]

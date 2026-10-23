@@ -233,6 +233,7 @@ async def run_test_case_via_agent(
     run_id: int | None = None,
     dataset_group: int | None = None,
     dataset_row: dict | None = None,
+    env_values: dict | None = None,
 ) -> dict | None:
     """使用 AgentRunner OTA 循环执行单条测试用例。
 
@@ -257,10 +258,21 @@ async def run_test_case_via_agent(
                 goal_text += f"\n描述: {tc.description}"
             steps = list(getattr(tc, "steps", None) or [])
             steps.sort(key=lambda s: getattr(s, "step_order", 0) or 0)
-            if dataset_row is not None:
-                from core.dataset_variables import render_steps
+            if dataset_row is not None or env_values:
+                from core.dataset_variables import discover_parameters, render_steps
 
-                rendered_steps = render_steps(steps, dataset_row)
+                merged = {**(env_values or {}), **(dataset_row or {})}
+                rendered_steps = render_steps(steps, merged)
+                missing = discover_parameters(rendered_steps)
+                if missing:
+                    message = (
+                        "参数未提供："
+                        + "、".join(missing)
+                        + "（请在当前环境变量中配置；执行前已拦截）"
+                    )
+                    return await _fail_ota_unavailable(
+                        case_id, message, batch_id=batch_id, run_id=run_id,
+                    )
             else:
                 rendered_steps = [
                     {
@@ -523,7 +535,7 @@ async def run_test_case_via_agent(
         saved_run_id = run_id
 
     # 跑成功 → 固化脚本（与客户端 AgentBridge 对齐：第二次起可秒级回放、零 LLM）
-    if case_status == "passed" and tc is not None:
+    if case_status == "passed" and tc is not None and not env_values:
         await _synthesize_and_persist_compiled_script(
             db=db, tc=tc, case_id=case_id, steps=steps,
             goal_text=goal_text, journal=list(getattr(runner, "journal", None) or []),
@@ -772,6 +784,7 @@ async def run_batch_test_cases(
     dataset_plan = None
     dataset_rows: dict[int, list[dict]] = {}
     dataset_group_numbers: dict[int, list[int]] = {}
+    ui_env_values: dict = {}
     _plan_ids = list(dict.fromkeys([*(init_case_ids or []), *case_ids]))
     if _plan_ids:
         try:
@@ -781,8 +794,19 @@ async def run_batch_test_cases(
                     _tc = await crud.get_test_case(_plan_db, _cid)
                     if _tc is not None:
                         _plan_cases.append(_tc)
-                from app.services.dataset_execution import plan_batch_datasets
+                from app.services.dataset_execution import (
+                    load_environment_values,
+                    plan_batch_datasets,
+                )
 
+                _env_values, _env_errors = await load_environment_values(
+                    _plan_db, environment_id
+                )
+                if _env_errors:
+                    raise DatasetExecutionError(
+                        [f"环境变量读取失败：{'、'.join(_env_errors[:5])}"]
+                    )
+                ui_env_values = _env_values
                 dataset_plan = await plan_batch_datasets(
                     _plan_db,
                     _plan_cases,
@@ -790,6 +814,7 @@ async def run_batch_test_cases(
                     dataset_mode=dataset_mode,
                     loop_count=loop_count,
                     dataset_fail_fast=dataset_fail_fast,
+                    env_values=_env_values,
                 )
         except DatasetExecutionError:
             raise
@@ -1051,6 +1076,7 @@ async def run_batch_test_cases(
                             run_id=_rid,
                             dataset_group=_group,
                             dataset_row=_row,
+                            env_values=ui_env_values,
                         )
                         if result is None:
                             fail_msg = "OTA AgentRunner 不可用（执行中返回 None）"

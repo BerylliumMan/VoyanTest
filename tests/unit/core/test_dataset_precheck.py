@@ -31,7 +31,18 @@ async def test_unbound_with_placeholder_rejected():
         None, [_case(steps=[{"step_order": 1, "description": "输入 {{username}}"}])]
     )
     assert not plan.ok
-    assert "未绑定数据集" in plan.errors[0]
+    assert "当前环境变量未提供" in plan.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_unbound_with_env_values_ok():
+    plan = await plan_batch_datasets(
+        None,
+        [_case(steps=[{"step_order": 1, "description": "输入 {{username}}"}])],
+        env_values={"username": "admin"},
+    )
+    assert plan.ok
+    assert plan.rows_for(1) is None
 
 
 @pytest.mark.asyncio

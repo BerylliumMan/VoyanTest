@@ -5,7 +5,7 @@ import {
 import axios from 'axios';
 import { Step, Module, TestCase, CaseKind } from '../types';
 import StepList from './StepList';
-import ParameterPanel, { DatasetBinding, DatasetOption, ParameterDef } from './ParameterPanel';
+import type { DatasetBinding, ParameterDef } from './ParameterPanel';
 import styles from '../style/components.module.less';
 
 interface StepItem { step_order: number; description: string; }
@@ -39,7 +39,6 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
   const [scriptModalVisible, setScriptModalVisible] = useState(false);
   const [clearingScript, setClearingScript] = useState(false);
-  const [datasets, setDatasets] = useState<DatasetOption[]>([]);
   const kindLabel = caseKind === 'functional'
     ? (t['menu.testcases.functional'] || '功能测试用例')
     : caseKind === 'api'
@@ -49,19 +48,6 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
   const isApi = caseKind === 'api';
 
   const hasCompiledScript = Boolean(editingCase?.compiled_script);
-
-  // 039：加载项目内 UI 数据集（仅 UI 用例编辑时）
-  const datasetProjectId = projectId || editingCase?.project_id || null;
-  useEffect(() => {
-    if (!visible || !datasetProjectId || caseKind !== 'ui') return;
-    axios
-      .get('/api/api-test/datasets', { params: { project_id: datasetProjectId, purpose: 'ui' } })
-      .then((res) => {
-        const items = Array.isArray(res.data) ? res.data : (res.data?.items || []);
-        setDatasets(items);
-      })
-      .catch(() => setDatasets([]));
-  }, [visible, datasetProjectId, caseKind]);
 
   const handleClearCompiledScript = async () => {
     if (!editingCase?.id) return;
@@ -206,17 +192,9 @@ const TestCaseEditor: React.FC<TestCaseEditorProps> = ({
         ) : (
           <Form.Item label={t['case.steps']}>
             {caseKind === 'ui' ? (
-              <ParameterPanel
-                steps={steps}
-                parameters={parameters}
-                onParametersChange={setParameters}
-                datasets={datasets}
-                binding={datasetBinding}
-                onBindingChange={setDatasetBinding}
-                projectId={datasetProjectId}
-                onDatasetCreated={(dataset) => setDatasets((prev) => [dataset, ...prev])}
-                t={t}
-              />
+              <div style={{ marginBottom: 10, padding: '8px 10px', background: 'var(--color-fill-2)', borderRadius: 6, fontSize: 12, color: 'var(--color-text-2)' }}>
+                参数来自<strong>环境变量</strong>：在「环境管理」中为每个环境添加变量名和值（如 <code>username</code> / <code>password</code>），步骤描述里写 <code>{'{{username}}'}</code>；执行时按所选环境替换。不同环境可配置不同的值。
+              </div>
             ) : null}
             <StepList
               steps={steps}

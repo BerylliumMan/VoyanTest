@@ -971,11 +971,17 @@ async def lifespan(app: FastAPI):
                         logger.error("定时任务用例不存在: %s", target_id)
                         return
                     from app.scheduler import task_environment_id
-                    from app.services.dataset_execution import plan_batch_datasets
+                    from app.services.dataset_execution import plan_batch_datasets, load_environment_values
 
                     env_id = task_environment_id(task)
                     # 039：UI 参数化用例按数据集展开（不再固定 total=1）
-                    plan = await plan_batch_datasets(db, [tc]) if (tc.case_kind or "") != "api" else None
+                    _env_values, _env_errors = await load_environment_values(db, env_id)
+                    if _env_errors:
+                        logger.error("定时任务环境变量读取失败: %s", "; ".join(_env_errors))
+                        return
+                    plan = await plan_batch_datasets(
+                        db, [tc], env_values=_env_values
+                    ) if (tc.case_kind or "") != "api" else None
                     if plan is not None and not plan.ok:
                         logger.error("定时任务数据集预检失败: %s", "; ".join(plan.errors))
                         return

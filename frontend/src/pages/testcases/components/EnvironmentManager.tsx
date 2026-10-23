@@ -122,6 +122,9 @@ const EnvironmentManager: React.FC<EnvironmentManagerProps> = ({
           </Space>
           <Collapse className={styles['cookie-collapse']} defaultActiveKey={['variables', 'headers']}>
             <Collapse.Item header={t['environment.variables']} name="variables">
+              <div style={{ fontSize: 12, color: 'var(--color-text-2)', marginBottom: 8 }}>
+                UI 用例可在步骤中写 <code>{'{{变量名}}'}</code>（如 <code>{'{{username}}'}</code>），执行时按所选环境自动替换；不同环境配置不同的值即可。
+              </div>
               <EnvVariablesList form={form} t={t} />
               <EnvServicesList form={form} t={t} />
             </Collapse.Item>

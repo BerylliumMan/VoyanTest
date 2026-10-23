@@ -10,7 +10,6 @@ import {
   Space,
   Spin,
   Table,
-  Tabs,
   Typography,
   Upload,
 } from '@arco-design/web-react';
@@ -80,7 +79,7 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
 }) => {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   // 039：数据集用途（接口 / UI 用例参数化）
-  const [purpose, setPurpose] = useState<'api' | 'ui'>('api');
+  const [purpose] = useState<'api' | 'ui'>('api');
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [draft, setDraft] = useState<DatasetDraft | null>(null);
@@ -392,15 +391,6 @@ const DatasetPanel: React.FC<DatasetPanelProps> = ({
 
   return (
     <Drawer width={880} title="数据集管理" visible={visible} onCancel={onClose} footer={null} unmountOnExit>
-      <Tabs
-        activeTab={purpose}
-        onChange={(key) => setPurpose(key as 'api' | 'ui')}
-        type="rounded"
-        style={{ marginBottom: 12 }}
-      >
-        <Tabs.TabPane key="api" title="接口数据集" />
-        <Tabs.TabPane key="ui" title="UI 数据集" />
-      </Tabs>
       {draft ? (
         <div className={styles.datasetEditor}>
           <div className={styles.datasetFieldRow}>

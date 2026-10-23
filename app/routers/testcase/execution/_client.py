@@ -251,8 +251,16 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             agent = None
 
     # 039：数据集预检/展开（在创建批次之前）
-    from app.services.dataset_execution import plan_batch_datasets
+    from app.services.dataset_execution import plan_batch_datasets, load_environment_values
 
+    _env_values, _env_errors = await load_environment_values(
+        db, getattr(body, "environment_id", None)
+    )
+    if _env_errors:
+        raise HTTPException(
+            status_code=400,
+            detail="环境变量读取失败：" + "、".join(_env_errors[:5]),
+        )
     _plan_cases = []
     for _cid in dict.fromkeys([*case_ids, *init_case_ids]):
         _tc = await crud.get_test_case(db, _cid)
@@ -265,6 +273,7 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
         dataset_mode=getattr(body, "dataset_mode", None),
         loop_count=getattr(body, "loop_count", None),
         dataset_fail_fast=getattr(body, "dataset_fail_fast", None),
+        env_values=_env_values,
     )
     if not dataset_plan.ok:
         raise HTTPException(status_code=400, detail="；".join(dataset_plan.errors[:5]))

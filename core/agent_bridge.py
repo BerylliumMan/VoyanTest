@@ -232,10 +232,24 @@ class AgentBridge:
             _goal.get("dataset_row") if isinstance(_goal.get("dataset_row"), dict) else None
         )
 
+        # 环境变量参数用例：{{参数}} 由当前环境提供，值随环境变化 → 禁用固化回放/编译先行
+        # （避免把 A 环境的值缓存后在其他环境回放）。每次走实时执行，保证按环境取值。
+        self._env_param_case = False
+        if environment_id and case_id:
+            try:
+                from core.dataset_variables import discover_parameters
+
+                from app import crud as _crud0
+                _steps0 = await _crud0.get_steps_for_case(self.db, case_id)
+                if discover_parameters(self._steps_to_dicts(_steps0)):
+                    self._env_param_case = True
+            except Exception:
+                logger.debug("环境参数检测跳过 case=%s", case_id, exc_info=True)
+
         # 固化脚本优先：case 有匹配 hash 的 compiled_script 时先回放（秒级、无 LLM），
         # 失败/不支持再回退 OTA 循环（与 nl_goal 链路同语义：回放失败不阻断执行）。
         try:
-            if await self._try_replay_compiled_script(run, agent_id, run_id_str):
+            if not self._env_param_case and await self._try_replay_compiled_script(run, agent_id, run_id_str):
                 await self._collect_console_before_report(agent_id, run_id_str)
                 try:
                     await self._save_report(run, case_id)
@@ -250,7 +264,7 @@ class AgentBridge:
 
         # 编译先行（Phase A）：无可回放脚本时，先编译一段脚本直跑（失败不阻断，回落 OTA）
         try:
-            if await self._try_compile_first(run, agent_id, run_id_str):
+            if not self._env_param_case and await self._try_compile_first(run, agent_id, run_id_str):
                 await self._collect_console_before_report(agent_id, run_id_str)
                 try:
                     await self._save_report(run, case_id)
@@ -340,12 +354,12 @@ class AgentBridge:
         # 跑成功 → 固化脚本（下次执行优先回放）；合成失败不影响本次结果
         # 门禁：checklist 全覆盖且 journal 非空，避免 LLM 空口 done 后幻觉固化
         if run.status in ("completed", "passed"):
-            needed = self._ordered_step_numbers()
-            covered = len(self._journal_covered)
-            if needed and covered < len(needed):
+            if getattr(self, "_env_param_case", False):
+                logger.info("Bridge: skip synthesis case=%s (env parameterized)", case_id)
+            elif (needed := self._ordered_step_numbers()) and len(self._journal_covered) < len(needed):
                 logger.info(
                     "Bridge: skip synthesis case=%s (covered %s/%s steps)",
-                    case_id, covered, len(needed),
+                    case_id, len(self._journal_covered), len(needed),
                 )
             elif not self._journal:
                 logger.info(
@@ -2289,6 +2303,29 @@ class AgentBridge:
         self._dataset_group = _goal.get("dataset_group")
         self._dataset_row = _goal.get("dataset_row") if isinstance(_goal.get("dataset_row"), dict) else None
         self._test_run_id = _goal.get("test_run_id")
+
+        # 环境变量（UI 用例 {{参数}} 的唯一来源；secret 在执行时解密）
+        env_values: dict = {}
+        env_base_url: str = ""
+        if getattr(self, "_environment_id", None):
+            try:
+                from app.database import AsyncSessionLocal as _ASL
+                from app.crud.environment import get_environment as _ge
+                from app.services.dataset_execution import environment_values as _env_values
+
+                async with _ASL() as _edb:
+                    _env = await _ge(_edb, self._environment_id)
+                    if _env is not None:
+                        env_base_url = getattr(_env, "base_url", None) or ""
+                        env_values, _env_errors = _env_values(getattr(_env, "variables", None))
+                        if _env_errors:
+                            logger.warning(
+                                "Bridge: 环境变量解密失败 %s: %s",
+                                self._environment_id, _env_errors,
+                            )
+            except Exception:
+                logger.warning("Could not load environment %s", self._environment_id, exc_info=True)
+
         if run.case_id:
             try:
                 from app import crud as _crud
@@ -2296,9 +2333,11 @@ class AgentBridge:
                 if _tc:
                     _steps = await _crud.get_steps_for_case(self.db, run.case_id)
                     self._raw_steps = self._steps_to_dicts(_steps)
-                    if self._dataset_row is not None:
+                    if self._dataset_row is not None or env_values:
                         from core.dataset_variables import render_steps
-                        self._run_steps = render_steps(self._raw_steps, self._dataset_row)
+                        self._run_steps = render_steps(
+                            self._raw_steps, {**env_values, **(self._dataset_row or {})}
+                        )
                     else:
                         self._run_steps = self._raw_steps
                     for s in self._run_steps:
@@ -2321,19 +2360,7 @@ class AgentBridge:
             f"全部步骤完成后返回 done：\n{steps_text}"
         )
 
-        # 加载环境 base_url
-        env_base_url: str = ""
-        if getattr(self, '_environment_id', None):
-            try:
-                from app.database import AsyncSessionLocal as _ASL
-                async with _ASL() as _edb:
-                    from app.crud.environment import get_environment as _ge
-                    _env = await _ge(_edb, self._environment_id)
-                    if _env and getattr(_env, 'base_url', None):
-                        env_base_url = _env.base_url
-            except Exception:
-                logger.warning("Could not load environment %s", self._environment_id, exc_info=True)
-
+        # 加载环境 base_url 已在步骤加载前完成（env_base_url）
         if env_base_url and not case_url:
             case_url = env_base_url
             logger.info("Bridge: using base_url from environment: %s", env_base_url)
