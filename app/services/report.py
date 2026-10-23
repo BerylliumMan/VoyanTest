@@ -59,6 +59,20 @@ def _safe_report_path(report_path: str | None) -> Path | None:
     return resolved if resolved.exists() else None
 
 
+def load_report(report_path: str | None) -> dict | None:
+    """读取完整报告 JSON（040 AI 证据读取）；路径不安全/读取失败返回 None。"""
+    safe_path = _safe_report_path(report_path)
+    if not safe_path:
+        return None
+    try:
+        with open(safe_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("无法加载报告 JSON 文件: %s", report_path, exc_info=True)
+        return None
+
+
 def _load_report_steps(report_path: str | None) -> list[Any]:
     """从报告 JSON 文件读取 ``steps`` 字段；路径不安全或读取失败时返回空列表。"""
     safe_path = _safe_report_path(report_path)

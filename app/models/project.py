@@ -16,6 +16,8 @@ class Project(Base):
     base_url = Column(String, nullable=True)
     browser = Column(String, default="chromium")
     headless = Column(Boolean, default=True)
+    # 040：项目级 AI 设置（{"api_ai_enabled": false}）；NULL=继承全局开关
+    ai_settings = Column(JSON, nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), default=tz_now)
 
     test_cases = relationship("TestCase", backref="project", cascade="save-update, merge")

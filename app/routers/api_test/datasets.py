@@ -33,6 +33,7 @@ def _serialize(obj) -> dict:
         "rows": obj.rows or [],
         "source": obj.source,
         "purpose": obj.purpose or "api",
+        "meta": obj.meta,
         "updated_at": obj.updated_at.isoformat() if obj.updated_at else None,
     }
 

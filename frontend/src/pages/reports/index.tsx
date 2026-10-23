@@ -90,6 +90,7 @@ const Reports: React.FC = () => {
   const [selectedRun, setSelectedRun] = useState<RunItem | null>(null);
   const [runVisible, setRunVisible] = useState(false);
   const [expandedRuns, setExpandedRuns] = useState<Set<number>>(new Set());
+  const [aiRuns, setAiRuns] = useState<Record<number, { analysis?: any; contract?: any; loading?: string }>>({});
   const [pollingBatchId, setPollingBatchId] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -294,6 +295,20 @@ const Reports: React.FC = () => {
     });
   };
 
+  const runAi = async (runId: number, kind: 'analysis' | 'contract') => {
+    setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], loading: kind } }));
+    try {
+      const url = kind === 'analysis'
+        ? '/api/api-test/ai/analyze-failure'
+        : '/api/api-test/ai/check-contract';
+      const res = await axios.post(url, { run_id: runId });
+      setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], [kind]: res.data, loading: undefined } }));
+    } catch (err: any) {
+      Message.error(err?.response?.data?.detail || 'AI 分析失败');
+      setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], loading: undefined } }));
+    }
+  };
+
   const handleExport = async (batchId: number, batchName: string) => {
     try {
       const res = await axios.get(`/api/reports/batches/${batchId}/export`, {
@@ -490,6 +505,57 @@ const Reports: React.FC = () => {
                           {!isRunning && run.steps?.length ? ` · ${t['steps'].replace('{count}', String(run.steps.length))}` : ''}
                         </span>
                       </div>
+                      {expanded && (
+                        <div style={{ margin: '8px 0 4px 24px' }}>
+                          <Space size="small">
+                            {run.status === 'failed' && (
+                              <Button size="mini" loading={aiRuns[run.run_id]?.loading === 'analysis'}
+                                onClick={() => runAi(run.run_id, 'analysis')}>
+                                AI 分析失败原因
+                              </Button>
+                            )}
+                            {run.steps?.some((s: StepDetail) => (s as any).request) && (
+                              <Button size="mini" loading={aiRuns[run.run_id]?.loading === 'contract'}
+                                onClick={() => runAi(run.run_id, 'contract')}>
+                                契约检测
+                              </Button>
+                            )}
+                          </Space>
+                          {aiRuns[run.run_id]?.analysis && (
+                            <Card size="small" style={{ marginTop: 8 }} title="AI 失败归因"
+                              extra={<Tag color={aiRuns[run.run_id].analysis.stale ? 'orange' : 'green'}>
+                                {aiRuns[run.run_id].analysis.stale ? '可能过期' : '已生成'}
+                              </Tag>}>
+                              <div style={{ fontSize: 13 }}>
+                                <b>根因：</b>{aiRuns[run.run_id].analysis.result?.root_cause || '--'}
+                              </div>
+                              <div style={{ fontSize: 13, marginTop: 4 }}>
+                                {aiRuns[run.run_id].analysis.result?.summary}
+                              </div>
+                              {(aiRuns[run.run_id].analysis.result?.suggestions || []).length > 0 && (
+                                <ul style={{ margin: '6px 0 0 18px', fontSize: 13 }}>
+                                  {(aiRuns[run.run_id].analysis.result.suggestions || []).map((s: any, i: number) => (
+                                    <li key={i}>{s.action || s.summary || JSON.stringify(s)}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </Card>
+                          )}
+                          {aiRuns[run.run_id]?.contract && (
+                            <Card size="small" style={{ marginTop: 8 }} title="契约检测"
+                              extra={<Tag color={aiRuns[run.run_id].contract.result?.breaking ? 'red' : 'green'}>
+                                {aiRuns[run.run_id].contract.result?.breaking ? '破坏性' : '兼容'}
+                              </Tag>}>
+                              <div style={{ fontSize: 13 }}>{aiRuns[run.run_id].contract.result?.summary}</div>
+                              {(aiRuns[run.run_id].contract.result?.findings || []).map((f: any, i: number) => (
+                                <div key={i} style={{ fontSize: 12, marginTop: 4 }}>
+                                  {f.path}：期望 {String(f.expected)}，实际 {String(f.actual)}（{f.kind}）
+                                </div>
+                              ))}
+                            </Card>
+                          )}
+                        </div>
+                      )}
                       {expanded && run.dataset_row && (
                         <div style={{ fontSize: 12, color: 'var(--color-text-3)', margin: '4px 0 8px 24px' }}>
                           {`数据：${Object.entries(run.dataset_row).map(([k, v]) => `${k}=${String(v)}`).join(' · ')}`}

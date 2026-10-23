@@ -18,7 +18,14 @@ from app.gen.prompts import (
     TC_GENERATE_FLOW_PROMPT,
 )
 
-from app.gen.api.prompts import API_CASE_GENERATE_PROMPT
+from app.gen.api.prompts import (
+    API_CASE_GENERATE_PROMPT,
+    API_CONTRACT_PROMPT,
+    API_DATA_FACTORY_PROMPT,
+    API_FAILURE_ANALYSIS_PROMPT,
+    API_NL_GENERATE_PROMPT,
+    API_STRATEGY_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +353,41 @@ def get_seed_prompts() -> dict[str, dict]:
                 "违反即丢弃草案（与 app/gen/api/llm_cases.py 同口径）"
             ),
         },
+        "api_failure_analysis": {
+            "name": "接口失败归因",
+            "category": "analysis",
+            "content": API_FAILURE_ANALYSIS_PROMPT,
+            "variables": ["evidence"],
+            "description": "接口失败运行的根因/证据/修复建议（只基于证据，不编造）",
+        },
+        "api_nl_generate": {
+            "name": "接口自然语言生成",
+            "category": "generation",
+            "content": API_NL_GENERATE_PROMPT,
+            "variables": ["description", "candidates"],
+            "description": "自然语言→接口用例/场景草稿；只能引用候选接口",
+        },
+        "api_data_factory": {
+            "name": "接口数据工厂",
+            "category": "generation",
+            "content": API_DATA_FACTORY_PROMPT,
+            "variables": ["schema", "categories", "rows"],
+            "description": "按接口结构生成正常/边界/异常测试数据",
+        },
+        "api_contract_analysis": {
+            "name": "接口契约分析",
+            "category": "analysis",
+            "content": API_CONTRACT_PROMPT,
+            "variables": ["diff"],
+            "description": "解释确定性契约 diff 并给出断言建议",
+        },
+        "api_strategy": {
+            "name": "接口测试策略顾问",
+            "category": "analysis",
+            "content": API_STRATEGY_PROMPT,
+            "variables": ["coverage"],
+            "description": "基于接口/用例/执行/覆盖率给出补测建议",
+        },
         "chat_assistant": {
             "name": "对话工作台助手",
             "category": "assistant",
@@ -443,6 +485,11 @@ _FUNC_GEN_PROMPT_KEYS = frozenset({"fp_extract", "tc_generate"})
 _EXEC_PROMPT_KEYS = frozenset({"execution_system", "operation_translate"})
 # 034 chat workbench: product-owned assistant orchestration prompt.
 _CHAT_PROMPT_KEYS = frozenset({"chat_assistant"})
+# 040 API testing AI: product-owned analysis/generation prompts.
+_API_AI_PROMPT_KEYS = frozenset({
+    "api_failure_analysis", "api_nl_generate", "api_data_factory",
+    "api_contract_analysis", "api_strategy",
+})
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
 _UI_AGENT_NAME = "UI自动化用例生成助手"
 _FUNC_AGENT_NAME = "功能用例生成助手"
@@ -545,6 +592,7 @@ async def seed_defaults(db: AsyncSession) -> None:
         | _FUNC_GEN_PROMPT_KEYS
         | _EXEC_PROMPT_KEYS
         | _CHAT_PROMPT_KEYS
+        | _API_AI_PROMPT_KEYS
     )
     non_owned_keys = set(get_seed_prompts()) - owned_keys
     n_drafts = await sync_prompt_templates_from_seed(

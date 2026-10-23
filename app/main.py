@@ -565,6 +565,47 @@ async def _run_startup_init():
             """,
             "034-chat FK 级联",
         )
+        # ── 040-api-ai-capabilities：AI 分析缓存 + 数据集/项目 AI 元数据 ──
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS api_ai_analyses (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id),
+                run_id INTEGER REFERENCES test_runs(id),
+                case_id INTEGER REFERENCES test_cases(id),
+                kind VARCHAR(16) NOT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'ready',
+                input_hash VARCHAR(64),
+                result JSONB,
+                model VARCHAR(100),
+                created_by INTEGER REFERENCES users(id),
+                stale_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """,
+            "api_ai_analyses 表",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_api_ai_analyses_project_kind ON api_ai_analyses (project_id, kind)",
+            "api_ai_analyses project/kind 索引",
+        )
+        await _ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_api_ai_analysis_run_kind ON api_ai_analyses (run_id, kind) WHERE run_id IS NOT NULL",
+            "api_ai_analyses run/kind 唯一",
+        )
+        await _ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_api_ai_analysis_project_kind_hash ON api_ai_analyses (project_id, kind, input_hash) WHERE input_hash IS NOT NULL",
+            "api_ai_analyses project/kind/hash 唯一",
+        )
+        await _ddl(
+            "ALTER TABLE api_datasets ADD COLUMN IF NOT EXISTS meta JSONB",
+            "api_datasets.meta 迁移",
+        )
+        await _ddl(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_settings JSONB",
+            "projects.ai_settings 迁移",
+        )
         await _ddl(
             """
             CREATE TABLE IF NOT EXISTS schema_patches (

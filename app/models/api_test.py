@@ -89,6 +89,8 @@ class ApiDataset(Base):
     source = Column(String(16), default="manual", nullable=False)  # manual / csv
     # 039：数据集用途（api=接口测试；ui=UI 用例参数化）；存量行默认 api
     purpose = Column(String(16), default="api", nullable=False, index=True)
+    # 040：AI 数据工厂元数据（sensitive_columns/source/generated_at）；NULL=手工
+    meta = Column(JSON, nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 

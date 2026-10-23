@@ -63,6 +63,8 @@ class ProjectBase(BaseModel):
     base_url: Optional[str] = None
     browser: str = Field("chromium", pattern="^(chromium|firefox|webkit)$")
     headless: bool = True
+    # 040：项目级 AI 设置（{"api_ai_enabled": false}）；不传=保持
+    ai_settings: Optional[dict] = None
 
 class TestCaseBase(BaseModel):
     project_id: int
@@ -786,6 +788,8 @@ class ApiGenerateOptions(BaseModel):
     auth_fail: bool = False
     max_cases_per_operation: int = Field(default=5, ge=1, le=20)
     use_llm: bool = True
+    # 040：AI 生成模式（flow/security/strong_assertions）；空=现有增强行为
+    ai_modes: List[str] = []
 
 
 class ApiGenerateRequest(BaseModel):
@@ -927,6 +931,7 @@ class ApiDatasetPayload(BaseModel):
     rows: List[dict[str, Any]] = []
     source: str = "manual"
     purpose: str = "api"
+    meta: Optional[dict] = None
 
 
 class ApiDatasetResponse(BaseModel):
@@ -937,6 +942,7 @@ class ApiDatasetResponse(BaseModel):
     rows: List[dict[str, Any]] = []
     source: str = "manual"
     purpose: str = "api"
+    meta: Optional[dict] = None
     updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

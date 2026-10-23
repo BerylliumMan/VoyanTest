@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Form, Grid, Input, Message, Select } from '@arco-design/web-react';
+import { Button, Card, Form, Grid, Input, Message, Select, Tag } from '@arco-design/web-react';
 import {
   IconCheckCircleFill,
   IconCode,
@@ -73,6 +73,8 @@ const ApiTestOverview: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
   const [data, setData] = useState<Overview | null>(null);
+  const [strategy, setStrategy] = useState<any>(null);
+  const [strategyLoading, setStrategyLoading] = useState(false);
   const [url, setUrl] = useState('');
   const [cron, setCron] = useState('0 2 * * *');
   const [mode, setMode] = useState('skip');
@@ -84,6 +86,19 @@ const ApiTestOverview: React.FC = () => {
     const overview = await apiGet<Overview>('/api/api-test/overview', { project_id: id });
     setData(overview);
   }, []);
+
+  const loadStrategy = useCallback(async () => {
+    if (!projectId) return;
+    setStrategyLoading(true);
+    try {
+      const res = await apiPost<any>('/api/api-test/ai/strategy', { project_id: projectId });
+      setStrategy(res?.result || null);
+    } catch (err: any) {
+      Message.error(err?.response?.data?.detail || 'AI 策略生成失败');
+    } finally {
+      setStrategyLoading(false);
+    }
+  }, [projectId]);
 
   useEffect(() => {
     apiGet<Project[]>('/api/projects/')
@@ -177,6 +192,32 @@ const ApiTestOverview: React.FC = () => {
           )}
         </Card>
       )}
+      <Card
+        title="AI 测试策略"
+        className={styles['stat-card']}
+        style={{ marginTop: 16 }}
+        extra={<Button size="small" loading={strategyLoading} onClick={loadStrategy}>生成建议</Button>}
+      >
+        {!strategy && <div style={{ color: 'var(--vt-text-3)', fontSize: 13 }}>按风险排序的补测建议（未覆盖接口 / 弱断言 / 近期失败）</div>}
+        {strategy && (
+          <>
+            <div style={{ marginBottom: 8 }}>{strategy.summary}</div>
+            {(strategy.items || []).map((item: any, idx: number) => (
+              <div key={idx} style={{ padding: '6px 0', fontSize: 13 }}>
+                <Tag color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'gray'}>
+                  {item.priority}
+                </Tag>
+                <span style={{ marginLeft: 8 }}>{item.reason}</span>
+                <span style={{ marginLeft: 8, color: 'var(--vt-text-3)' }}>
+                  {item.action}
+                  {item.definition_ids?.length ? ` · 接口 ${item.definition_ids.join(',')}` : ''}
+                  {item.case_ids?.length ? ` · 用例 ${item.case_ids.slice(0, 5).join(',')}` : ''}
+                </span>
+              </div>
+            ))}
+          </>
+        )}
+      </Card>
       <Card title="Swagger URL 定时同步">
         <Form layout="inline">
           <FormItem label="文档地址">

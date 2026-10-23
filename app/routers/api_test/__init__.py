@@ -16,6 +16,7 @@ from fastapi import APIRouter
 
 from app.routers.api_test import (
     tokens as tokens_router,
+    ai as ai_router,
     datasets,
     debug,
     definitions,
@@ -42,6 +43,7 @@ router.include_router(files.router)
 router.include_router(tokens_router.router)
 router.include_router(inspect_router.router)
 router.include_router(snippets_router.router)
+router.include_router(ai_router.router)
 
 
 @router.get("/health")

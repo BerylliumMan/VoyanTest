@@ -141,6 +141,7 @@ async def _persist_drafts(
                 "kind": "api",
                 "api_spec": spec,
                 "definition_id": definition.get("id"),
+                "definition_ids": case.get("definition_ids") or [],
                 "notes": case.get("notes") or [],
                 "source": case.get("source") or "rule",
             },
@@ -155,6 +156,7 @@ async def _persist_drafts(
                 "priority": row.priority,
                 "api_spec": spec,
                 "notes": case.get("notes") or [],
+                "source": case.get("source") or "rule",
             }
         )
     return drafts
@@ -248,6 +250,29 @@ async def generate_api_cases(
         seq += len(drafts)
         all_drafts.extend(drafts)
         notes.extend(definition_notes)
+
+    # 040 US2：跨接口业务流程（flow）——只跑一次，避免每个接口重复生成
+    if options.get("use_llm", True) and "flow" in (options.get("ai_modes") or []):
+        from app.gen.api.llm_cases import enhance_flow_cases_with_llm
+
+        flow_defs = [
+            {
+                "id": obj.id, "name": obj.name, "method": obj.method, "path": obj.path,
+                "summary": obj.summary,
+                "request_schema": obj.request_schema or {},
+                "response_schema": obj.response_schema or {},
+            }
+            for obj in definitions
+        ]
+        flow_cases, flow_notes = await enhance_flow_cases_with_llm(
+            db, flow_defs, options, agent_id=None,
+        )
+        notes.extend(flow_notes)
+        if flow_cases:
+            flow_definition = flow_defs[0]
+            drafts = await _persist_drafts(db, session_id, flow_definition, flow_cases, seq)
+            seq += len(drafts)
+            all_drafts.extend(drafts)
 
     total_drafts = len(all_drafts)
     session.test_cases_count = total_drafts

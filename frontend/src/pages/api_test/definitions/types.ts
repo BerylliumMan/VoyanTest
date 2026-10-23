@@ -415,6 +415,7 @@ export interface GenerateOptions {
   auth_fail: boolean;
   max_cases_per_operation: number;
   use_llm: boolean;
+  ai_modes: string[];
 }
 
 /** 默认生成选项 */
@@ -426,6 +427,7 @@ export const DEFAULT_GENERATE_OPTIONS: GenerateOptions = {
   auth_fail: false,
   max_cases_per_operation: 5,
   use_llm: true,
+  ai_modes: [],
 };
 
 /** 断言类型选项 */

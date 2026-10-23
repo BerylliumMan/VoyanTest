@@ -86,3 +86,6 @@ from app.models.agent_run import (  # noqa: F401
 from app.models.chat import (  # noqa: F401
     ChatConversation, ChatMessage, CaseRevision,
 )
+
+# 040 API testing AI: analysis cache
+from app.models.ai import ApiAiAnalysis  # noqa: F401

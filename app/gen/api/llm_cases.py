@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gen.api.prompts import API_CASE_GENERATE_PROMPT
+from app.gen.api.prompts import API_CASE_GENERATE_PROMPT, API_FLOW_GENERATE_PROMPT
 from app.models.schemas import ApiSpecPayload
 from core.api_spec import ApiSpecError, normalize_api_spec, validate_api_spec
 
@@ -166,16 +166,23 @@ async def enhance_cases_with_llm(
                 "name": definition.get("name"),
                 "method": definition.get("method"),
                 "path": definition.get("path"),
+                "summary": definition.get("summary") or "",
+                "description": definition.get("description") or "",
                 "request_schema": definition.get("request_schema") or {},
                 "response_schema": definition.get("response_schema") or {},
+                "security": (definition.get("request_schema") or {}).get("security") or [],
             },
             "existing_cases": [
                 {"name": c.get("name"), "notes": c.get("notes") or []} for c in base_cases
             ],
             "options": {
                 k: bool(options.get(k, False))
-                for k in ("boundary", "type_error", "auth_fail")
+                for k in ("boundary", "type_error", "auth_fail", "security", "strong_assertions")
             },
+            "ai_modes": [
+                str(x) for x in (options.get("ai_modes") or [])
+                if str(x) in ("flow", "security", "strong_assertions")
+            ],
         },
         ensure_ascii=False,
     )
@@ -226,4 +233,87 @@ async def enhance_cases_with_llm(
     return accepted, notes
 
 
-__all__ = ["MIN_PROMPT_CHARS", "case_violations", "parse_llm_cases", "enhance_cases_with_llm"]
+async def enhance_flow_cases_with_llm(
+    db: AsyncSession,
+    definitions: list[dict],
+    options: dict | None = None,
+    *,
+    agent_id: int | None = None,
+) -> tuple[list[dict], list[str]]:
+    """跨接口业务流程生成（US2 flow）：只引用给定定义，至少 2 步。"""
+    from app.gen.model_client import call_model
+
+    options = options or {}
+    payload = json.dumps(
+        {
+            "definitions": [
+                {
+                    "id": d.get("id"),
+                    "name": d.get("name"),
+                    "method": d.get("method"),
+                    "path": d.get("path"),
+                    "summary": d.get("summary") or "",
+                    "request_schema": d.get("request_schema") or {},
+                    "response_schema": d.get("response_schema") or {},
+                    "security": (d.get("request_schema") or {}).get("security") or [],
+                }
+                for d in definitions[:20]
+            ],
+            "options": {
+                "flow": True,
+                "security": bool(options.get("security")),
+                "strong_assertions": bool(options.get("strong_assertions")),
+            },
+        },
+        ensure_ascii=False,
+    )
+    try:
+        text = await call_model(
+            [
+                {"role": "system", "content": API_FLOW_GENERATE_PROMPT},
+                {"role": "user", "content": payload},
+            ],
+            agent_type="generation",
+            agent_id=agent_id,
+        )
+    except Exception as exc:
+        logger.warning("接口业务流程 AI 生成失败: %s", exc, exc_info=True)
+        return [], [f"业务流程生成失败: {exc}"]
+    accepted: list[dict] = []
+    notes: list[str] = []
+    for raw in parse_llm_cases(str(text or "")):
+        problems = case_violations(raw)
+        if problems:
+            notes.append(f"丢弃流程草案 {raw.get('name') or '<未命名>'}: {'; '.join(problems[:3])}")
+            continue
+        try:
+            spec = normalize_api_spec(raw["api_spec"])
+            ApiSpecPayload.model_validate(spec)
+        except Exception as exc:
+            notes.append(f"丢弃流程草案 {raw.get('name') or '<未命名>'}: {exc}")
+            continue
+        if len(spec.get("steps") or []) < 2:
+            notes.append(f"丢弃流程草案 {raw.get('name') or '<未命名>'}: 步骤少于 2 步")
+            continue
+        accepted.append({
+            "name": str(raw.get("name") or "").strip(),
+            "priority": str(raw.get("priority") or "medium"),
+            "api_spec": spec,
+            "notes": [str(n) for n in (raw.get("notes") or [])],
+            "source": "ai_flow",
+            "definition_ids": sorted({
+                int(s.get("definition_id"))
+                for s in (spec.get("steps") or [])
+                if isinstance(s, dict) and str(s.get("definition_id") or "").isdigit()
+            }),
+        })
+    return accepted, notes
+
+
+__all__ = [
+    "MIN_PROMPT_CHARS",
+    "case_violations",
+    "parse_llm_cases",
+    "enhance_cases_with_llm",
+    "enhance_flow_cases_with_llm",
+]

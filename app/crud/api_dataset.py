@@ -151,10 +151,29 @@ async def get_dataset(db: AsyncSession, dataset_id: int) -> Optional[db_models.A
     return result.scalar_one_or_none()
 
 
+def validate_dataset_meta(meta: Any, columns: list[str]) -> dict | None:
+    """校验 AI 数据工厂 meta：sensitive_columns 必须是 columns 子集。"""
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        raise DatasetValidationError("meta 必须是对象")
+    source = meta.get("source")
+    if source is not None and source not in ("manual", "csv", "ai"):
+        raise DatasetValidationError("meta.source 仅允许 manual/csv/ai")
+    sensitive = meta.get("sensitive_columns") or []
+    if not isinstance(sensitive, list) or any(not isinstance(x, str) for x in sensitive):
+        raise DatasetValidationError("meta.sensitive_columns 必须是字符串数组")
+    unknown = sorted(set(sensitive) - set(columns))
+    if unknown:
+        raise DatasetValidationError(f"meta.sensitive_columns 不在 columns 中: {unknown}")
+    return meta
+
+
 async def create_dataset(db: AsyncSession, data: dict) -> db_models.ApiDataset:
     """创建数据集（columns/rows 不一致抛 DatasetValidationError）。"""
     rows = list(data.get("rows") or [])
     columns = validate_dataset_fields(data.get("columns") or [], rows)
+    meta = validate_dataset_meta(data.get("meta"), columns)
     obj = db_models.ApiDataset(
         project_id=data["project_id"],
         name=str(data.get("name") or "").strip() or DEFAULT_DATASET_NAME,
@@ -162,6 +181,7 @@ async def create_dataset(db: AsyncSession, data: dict) -> db_models.ApiDataset:
         rows=rows,
         source=str(data.get("source") or "manual"),
         purpose=str(data.get("purpose") or "api"),
+        meta=meta,
     )
     db.add(obj)
     await db.commit()
@@ -187,6 +207,8 @@ async def update_dataset(
         obj.source = str(patch["source"])
     if patch.get("purpose") in ("api", "ui"):
         obj.purpose = str(patch["purpose"])
+    if "meta" in patch:
+        obj.meta = validate_dataset_meta(patch.get("meta"), list(obj.columns or []))
     await db.commit()
     await db.refresh(obj)
     return obj
@@ -207,6 +229,7 @@ __all__ = [
     "DEFAULT_DATASET_NAME",
     "DatasetValidationError",
     "validate_dataset_fields",
+    "validate_dataset_meta",
     "parse_csv_dataset",
     "list_datasets",
     "get_dataset",

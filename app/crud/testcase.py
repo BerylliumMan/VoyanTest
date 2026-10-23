@@ -370,7 +370,14 @@ async def update_test_case(
         ))
         await db.commit()
         await db.refresh(db_case)
+    # 040：用例内容变更后，关联 AI 分析标记「可能过期」（不自动重算）
+    try:
+        from app.crud import api_ai as _crud_api_ai
+        await _crud_api_ai.mark_stale_for_case(db, case_id)
+    except Exception:
+        pass
     return db_case
+
 
 async def update_test_case_is_init(db: AsyncSession, case_id: int, is_init: bool) -> db_models.TestCase | None:
     """切换测试用例的初始化标记"""

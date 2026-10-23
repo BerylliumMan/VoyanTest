@@ -295,6 +295,13 @@ def default_tool_filter(spec_or_name) -> bool:
             return bool(getattr(get_settings(), "chat_script_enabled", False))
         except Exception:
             return False
+    if name in {"analyze_api_failure", "check_api_contract", "generate_api_from_text"}:
+        try:
+            from app.config import get_settings
+
+            return bool(getattr(get_settings(), "api_ai_enabled", True))
+        except Exception:
+            return False
     return True
 
 

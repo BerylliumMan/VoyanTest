@@ -414,6 +414,24 @@ const DefinitionDrawer: React.FC<DefinitionDrawerProps> = ({
                 >
                   使用 LLM 生成
                 </Checkbox>
+                {[
+                  { key: 'flow', label: '业务流程（跨接口多步骤）' },
+                  { key: 'security', label: '安全负向（未认证/越权）' },
+                  { key: 'strong_assertions', label: '强断言（字段/类型/结构）' },
+                ].map((mode) => (
+                  <Checkbox
+                    key={mode.key}
+                    checked={(options.ai_modes || []).includes(mode.key)}
+                    onChange={(v) => setOptions({
+                      ...options,
+                      ai_modes: v
+                        ? [...(options.ai_modes || []), mode.key]
+                        : (options.ai_modes || []).filter((x) => x !== mode.key),
+                    })}
+                  >
+                    {mode.label}
+                  </Checkbox>
+                ))}
               </div>
               <div className={styles.drawerRow}>
                 <span className={styles.drawerLabel}>每接口最多用例数：</span>

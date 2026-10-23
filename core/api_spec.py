@@ -231,8 +231,8 @@ def _normalize_request(raw: Any, *, step_no: int) -> dict:
         **req,
         "method": method,
         "url": str(req.get("url") or ""),
-        "headers": list(req.get("headers") or []),
-        "query": list(req.get("query") or []),
+        "headers": _normalize_pairs(req.get("headers")),
+        "query": _normalize_pairs(req.get("query")),
         "body": {
             # 031：兼容别名 multipart → 规范值 form_data
             "type": (
@@ -252,6 +252,67 @@ def _normalize_request(raw: Any, *, step_no: int) -> dict:
     }
 
 
+def _normalize_condition(value: Any) -> Any:
+    mapping = {
+        "greater_than_or_equal": "gte",
+        "greater_than": "gt",
+        "less_than_or_equal": "lte",
+        "less_than": "lt",
+        "not_equal": "not_equals",
+        "not_equal_to": "not_equals",
+        "==": "equals",
+        "!=": "not_equals",
+        ">=": "gte",
+        "<=": "lte",
+        ">": "gt",
+        "<": "lt",
+    }
+    text = str(value or "").strip()
+    return mapping.get(text, text)
+
+
+def _normalize_assertion(raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    item = dict(raw)
+    nested = item.get("assertion")
+    if not item.get("type") and isinstance(nested, dict):
+        item = {**nested, **{k: v for k, v in item.items() if k != "assertion"}}
+    if str(item.get("type") or "") in ("json_path", "json-path"):
+        item["type"] = "jsonpath"
+    if item.get("condition") is not None:
+        item["condition"] = _normalize_condition(item.get("condition"))
+    return item
+
+
+def _normalize_pairs(raw: Any) -> list:
+    """兼容 LLM 常见的 {name,value} / {key,value} 头/查询参数形状。"""
+    out: list = []
+    for item in (raw or []):
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        pair = dict(item)
+        if not pair.get("key") and pair.get("name"):
+            pair["key"] = pair.get("name")
+        out.append(pair)
+    return out
+
+
+def _normalize_extractor(raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    item = dict(raw)
+    nested = item.get("extractor")
+    if not item.get("type") and isinstance(nested, dict):
+        item = {**nested, **{k: v for k, v in item.items() if k != "extractor"}}
+    if str(item.get("type") or "") in ("json_path", "json-path"):
+        item["type"] = "jsonpath"
+    if not item.get("variable") and item.get("name"):
+        item["variable"] = item.get("name")
+    return item
+
+
 def _normalize_step(raw: Any, index: int) -> dict:
     step = _as_dict(raw, f"steps[{index}]")
     if "request" not in step or step.get("request") is None:
@@ -268,8 +329,8 @@ def _normalize_step(raw: Any, index: int) -> dict:
         "enable": bool(step.get("enable", True)),
         "definition_id": step.get("definition_id"),
         "request": _normalize_request(step.get("request"), step_no=index + 1),
-        "assertions": list(step.get("assertions") or []),
-        "extractors": list(step.get("extractors") or []),
+        "assertions": [_normalize_assertion(a) for a in (step.get("assertions") or [])],
+        "extractors": [_normalize_extractor(e) for e in (step.get("extractors") or [])],
         "pre": list(step.get("pre") or []),
         "post": list(step.get("post") or []),
         # 031：脚本与重试（默认空/None → runner 走既有行为 + 默认重试策略）

@@ -105,6 +105,13 @@ async def update_environment(db: AsyncSession, env_id: int, env: models.Environm
     if db_env.is_default:
         await _sync_env_to_project(db, db_env.project_id, db_env)
 
+    # 040：环境变更后，项目内 AI 分析标记「可能过期」（不自动重算）
+    try:
+        from app.crud import api_ai as _crud_api_ai
+        await _crud_api_ai.mark_stale_for_project(db, db_env.project_id)
+    except Exception:
+        pass
+
     return db_env
 
 

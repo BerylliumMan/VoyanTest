@@ -133,6 +133,21 @@ class Settings(BaseSettings):
     # 039 UI 用例参数化与数据集驱动：
     # - 单次执行展开的数据组上限（行数 × 循环次数；超过在执行前拒绝）
     ui_dataset_max_groups: int = 100
+    # 040 接口测试 AI 能力：
+    # - 总开关（关闭=所有 /api/api-test/ai/* 403，前端隐藏入口；手工流程零影响）
+    api_ai_enabled: bool = True
+    # - 分能力开关（默认开；可独立关闭）
+    api_ai_analysis_enabled: bool = True
+    api_ai_generation_enabled: bool = True
+    api_ai_data_enabled: bool = True
+    api_ai_contract_enabled: bool = True
+    api_ai_strategy_enabled: bool = True
+    # - 单次 AI 输入字符上限（证据/定义/覆盖率摘要；超出截断并标注）
+    api_ai_max_input_chars: int = 12000
+    # - 单次返回候选上限
+    api_ai_max_suggestions: int = 10
+    # - 单次 AI 调用超时（秒）
+    api_ai_timeout_s: int = 60
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""
