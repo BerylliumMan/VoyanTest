@@ -88,6 +88,12 @@ export const routes: IRoute[] = [
     ignore: true,
   },
   {
+    name: '接口用例编辑',
+    key: 'api_test/cases/edit',
+    path: '/api_test/cases/:id/edit',
+    ignore: true,
+  },
+  {
     name: 'menu.api_test',
     key: 'api_test',
     children: [
@@ -98,6 +104,10 @@ export const routes: IRoute[] = [
       {
         name: 'menu.api_test.definitions',
         key: 'api_test/definitions',
+      },
+      {
+        name: 'menu.api_test_cases',
+        key: 'api_test/cases',
       },
       {
         name: 'menu.api_test.scenarios',

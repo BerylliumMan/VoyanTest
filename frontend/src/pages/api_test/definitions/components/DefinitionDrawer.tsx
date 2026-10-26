@@ -6,6 +6,7 @@ import {
   Empty,
   Input,
   Message,
+  Progress,
   Radio,
   Select,
   Space,
@@ -18,6 +19,7 @@ import {
 } from '@arco-design/web-react';
 import type { UploadItem } from '@arco-design/web-react/es/Upload/interface';
 import { IconUpload, IconThunderbolt, IconCheck } from '@arco-design/web-react/icon';
+import axios from 'axios';
 import { apiRequest } from '@/utils/apiRequest';
 import {
   ApiDefinition,
@@ -40,6 +42,10 @@ interface DefinitionDrawerProps {
   onImported?: () => void;
   /** 生成并导入成功后回调 */
   onGenerated?: () => void;
+  /** 040：从策略建议跳转时预选接口 */
+  initialSelectedIds?: number[];
+  /** 040：打开时默认页签（import|definitions|generate） */
+  initialTab?: string;
 }
 
 /**
@@ -54,6 +60,8 @@ const DefinitionDrawer: React.FC<DefinitionDrawerProps> = ({
   projectId,
   onImported,
   onGenerated,
+  initialSelectedIds,
+  initialTab,
 }) => {
   const [activeTab, setActiveTab] = useState('import');
 
@@ -70,12 +78,46 @@ const DefinitionDrawer: React.FC<DefinitionDrawerProps> = ({
   const [keyword, setKeyword] = useState('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
+  useEffect(() => {
+    if (!visible) return;
+    if (initialTab) setActiveTab(initialTab);
+    if (initialSelectedIds && initialSelectedIds.length > 0) {
+      setSelectedIds(initialSelectedIds);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, initialTab, (initialSelectedIds || []).join(',')]);
+
   // ---- 生成 ----
   const [options, setOptions] = useState<GenerateOptions>(DEFAULT_GENERATE_OPTIONS);
   const [generating, setGenerating] = useState(false);
   const [genResult, setGenResult] = useState<GenerateResponse | null>(null);
+  const [progressId, setProgressId] = useState<string | null>(null);
+  const [genProgress, setGenProgress] = useState(0);
+  const [genMessage, setGenMessage] = useState('');
   const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
   const [importingDrafts, setImportingDrafts] = useState(false);
+
+  useEffect(() => {
+    if (!generating || !progressId) return undefined;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const resp = await axios.get(`/api/gen/status/${progressId}`);
+        if (stopped) return;
+        const p = Number(resp.data?.progress || 0);
+        if (Number.isFinite(p)) setGenProgress(Math.max(0, Math.min(100, p)));
+        if (resp.data?.message) setGenMessage(String(resp.data.message));
+      } catch {
+        // 会话刚创建时可能 404，下一轮再取
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [generating, progressId]);
 
   const loadDefinitions = useCallback(async () => {
     if (!projectId) return;
@@ -194,6 +236,12 @@ const DefinitionDrawer: React.FC<DefinitionDrawerProps> = ({
     }
     setGenerating(true);
     setGenResult(null);
+    const pid = (typeof crypto !== 'undefined' && (crypto as any).randomUUID)
+      ? (crypto as any).randomUUID()
+      : `api-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setProgressId(pid);
+    setGenProgress(0);
+    setGenMessage('正在提交生成任务…');
     try {
       const data = await apiRequest<GenerateResponse>(
         {
@@ -203,10 +251,13 @@ const DefinitionDrawer: React.FC<DefinitionDrawerProps> = ({
             project_id: projectId,
             definition_ids: selectedIds,
             options,
+            progress_id: pid,
           },
         },
         { showSuccess: false }
       );
+      setGenProgress(100);
+      setGenMessage(`生成完成：${data.total} 条草案`);
       setGenResult(data);
       setSelectedDraftIds((data.cases || []).map((c) => c.draft_id));
     } catch {
@@ -454,6 +505,14 @@ const DefinitionDrawer: React.FC<DefinitionDrawerProps> = ({
               <Text type="secondary" style={{ fontSize: 12 }}>
                 未勾选接口时请先在「接口定义」页勾选
               </Text>
+              {generating && (
+                <div style={{ marginTop: 12 }}>
+                  <Progress percent={genProgress} animation />
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {genMessage || '正在生成…'}
+                  </Text>
+                </div>
+              )}
             </div>
 
             {genResult && (

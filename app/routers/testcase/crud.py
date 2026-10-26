@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, Depends
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, models, db_models
@@ -161,7 +163,12 @@ async def export_test_cases(
     )
     cell_align = Alignment(vertical="top", wrap_text=True)
 
-    headers = ["用例ID", "所属模块", "标题", "前置条件", "测试步骤", "预期结果", "优先级", "结构化步骤JSON"]
+    api_export = (case_kind or "").strip() == "api"
+    headers = (
+        ["用例ID", "所属模块", "标题", "优先级", "接口定义JSON"]
+        if api_export
+        else ["用例ID", "所属模块", "标题", "前置条件", "测试步骤", "预期结果", "优先级", "结构化步骤JSON"]
+    )
     for col, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=h)
         cell.font = header_font
@@ -195,16 +202,25 @@ async def export_test_cases(
 
         from app.gen.adapter import format_priority_for_export
 
-        values = [
-            tc.project_case_number,
-            module_name,
-            tc.name,
-            tc.description or "",
-            steps_str,
-            expected_str,
-            format_priority_for_export(tc.priority),
-            structured_json,
-        ]
+        if api_export:
+            values = [
+                tc.project_case_number,
+                module_name,
+                tc.name,
+                format_priority_for_export(tc.priority),
+                json.dumps(tc.api_spec or {}, ensure_ascii=False),
+            ]
+        else:
+            values = [
+                tc.project_case_number,
+                module_name,
+                tc.name,
+                tc.description or "",
+                steps_str,
+                expected_str,
+                format_priority_for_export(tc.priority),
+                structured_json,
+            ]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
             cell.alignment = cell_align
@@ -213,7 +229,7 @@ async def export_test_cases(
     # 列宽（对齐 gen/history.py 格式 + 结构化列）
     from openpyxl.utils import get_column_letter
 
-    widths = [10, 16, 30, 24, 40, 40, 10, 36]
+    widths = [10, 16, 30, 10, 60] if api_export else [10, 16, 30, 24, 40, 40, 10, 36]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -226,6 +242,121 @@ async def export_test_cases(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=testcases_project_{project_id}.xlsx"},
     )
+
+
+@router.get("/last-runs")
+async def last_runs_by_cases(
+    project_id: int,
+    case_ids: str = "",
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """040：接口用例列表的“最近执行”列（按用例取最新一条 TestRun）。"""
+    allowed = get_user_project_filter(user)
+    if allowed is not None and project_id not in allowed:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    ids = [int(x) for x in case_ids.split(",") if x.strip().isdigit()][:500]
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(db_models.TestRun)
+            .join(db_models.TestCase, db_models.TestCase.id == db_models.TestRun.case_id)
+            .where(
+                db_models.TestCase.project_id == project_id,
+                db_models.TestRun.case_id.in_(ids),
+            )
+            .order_by(db_models.TestRun.id.desc())
+        )
+    ).scalars().all()
+    latest: dict[str, dict] = {}
+    for run in rows:
+        key = str(run.case_id)
+        if key in latest:
+            continue
+        latest[key] = {
+            "run_id": run.id,
+            "batch_id": run.batch_id,
+            "status": run.status,
+            "duration": run.duration,
+            "start_time": run.start_time.isoformat() if run.start_time else None,
+        }
+    return latest
+
+
+@router.get("/{case_id}/revisions")
+async def list_revisions(
+    case_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """040：用例变更记录（页面/对话双来源）。"""
+    from app.crud.chat import list_case_revisions
+
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed = get_user_project_filter(user)
+    if allowed is not None and db_case.project_id not in allowed:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    rows = await list_case_revisions(db, case_id)
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "source": row.source,
+                "summary": row.summary,
+                "user_id": row.user_id,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "before": row.before_snapshot,
+                "after": row.after_snapshot,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/{case_id}/revisions/{revision_id}/restore")
+async def restore_revision(
+    case_id: int,
+    revision_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """040：恢复某个历史版本（接口用例；只恢复 api_spec/名称/优先级）。"""
+    db_case = await crud.get_test_case(db, case_id)
+    if db_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    allowed = get_user_project_filter(user)
+    if allowed is not None and db_case.project_id not in allowed:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    revision = await db.get(db_models.CaseRevision, revision_id)
+    if revision is None or revision.case_id != case_id:
+        raise HTTPException(status_code=404, detail="变更记录不存在")
+    snapshot = revision.before_snapshot or {}
+    api_spec = snapshot.get("api_spec")
+    if not api_spec:
+        raise HTTPException(status_code=400, detail="该历史版本未记录 api_spec，无法恢复")
+    payload = models.TestCaseUpdate(
+        name=snapshot.get("name") or db_case.name,
+        description=db_case.description,
+        module_id=db_case.module_id,
+        priority=snapshot.get("priority") or db_case.priority,
+        tags=db_case.tags,
+        steps=[],
+        api_spec=api_spec,
+    )
+    updated = await crud.update_test_case(
+        db,
+        case_id,
+        payload,
+        revision_user_id=user.id,
+        revision_source="page",
+        revision_summary=f"恢复历史版本 #{revision_id}",
+    )
+    if updated is None:
+        raise HTTPException(status_code=500, detail="恢复失败")
+    return {"id": updated.id, "name": updated.name}
 
 
 @router.get("/{case_id}", response_model=models.TestCase)
@@ -495,7 +626,7 @@ async def import_test_cases(
     allowed_ids = get_user_project_filter(user)
     if allowed_ids is not None and project_id not in allowed_ids:
         raise HTTPException(status_code=403, detail="无权访问该项目")
-    if case_kind not in ("functional", "ui"):
+    if case_kind not in ("functional", "ui", "api"):
         case_kind = "ui"
     from openpyxl import load_workbook
 
@@ -511,6 +642,37 @@ async def import_test_cases(
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     created = 0
     errors = []
+
+    if case_kind == "api":
+        from app.gen.adapter import normalize_priority_to_storage
+        from core.api_spec import validate_api_spec
+
+        for row in rows:
+            if not any(str(c or "").strip() for c in row):
+                continue
+            cells = [str(c or "").strip() for c in row]
+            _case_id, module_name, title, priority, spec_text = (cells + [""] * 5)[:5]
+            if not title:
+                continue
+            try:
+                spec = json.loads(spec_text) if spec_text else None
+                problems = validate_api_spec(spec)
+                if problems:
+                    errors.append(f"「{title}」接口定义非法: {'；'.join(problems[:3])}")
+                    continue
+                await crud.create_test_case(db, models.TestCaseCreate(
+                    project_id=project_id,
+                    name=title,
+                    module_id=None,
+                    steps=[],
+                    priority=normalize_priority_to_storage(priority),
+                    case_kind="api",
+                    api_spec=spec,
+                ))
+                created += 1
+            except Exception as e:
+                errors.append(f"创建接口用例「{title}」失败: {e}")
+        return {"created": created, "errors": errors}
 
     # 从表头判断格式（新格式含"测试步骤"/"前置条件"，旧格式含"步骤序号"/"步骤描述"）
     header_cells = list(ws.iter_rows(min_row=1, max_row=1, values_only=True))

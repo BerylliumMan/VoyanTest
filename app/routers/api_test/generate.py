@@ -194,6 +194,9 @@ async def generate_api_cases(
         auth_definition = await _find_login_definition(db, payload.project_id, definitions)
 
     session_id = uuid.uuid4().hex
+    # 040：前端传入 progress_id 时复用其作为会话 ID，便于生成期间轮询进度
+    if payload.progress_id and 8 <= len(payload.progress_id) <= 64:
+        session_id = payload.progress_id
     # 会话必须先落库：gen_test_cases.session_id 是外键，草案在循环内写库
     session = db_models.GenSession(
         id=session_id,
@@ -218,7 +221,14 @@ async def generate_api_cases(
     all_drafts: list[dict] = []
     notes: list[str] = []
     seq = 1
-    for obj in definitions:
+    total_defs = max(1, len(definitions))
+    for index, obj in enumerate(definitions):
+        percent = 5 + int(index / total_defs * 70)
+        session.progress = percent
+        session.progress_message = (
+            f"正在生成 {index + 1}/{total_defs}：{obj.method} {obj.path}"
+        )
+        await db.commit()
         definition = {
             "id": obj.id,
             "name": obj.name,
@@ -250,9 +260,18 @@ async def generate_api_cases(
         seq += len(drafts)
         all_drafts.extend(drafts)
         notes.extend(definition_notes)
+        session.progress = 5 + int((index + 1) / total_defs * 70)
+        session.test_cases_count = len(all_drafts)
+        session.progress_message = (
+            f"已生成 {len(all_drafts)} 条（{index + 1}/{total_defs}）"
+        )
+        await db.commit()
 
     # 040 US2：跨接口业务流程（flow）——只跑一次，避免每个接口重复生成
     if options.get("use_llm", True) and "flow" in (options.get("ai_modes") or []):
+        session.progress = 80
+        session.progress_message = "正在生成跨接口业务流程…"
+        await db.commit()
         from app.gen.api.llm_cases import enhance_flow_cases_with_llm
 
         flow_defs = [

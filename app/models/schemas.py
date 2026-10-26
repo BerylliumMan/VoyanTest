@@ -797,6 +797,8 @@ class ApiGenerateRequest(BaseModel):
     definition_ids: List[int] = []
     module_id: Optional[int] = None
     options: ApiGenerateOptions = ApiGenerateOptions()
+    # 040：前端生成的进度会话 ID；提供时复用为 GenSession.id 以便轮询 /api/gen/status
+    progress_id: Optional[str] = None
 
 
 class ApiGenerateCase(BaseModel):

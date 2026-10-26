@@ -13,6 +13,7 @@ import {
   Modal,
   Popconfirm,
   Select,
+  Space,
   Spin,
   Table,
   Tag,
@@ -231,6 +232,7 @@ const ApiTestPage: React.FC = () => {
   const [historyVisible, setHistoryVisible] = useState(false);
 
   const [drawerVisible, setDrawerVisible] = useState(false);
+  const [genInitIds, setGenInitIds] = useState<number[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [datasetPanelVisible, setDatasetPanelVisible] = useState(false);
   const [datasetBinding, setDatasetBinding] =
@@ -271,11 +273,26 @@ const ApiTestPage: React.FC = () => {
     apiGet<Project[]>('/api/projects/')
       .then((data) => {
         setProjects(data || []);
-        if (data && data.length > 0) {
+        const q = new URLSearchParams(window.location.search);
+        const wanted = Number(q.get('project_id') || 0);
+        if (wanted && (data || []).some((p) => p.id === wanted)) {
+          setProjectId(wanted);
+        } else if (data && data.length > 0) {
           setProjectId(data[0].id);
         }
       })
       .catch(() => setProjects([]));
+  }, []);
+
+  // 040：从「AI 测试策略」跳转过来时，预选接口并打开生成页签
+  useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get('generate');
+    if (!raw) return;
+    const ids = raw.split(',').map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0);
+    if (ids.length) {
+      setGenInitIds(ids);
+      setDrawerVisible(true);
+    }
   }, []);
 
   // ---- 环境 ----
@@ -1315,6 +1332,8 @@ const ApiTestPage: React.FC = () => {
         visible={drawerVisible}
         onClose={() => setDrawerVisible(false)}
         projectId={projectId}
+        initialSelectedIds={genInitIds}
+        initialTab={genInitIds.length ? 'generate' : 'import'}
         onImported={loadDefinitions}
         onGenerated={() => {
           loadDefinitions();
@@ -1381,6 +1400,20 @@ const ApiTestPage: React.FC = () => {
         <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
           {refScenarios.length ? `被场景引用：${refScenarios.join('、')}` : '没有场景引用这个接口'}
         </Text>
+        <Space style={{ marginBottom: 8 }}>
+          <Button
+            size="small"
+            type="primary"
+            onClick={() => {
+              const defId = selectedDef?.id ?? step.definition_id;
+              if (defId == null) return;
+              setDefCasesVisible(false);
+              history.push(`/api_test/cases/new/edit?project_id=${projectId}&definitions=${defId}`);
+            }}
+          >
+            新建用例
+          </Button>
+        </Space>
         <Spin loading={defCasesLoading} style={{ width: '100%' }}>
           {defCases.length === 0 ? (
             <Empty description="该接口下还没有用例。调试后点「保存为用例」。" />
@@ -1402,23 +1435,36 @@ const ApiTestPage: React.FC = () => {
                 },
                 {
                   title: '操作',
-                  width: 80,
-                  render: (_: unknown, row: { id: number; stale?: boolean }) =>
-                    row.stale ? (
+                  width: 130,
+                  render: (_: unknown, row: { id: number; stale?: boolean }) => (
+                    <Space size="mini">
                       <Button
                         type="text"
                         size="mini"
-                        onClick={async () => {
-                          const defId = selectedDef?.id ?? step.definition_id;
-                          if (defId == null) return;
-                          await apiPost(`/api/api-test/definitions/${defId}/cases/${row.id}/sync`, {});
-                          Message.success('已同步请求结构');
-                          loadDefCases(defId);
+                        onClick={() => {
+                          setDefCasesVisible(false);
+                          history.push(`/api_test/cases/${row.id}/edit?project_id=${projectId}`);
                         }}
                       >
-                        同步
+                        编辑
                       </Button>
-                    ) : null,
+                      {row.stale ? (
+                        <Button
+                          type="text"
+                          size="mini"
+                          onClick={async () => {
+                            const defId = selectedDef?.id ?? step.definition_id;
+                            if (defId == null) return;
+                            await apiPost(`/api/api-test/definitions/${defId}/cases/${row.id}/sync`, {});
+                            Message.success('已同步请求结构');
+                            loadDefCases(defId);
+                          }}
+                        >
+                          同步
+                        </Button>
+                      ) : null}
+                    </Space>
+                  ),
                 },
               ]}
             />

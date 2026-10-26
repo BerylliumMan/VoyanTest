@@ -19,6 +19,19 @@ from app.services.api_ai import ApiAiUnavailable
 
 logger = logging.getLogger(__name__)
 
+# 040：生成进度（进程内，供前端轮询；页面级短任务）
+_PROGRESS: dict[str, dict] = {}
+
+
+def _set_progress(progress_id: str | None, percent: int, message: str) -> None:
+    if not progress_id:
+        return
+    _PROGRESS[progress_id] = {"progress": max(0, min(100, percent)), "message": message}
+
+
+def get_progress(progress_id: str) -> dict | None:
+    return _PROGRESS.get(progress_id)
+
 
 def _extract_json(text: str) -> dict | None:
     raw = str(text or "")
@@ -95,9 +108,12 @@ async def generate_strategy(
     project_id: int,
     user_id: int | None = None,
     force: bool = False,
+    progress_id: str | None = None,
 ) -> db_models.ApiAiAnalysis:
     settings = get_settings()
+    _set_progress(progress_id, 5, "汇总项目接口与用例…")
     data = await build_strategy_input(db, project_id)
+    _set_progress(progress_id, 30, "计算未覆盖接口与弱断言…")
     digest = hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     if not force:
         cached = await crud_api_ai.get_analysis(
@@ -106,7 +122,9 @@ async def generate_strategy(
         if cached and cached.status == "ready" and not cached.stale_at:
             return cached
     if not data["definitions"]:
+        _set_progress(progress_id, 100, "项目内没有接口定义")
         raise ApiAiUnavailable("项目内没有接口定义，无法生成策略")
+    _set_progress(progress_id, 45, "调用 AI 排序风险与建议…")
     try:
         from app.gen.model_client import call_model
         from app.runtime_config import resolve_prompt_for_agent
@@ -131,6 +149,7 @@ async def generate_strategy(
     except Exception as exc:
         logger.warning("AI 策略生成失败: %s", exc, exc_info=True)
         raise ApiAiUnavailable(f"AI 服务不可用：{type(exc).__name__}") from exc
+    _set_progress(progress_id, 85, "校验并整理建议…")
     parsed = _extract_json(str(raw or ""))
     if parsed is None:
         raise ApiAiUnavailable("AI 未返回合法 JSON")
@@ -161,6 +180,7 @@ async def generate_strategy(
         db, project_id=project_id, kind="strategy", input_hash=digest,
         result=result, created_by=user_id,
     )
+    _set_progress(progress_id, 100, "策略生成完成")
     from app.auth import log_audit
     await log_audit(
         db, user_id, "ai.strategy",

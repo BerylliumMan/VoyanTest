@@ -257,6 +257,7 @@ async def update_test_case(
         _before_snapshot = {
             "name": db_case.name,
             "priority": db_case.priority,
+            "api_spec": db_case.api_spec,
             "steps": [
                 {"description": s.description or "", "expected": s.parsed_result or ""}
                 for s in sorted(db_case.steps or [], key=lambda x: x.step_order)
@@ -361,6 +362,7 @@ async def update_test_case(
             after_snapshot={
                 "name": db_case.name,
                 "priority": db_case.priority,
+                "api_spec": db_case.api_spec,
                 "steps": [
                     {"description": s.description or "", "expected": s.parsed_result or ""}
                     for s in sorted(db_case.steps or [], key=lambda x: x.step_order)
@@ -466,6 +468,9 @@ async def delete_test_case(db: AsyncSession, case_id: int) -> dict[str, str] | N
 
     # 解除运行记录的外键关联（保留报告记录）
     await db.execute(text("UPDATE test_runs SET case_id = NULL WHERE case_id = :cid"), {"cid": case_id})
+
+    # 040：变更记录随用例删除（case_revisions.case_id 非空外键，否则删除 500）
+    await db.execute(delete(db_models.CaseRevision).where(db_models.CaseRevision.case_id == case_id))
 
     await db.delete(db_case)
     await db.commit()

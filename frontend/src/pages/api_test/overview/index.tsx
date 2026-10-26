@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Form, Grid, Input, Message, Select, Tag } from '@arco-design/web-react';
+import { Button, Card, Form, Grid, Input, Message, Progress, Select, Tag } from '@arco-design/web-react';
 import {
   IconCheckCircleFill,
   IconCode,
@@ -75,6 +75,9 @@ const ApiTestOverview: React.FC = () => {
   const [data, setData] = useState<Overview | null>(null);
   const [strategy, setStrategy] = useState<any>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
+  const [strategyProgress, setStrategyProgress] = useState(0);
+  const [strategyMessage, setStrategyMessage] = useState('');
+  const [strategyPid, setStrategyPid] = useState<string | null>(null);
   const [url, setUrl] = useState('');
   const [cron, setCron] = useState('0 2 * * *');
   const [mode, setMode] = useState('skip');
@@ -89,9 +92,20 @@ const ApiTestOverview: React.FC = () => {
 
   const loadStrategy = useCallback(async () => {
     if (!projectId) return;
+    const pid = (typeof crypto !== 'undefined' && (crypto as any).randomUUID)
+      ? (crypto as any).randomUUID()
+      : `strategy-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setStrategyPid(pid);
+    setStrategyProgress(0);
+    setStrategyMessage('正在提交分析任务…');
     setStrategyLoading(true);
     try {
-      const res = await apiPost<any>('/api/api-test/ai/strategy', { project_id: projectId });
+      const res = await apiPost<any>('/api/api-test/ai/strategy', {
+        project_id: projectId,
+        progress_id: pid,
+      });
+      setStrategyProgress(100);
+      setStrategyMessage('策略生成完成');
       setStrategy(res?.result || null);
     } catch (err: any) {
       Message.error(err?.response?.data?.detail || 'AI 策略生成失败');
@@ -99,6 +113,24 @@ const ApiTestOverview: React.FC = () => {
       setStrategyLoading(false);
     }
   }, [projectId]);
+
+  useEffect(() => {
+    if (!strategyLoading || !strategyPid) return undefined;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const res = await apiGet<any>(`/api/api-test/ai/strategy/status/${strategyPid}`);
+        if (stopped) return;
+        setStrategyProgress(Math.max(0, Math.min(100, Number(res?.progress || 0))));
+        if (res?.message) setStrategyMessage(String(res.message));
+      } catch {
+        // 任务刚启动时可能还没有进度，下一轮再取
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [strategyLoading, strategyPid]);
 
   useEffect(() => {
     apiGet<Project[]>('/api/projects/')
@@ -198,7 +230,13 @@ const ApiTestOverview: React.FC = () => {
         style={{ marginTop: 16 }}
         extra={<Button size="small" loading={strategyLoading} onClick={loadStrategy}>生成建议</Button>}
       >
-        {!strategy && <div style={{ color: 'var(--vt-text-3)', fontSize: 13 }}>按风险排序的补测建议（未覆盖接口 / 弱断言 / 近期失败）</div>}
+        {strategyLoading && (
+          <div style={{ marginBottom: 10 }}>
+            <Progress percent={strategyProgress} animation />
+            <div style={{ color: 'var(--vt-text-3)', fontSize: 12 }}>{strategyMessage || 'AI 正在分析…'}</div>
+          </div>
+        )}
+        {!strategy && !strategyLoading && <div style={{ color: 'var(--vt-text-3)', fontSize: 13 }}>按风险排序的补测建议（未覆盖接口 / 弱断言 / 近期失败）</div>}
         {strategy && (
           <>
             <div style={{ marginBottom: 8 }}>{strategy.summary}</div>
@@ -213,6 +251,18 @@ const ApiTestOverview: React.FC = () => {
                   {item.definition_ids?.length ? ` · 接口 ${item.definition_ids.join(',')}` : ''}
                   {item.case_ids?.length ? ` · 用例 ${item.case_ids.slice(0, 5).join(',')}` : ''}
                 </span>
+                {item.definition_ids?.length > 0 && (
+                  <Button
+                    size="mini"
+                    type="outline"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => {
+                      window.location.href = `/api_test/definitions?project_id=${projectId}&generate=${item.definition_ids.join(',')}`;
+                    }}
+                  >
+                    生成用例
+                  </Button>
+                )}
               </div>
             ))}
           </>

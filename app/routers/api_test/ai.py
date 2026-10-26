@@ -80,6 +80,7 @@ class CheckContractRequest(BaseModel):
 class StrategyRequest(BaseModel):
     project_id: int
     force: bool = False
+    progress_id: str | None = None
 
 
 @router.post("/ai/analyze-failure")
@@ -202,10 +203,24 @@ async def strategy_endpoint(
         row = await generate_strategy(
             db, project_id=payload.project_id,
             user_id=getattr(user, "id", None), force=payload.force,
+            progress_id=payload.progress_id,
         )
     except ApiAiUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return crud_api_ai.serialize_analysis(row)
+
+
+@router.get("/ai/strategy/status/{progress_id}")
+async def strategy_status_endpoint(
+    progress_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    from app.services.api_ai_strategy import get_progress
+
+    data = get_progress(progress_id)
+    if data is None:
+        return {"progress": 0, "message": "等待开始…"}
+    return data
 
 
 @router.get("/ai/analyses/{analysis_id}")
