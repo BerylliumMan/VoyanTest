@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   IconDashboard,
+  IconBook,
   IconList,
   IconSettings,
   IconFile,
@@ -53,7 +54,7 @@ export function getIconFromKey(key: string): JSX.Element {
     case 'api_test/definitions':
       return <IconCode className={styles.icon} />;
     case 'api_test/cases':
-      return <IconList className={styles.icon} />;
+      return <IconBook className={styles.icon} />;
     case 'api_test/scenarios':
       return <IconList className={styles.icon} />;
     case 'agent_definitions':
