@@ -52,6 +52,8 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconDashboard className={styles.icon} />;
     case 'api_test/definitions':
       return <IconCode className={styles.icon} />;
+    case 'api_test/cases':
+      return <IconList className={styles.icon} />;
     case 'api_test/scenarios':
       return <IconList className={styles.icon} />;
     case 'agent_definitions':
