@@ -66,6 +66,8 @@ export interface RunItem {
   run_id: number;
   case_id: number;
   case_name: string;
+  case_kind?: string | null;
+  execution_mode?: string;
   status: string;
   duration: number;
   started_at: string;

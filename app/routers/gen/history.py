@@ -217,6 +217,7 @@ async def get_history_detail(
     tcs = [
         GenPreviewItem(
             test_case_id=tc.test_case_id,
+            draft_id=getattr(tc, "id", None),
             module=tc.module or "",
             title=tc.title,
             preconditions=tc.preconditions or "",
@@ -225,9 +226,7 @@ async def get_history_detail(
             priority=tc.priority or "中",
             selected=not bool(getattr(tc, "validation_errors", None)),
             validation_errors=getattr(tc, "validation_errors", None) or "",
-            structured_steps=list(tc.structured_steps or [])
-            if isinstance(getattr(tc, "structured_steps", None), list)
-            else [],
+            structured_steps=getattr(tc, "structured_steps", None) or [],
         )
         for tc in db_tcs
     ]

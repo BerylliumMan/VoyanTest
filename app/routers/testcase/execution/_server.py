@@ -270,7 +270,11 @@ async def batch_run_cases(req: BatchRunRequest, background_tasks: BackgroundTask
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     stop_on_error = bool(req.stop_on_error)
 
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=total, triggered_by=getattr(user, 'username', None))
+    batch = await crud.create_run_batch(
+        db, project_id=project_id, total_cases=total,
+        triggered_by=getattr(user, 'username', None),
+        source=req.source, source_id=req.source_id,
+    )
     from app.routers.testcase import execution as _exec
     batch_id = batch.id
     if dataset_plan.total_groups:
@@ -356,7 +360,10 @@ async def run_module_test_cases(
     case_ids = [c.id for c in test_cases]
     project_id = db_module.project_id
 
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids), triggered_by=getattr(user, 'username', None))
+    batch = await crud.create_run_batch(
+        db, project_id=project_id, total_cases=len(case_ids),
+        triggered_by=getattr(user, 'username', None), source="full", source_id=module_id,
+    )
 
     from app.routers.testcase import execution as _exec
     _spawn(_exec.run_batch_test_cases(
@@ -396,7 +403,10 @@ async def run_project_test_cases(
 
     case_ids = [c.id for c in test_cases]
 
-    batch = await crud.create_run_batch(db, project_id=project_id, total_cases=len(case_ids), triggered_by=getattr(user, 'username', None))
+    batch = await crud.create_run_batch(
+        db, project_id=project_id, total_cases=len(case_ids),
+        triggered_by=getattr(user, 'username', None), source="full", source_id=project_id,
+    )
 
     from app.routers.testcase import execution as _exec
     _spawn(_exec.run_batch_test_cases(

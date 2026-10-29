@@ -515,6 +515,12 @@ const GenPage: React.FC = () => {
                   >
                     全部导入 ({testCases.length})
                   </Button>
+                  <Button
+                    icon={<IconHistory />}
+                    onClick={() => history.push(`/gen-history-detail/${sessionId}`)}
+                  >
+                    AI 评审
+                  </Button>
                 </>
               )}
             </Space>

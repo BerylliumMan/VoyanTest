@@ -26,6 +26,7 @@ from .routers import project_router, testcase_router, module_router, report_rout
 from .routers import auth_router, user_router, audit_router, agent_router as mgmt_agent_router, gen_router, recordings_router, notification_router, setup_router, agent_definition_router, agent_run_router, suite_router
 from .routers import api_test as api_test_router
 from .routers import chat as chat_router
+from .routers import quality as quality_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -606,6 +607,112 @@ async def _run_startup_init():
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS ai_settings JSONB",
             "projects.ai_settings 迁移",
         )
+        # ── 042-quality-decisions：回归计划 / Flaky 治理 / 需求追溯 ──
+        await _ddl(
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS quarantined_count INTEGER NOT NULL DEFAULT 0",
+            "run_batches.quarantined_count 迁移",
+        )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS quality_regression_plans (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id),
+                name VARCHAR(200) NOT NULL,
+                description TEXT,
+                environment_id INTEGER REFERENCES environments(id),
+                agent_id INTEGER REFERENCES agent_definitions(id),
+                items JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_batch_id INTEGER REFERENCES run_batches(id)
+            )
+            """,
+            "quality_regression_plans 表",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_quality_regression_plans_project ON quality_regression_plans (project_id, created_at DESC)",
+            "quality_regression_plans project 索引",
+        )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS quality_flaky_states (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id),
+                case_id INTEGER NOT NULL REFERENCES test_cases(id) ON DELETE CASCADE,
+                status VARCHAR(16) NOT NULL DEFAULT 'candidate',
+                sample_runs INTEGER NOT NULL DEFAULT 0,
+                passed INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                consecutive_passes INTEGER NOT NULL DEFAULT 0,
+                last_failed_at TIMESTAMPTZ,
+                last_checked_at TIMESTAMPTZ,
+                reason TEXT,
+                last_batch_id INTEGER REFERENCES run_batches(id),
+                created_by INTEGER REFERENCES users(id),
+                updated_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "quality_flaky_states 表",
+        )
+        await _ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_flaky_case ON quality_flaky_states (case_id)",
+            "quality_flaky_states case 唯一",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_quality_flaky_project_status ON quality_flaky_states (project_id, status)",
+            "quality_flaky_states project/status 索引",
+        )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS quality_requirements (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id),
+                name VARCHAR(300) NOT NULL,
+                module_id INTEGER REFERENCES modules(id),
+                source VARCHAR(16) NOT NULL DEFAULT 'manual',
+                source_session_id VARCHAR(64),
+                description TEXT,
+                status VARCHAR(16) NOT NULL DEFAULT 'active',
+                created_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "quality_requirements 表",
+        )
+        await _ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_requirement_project_name ON quality_requirements (project_id, name)",
+            "quality_requirements project/name 唯一",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_quality_requirements_project_module ON quality_requirements (project_id, module_id)",
+            "quality_requirements project/module 索引",
+        )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS quality_requirement_links (
+                id SERIAL PRIMARY KEY,
+                requirement_id INTEGER NOT NULL REFERENCES quality_requirements(id) ON DELETE CASCADE,
+                case_id INTEGER NOT NULL REFERENCES test_cases(id) ON DELETE CASCADE,
+                case_kind VARCHAR(16) NOT NULL DEFAULT 'ui',
+                source VARCHAR(16) NOT NULL DEFAULT 'manual',
+                created_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "quality_requirement_links 表",
+        )
+        await _ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_requirement_case ON quality_requirement_links (requirement_id, case_id)",
+            "quality_requirement_links 唯一",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_quality_requirement_links_case ON quality_requirement_links (case_id)",
+            "quality_requirement_links case 索引",
+        )
         await _ddl(
             """
             CREATE TABLE IF NOT EXISTS schema_patches (
@@ -1030,6 +1137,7 @@ async def lifespan(app: FastAPI):
                     batch = await crud.create_run_batch(
                         db, project_id=tc.project_id, total_cases=total,
                         triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                        source="scheduler", source_id=getattr(task, "id", None),
                     )
                     batch_id, case_id = batch.id, tc.id
                     await db.commit()
@@ -1051,6 +1159,7 @@ async def lifespan(app: FastAPI):
                     batch = await crud.create_run_batch(
                         db, project_id=mod.project_id, total_cases=len(case_ids),
                         triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                        source="scheduler", source_id=getattr(task, "id", None),
                     )
                     batch_id, project_id = batch.id, mod.project_id
                     await db.commit()
@@ -1070,6 +1179,7 @@ async def lifespan(app: FastAPI):
                     batch = await crud.create_run_batch(
                         db, project_id=tc.project_id, total_cases=1,
                         triggered_by=f"scheduler:{getattr(task, 'name', task.id)}",
+                        source="scheduler", source_id=getattr(task, "id", None),
                     )
                     batch_id, case_id = batch.id, tc.id
                     await db.commit()
@@ -1313,6 +1423,7 @@ app.include_router(agent_definition_router.router)
 app.include_router(agent_run_router.router)
 app.include_router(api_test_router.router)
 app.include_router(chat_router.router)
+app.include_router(quality_router.router)
 from app.routers.api_test.mocks import public_router as api_mock_public_router
 app.include_router(api_mock_public_router)
 

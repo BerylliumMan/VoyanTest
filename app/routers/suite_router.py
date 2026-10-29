@@ -142,6 +142,8 @@ async def run_suite(
         environment_id=body.environment_id,
         init_case_ids=list(body.init_case_ids or []),
         init_policy="once",
+        source="suite",
+        source_id=suite.id,
     )
     result = await batch_run_cases(req, background_tasks, user, db)
     # 轻量关联：写回批次名（若 batch_id 可用）
@@ -178,6 +180,8 @@ async def run_suite_client(
         environment_id=body.environment_id,
         backend=body.backend,
         init_policy="once",
+        source="suite",
+        source_id=suite.id,
     )
     result = await batch_run_client(req, user, db)
     batch_id = result.get("batch_id")

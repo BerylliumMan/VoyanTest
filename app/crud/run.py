@@ -606,3 +606,58 @@ async def get_batch_detail_with_related(db: AsyncSession, batch_id: int) -> dict
             cases[c.id] = c
 
     return {"runs": runs, "cases": cases}
+
+async def list_runs_for_quality(
+    db: AsyncSession,
+    *,
+    project_id: int,
+    since=None,
+    module_id: int | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """041：质量洞察的失败运行查询（项目/时间窗/模块，最多 limit 条）。"""
+    time_col = func.coalesce(
+        db_models.TestRun.start_time,
+        db_models.TestRun.end_time,
+        db_models.RunBatch.created_at,
+    )
+    stmt = (
+        select(
+            db_models.TestRun.id,
+            db_models.TestRun.case_id,
+            db_models.TestRun.batch_id,
+            db_models.TestRun.status,
+            db_models.TestRun.start_time,
+            db_models.TestRun.end_time,
+            db_models.TestRun.execution_mode,
+            db_models.TestCase.name,
+            db_models.TestCase.project_id,
+            db_models.TestCase.module_id,
+        )
+        .outerjoin(db_models.TestCase, db_models.TestRun.case_id == db_models.TestCase.id)
+        .outerjoin(db_models.RunBatch, db_models.TestRun.batch_id == db_models.RunBatch.id)
+        .where(
+            db_models.TestRun.status.in_(("failed", "error")),
+            func.coalesce(db_models.TestCase.project_id, db_models.RunBatch.project_id) == project_id,
+        )
+    )
+    if since is not None:
+        stmt = stmt.where(time_col >= since)
+    if module_id is not None:
+        stmt = stmt.where(db_models.TestCase.module_id == module_id)
+    stmt = stmt.order_by(time_col.desc()).limit(max(1, min(int(limit), 500)))
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "run_id": r.id,
+            "case_id": r.case_id,
+            "batch_id": r.batch_id,
+            "status": r.status,
+            "started_at": (r.start_time or r.end_time).isoformat() if (r.start_time or r.end_time) else None,
+            "execution_mode": r.execution_mode,
+            "case_name": r.name,
+            "project_id": r.project_id,
+            "module_id": r.module_id,
+        }
+        for r in rows
+    ]

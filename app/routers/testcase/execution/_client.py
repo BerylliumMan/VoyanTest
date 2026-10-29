@@ -217,6 +217,18 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     if not case_ids:
         raise HTTPException(status_code=400, detail="No test case IDs provided")
 
+    # 042：自动展开批次跳过已隔离用例
+    _quarantined_skipped = 0
+    try:
+        from app.services.quality_flaky import filter_auto_cases
+        case_ids, _quarantined_skipped = await filter_auto_cases(db, list(case_ids), getattr(body, "source", None))
+        if _quarantined_skipped and not case_ids:
+            raise HTTPException(status_code=400, detail="全部用例已隔离，已跳过")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Flaky 隔离过滤失败，按原用例继续", exc_info=True)
+
     agents = await agent_manager.get_online_agents()
     agent_name = body.agent_name
 
@@ -326,6 +338,9 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
             total_cases=len(exec_queue),
             started_at=_tz_now_batch(),
             triggered_by=agent_name,
+            source=getattr(body, "source", None),
+            source_id=getattr(body, "source_id", None),
+            quarantined_count=_quarantined_skipped,
         )
         db.add(batch)
         await db.commit()
@@ -387,9 +402,13 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
     batch = await crud.create_run_batch(
         db, project_id=project_id, name=_batch_name,
         total_cases=len(case_infos), triggered_by=getattr(user, "username", None),
+        source=getattr(body, "source", None), source_id=getattr(body, "source_id", None),
     )
     if dataset_plan.total_groups:
         batch.dataset_total = dataset_plan.total_groups
+        await db.commit()
+    if _quarantined_skipped:
+        batch.quarantined_count = _quarantined_skipped
         await db.commit()
 
     precreated_map: dict[tuple[int, int | None], int] = {}
@@ -511,6 +530,11 @@ async def batch_run_client(body: BatchCaseIdsRequest, user=Depends(get_current_u
                     _b.finished_at = tz_now()
                 await crud._compute_batch_status(_db, _b)
                 await _db.commit()
+                try:
+                    from app.services.quality_flaky import on_batch_finished
+                    await on_batch_finished(_db, _b.id)
+                except Exception:
+                    logger.warning("Flaky 恢复回调失败 batch=%s", _b.id, exc_info=True)
                 _uid2 = getattr(user, "id", None)
                 if _uid2 and not _stopped_by_user:
                     _asyncio.create_task(notify_batch_completed(_b.id, _uid2))

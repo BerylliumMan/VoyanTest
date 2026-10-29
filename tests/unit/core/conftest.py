@@ -210,3 +210,41 @@ def make_expanded_queue():
         )
 
     return _make
+
+
+# ── 042-quality-decisions：质量治理上下文夹具 ──────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def make_quality_context(db):
+    """创建 042 所需的最小项目/用例/定义/运行上下文。"""
+
+    async def _make(*, project_name="042 质量项目", case_name="质量用例",
+                    case_kind="ui", run_status="failed"):
+        from app import db_models
+
+        project = db_models.Project(name=project_name)
+        db.add(project)
+        await db.flush()
+        case = db_models.TestCase(
+            project_id=project.id, project_case_number=1, name=case_name,
+            case_kind=case_kind, priority="medium", status="active",
+        )
+        db.add(case)
+        await db.flush()
+        definition = db_models.ApiDefinition(
+            project_id=project.id, method="GET", path="/api/health",
+            name="健康检查", version=1,
+        )
+        db.add(definition)
+        await db.flush()
+        run = db_models.TestRun(case_id=case.id, status=run_status)
+        db.add(run)
+        await db.commit()
+        await db.refresh(project)
+        await db.refresh(case)
+        await db.refresh(definition)
+        await db.refresh(run)
+        return project, case, definition, run
+
+    return _make

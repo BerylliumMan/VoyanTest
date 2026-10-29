@@ -29,6 +29,8 @@ class RunBatch(Base):
     parent_batch_id = Column(Integer, nullable=True, index=True)
     # 039：本批次展开的数据组总数（非参数化批次为 NULL）
     dataset_total = Column(Integer, nullable=True)
+    # 042：本批次因 Flaky 隔离而跳过的用例数（不进入 total_cases）
+    quarantined_count = Column(Integer, nullable=False, default=0)
 
     runs = relationship("TestRun", backref="batch")
 

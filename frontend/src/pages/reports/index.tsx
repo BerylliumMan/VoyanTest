@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space, Select,
+  Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space, Select, Input,
 } from '@arco-design/web-react';
 import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete, IconMessage } from '@arco-design/web-react/icon';
 import axios from 'axios';
@@ -26,6 +26,8 @@ interface BatchDetail {
   /** 031（US5）：仅失败重跑的来源批次（报告页互跳） */
   parent_batch_id?: number | null;
   parent_batch_name?: string | null;
+  /** 042：因 Flaky 隔离而跳过的用例数 */
+  quarantined_count?: number;
   runs: RunItem[];
 }
 
@@ -90,7 +92,8 @@ const Reports: React.FC = () => {
   const [selectedRun, setSelectedRun] = useState<RunItem | null>(null);
   const [runVisible, setRunVisible] = useState(false);
   const [expandedRuns, setExpandedRuns] = useState<Set<number>>(new Set());
-  const [aiRuns, setAiRuns] = useState<Record<number, { analysis?: any; contract?: any; loading?: string }>>({});
+  const [aiRuns, setAiRuns] = useState<Record<number, { analysis?: any; contract?: any; defect?: any; loading?: string }>>({});
+  const [defectTexts, setDefectTexts] = useState<Record<number, string>>({});
   const [pollingBatchId, setPollingBatchId] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -98,6 +101,9 @@ const Reports: React.FC = () => {
   const [compareA, setCompareA] = useState<number | undefined>();
   const [compareB, setCompareB] = useState<number | undefined>();
   const [compareResult, setCompareResult] = useState<any>(null);
+  const [insightsVisible, setInsightsVisible] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsData, setInsightsData] = useState<any>(null);
 
   const getCookie = (name: string) => {
     const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
@@ -295,17 +301,46 @@ const Reports: React.FC = () => {
     });
   };
 
-  const runAi = async (runId: number, kind: 'analysis' | 'contract') => {
+  const runAi = async (run: RunItem, kind: 'analysis' | 'contract' | 'defect') => {
+    const runId = run.run_id;
+    const isApi = run.case_kind === 'api' || run.steps?.some((s: StepDetail) => (s as any).request);
     setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], loading: kind } }));
     try {
+      if (kind === 'defect') {
+        const res = await axios.post('/api/quality/defect-reports', {
+          project_id: detail?.project_id,
+          run_id: runId,
+        });
+        setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], defect: res.data, loading: undefined } }));
+        setDefectTexts((prev) => ({ ...prev, [runId]: res.data?.result?.markdown || '' }));
+        return;
+      }
       const url = kind === 'analysis'
-        ? '/api/api-test/ai/analyze-failure'
+        ? (isApi ? '/api/api-test/ai/analyze-failure' : '/api/quality/failure-analysis')
         : '/api/api-test/ai/check-contract';
       const res = await axios.post(url, { run_id: runId });
       setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], [kind]: res.data, loading: undefined } }));
     } catch (err: any) {
       Message.error(err?.response?.data?.detail || 'AI 分析失败');
       setAiRuns((prev) => ({ ...prev, [runId]: { ...prev[runId], loading: undefined } }));
+    }
+  };
+
+  const openInsights = async () => {
+    if (!detail) return;
+    setInsightsVisible(true);
+    setInsightsLoading(true);
+    try {
+      const res = await axios.post('/api/quality/insights', {
+        project_id: detail.project_id,
+        days: 14,
+      });
+      setInsightsData(res.data);
+    } catch (err: any) {
+      Message.error(err?.response?.data?.detail || '失败洞察生成失败');
+      setInsightsData(null);
+    } finally {
+      setInsightsLoading(false);
     }
   };
 
@@ -440,6 +475,9 @@ const Reports: React.FC = () => {
                 <Button status="danger" onClick={() => handleBatchControl(detail.id, 'stop')}>{t['batch.stop']}</Button>
               </>
             )}
+            {detail && (
+              <Button onClick={openInsights} loading={insightsLoading}>失败洞察</Button>
+            )}
             <Button onClick={handleCloseDetail}>{t['close']}</Button>
           </Space>
         }
@@ -454,6 +492,9 @@ const Reports: React.FC = () => {
                   { label: t['project'], value: detail.project_name },
                   { label: t['status'], value: getBatchStatusTag(detail.status, detail.passed, detail.total_cases, detail.failed) },
                   { label: t['case.count'], value: detail.total_cases },
+                  ...(detail.quarantined_count
+                    ? [{ label: '已隔离跳过', value: detail.quarantined_count }]
+                    : []),
                   ...(detail.parent_batch_id
                     ? [{
                         label: t['batch.source_batch'],
@@ -510,13 +551,19 @@ const Reports: React.FC = () => {
                           <Space size="small">
                             {run.status === 'failed' && (
                               <Button size="mini" loading={aiRuns[run.run_id]?.loading === 'analysis'}
-                                onClick={() => runAi(run.run_id, 'analysis')}>
+                                onClick={() => runAi(run, 'analysis')}>
                                 AI 分析失败原因
+                              </Button>
+                            )}
+                            {run.status === 'failed' && (
+                              <Button size="mini" loading={aiRuns[run.run_id]?.loading === 'defect'}
+                                onClick={() => runAi(run, 'defect')}>
+                                生成缺陷报告
                               </Button>
                             )}
                             {run.steps?.some((s: StepDetail) => (s as any).request) && (
                               <Button size="mini" loading={aiRuns[run.run_id]?.loading === 'contract'}
-                                onClick={() => runAi(run.run_id, 'contract')}>
+                                onClick={() => runAi(run, 'contract')}>
                                 契约检测
                               </Button>
                             )}
@@ -535,9 +582,19 @@ const Reports: React.FC = () => {
                               {(aiRuns[run.run_id].analysis.result?.suggestions || []).length > 0 && (
                                 <ul style={{ margin: '6px 0 0 18px', fontSize: 13 }}>
                                   {(aiRuns[run.run_id].analysis.result.suggestions || []).map((s: any, i: number) => (
-                                    <li key={i}>{s.action || s.summary || JSON.stringify(s)}</li>
+                                    <li key={i}>
+                                      {s.action || s.summary || JSON.stringify(s)}
+                                      {s.detail ? `：${s.detail}` : ''}
+                                    </li>
                                   ))}
                                 </ul>
+                              )}
+                              {(aiRuns[run.run_id].analysis.result?.evidence || []).length > 0 && (
+                                <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-3)' }}>
+                                  {aiRuns[run.run_id].analysis.result.evidence.map((e: any, i: number) => (
+                                    <div key={i}>证据{i + 1}：{e.ref || e.source} — {e.quote || e.detail || ''}</div>
+                                  ))}
+                                </div>
                               )}
                             </Card>
                           )}
@@ -552,6 +609,31 @@ const Reports: React.FC = () => {
                                   {f.path}：期望 {String(f.expected)}，实际 {String(f.actual)}（{f.kind}）
                                 </div>
                               ))}
+                            </Card>
+                          )}
+                          {aiRuns[run.run_id]?.defect && (
+                            <Card size="small" style={{ marginTop: 8 }} title="缺陷报告草稿"
+                              extra={
+                                <Space size="mini">
+                                  <Button size="mini" onClick={async () => {
+                                    try {
+                                      await navigator.clipboard.writeText(defectTexts[run.run_id] || '');
+                                      Message.success('已复制 Markdown');
+                                    } catch { Message.error('复制失败'); }
+                                  }}>复制 Markdown</Button>
+                                  <Button size="mini" onClick={() => {
+                                    const a = document.createElement('a');
+                                    a.href = `/api/quality/defect-reports/${aiRuns[run.run_id].defect.analysis_id}/evidence.zip`;
+                                    a.download = `defect_${run.run_id}.zip`;
+                                    a.click();
+                                  }}>下载证据包</Button>
+                                </Space>
+                              }>
+                              <Input.TextArea
+                                value={defectTexts[run.run_id] ?? ''}
+                                onChange={(v) => setDefectTexts((prev) => ({ ...prev, [run.run_id]: v }))}
+                                autoSize={{ minRows: 8, maxRows: 20 }}
+                              />
                             </Card>
                           )}
                         </div>
@@ -625,6 +707,61 @@ const Reports: React.FC = () => {
 
       {/* Run Detail Modal */}
       <RunDetail visible={runVisible} run={selectedRun} onClose={() => setRunVisible(false)} />
+
+      <Modal title="失败洞察" visible={insightsVisible} onCancel={() => setInsightsVisible(false)} footer={null} style={{ width: 1000 }}>
+        <Spin loading={insightsLoading}>
+          {insightsData?.result ? (
+            <div>
+              <div style={{ fontSize: 13, marginBottom: 8 }}>
+                窗口 {insightsData.result.window_days} 天 · 失败 {insightsData.result.total_failures} 次 ·
+                {insightsData.result.ai_available ? ' AI 已解释' : ' 仅确定性统计'}
+              </div>
+              <div style={{ fontWeight: 600, margin: '10px 0 6px' }}>问题组（相同失败签名 ≥2 次）</div>
+              <Table
+                rowKey="signature"
+                size="small"
+                pagination={false}
+                data={insightsData.result.groups || []}
+                columns={[
+                  { title: '问题', dataIndex: 'title', render: (_: any, r: any) => r.title || r.summary },
+                  { title: '类型', dataIndex: 'kind_hint', width: 110 },
+                  { title: '运行数', dataIndex: 'run_count', width: 80 },
+                  { title: '用例数', width: 80, render: (_: any, r: any) => (r.case_ids || []).length },
+                  { title: '建议', dataIndex: 'next_action', width: 240 },
+                ]}
+              />
+              <div style={{ fontWeight: 600, margin: '14px 0 6px' }}>单次失败（新出现/未聚类）</div>
+              <Table
+                rowKey="run_id"
+                size="small"
+                pagination={{ pageSize: 8 }}
+                data={insightsData.result.singletons || []}
+                columns={[
+                  { title: '运行', dataIndex: 'run_id', width: 80 },
+                  { title: '用例', dataIndex: 'case_id', width: 80 },
+                  { title: '摘要', dataIndex: 'summary' },
+                  { title: '类型', dataIndex: 'kind_hint', width: 110 },
+                ]}
+              />
+              <div style={{ fontWeight: 600, margin: '14px 0 6px' }}>Flaky 用例</div>
+              <Table
+                rowKey="case_id"
+                size="small"
+                pagination={false}
+                data={insightsData.result.flaky || []}
+                columns={[
+                  { title: '用例', dataIndex: 'case_id', width: 80 },
+                  { title: '运行数', dataIndex: 'runs', width: 80 },
+                  { title: '通过率', dataIndex: 'pass_rate', width: 90 },
+                  { title: '最近失败', dataIndex: 'last_failed_at' },
+                ]}
+              />
+            </div>
+          ) : (
+            <div style={{ color: 'var(--color-text-3)' }}>暂无失败数据</div>
+          )}
+        </Spin>
+      </Modal>
 
       {/* Compare Modal */}
       <Modal title="报告对比" visible={compareVisible} onCancel={() => setCompareVisible(false)} footer={null}>

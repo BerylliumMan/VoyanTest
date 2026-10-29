@@ -129,6 +129,10 @@ export const routes: IRoute[] = [
     key: 'reports',
   },
   {
+    name: 'menu.quality',
+    key: 'quality',
+  },
+  {
     name: 'menu.agents',
     key: 'agents',
   },

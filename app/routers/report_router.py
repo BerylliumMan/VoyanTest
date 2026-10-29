@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from ..database import get_async_db
 from ..auth import require_admin, get_current_user, get_user_project_filter
 from .. import crud
+from .. import db_models
 from ..services import ReportService
 from ..services.report import BatchNotFound, ProjectAccessDenied
 from ..services.report_html import render_batch_report_html
@@ -214,6 +215,8 @@ async def get_run_detail(run_id: int, user=Depends(get_current_user), db: AsyncS
         "run_id": run.id,
         "case_id": run.case_id,
         "case_name": case_name,
+        "case_kind": (await db.get(db_models.TestCase, run.case_id)).case_kind if run.case_id else None,
+        "execution_mode": run.execution_mode,
         "status": run.status,
         "start_time": run.start_time.isoformat() if run.start_time else None,
         "end_time": run.end_time.isoformat() if run.end_time else None,
@@ -358,6 +361,8 @@ async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user
             "run_id": run.id,
             "case_id": run.case_id,
             "case_name": case_name,
+            "case_kind": (case.case_kind if case else None),
+            "execution_mode": run.execution_mode,
             "status": run.status,
             "duration": run.duration,
             "started_at": run.start_time.isoformat() if run.start_time else None,
@@ -394,6 +399,9 @@ async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user
         "passed": batch.passed,
         "failed": batch.failed,
         "dataset_total": getattr(batch, "dataset_total", None),
+        "quarantined_count": getattr(batch, "quarantined_count", 0) or 0,
+        "source": getattr(batch, "source", None),
+        "source_id": getattr(batch, "source_id", None),
         "created_at": batch.created_at.isoformat() if batch.created_at else None,
         "started_at": _batch_started_at.isoformat() if _batch_started_at else None,
         "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,

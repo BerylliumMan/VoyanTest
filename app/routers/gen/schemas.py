@@ -5,7 +5,7 @@ history sub-routers can all reuse the same request/response shapes without
 causing circular imports.
 """
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -23,6 +23,7 @@ class GenStatusResponse(BaseModel):
 
 class GenPreviewItem(BaseModel):
     test_case_id: str
+    draft_id: Optional[int] = None
     module: str
     title: str
     preconditions: str
@@ -31,7 +32,7 @@ class GenPreviewItem(BaseModel):
     priority: str
     selected: bool = True
     validation_errors: str = ""
-    structured_steps: list = []
+    structured_steps: Any = []
 
 
 class GenPreviewResponse(BaseModel):
@@ -101,3 +102,5 @@ class GenTestCaseUpdate(BaseModel):
     expected_result: Optional[str] = None
     priority: Optional[str] = None
     validation_errors: Optional[str] = None
+    # 041：质量评审确认后更新结构化草稿（API 草稿为 dict；UI 草稿为 list）
+    structured_steps: Optional[Any] = None

@@ -34,6 +34,9 @@ class BatchRunRequest(BaseModel):
     dataset_mode: Optional[str] = None  # sequential | random | loop
     loop_count: Optional[int] = None
     dataset_fail_fast: Optional[bool] = None
+    # 042：批次来源（回归计划/套件/定时等自动展开；显式批跑留空）
+    source: Optional[str] = None
+    source_id: Optional[int] = None
 
 
 def validate_delay_ms(value: Optional[int], max_ms: int) -> int:
@@ -62,6 +65,9 @@ class BatchCaseIdsRequest(BaseModel):
     dataset_mode: Optional[str] = None
     loop_count: Optional[int] = None
     dataset_fail_fast: Optional[bool] = None
+    # 042：批次来源
+    source: Optional[str] = None
+    source_id: Optional[int] = None
 
 
 class DebugRunRequest(BaseModel):

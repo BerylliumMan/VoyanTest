@@ -20,8 +20,10 @@ import {
   IconPlayArrow,
   IconPlus,
   IconImport,
+  IconRobot,
 } from '@arco-design/web-react/icon';
 import useTestCaseData from '../../testcases/hooks/useTestCaseData';
+import CaseReviewModal from '@/components/QualityAi/CaseReviewModal';
 
 const { Text } = Typography;
 
@@ -69,6 +71,8 @@ const ApiCasesPage: React.FC = () => {
   const [searchInput, setSearchInput] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([]);
+  const [reviewVisible, setReviewVisible] = useState(false);
+  const [reviewIds, setReviewIds] = useState<number[]>([]);
   const [defModalVisible, setDefModalVisible] = useState(false);
   const [definitions, setDefinitions] = useState<ApiDefinition[]>([]);
   const [selectedDefs, setSelectedDefs] = useState<number[]>([]);
@@ -255,6 +259,13 @@ const ApiCasesPage: React.FC = () => {
           </Button>
           <Button
             size="mini"
+            icon={<IconRobot />}
+            onClick={() => { setReviewIds([record.id]); setReviewVisible(true); }}
+          >
+            评审
+          </Button>
+          <Button
+            size="mini"
             status="danger"
             icon={<IconDelete />}
             onClick={() => Modal.confirm({
@@ -350,6 +361,9 @@ const ApiCasesPage: React.FC = () => {
             <Button type="primary" icon={<IconPlayArrow />} onClick={() => runCases(selectedRowKeys)}>
               批量执行
             </Button>
+            <Button icon={<IconRobot />} onClick={() => { setReviewIds(selectedRowKeys); setReviewVisible(true); }}>
+              AI 评审
+            </Button>
             <Button
               status="danger"
               onClick={() => Modal.confirm({
@@ -436,6 +450,15 @@ const ApiCasesPage: React.FC = () => {
           ]}
         />
       </Modal>
+
+      <CaseReviewModal
+        visible={reviewVisible}
+        projectId={projectId}
+        targetType="case"
+        targetIds={reviewIds}
+        onClose={() => setReviewVisible(false)}
+        onApplied={() => { setReviewVisible(false); fetchData(); }}
+      />
     </div>
   );
 };

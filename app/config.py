@@ -148,6 +148,35 @@ class Settings(BaseSettings):
     api_ai_max_suggestions: int = 10
     # - 单次 AI 调用超时（秒）
     api_ai_timeout_s: int = 60
+    # 041 AI 质量智能：
+    # - 总开关（关闭=所有 /api/quality/* 403，前端隐藏入口；报告/用例/执行零影响）
+    quality_ai_enabled: bool = True
+    # - 单次 AI 调用超时（秒）
+    quality_ai_timeout_s: int = 60
+    # - 用例评审低分确认阈值（0-100；仅提示，不阻断导入）
+    quality_review_low_score: int = 60
+    # - 单次批量评审上限
+    quality_review_batch_max: int = 50
+    # - 失败聚类默认窗口（天）
+    quality_cluster_days: int = 14
+    # - 单次聚类最多失败运行数
+    quality_cluster_max_runs: int = 500
+    # - Flaky 判定最小运行数
+    quality_flaky_min_runs: int = 5
+    # - 缺陷报告证据包上限（MB）
+    quality_evidence_max_mb: int = 100
+    # - 质量 AI 模型输入字符上限
+    quality_ai_max_input_chars: int = 60000
+    # 042 质量决策与治理：
+    quality_impact_enabled: bool = True
+    quality_flaky_enabled: bool = True
+    quality_traceability_enabled: bool = True
+    quality_impact_recent_days: int = 14
+    quality_impact_stale_days: int = 30
+    quality_impact_max_candidates: int = 300
+    quality_flaky_confirm_runs: int = 3
+    quality_flaky_recover_runs: int = 3
+    quality_matrix_max_requirements: int = 500
     # 生成后处理的默认登录账号（留空则自动从需求正文里找「账号：xx / yy」）
     gen_autologin_username: str = ""
     gen_autologin_password: str = ""

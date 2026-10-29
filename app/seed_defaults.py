@@ -25,6 +25,10 @@ from app.gen.api.prompts import (
     API_FAILURE_ANALYSIS_PROMPT,
     API_NL_GENERATE_PROMPT,
     API_STRATEGY_PROMPT,
+    QUALITY_CASE_REVIEW_PROMPT,
+    QUALITY_CLUSTER_PROMPT,
+    QUALITY_DEFECT_PROMPT,
+    QUALITY_UI_FAILURE_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -388,6 +392,34 @@ def get_seed_prompts() -> dict[str, dict]:
             "variables": ["coverage"],
             "description": "基于接口/用例/执行/覆盖率给出补测建议",
         },
+        "quality_ui_failure": {
+            "name": "UI 失败归因",
+            "category": "analysis",
+            "content": QUALITY_UI_FAILURE_PROMPT,
+            "variables": ["evidence"],
+            "description": "UI/客户端失败运行的根因/证据/修复建议（run_logs/截图口径）",
+        },
+        "quality_case_review": {
+            "name": "用例质量评审",
+            "category": "analysis",
+            "content": QUALITY_CASE_REVIEW_PROMPT,
+            "variables": ["cases", "similar_cases"],
+            "description": "草稿/已导入用例的质量评分与问题建议（不直接修改）",
+        },
+        "quality_cluster_explain": {
+            "name": "失败聚类解释",
+            "category": "analysis",
+            "content": QUALITY_CLUSTER_PROMPT,
+            "variables": ["clusters", "flaky"],
+            "description": "解释确定性失败聚类与 Flaky 结果",
+        },
+        "quality_defect_report": {
+            "name": "缺陷报告摘要",
+            "category": "analysis",
+            "content": QUALITY_DEFECT_PROMPT,
+            "variables": ["run", "evidence"],
+            "description": "为缺陷报告生成标题/现象摘要（不编造证据）",
+        },
         "chat_assistant": {
             "name": "对话工作台助手",
             "category": "assistant",
@@ -489,6 +521,11 @@ _CHAT_PROMPT_KEYS = frozenset({"chat_assistant"})
 _API_AI_PROMPT_KEYS = frozenset({
     "api_failure_analysis", "api_nl_generate", "api_data_factory",
     "api_contract_analysis", "api_strategy",
+})
+# 041 AI quality intelligence: product-owned analysis/review prompts.
+_QUALITY_PROMPT_KEYS = frozenset({
+    "quality_ui_failure", "quality_case_review",
+    "quality_cluster_explain", "quality_defect_report",
 })
 _FLOW_AGENT_NAME = "流程手册用例生成助手"
 _UI_AGENT_NAME = "UI自动化用例生成助手"
@@ -593,6 +630,7 @@ async def seed_defaults(db: AsyncSession) -> None:
         | _EXEC_PROMPT_KEYS
         | _CHAT_PROMPT_KEYS
         | _API_AI_PROMPT_KEYS
+        | _QUALITY_PROMPT_KEYS
     )
     non_owned_keys = set(get_seed_prompts()) - owned_keys
     n_drafts = await sync_prompt_templates_from_seed(

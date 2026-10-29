@@ -43,6 +43,8 @@ export function getIconFromKey(key: string): JSX.Element {
       return <IconMessage className={styles.icon} />;
     case 'reports':
       return <IconFile className={styles.icon} />;
+    case 'quality':
+      return <IconSafe className={styles.icon} />;
     case 'agents':
       return <IconRobot className={styles.icon} />;
     case 'recordings':

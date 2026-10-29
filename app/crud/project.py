@@ -19,7 +19,8 @@ async def create_project(db: AsyncSession, project: models.ProjectCreate) -> db_
         description=project.description,
         base_url=project.base_url,
         browser=project.browser,
-        headless=project.headless
+        headless=project.headless,
+        ai_settings=project.ai_settings,
     )
     db.add(db_project)
     try:
@@ -121,6 +122,19 @@ async def delete_project(db: AsyncSession, project_id: int) -> dict[str, str] | 
         await db.execute(delete(ScheduledTaskRun).where(ScheduledTaskRun.run_id.in_(run_id_list)))
         await db.execute(delete(RunLog).where(RunLog.run_id.in_(run_id_list)))
         await db.execute(delete(TestRun).where(TestRun.id.in_(run_id_list)))
+    # 042：质量治理表先于批次/用例删除（存在 last_batch_id/case_id 外键）
+    from app.db_models import (
+        QualityFlakyState, QualityRegressionPlan, QualityRequirement,
+        QualityRequirementLink,
+    )
+    await db.execute(delete(QualityRequirementLink).where(
+        QualityRequirementLink.requirement_id.in_(
+            select(QualityRequirement.id).where(QualityRequirement.project_id == project_id)
+        )
+    ))
+    await db.execute(delete(QualityRequirement).where(QualityRequirement.project_id == project_id))
+    await db.execute(delete(QualityFlakyState).where(QualityFlakyState.project_id == project_id))
+    await db.execute(delete(QualityRegressionPlan).where(QualityRegressionPlan.project_id == project_id))
     if batch_id_list:
         await db.execute(delete(RunBatch).where(RunBatch.id.in_(batch_id_list)))
 

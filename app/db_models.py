@@ -89,3 +89,9 @@ from app.models.chat import (  # noqa: F401
 
 # 040 API testing AI: analysis cache
 from app.models.ai import ApiAiAnalysis  # noqa: F401
+
+# 042 quality decisions: regression plans / flaky states / requirements
+from app.models.quality import (  # noqa: F401
+    QualityRegressionPlan, QualityFlakyState, QualityRequirement,
+    QualityRequirementLink,
+)

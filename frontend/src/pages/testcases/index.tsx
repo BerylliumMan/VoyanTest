@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useHistory, useLocation } from 'react-router-dom';
 import { Button, Modal, Form, Message, Popconfirm, Select, Space, Tag, Switch, Checkbox, Input, InputNumber } from '@arco-design/web-react';
-import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug, IconImport, IconMessage } from '@arco-design/web-react/icon';
+import { IconEdit, IconDelete, IconPlayArrow, IconStar, IconStarFill, IconBug, IconImport, IconMessage, IconRobot } from '@arco-design/web-react/icon';
 import axios from 'axios';
 import { apiGet, apiRequest } from '@/utils/apiRequest';
 import useLocale from '@/utils/useLocale';
@@ -14,6 +14,7 @@ import TestCaseEditor from './components/TestCaseEditor';
 import ModuleEditor from './components/ModuleEditor';
 import BatchMoveCopyModal from './components/BatchMoveCopyModal';
 import EnvironmentManager from './components/EnvironmentManager';
+import CaseReviewModal from '@/components/QualityAi/CaseReviewModal';
 import { toEnvServicesForm, serializeEnvServices } from './utils/envPayload';
 import { hydrateStructuredFromDescription } from './utils/parseInstantStep';
 import {
@@ -69,6 +70,8 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
   const [pageSize, setPageSize] = useState(20);
   const [initCaseFilter, setInitCaseFilter] = useState<'all' | 'init' | 'normal'>('all');
   const [initCases, setInitCases] = useState<TestCase[]>([]);
+  const [reviewVisible, setReviewVisible] = useState(false);
+  const [reviewIds, setReviewIds] = useState<number[]>([]);
   const [batchRunVisible, setBatchRunVisible] = useState(false);
   const [batchRunIncludeInit, setBatchRunIncludeInit] = useState(true);
   // 031（US10）：批次内复用会话（共享 httpx client，cookie 可见；默认关闭）
@@ -406,6 +409,10 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
               <Button type="outline" size="mini" icon={<IconBug />} onClick={() => handleRunDebug(record.id)}>调试</Button>
             </>
           )}
+          <Button type="text" size="mini" icon={<IconRobot />}
+            onClick={() => { setReviewIds([record.id]); setReviewVisible(true); }}
+            aria-label="AI 评审用例" title="AI 评审用例"
+          />
           <Button type="text" size="mini" icon={record.is_init ? <IconStarFill className={styles.initIcon} /> : <IconStar />}
             onClick={() => handleToggleInit(record.id, !record.is_init)}
             aria-label={record.is_init ? '取消初始化' : '标记为初始化'}
@@ -435,6 +442,7 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
     <Button type="outline" onClick={() => openBatchModal('move')}>{t['batch.move']}</Button>
     <Button type="outline" onClick={() => openBatchModal('copy')}>{t['batch.copy']}</Button>
     <Button type="outline" onClick={() => { setSaveSuiteName(''); setSaveSuiteVisible(true); }}>{t['suite.save']}</Button>
+    <Button type="outline" icon={<IconRobot />} onClick={() => { setReviewIds(selectedRowKeys as number[]); setReviewVisible(true); }}>AI 评审</Button>
     {allowBatchRun && (
       <>
         <Button type="primary" icon={<IconPlayArrow />} onClick={() => openBatchRunDialog('server')}>{t['batch.run.server']}</Button>
@@ -675,6 +683,14 @@ const TestCases: React.FC<TestCasesProps> = ({ caseKind = 'ui' }) => {
             </>
           )}
         </Modal>
+      <CaseReviewModal
+        visible={reviewVisible}
+        projectId={selectedProject}
+        targetType="case"
+        targetIds={reviewIds}
+        onClose={() => setReviewVisible(false)}
+        onApplied={() => setReviewVisible(false)}
+      />
       </div>
     </>
   );

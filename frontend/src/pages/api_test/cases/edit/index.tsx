@@ -25,9 +25,11 @@ import {
   IconUp,
   IconDown,
   IconHistory,
+  IconRobot,
 } from '@arco-design/web-react/icon';
 import RequestEditor from '../../definitions/components/RequestEditor';
 import ResponsePanel from '../../definitions/components/ResponsePanel';
+import CaseReviewModal from '@/components/QualityAi/CaseReviewModal';
 import {
   ApiDefinition,
   ApiStep,
@@ -124,6 +126,7 @@ const ApiCaseEditorPage: React.FC = () => {
 
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
+  const [reviewVisible, setReviewVisible] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [moduleId, setModuleId] = useState<number | null>(null);
@@ -375,6 +378,7 @@ const ApiCaseEditorPage: React.FC = () => {
           <Button type="primary" icon={<IconSave />} loading={saving} onClick={() => saveCase(false)}>保存</Button>
           <Button icon={<IconPlayArrow />} loading={saving} onClick={() => saveCase(true)}>保存并执行</Button>
           <Button icon={<IconHistory />} onClick={loadRevisions}>变更记录</Button>
+          <Button icon={<IconRobot />} onClick={() => setReviewVisible(true)}>AI 评审</Button>
           <Select
             style={{ width: 200 }}
             value={environmentId ?? undefined}
@@ -525,6 +529,15 @@ const ApiCaseEditorPage: React.FC = () => {
           ]}
         />
       </Drawer>
+
+      <CaseReviewModal
+        visible={reviewVisible}
+        projectId={projectId}
+        targetType="case"
+        targetIds={Number(params.id) ? [Number(params.id)] : []}
+        onClose={() => setReviewVisible(false)}
+        onApplied={() => setReviewVisible(false)}
+      />
     </div>
   );
 };

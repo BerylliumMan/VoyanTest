@@ -164,6 +164,19 @@ class AgentBridge:
         # 记录本次执行所属的客户端（execution_mode=client:<agent> 用；此前只在回放分支里设置，
         # 导致回放路径写出 client:unknown）
         self._active_agent_id = agent_id or getattr(self, "_active_agent_id", None)
+        self._environment_meta = {}
+        if environment_id:
+            try:
+                from app import crud as _crud
+
+                env = await _crud.get_environment(self.db, environment_id)
+                if env is not None:
+                    self._environment_meta = {
+                        "environment_id": env.id,
+                        "environment_name": env.name,
+                    }
+            except Exception:
+                logger.debug("environment metadata lookup failed", exc_info=True)
         # 037：验证码断点状态装载（meta 存在且开关开 → 头段实时 / 尾段回放）
         try:
             await self._load_breakpoint_state(case_id)
@@ -2138,7 +2151,7 @@ class AgentBridge:
         ar = AgentRun(
             agent_definition_id=self.agent_def.id,
             case_id=case_id,
-            goal=goal,
+            goal={**(goal or {}), **(getattr(self, "_environment_meta", {}) or {})},
             status="running",
             started_at=tz_now(),
         )

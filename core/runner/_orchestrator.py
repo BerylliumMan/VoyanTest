@@ -308,6 +308,15 @@ async def run_test_case_via_agent(
     from app.crud.agent_run import create_agent_run, update_agent_run_status
     from app.models.schemas import AgentRunCreate
 
+    _env_meta = {}
+    if environment_id:
+        try:
+            _env = await crud.get_environment(db, environment_id)
+            if _env is not None:
+                _env_meta = {"environment_id": _env.id, "environment_name": _env.name}
+        except Exception:
+            logger.debug("environment metadata lookup failed", exc_info=True)
+
     run = await create_agent_run(db, AgentRunCreate(
         agent_definition_id=agent_def.id,
         case_id=case_id,
@@ -317,6 +326,7 @@ async def run_test_case_via_agent(
             "batch_id": batch_id,
             "test_run_id": run_id,
             "dataset_group": dataset_group,
+            **_env_meta,
         },
     ))
     await update_agent_run_status(db, run.id, "running")
@@ -780,6 +790,32 @@ async def run_batch_test_cases(
     from core.browser_pool import BrowserPool
     from core.playwright_manager import PlaywrightMCPManager
 
+    # 042：自动展开批次跳过已隔离用例（显式批跑 source 为空，不跳过）
+    _quarantined_skipped = 0
+    if batch_id is not None:
+        try:
+            async with AsyncSessionLocal() as _flaky_db:
+                _batch_row = await crud.get_run_batch(_flaky_db, batch_id)
+                _source = getattr(_batch_row, "source", None) if _batch_row else None
+                from app.services.quality_flaky import filter_auto_cases
+                _case_ids, _skipped = await filter_auto_cases(_flaky_db, case_ids, _source)
+                if _skipped:
+                    _quarantined_skipped = _skipped
+                    case_ids = _case_ids
+                    _batch_row.quarantined_count = _skipped
+                    _batch_row.total_cases = max(0, int(getattr(_batch_row, "total_cases", 0) or 0) - _skipped)
+                    if not case_ids:
+                        from app.tz import now as _tz_now
+                        _batch_row.total_cases = 0
+                        _batch_row.status = "cancelled"
+                        _batch_row.finished_at = _tz_now()
+                    await _flaky_db.commit()
+                    logger.info("批次 %s 跳过已隔离用例 %s 条", batch_id, _skipped)
+        except Exception:
+            logger.warning("Flaky 隔离过滤失败 batch=%s，按原用例继续", batch_id, exc_info=True)
+    if not case_ids and _quarantined_skipped:
+        return []
+
     # 039：在创建批次之前完成数据集预检/展开（避免孤儿批次）
     dataset_plan = None
     dataset_rows: dict[int, list[dict]] = {}
@@ -1158,4 +1194,10 @@ async def run_batch_test_cases(
                 logger.debug("关闭共享 HTTP 客户端失败", exc_info=True)
             _shared_client = None
         if batch_id is not None:
+            try:
+                from app.services.quality_flaky import on_batch_finished
+                async with AsyncSessionLocal() as _quality_db:
+                    await on_batch_finished(_quality_db, batch_id)
+            except Exception:
+                logger.warning("Flaky 恢复回调失败 batch=%s", batch_id, exc_info=True)
             await execution_control.clear_batch(batch_id)

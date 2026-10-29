@@ -103,11 +103,11 @@ async def preview_results(session_id: str, user=Depends(get_current_user),
         fps = [{"id": fp.id, "module": fp.module, "name": fp.name, "category": fp.category, "description": fp.description}
                for fp in row.functional_points] if row.functional_points else []
         tcs = [GenPreviewItem(
-            test_case_id=tc.test_case_id, module=tc.module, title=tc.title,
+            test_case_id=tc.test_case_id, draft_id=getattr(tc, "id", None),
+            module=tc.module, title=tc.title,
             preconditions=tc.preconditions, test_steps=tc.test_steps,
             expected_result=tc.expected_result, priority=tc.priority,
-            structured_steps=list(tc.structured_steps or [])
-            if isinstance(getattr(tc, "structured_steps", None), list) else [],
+            structured_steps=getattr(tc, "structured_steps", None) or [],
         ) for tc in row.test_cases] if row.test_cases else []
         return GenPreviewResponse(
             session_id=session_id,
@@ -130,14 +130,14 @@ async def preview_results(session_id: str, user=Depends(get_current_user),
     tcs = [
         GenPreviewItem(
             test_case_id=tc.test_case_id,
+            draft_id=getattr(tc, "id", None),
             module=tc.module,
             title=tc.title,
             preconditions=tc.preconditions,
             test_steps=tc.test_steps,
             expected_result=tc.expected_result,
             priority=tc.priority,
-            structured_steps=list(getattr(tc, "structured_steps", None) or [])
-            if isinstance(getattr(tc, "structured_steps", None), list) else [],
+            structured_steps=getattr(tc, "structured_steps", None) or [],
         )
         for tc in session.test_cases
     ]

@@ -38,6 +38,7 @@ interface FunctionalPoint {
 
 interface TestCase {
   test_case_id: string;
+  draft_id?: number;
   module: string;
   title: string;
   preconditions: string;
@@ -181,6 +182,15 @@ const GenHistoryDetailPage: React.FC = () => {
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editForm] = Form.useForm();
   const [editSubmitting, setEditSubmitting] = useState(false);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewResult, setReviewResult] = useState<any>(null);
+  const [reviewVisible, setReviewVisible] = useState(false);
+  const [reviewLowAck, setReviewLowAck] = useState(false);
+  const [applyVisible, setApplyVisible] = useState(false);
+  const [applyItem, setApplyItem] = useState<any>(null);
+  const [applyName, setApplyName] = useState('');
+  const [applySteps, setApplySteps] = useState('');
+  const [applyLoading, setApplyLoading] = useState(false);
   const [editSteps, setEditSteps] = useState<Step[]>([]);
   const [copiedStep, setCopiedStep] = useState<Step | null>(null);
   const [viewMode, setViewMode] = useState<'summary' | 'cases'>('summary');
@@ -272,7 +282,110 @@ const GenHistoryDetailPage: React.FC = () => {
       .catch(() => setProjectModules([]));
   }, [selectedProjectId]);
 
+  const openApply = (item: any) => {
+    setApplyItem(item);
+    setApplyName(item.name || '');
+    const found = previewData?.test_cases.find(
+      (tc) => (item.target_type === 'draft' ? tc.draft_id === item.target_id : tc.test_case_id === String(item.target_id)),
+    );
+    setApplySteps(found?.test_steps || '');
+    setApplyVisible(true);
+  };
+
+  const submitApply = async () => {
+    if (!reviewResult?.analysis_id || !applyItem) return;
+    setApplyLoading(true);
+    try {
+      await axios.post(`/api/quality/case-reviews/${reviewResult.analysis_id}/apply`, {
+        target_type: applyItem.target_type,
+        target_id: applyItem.target_id,
+        base_hash: applyItem.base_hash,
+        name: applyName,
+        test_steps: applySteps,
+      });
+      Message.success('已应用评审建议');
+      setApplyVisible(false);
+      const res = await axios.get(`/api/gen/history/${id}`);
+      setPreviewData(res.data);
+    } catch (err: any) {
+      Message.error(err?.response?.data?.detail || '应用失败');
+    } finally {
+      setApplyLoading(false);
+    }
+  };
+
+  const handleReview = async () => {
+    if (!selectedProjectId) {
+      Message.warning('请先选择项目');
+      return;
+    }
+    if (!previewData) {
+      Message.warning('暂无可评审的用例');
+      return;
+    }
+    const selected = previewData.test_cases.filter((tc) =>
+      selectedRowKeys.length === 0 || selectedRowKeys.includes(tc.test_case_id),
+    );
+    const targetIds = selected.map((tc) => tc.draft_id).filter((v): v is number => typeof v === 'number');
+    if (targetIds.length === 0) {
+      Message.warning('当前页面没有可评审的草稿（请从生成历史进入）');
+      return;
+    }
+    setReviewLoading(true);
+    setReviewLowAck(false);
+    try {
+      const res = await axios.post('/api/quality/case-reviews', {
+        project_id: selectedProjectId,
+        target_type: 'draft',
+        target_ids: targetIds,
+      });
+      let result = res.data?.result;
+      let analysisId = res.data?.analysis_id;
+      if (res.status === 202 && res.data?.task_id) {
+        const taskId = res.data.task_id;
+        for (let i = 0; i < 120; i += 1) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const task = await axios.get(`/api/quality/tasks/${taskId}`);
+          if (task.data.status === 'completed') {
+            result = task.data.result;
+            analysisId = task.data.analysis_id;
+            break;
+          }
+          if (task.data.status === 'failed' || task.data.status === 'stopped') {
+            throw new Error(task.data.error || '评审任务已停止');
+          }
+        }
+      }
+      if (!result) {
+        Message.error('评审未返回结果');
+        return;
+      }
+      setReviewResult({ ...result, analysis_id: analysisId });
+      setReviewVisible(true);
+    } catch (err: any) {
+      Message.error(err?.response?.data?.detail || 'AI 评审失败');
+    } finally {
+      setReviewLoading(false);
+    }
+  };
+
   const handleImport = async (mode: 'all' | 'selected' | 'module') => {
+    const lowItems = (reviewResult?.items || []).filter(
+      (it: any) => typeof it.score === 'number' && it.score < (reviewResult?.low_score_threshold || 60),
+    );
+    if (lowItems.length > 0 && !reviewLowAck) {
+      Modal.confirm({
+        title: '存在低分用例',
+        content: `${lowItems.length} 条用例评分低于 ${reviewResult?.low_score_threshold || 60} 分，仍要导入吗？`,
+        okText: '仍然导入',
+        cancelText: '返回修改',
+        onOk: () => {
+          setReviewLowAck(true);
+          handleImport(mode);
+        },
+      });
+      return;
+    }
     if (!selectedProjectId) {
       Message.warning('请先选择项目');
       return;
@@ -781,6 +894,15 @@ const GenHistoryDetailPage: React.FC = () => {
                 </>
               )}
               <Button
+                type="primary"
+                status="warning"
+                loading={reviewLoading}
+                disabled={!selectedProjectId}
+                onClick={handleReview}
+              >
+                AI 评审
+              </Button>
+              <Button
                 icon={<IconDownload />}
                 onClick={() => {
                   const a = document.createElement('a');
@@ -879,6 +1001,82 @@ const GenHistoryDetailPage: React.FC = () => {
           </>
         )}
       </Card>
+
+      <Modal
+        title="AI 用例评审"
+        visible={reviewVisible}
+        onCancel={() => setReviewVisible(false)}
+        footer={<Button onClick={() => setReviewVisible(false)}>关闭</Button>}
+        style={{ width: 960 }}
+      >
+        <div style={{ fontSize: 13, marginBottom: 8 }}>
+          {reviewResult?.summary || '暂无评审结果'}
+        </div>
+        <Table
+          rowKey={(r: any) => `${r.target_type}-${r.target_id}`}
+          size="small"
+          pagination={{ pageSize: 10 }}
+          data={reviewResult?.items || []}
+          columns={[
+            { title: '用例', dataIndex: 'name' },
+            {
+              title: '评分',
+              dataIndex: 'score',
+              width: 90,
+              render: (v: number) => (
+                <Tag color={v < (reviewResult?.low_score_threshold || 60) ? 'red' : v < 80 ? 'orange' : 'green'}>
+                  {v}
+                </Tag>
+              ),
+            },
+            {
+              title: '问题与建议',
+              render: (_: any, r: any) => (
+                <div>
+                  {(r.issues || []).map((issue: any, idx: number) => (
+                    <div key={idx} style={{ fontSize: 12, marginBottom: 4 }}>
+                      <Tag size="small" color={issue.severity === 'high' ? 'red' : issue.severity === 'medium' ? 'orange' : 'gray'}>
+                        {issue.type}
+                      </Tag>
+                      {issue.detail}
+                      {issue.suggestion ? <span style={{ color: 'var(--color-text-3)' }}> → {issue.suggestion}</span> : null}
+                    </div>
+                  ))}
+                </div>
+              ),
+            },
+            {
+              title: '操作',
+              width: 90,
+              render: (_: any, r: any) => (
+                <Button size="mini" onClick={() => openApply(r)}>应用修改</Button>
+              ),
+            },
+          ]}
+        />
+      </Modal>
+
+      <Modal
+        title="应用评审建议"
+        visible={applyVisible}
+        onCancel={() => setApplyVisible(false)}
+        onOk={submitApply}
+        confirmLoading={applyLoading}
+        okText="确认并保存"
+        cancelText="取消"
+      >
+        <Form layout="vertical">
+          <FormItem label="用例名称">
+            <Input value={applyName} onChange={setApplyName} />
+          </FormItem>
+          <FormItem label="步骤（编号文本）">
+            <Input.TextArea value={applySteps} onChange={setApplySteps} autoSize={{ minRows: 8, maxRows: 20 }} />
+          </FormItem>
+          <div style={{ fontSize: 12, color: 'var(--color-text-3)' }}>
+            未点击「确认并保存」前不会写入；保存后可在生成历史中查看。
+          </div>
+        </Form>
+      </Modal>
 
       <Modal
         title="编辑测试用例"
