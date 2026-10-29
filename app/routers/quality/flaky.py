@@ -5,9 +5,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud
+from app import crud, db_models
 from app.auth import get_current_user, log_audit
 from app.database import get_async_db
 from app.routers.quality.common import ensure_capability
@@ -32,8 +33,18 @@ async def list_flaky(project_id: int, status: Optional[str] = None,
     rows = await quality_flaky.crud_quality_list(db, project_id)
     if status:
         rows = [r for r in rows if r.status == status]
+    # 列表需要展示用例名称；一次性批量查询，避免逐行 N+1
+    case_ids = [r.case_id for r in rows]
+    names: dict[int, str] = {}
+    if case_ids:
+        res = await db.execute(
+            select(db_models.TestCase.id, db_models.TestCase.name)
+            .where(db_models.TestCase.id.in_(case_ids))
+        )
+        names = {int(cid): name for cid, name in res.all()}
     return {"items": [{
-        "case_id": r.case_id, "status": r.status, "sample_runs": r.sample_runs,
+        "case_id": r.case_id, "name": names.get(int(r.case_id)) or f"#{r.case_id}",
+        "status": r.status, "sample_runs": r.sample_runs,
         "passed": r.passed, "failed": r.failed,
         "pass_rate": round((r.passed / (r.passed + r.failed)) * 100, 1)
         if (r.passed + r.failed) else None,

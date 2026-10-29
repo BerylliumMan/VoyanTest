@@ -128,3 +128,93 @@ async def test_flaky_endpoints_404_and_list(client, db, admin_cookies):
         json={"reason": "test"}, cookies=admin_cookies,
     )
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_regression_plan_patch(client, db, admin_cookies):
+    project = await _project(db)
+    case = await _case(db, project)
+    created = client.post(
+        "/api/quality/regression-plans",
+        json={"project_id": project.id, "name": "原名", "items": [{"case_id": case.id}]},
+        cookies=admin_cookies,
+    )
+    assert created.status_code == 200, created.text
+    plan_id = created.json()["id"]
+
+    patched = client.patch(
+        f"/api/quality/regression-plans/{plan_id}",
+        json={"name": "新名", "description": "说明"}, cookies=admin_cookies,
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["name"] == "新名"
+    assert patched.json()["description"] == "说明"
+
+    empty = client.patch(
+        f"/api/quality/regression-plans/{plan_id}", json={"items": []}, cookies=admin_cookies,
+    )
+    assert empty.status_code == 400
+    bad = client.patch(
+        f"/api/quality/regression-plans/{plan_id}",
+        json={"items": [{"case_id": 999999}]}, cookies=admin_cookies,
+    )
+    assert bad.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_quality_overview(client, db, admin_cookies):
+    project = await _project(db)
+    await _case(db, project)
+    resp = client.get(
+        f"/api/quality/overview?project_id={project.id}", cookies=admin_cookies,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["total_cases"] == 1
+    assert data["unlinked_cases"] == 1
+    assert data["runs_14d"] == 0
+    assert data["pass_rate_14d"] is None
+
+
+@pytest.mark.asyncio
+async def test_flaky_list_includes_case_name(client, db, admin_cookies):
+    project = await _project(db)
+    case = await _case(db, project, "Flaky 展示用例")
+    db.add(db_models.QualityFlakyState(
+        project_id=project.id, case_id=case.id, status="candidate",
+        sample_runs=5, passed=3, failed=2,
+    ))
+    await db.commit()
+    resp = client.get(f"/api/quality/flaky?project_id={project.id}", cookies=admin_cookies)
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["name"] == "Flaky 展示用例"
+
+
+@pytest.mark.asyncio
+async def test_requirement_links_list_and_unlink(client, db, admin_cookies):
+    project = await _project(db)
+    case = await _case(db, project, "关联展示用例")
+    created = client.post(
+        "/api/quality/requirements",
+        json={"project_id": project.id, "name": "需求A"}, cookies=admin_cookies,
+    )
+    req_id = created.json()["id"]
+    linked = client.post(
+        f"/api/quality/requirements/{req_id}/links",
+        json={"case_ids": [case.id]}, cookies=admin_cookies,
+    )
+    assert linked.status_code == 200, linked.text
+    listed = client.get(
+        f"/api/quality/requirements/{req_id}/links", cookies=admin_cookies,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"][0]["name"] == "关联展示用例"
+    unlinked = client.delete(
+        f"/api/quality/requirements/{req_id}/links/{case.id}", cookies=admin_cookies,
+    )
+    assert unlinked.status_code == 200
+    assert client.get(
+        f"/api/quality/requirements/{req_id}/links", cookies=admin_cookies,
+    ).json()["items"] == []

@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, db_models
@@ -134,6 +135,32 @@ async def link_cases(requirement_id: int, body: LinkRequest,
     await log_audit(db, getattr(user, "id", None), "quality.requirement_link",
                     details={"requirement_id": requirement_id, "count": count})
     return {"requirement_id": requirement_id, "linked": count}
+
+
+@router.get("/requirements/{requirement_id}/links")
+async def list_links(requirement_id: int, user=Depends(get_current_user),
+                     db: AsyncSession = Depends(get_async_db)) -> dict:
+    row = await crud_quality().get_requirement(db, requirement_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="需求不存在")
+    await ensure_capability(db, user, row.project_id, "traceability")
+    links = (await db.execute(
+        select(db_models.QualityRequirementLink)
+        .where(db_models.QualityRequirementLink.requirement_id == requirement_id)
+    )).scalars().all()
+    case_ids = [int(l.case_id) for l in links]
+    names: dict[int, dict] = {}
+    if case_ids:
+        rows = await db.execute(
+            select(db_models.TestCase.id, db_models.TestCase.name, db_models.TestCase.case_kind)
+            .where(db_models.TestCase.id.in_(case_ids))
+        )
+        names = {int(i): {"name": n, "case_kind": k or "ui"} for i, n, k in rows.all()}
+    return {"items": [{
+        "case_id": int(l.case_id),
+        "name": names.get(int(l.case_id), {}).get("name") or f"#{l.case_id}",
+        "case_kind": names.get(int(l.case_id), {}).get("case_kind", l.case_kind or "ui"),
+    } for l in links]}
 
 
 @router.delete("/requirements/{requirement_id}/links/{case_id}")
