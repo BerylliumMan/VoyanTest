@@ -1997,7 +1997,9 @@ class AgentClient:
         try:
             text = "(page not available)"
             if not self._mcp_process_alive():
-                if self._run_in_progress():
+                active = self._active_run_id
+                same_run = bool(active) and run_id == active
+                if same_run:
                     recovered = await self._recover_mcp_keeping_chrome(
                         "Snapshot: MCP dead mid-run"
                     )
@@ -2007,6 +2009,17 @@ class AgentClient:
                             "Snapshot: MCP/browser dead mid-run"
                         )
                 else:
+                    # 不是当前 run（例如上一次执行/探索的 active run 残留、浏览器已死）：
+                    # 清理残留状态并恢复会话，否则新的 browse/执行永远开不起浏览器。
+                    if active and active != run_id:
+                        self._log_warning(
+                            f"Snapshot: stale active run {active} with dead MCP — "
+                            f"clearing and recovering for {run_id}"
+                        )
+                        self._active_run_id = None
+                        self._active_step_order = None
+                        self._active_backend = None
+                        self._emit_status('idle')
                     # Idle between runs — recover so the next case can start
                     try:
                         shared = self._exec_cdp_http is not None

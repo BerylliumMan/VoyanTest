@@ -1,8 +1,9 @@
 # core/chat/prompts.py
 # 034/035 对话工作台：助手系统提示词（产品属主，随种子同步到 DB；此处为唯一文本源）。
 #
-# 035 起：可用工具清单由注册表（core/tools/registry.py）生成（FR-013 单一来源），
-# 不再手写动作枚举；JSON 决策契约降级为"无法调用工具时"的兼容协议（C7）。
+# 035 起：可用工具清单由注册表（core/tools/registry.py）生成（FR-013 单一来源）。
+# 044 起：拆为稳定段（身份/职责/硬规则）与动态段（工具清单/计划状态/记忆索引），
+#         `CHAT_ASSISTANT_PROMPT` 仍按原文顺序拼接，保证 DB 种子与旧调用不变。
 
 
 def _tools_section() -> str:
@@ -21,7 +22,7 @@ def _tools_section() -> str:
         return "（工具清单将在运行时提供）"
 
 
-CHAT_ASSISTANT_PROMPT = """你是 VoyanTest 平台的「智能体对话工作台」助手，帮助用户在一个对话内完成测试用例的生成、修改与执行。
+STABLE_HEAD = """你是 VoyanTest 平台的「智能体对话工作台」助手，帮助用户在一个对话内完成测试用例的生成、修改与执行。
 
 【职责范围 — 严格遵守】
 仅处理：测试用例生成（功能/UI）、用例修改、用例执行与结果解读、失败原因分析。
@@ -33,15 +34,10 @@ CHAT_ASSISTANT_PROMPT = """你是 VoyanTest 平台的「智能体对话工作台
 - 当前草稿集状态（如存在：草稿 id/标题清单）。
 
 【工作方式 — 优先工具调用（function calling）】
-执行操作时优先通过工具调用完成：每轮可以调用一个或多个工具，收到工具结果后继续决策，任务完成后给出最终中文回复。
-可用工具（与实际执行能力严格一致）：
-""" + _tools_section() + """
+执行操作时优先通过工具调用完成：每轮可以调用一个或多个工具，收到工具结果后继续决策，任务完成后给出最终中文回复。"""
 
-工具使用要点：
-- 只读工具可并行调用；变更/执行类工具按顺序调用，不要一轮内堆叠多个变更动作；
-- 变更类工具的产物是"草稿/对照/提议"：落库需用户在界面确认；在工具结果返回前禁止声称"已完成/已导入/已开始"；
-- 禁止编造 id：只能使用上下文与工具结果中真实存在的对象；不确定时先追问或先查询。
 
+STABLE_TAIL = """
 【降级协议 — 仅当无法调用工具时使用】
 如果你的运行环境无法进行工具调用，则改为只输出一个 JSON 对象（不要输出任何其他文字、不要用代码块包裹）：
 {
@@ -88,3 +84,62 @@ CHAT_ASSISTANT_PROMPT = """你是 VoyanTest 平台的「智能体对话工作台
 - 修改类操作必须给出可读的变更摘要；
 - 证据不足时明确说明"证据不足/无法归因"，禁止臆造原因；若需要更多证据才能下结论，可先用 run_script 工具取证（只读查库/调接口/平台查询），再把脚本实际输出作为依据回答（引用输出中的具体值）；
 - 回复简洁、可操作，使用中文。"""
+
+
+def stable_prompt() -> str:
+    """稳定段：身份、职责与工作方式开头（不含工具清单与动作映射）。"""
+    return STABLE_HEAD
+
+
+def dynamic_prompt(
+    *,
+    tools_md: str,
+    plan_active: bool = False,
+    memory_index: str = "",
+    plan_available: bool = True,
+) -> str:
+    """动态段：工具清单、工具使用要点、计划模式状态、记忆索引。"""
+    parts = [
+        "可用工具（与实际执行能力严格一致）：\n" + (tools_md or "（工具清单将在运行时提供）"),
+        "工具使用要点：\n"
+        "- 只读工具可并行调用；变更/执行类工具按顺序调用，不要一轮内堆叠多个变更动作；\n"
+        "- 变更类工具的产物是\"草稿/对照/提议\"：落库需用户在界面确认；在工具结果返回前禁止声称\"已完成/已导入/已开始\"；\n"
+        "- 禁止编造 id：只能使用上下文与工具结果中真实存在的对象；不确定时先追问或先查询。",
+    ]
+    if plan_available and not plan_active:
+        parts.append(
+            "【计划模式使用建议】\n"
+            "- 遇到多步、跨对象、需要先查后改的任务，先调用 enter_plan_mode 产出计划；\n"
+            "- 用户明确要求「先计划」「别急着改」时直接进入计划模式；\n"
+            "- 单步查询或明确的小改动不要进入计划模式。"
+        )
+    if plan_active:
+        parts.append(
+            "【计划模式 — 当前激活】\n"
+            "- 阶段：理解 → 设计 → 复查 → 批准；计划模式下只读工具可用，不执行写操作；\n"
+            "- 每个回合必须以 ask_user_question 或 exit_plan_mode 结束，不允许只输出文本等待；\n"
+            "- 计划完成后调用 exit_plan_mode 提交计划，等待用户批准再执行。"
+        )
+    if memory_index:
+        parts.append("【项目记忆索引】\n" + memory_index)
+    return "\n\n".join(parts) + STABLE_TAIL
+
+
+def build_system_messages(stable: str, dynamic: str) -> list[dict]:
+    """把提示词拆成两条 system 消息（稳定前缀 + 动态段）。"""
+    return [
+        {"role": "system", "content": stable},
+        {"role": "system", "content": dynamic},
+    ]
+
+
+def compose_prompt(*, tools_md: str | None = None, plan_active: bool = False,
+                   memory_index: str = "") -> str:
+    """按原文顺序拼接完整提示词（稳定头 + 动态段 + 稳定尾）。"""
+    tools = _tools_section() if tools_md is None else tools_md
+    return STABLE_HEAD + "\n\n" + dynamic_prompt(
+        tools_md=tools, plan_active=plan_active, memory_index=memory_index
+    )
+
+
+CHAT_ASSISTANT_PROMPT = compose_prompt()

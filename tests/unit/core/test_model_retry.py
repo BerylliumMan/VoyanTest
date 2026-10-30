@@ -16,7 +16,7 @@ from app.gen import model_client
 @pytest.fixture(autouse=True)
 def _no_pacing(monkeypatch):
     monkeypatch.setattr(model_client, "_LLM_MIN_INTERVAL", 0)
-    monkeypatch.setattr(model_client, "_last_call_ts", 0.0)
+    monkeypatch.setattr(model_client, "_last_call_ts", {})
 
 
 class FakeResp:

@@ -273,6 +273,24 @@ class ServerBrowser:
             return []
 
 
+def _looks_like_stale_client_session(res) -> bool:
+    """客户端返回「MCP 未启动 / 浏览器被关」时，多半是残留 active run 导致。"""
+    if not isinstance(res, dict):
+        return False
+    if res.get("success") is not False:
+        return False
+    text = str(res.get("error") or res.get("text") or "").lower()
+    return any(
+        key in text
+        for key in (
+            "mcp subprocess not started",
+            "browser not ready",
+            "browser closed",
+            "客户端浏览器启动失败",
+        )
+    )
+
+
 class ClientBrowser:
     """客户端 Agent 浏览器（用户机器上，默认有头可见；经 WS 逐条驱动）。"""
 
@@ -290,16 +308,35 @@ class ClientBrowser:
 
         客户端 observe/act 不会拉起 MCP（只有 run_start / get_snapshot 会），
         因此探索前必须先经 get_snapshot 完成冷启动（2026-10-10 实测修复）。
+
+        044：客户端若残留上一次执行的 active run（浏览器已关），会把本次探索
+        误判为「运行中浏览器死亡」而永久 abort。这里在失败后补发 RUN_END
+        清理残留状态，再重试一次——无需升级客户端。
         """
+        res = await self._snapshot_start()
+        if _looks_like_stale_client_session(res):
+            logger.warning(
+                "客户端会话残留（%s），清理后重试一次", str((res or {}).get("error"))[:120]
+            )
+            try:
+                await self._manager.send(
+                    self._agent, {"type": "run_end", "run_id": self._run_id}
+                )
+            except Exception:
+                logger.debug("send run_end cleanup failed", exc_info=True)
+            await asyncio.sleep(0.5)
+            res = await self._snapshot_start()
+        if isinstance(res, dict) and res.get("success") is False:
+            raise RuntimeError(f"客户端浏览器启动失败: {res.get('error') or '未知错误'}")
+
+    async def _snapshot_start(self) -> dict:
         try:
-            res = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self._manager.send_get_snapshot(self._agent, self._run_id),
                 timeout=120,
             )
         except Exception as exc:
             raise RuntimeError(f"客户端浏览器启动失败: {exc}") from exc
-        if isinstance(res, dict) and res.get("success") is False:
-            raise RuntimeError(f"客户端浏览器启动失败: {res.get('error') or '未知错误'}")
 
     async def stop(self) -> None:
         return None

@@ -14,8 +14,27 @@ def _attr(msg, name, default=None):
     return getattr(msg, name, default)
 
 
-def message_text(msg) -> str:
-    """从 ORM 消息或 dict 提取注入文本（含引用与卡片一行摘要）。"""
+def tool_events_digest(msg, *, max_items: int = 5, max_chars: int = 1200) -> str:
+    """把历史轮次的工具调用结论压成一段，供下一轮模型复用（044）。
+
+    只回注摘要，不回注原始 data；取最近 max_items 条，整体截到 max_chars。
+    """
+    actions = _attr(msg, "actions", None) or []
+    lines: list[str] = []
+    per_item = max(80, max_chars // max(1, max_items))
+    for a in actions[-max_items:]:
+        if not isinstance(a, dict) or a.get("type") != "tool":
+            continue
+        status = "ok" if a.get("status") == "ok" else "failed"
+        summary = str(a.get("summary") or "").strip()[:per_item]
+        lines.append(f"- {a.get('tool')}({status}): {summary}")
+    if not lines:
+        return ""
+    return ("【上一轮工具结果】\n" + "\n".join(lines))[:max_chars]
+
+
+def message_text(msg, *, include_tool_events: bool = True) -> str:
+    """从 ORM 消息或 dict 提取注入文本（含引用、工具事件与卡片一行摘要）。"""
     content = (_attr(msg, "content") or "")[:MAX_MESSAGE_CHARS]
     refs = _attr(msg, "refs", None) or []
     lines = []
@@ -33,6 +52,10 @@ def message_text(msg) -> str:
             lines.append(f"- {r.get('type')}#{r.get('id')} {r.get('label') or ''}".rstrip())
     if lines:
         content += "\n【引用】\n" + "\n".join(lines)
+    if include_tool_events:
+        events = tool_events_digest(msg)
+        if events:
+            content = (content + "\n" + events).strip()
     digest = cards_digest(_attr(msg, "cards") or [])
     if digest:
         return (content + "\n" + digest).strip()
@@ -142,8 +165,13 @@ def build_llm_messages(
     environments=None,
     suites=None,
     settings_block: str | None = None,
+    system_messages: list[dict] | None = None,
 ) -> list[dict]:
-    """组装发给 LLM 的 messages（system 注入上下文块 + 历史消息）。"""
+    """组装发给 LLM 的 messages（system 注入上下文块 + 历史消息）。
+
+    044：传入 ``system_messages`` 时使用分层 system（稳定段 + 动态段），
+    上下文块追加到最后一条 system；否则保持原有单条 system 行为。
+    """
     system = system_prompt or ""
     ctx_parts = []
     if project_name:
@@ -163,9 +191,14 @@ def build_llm_messages(
         ctx_parts.append(draft_digest)
     if summary:
         ctx_parts.append(f"【较早对话摘要】\n{summary}")
-    if ctx_parts:
-        system = system + "\n\n" + "\n\n".join(ctx_parts)
-    out = [{"role": "system", "content": system}]
+    if system_messages:
+        out = [dict(m) for m in system_messages]
+        if ctx_parts:
+            out[-1]["content"] = str(out[-1].get("content") or "") + "\n\n" + "\n\n".join(ctx_parts)
+    else:
+        if ctx_parts:
+            system = system + "\n\n" + "\n\n".join(ctx_parts)
+        out = [{"role": "system", "content": system}]
     for m in messages:
         role = _attr(m, "role", "user")
         role = "assistant" if role == "assistant" else "user"

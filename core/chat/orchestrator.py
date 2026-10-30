@@ -14,7 +14,7 @@ from typing import Awaitable, Callable, Optional
 
 from app.config import get_settings
 from app.crud import chat as chat_crud
-from core.chat import contracts, context
+from core.chat import budget, contracts, context, plan_mode
 from core.chat.events import emit
 
 logger = logging.getLogger(__name__)
@@ -127,9 +127,25 @@ async def resolve_system_prompt(db, conversation, *, agent_id=None) -> str:
     return CHAT_ASSISTANT_PROMPT
 
 
+def _merge_summary(existing: str | None, chunk: str, *, max_chars: int = 8000) -> str:
+    """合并摘要：超限时丢弃最旧部分，保证最新 chunk 完整保留。
+
+    修复前是 `(旧 + 新)[:8000]`，超限时被截掉的是刚生成的新摘要尾部。
+    """
+    chunk = (chunk or "").strip()
+    if not existing:
+        return chunk[:max_chars]
+    room = max_chars - len(chunk) - 1
+    if room <= 0:
+        return chunk[:max_chars]
+    return (existing[-room:] + "\n" + chunk).strip()
+
+
 async def _maybe_update_summary(db, conversation, messages, llm) -> tuple[Optional[str], list]:
     """超预算时增量摘要较早消息；返回 (summary, 供注入的消息列表)。"""
     settings = get_settings()
+    if not getattr(settings, "chat_compact_enabled", True):
+        return conversation.summary, list(messages)
     max_chars = int(getattr(settings, "chat_context_max_chars", 24000) or 24000)
     keep = int(getattr(settings, "chat_summary_keep_messages", 12) or 12)
     try:
@@ -140,7 +156,11 @@ async def _maybe_update_summary(db, conversation, messages, llm) -> tuple[Option
     except Exception:
         pass
     total = context.estimate_context_chars(messages)
-    if total <= max_chars:
+    total_tokens = sum(
+        budget.estimate_tokens(context.message_text(m)) for m in messages
+    )
+    budget_tokens = budget.resolve_context_budget_tokens(settings=settings)
+    if total <= max_chars and total_tokens <= budget_tokens:
         return conversation.summary, list(messages)
     older, recent = context.split_for_summary(messages, keep)
     if not older:
@@ -150,7 +170,7 @@ async def _maybe_update_summary(db, conversation, messages, llm) -> tuple[Option
     if not to_summarize:
         return conversation.summary, recent
     chunk = await context.summarize_history(llm, to_summarize)
-    merged = ((conversation.summary + "\n" if conversation.summary else "") + chunk).strip()[:8000]
+    merged = _merge_summary(conversation.summary, chunk)
     last_id = int(context._attr(to_summarize[-1], "id", 0) or 0)
     await chat_crud.update_conversation(
         db, conversation, summary=merged or None,
@@ -237,10 +257,70 @@ async def _conversation_settings_block(db, conversation) -> Optional[str]:
         return None
 
 
+def _system_messages(system_prompt: str, plan_state) -> Optional[list[dict]]:
+    """044：内置提示词启用稳定/动态分层；用户自定义模板保持单条。"""
+    from core.chat import prompts
+
+    if (system_prompt or "").strip() != prompts.CHAT_ASSISTANT_PROMPT.strip():
+        return None
+    if not getattr(get_settings(), "chat_plan_mode_enabled", True) and plan_state.active:
+        plan_active = False
+    else:
+        plan_active = bool(getattr(plan_state, "active", False))
+    return prompts.build_system_messages(
+        prompts.stable_prompt(),
+        prompts.dynamic_prompt(
+            tools_md=prompts._tools_section(),
+            plan_active=plan_active,
+            plan_available=bool(getattr(get_settings(), "chat_plan_mode_enabled", True)),
+        ),
+    )
+
+
+def _memory_block(conversation, messages) -> Optional[str]:
+    """044 US4：项目记忆索引 + 与当前问题相关的少量召回。"""
+    settings = get_settings()
+    if not getattr(settings, "chat_memory_enabled", False):
+        return None
+    pid = getattr(conversation, "project_id", None)
+    if not pid:
+        return None
+    from core.chat import memory as mem
+
+    index = mem.load_index(pid)
+    if not index:
+        return None
+    parts = ["【项目记忆索引】", index]
+    last_user = ""
+    for m in reversed(list(messages)):
+        if context._attr(m, "role", "") == "user":
+            last_user = context.message_text(m, include_tool_events=False)
+            break
+    hits = mem.recall(pid, last_user, limit=3) if last_user else []
+    if hits:
+        parts.append("【相关记忆】")
+        for e in hits:
+            parts.append(f"- [{e.name}] {e.description}\n  {(e.body or '')[:800]}")
+    return "\n".join(parts)
+
+
 async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None) -> list[dict]:
     summary, inject_messages = await _maybe_update_summary(db, conversation, messages, llm)
     draft_digest = _active_draft_digest(inject_messages)
     system_prompt = await resolve_system_prompt(db, conversation, agent_id=agent_id)
+    # 044 US2：计划模式下注入阶段提醒（每 5 轮一次），并推进轮次计数
+    plan_state = plan_mode.load_plan_state(getattr(conversation, "refs", None))
+    plan_block: Optional[str] = None
+    if plan_state.active:
+        if plan_mode.should_remind(plan_state):
+            plan_block = plan_mode.plan_reminder(plan_state)
+        plan_state.turn += 1
+        new_refs = plan_mode.dump_plan_state(getattr(conversation, "refs", None), plan_state)
+        conversation.refs = new_refs
+        try:
+            await chat_crud.update_conversation(db, conversation, refs=new_refs)
+        except Exception:
+            logger.debug("persist plan state failed", exc_info=True)
     project_name = None
     environments = None
     if getattr(conversation, "project_id", None):
@@ -283,7 +363,16 @@ async def _build_llm_messages(db, conversation, messages, llm, *, agent_id=None)
         environments=environments,
         suites=suites,
         settings_block=settings_block,
+        system_messages=_system_messages(system_prompt, plan_state),
     )
+    # 044 US4：记忆索引与相关召回追加到最后一条 system
+    # 044 US2：计划阶段提醒同样追加，避免破坏稳定/动态分段
+    extra_blocks = [b for b in (_memory_block(conversation, inject_messages), plan_block) if b]
+    if extra_blocks:
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "system":
+                m["content"] = str(m.get("content") or "") + "\n\n" + "\n\n".join(extra_blocks)
+                break
     # 最后一道防线：装配后仍超预算 → 压缩较早消息内容（增量摘要之外的兜底）
     return context.compact_messages(msgs, _context_budget_chars())
 
@@ -730,6 +819,59 @@ async def handle_user_message(
     return user_msg, assistant_msg
 
 
+async def _try_tool_loop(
+    *, db, conversation, llm_messages: list[dict], agent_id, user_id: int
+):
+    """尝试原生工具循环；网关不支持或开关关闭时返回 (None, None)。
+
+    044 修复：重新生成此前只走决策 JSON 协议，模型按工具形态输出时必然解析失败
+    （「未能解析出 JSON 决策」）。这里复用与发送路径一致的循环。
+    """
+    if not _tool_loop_enabled():
+        return None, None
+    from app.gen.model_client import ToolCallingUnsupported
+    from core.tools.loop import run_tool_loop
+    from core.tools.registry import ToolContext
+
+    try:
+        on_reasoning, on_content, reasoning_parts = await _tool_stream_callbacks(conversation)
+        tool_ctx = ToolContext(db=db, user_id=user_id, conversation=conversation, source="chat")
+
+        async def _tool_llm(messages, *, tools, stream_callback=None, reasoning_callback=None):
+            from app.gen.model_client import call_model as _cm
+
+            return await _cm(
+                messages, tools=tools, stream_callback=stream_callback,
+                reasoning_callback=reasoning_callback,
+                agent_type="assistant", agent_id=agent_id,
+            )
+
+        outcome = await run_tool_loop(
+            db=db, conversation=conversation, ctx=tool_ctx, messages=llm_messages,
+            llm=_tool_llm, on_content=on_content, on_reasoning=on_reasoning,
+        )
+        return outcome, ("".join(reasoning_parts).strip() or None)
+    except ToolCallingUnsupported:
+        logger.info("tool loop unsupported in regenerate → decision protocol fallback")
+        return None, None
+
+
+async def _stop_running_browse_tasks(conversation_id: int) -> None:
+    """044 缺陷修复：重新生成/编辑前停止该对话进行中的浏览器探索。
+
+    browse 任务与对话 turn 是两套独立任务。若旧探索仍在跑，新探索会与它
+    共用同一个浏览器会话（客户端 MCP 单进程 / 服务端 MCP 实例），
+    表现为「重新生成后打不开浏览器」。这里先取消旧任务，保证同一对话
+    同时只有一个探索在驱动浏览器。
+    """
+    try:
+        from app.services import chat_browse
+
+        await chat_browse.stop_browse_tasks(conversation_id)
+    except Exception:
+        logger.debug("stop browse tasks before regenerate failed", exc_info=True)
+
+
 async def regenerate_message(
     db,
     *,
@@ -744,6 +886,7 @@ async def regenerate_message(
     """
     from app.gen.model_client import call_model
 
+    await _stop_running_browse_tasks(conversation.id)
     msg = await chat_crud.get_message(db, conversation.id, message_id)
     if msg is None:
         return None, "消息不存在"
@@ -758,6 +901,25 @@ async def regenerate_message(
 
     history = [m for m in await chat_crud.list_messages_after(db, conversation.id) if m.id < msg.id]
     llm_messages = await _build_llm_messages(db, conversation, history, llm, agent_id=agent_id)
+
+    # 044 修复：优先原生工具循环（与发送路径一致），失败再降级决策 JSON
+    if llm_call is None:
+        tool_outcome, tool_thinking = await _try_tool_loop(
+            db=db, conversation=conversation, llm_messages=llm_messages,
+            agent_id=agent_id, user_id=user_id,
+        )
+        if tool_outcome is not None and (tool_outcome.used_tools or tool_outcome.reply):
+            updated = await chat_crud.update_message(
+                db, msg, content=tool_outcome.reply or "",
+                thinking=tool_thinking, cards=tool_outcome.cards or None,
+                actions=tool_outcome.actions_log or None,
+            )
+            if tool_outcome.task_id:
+                updated.task_id = str(tool_outcome.task_id)
+                await db.commit()
+            await emit(conversation.id, {"type": "message.updated", "message": serialize_message(updated)})
+            return updated, ""
+
     try:
         if llm_call is not None:
             raw = await llm(llm_messages)
@@ -801,6 +963,7 @@ async def edit_message(
     语义：更新该用户消息内容 → 删除其后所有消息（含助手回复）→ 以新内容重跑本轮。
     返回 (user_message | None, assistant_message | None, error)。
     """
+    await _stop_running_browse_tasks(conversation.id)
     msg = await chat_crud.get_message(db, conversation.id, message_id)
     if msg is None:
         return None, None, "消息不存在"

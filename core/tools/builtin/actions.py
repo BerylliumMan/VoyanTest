@@ -231,3 +231,145 @@ async def browse_site(ctx: ToolContext, url: str, goal: str = "", username: str 
         "username": username, "password": password, "kind": kind,
         "document_ref": document_ref,
     })
+
+
+# ── 044 US2：计划模式（状态存 conversation.refs，不新增表） ──
+
+
+async def _save_plan_state(ctx: ToolContext, state) -> None:
+    from app.crud import chat as chat_crud
+    from core.chat.plan_mode import dump_plan_state
+
+    refs = dump_plan_state(getattr(ctx.conversation, "refs", None), state)
+    ctx.conversation.refs = refs
+    if ctx.db is not None:
+        await chat_crud.update_conversation(ctx.db, ctx.conversation, refs=refs or None)
+
+
+@register_tool(
+    name="enter_plan_mode",
+    description=(
+        "进入计划模式：先只读探索，产出分步计划，用户批准后才执行。"
+        "适用于多步、跨对象、需要先查后改的任务。"
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    side_effect="read",
+)
+async def enter_plan_mode(ctx: ToolContext):
+    from core.chat.plan_mode import enter_plan_mode as _enter, load_plan_state
+
+    state = _enter(load_plan_state(getattr(ctx.conversation, "refs", None)))
+    await _save_plan_state(ctx, state)
+    return ToolResult(ok=True, summary="已进入计划模式（阶段：理解）",
+                      data={"plan_phase": state.phase, "plan_active": True})
+
+
+@register_tool(
+    name="exit_plan_mode",
+    description="提交分步计划并退出计划模式；计划会展示给用户，等待批准后再执行。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "plan": {"type": "string", "description": "分步计划正文（中文，按执行顺序编号）"},
+        },
+        "required": ["plan"],
+    },
+    side_effect="read",
+)
+async def exit_plan_mode(ctx: ToolContext, plan: str):
+    from core.chat.plan_mode import exit_plan_mode as _exit, load_plan_state
+
+    text = str(plan or "").strip()
+    if not text:
+        return error_result("exit_plan_mode 需要 plan（分步计划正文）")
+    state = _exit(load_plan_state(getattr(ctx.conversation, "refs", None)), text)
+    await _save_plan_state(ctx, state)
+    return ToolResult(ok=True, summary="计划已提交，等待用户批准", data={"plan": text})
+
+
+# ── 044 US5：只读子代理（大范围检索不污染主对话） ──
+
+
+@register_tool(
+    name="agent",
+    description=(
+        "派出只读子代理执行大范围检索（多文件/多用例/需要翻查大量记录），"
+        "主对话只接收结论。子代理只能使用只读工具，不能修改任何数据。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "交给子代理的检索任务（中文，写清要找什么）"},
+            "tool_allowlist": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "允许子代理使用的只读工具名（省略=全部只读工具）",
+            },
+        },
+        "required": ["prompt"],
+    },
+    side_effect="read",
+)
+async def agent(ctx: ToolContext, prompt: str, tool_allowlist: list | None = None):
+    from core.chat.subagent import run_subagent
+
+    text = str(prompt or "").strip()
+    if not text:
+        return error_result("agent 需要 prompt（检索任务描述）")
+    allow = [str(x) for x in tool_allowlist] if tool_allowlist else None
+    result = await run_subagent(
+        ctx=ctx, prompt=text, tool_allowlist=allow, llm=getattr(ctx, "llm", None),
+    )
+    return ToolResult(
+        ok=result.status == "completed",
+        summary=f"子代理{result.status}：{len(result.content)} 字",
+        data={
+            "output": result.content,
+            "status": result.status,
+            "tool_uses": result.tool_uses,
+            "duration_ms": result.duration_ms,
+        },
+        error=None if result.status == "completed" else result.content,
+    )
+
+
+# ── 044 US4：项目记忆写入（用户显式要求 / 助手识别到长期有效信息） ──
+
+
+@register_tool(
+    name="save_memory",
+    description=(
+        "把长期有效的信息写入项目记忆，供后续对话召回。"
+        "仅用于用户偏好、工作约定、项目背景、外部资源指针；"
+        "不要记录一次性任务细节、可从现有资料推导的事实。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "稳定标识（英文短横线），如 run-habit"},
+            "description": {"type": "string", "description": "一句话描述（中文）"},
+            "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"],
+                     "description": "记忆类型，默认 project"},
+            "body": {"type": "string", "description": "正文：具体内容与适用方式"},
+        },
+        "required": ["name", "description"],
+    },
+    side_effect="mutate",
+)
+async def save_memory_tool(ctx: ToolContext, name: str, description: str,
+                           type: str = "project", body: str = ""):
+    from core.chat import memory as mem
+
+    pid = getattr(ctx.conversation, "project_id", None)
+    if not pid:
+        return error_result("当前对话未绑定项目，无法写入项目记忆")
+    if not str(name or "").strip() or not str(description or "").strip():
+        return error_result("save_memory 需要 name 与 description")
+    path = mem.save_memory(
+        pid,
+        mem.MemoryEntry(
+            name=name, description=description, type=type or "project",
+            body=body or description,
+        ),
+    )
+    return ToolResult(ok=True, summary=f"已记住：{description}", data={"file": str(path)})

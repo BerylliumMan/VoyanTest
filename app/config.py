@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     chat_context_max_chars: int = 24000
     # - 摘要后保留最近 N 条消息原文
     chat_summary_keep_messages: int = 12
+    # - 044 对话智能：上下文 token 预算（0 = 按模型窗口 70% 自动计算）
+    chat_context_max_tokens: int = 0
+    # - 044 LLM 调用最小间隔（毫秒；按 Agent/用户隔离，避免全局串行）
+    chat_llm_min_interval_ms: int = 250
+    # - 044 历史工具事件回注条数与总字符上限
+    chat_tool_result_replay_max: int = 5
+    chat_tool_replay_max_chars: int = 1200
+    # - 044 连续重复调用提醒阈值
+    chat_reminder_repeat_threshold: int = 3
+    # - 044 增强机制开关（默认开启；关闭后行为与增强前一致）
+    chat_compact_enabled: bool = True
+    chat_plan_mode_enabled: bool = True
+    chat_subagent_enabled: bool = True
+    chat_memory_enabled: bool = True
     # - 附件内容提取预算（docx/pdf/xlsx/md → 文本进对话上下文 / 文档驱动探索；超限截断）
     chat_attachment_max_chars: int = 6000
     # - 单对话并行执行上限（生成类同对话串行，不受此限）
@@ -96,9 +110,11 @@ class Settings(BaseSettings):
     # - 对话原生工具调用循环（false=降级为既有决策 JSON 协议，用户无感）
     chat_tool_loop_enabled: bool = True
     # - 单轮工具循环轮次上限
-    chat_tool_max_rounds: int = 8
+    # - 工具循环轮次上限（044：用户决策设为 100，实际等同不限制；时长仍受 chat_tool_timeout_seconds 约束）
+    chat_tool_max_rounds: int = 100
     # - 单轮工具循环时长上限（秒）
-    chat_tool_timeout_seconds: int = 180
+    # - 单轮工具循环总时长上限（秒）；044：用户决策 300s（配合 100 轮上限）
+    chat_tool_timeout_seconds: int = 300
     # - 只读工具并行上限（mutate/execute 恒串行）
     chat_tool_parallel_max: int = 4
     # - 工具结果序列化字节上限（超出→分页切片 + 显式截断标注）

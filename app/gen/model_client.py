@@ -206,9 +206,9 @@ async def _load_ai_config(
 
 _LLM_RETRY_ATTEMPTS = 5
 _LLM_RETRY_BASE_DELAY = 2.0
-# 生成链路连续调用时的最小间隔（s）：网关 key RPM 严格，错峰避免 429。
-_LLM_MIN_INTERVAL = 3.0
-_last_call_ts: float = 0.0
+# 044：节流改为按 Agent/用户隔离。模块常量仅作回退，实际间隔读 chat_llm_min_interval_ms。
+_LLM_MIN_INTERVAL = 0.25
+_last_call_ts: dict[str, float] = {}
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -232,14 +232,28 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
     return _LLM_RETRY_BASE_DELAY * attempt
 
 
-async def _pace_calls() -> None:
-    """连续调用错峰：距离上次调用不足间隔时补睡差值。"""
-    global _last_call_ts
+def _effective_min_interval() -> float:
+    """最小调用间隔（秒）：运行时配置优先，回退模块常量。"""
+    try:
+        from app.config import get_settings
+
+        ms = int(getattr(get_settings(), "chat_llm_min_interval_ms", 0) or 0)
+        if ms > 0:
+            return ms / 1000.0
+    except Exception:
+        pass
+    return _LLM_MIN_INTERVAL
+
+
+async def _pace_calls(key: str = "default") -> None:
+    """连续调用错峰：按 key（Agent/用户）各自计时，互不阻塞。"""
     now = asyncio.get_event_loop().time()
-    wait = _LLM_MIN_INTERVAL - (now - _last_call_ts)
+    interval = _effective_min_interval()
+    last = _last_call_ts.get(key, 0.0)
+    wait = interval - (now - last)
     if wait > 0:
         await asyncio.sleep(wait)
-    _last_call_ts = asyncio.get_event_loop().time()
+    _last_call_ts[key] = asyncio.get_event_loop().time()
 
 
 async def call_model(
@@ -296,7 +310,7 @@ async def call_model(
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
     if not skip_pace:
-        await _pace_calls()
+        await _pace_calls(f"{agent_type or 'default'}:{agent_id or 0}")
 
     if stream_callback:
         payload["stream"] = True

@@ -161,3 +161,75 @@ def test_compact_messages_truncates_when_over_budget():
     assert msgs[1]["content"] == "A" * 5000  # 不改原对象
     # 未超限原样返回
     assert context.compact_messages(msgs, 100000) is msgs
+
+
+# ── 044 US1：摘要合并 / 工具事件回注 / 分层提示词 ──
+
+
+def test_merge_summary_keeps_newest_content_when_over_limit():
+    merged = orch._merge_summary("旧" * 8000, "新摘要要点", max_chars=100)
+    assert merged.endswith("新摘要要点")
+    assert len(merged) <= 100
+
+
+def test_merge_summary_without_existing_returns_chunk():
+    assert orch._merge_summary(None, "abc", max_chars=10) == "abc"
+
+
+def test_tool_events_digest_renders_recent_events():
+    msg = SimpleNamespace(actions=[
+        {"type": "tool", "tool": "search_cases", "status": "ok", "summary": "命中 3 条"},
+        {"type": "tool", "tool": "run_case", "status": "failed", "summary": "环境不可达"},
+    ])
+    text = context.tool_events_digest(msg)
+    assert "search_cases" in text and "命中 3 条" in text
+    assert "run_case" in text and "环境不可达" in text
+
+
+def test_tool_events_digest_caps_items_and_chars():
+    msg = SimpleNamespace(actions=[
+        {"type": "tool", "tool": f"t{i}", "status": "ok", "summary": "x" * 500}
+        for i in range(10)
+    ])
+    text = context.tool_events_digest(msg, max_items=3, max_chars=200)
+    assert len(text) <= 200
+    assert "t9" in text and "t6" not in text
+
+
+def test_message_text_includes_tool_events_by_default():
+    msg = SimpleNamespace(content="结果如下", refs=[], cards=[], actions=[
+        {"type": "tool", "tool": "get_batch", "status": "ok", "summary": "批次 12：3 通过 1 失败"},
+    ])
+    assert "get_batch" in context.message_text(msg)
+
+
+def test_message_text_can_skip_tool_events():
+    msg = SimpleNamespace(content="x", refs=[], cards=[], actions=[
+        {"type": "tool", "tool": "get_batch", "status": "ok", "summary": "y"},
+    ])
+    assert "get_batch" not in context.message_text(msg, include_tool_events=False)
+
+
+def test_stable_prompt_excludes_tool_listing():
+    from core.chat.prompts import stable_prompt
+
+    text = stable_prompt()
+    assert "【职责范围" in text
+    assert "generate_cases" not in text
+
+
+def test_dynamic_prompt_carries_tools_and_plan_state():
+    from core.chat.prompts import dynamic_prompt
+
+    text = dynamic_prompt(tools_md="- generate_cases：生成用例", plan_active=True, memory_index="m1")
+    assert "generate_cases" in text
+    assert "计划模式" in text
+    assert "m1" in text
+
+
+def test_build_system_messages_returns_two_blocks():
+    from core.chat.prompts import build_system_messages
+
+    msgs = build_system_messages("S", "D")
+    assert [m["role"] for m in msgs] == ["system", "system"]
+    assert msgs[0]["content"] == "S" and msgs[1]["content"] == "D"

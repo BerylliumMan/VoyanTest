@@ -166,6 +166,8 @@ const ChatPage: React.FC = () => {
   // 编辑已发送消息（保存并从该条重新生成）
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+  // 正在重新生成的消息 id（点击后立即清空旧回答，展示生成中占位）
+  const [regeneratingId, setRegeneratingId] = useState<number | null>(null);
   const streamReplyStartedRef = useRef(false);
   // 执行上下文：项目环境列表 / 客户端 Agent 列表
   const [envs, setEnvs] = useState<Array<{ id: number; name: string; is_default?: boolean }>>([]);
@@ -664,12 +666,30 @@ const ChatPage: React.FC = () => {
 
   const regenerate = async (mid: number) => {
     if (activeId == null) return;
+    const prevMsg = messages.find((m) => m.id === mid) || null;
+    // 重新生成同样是一轮阻塞调用：置 sending，让发送按钮切成「停止」
+    setSending(true);
+    setRegeneratingId(mid);
+    // 立即清空旧回答：生成期间不再展示过期内容（失败时恢复）
+    setMessages((prev) => prev.map((m) => (m.id === mid
+      ? { ...m, content: '', thinking: '', cards: [], actions: [] }
+      : m)));
     try {
       const r = await axios.post(`/api/chat/conversations/${activeId}/messages/${mid}/regenerate`);
+      const am = r.data?.assistant_message;
+      if (am) {
+        setMessages((prev) => prev.map((m) => (m.id === mid ? am : m)));
+      }
       if (r.data?.stopped) Message.info('已停止本轮回复');
       else Message.success('已重新生成');
     } catch (e: any) {
+      if (prevMsg) {
+        setMessages((prev) => prev.map((m) => (m.id === mid ? prevMsg : m)));
+      }
       Message.error(e?.response?.data?.detail || '重新生成失败');
+    } finally {
+      setSending(false);
+      setRegeneratingId(null);
     }
   };
 
@@ -1410,10 +1430,16 @@ const ChatPage: React.FC = () => {
                                 {maskSecrets(live.reply)}
                                 <span className={styles.cursor}>▍</span>
                               </div>
+                            ) : regeneratingId === m.id ? (
+                              <div className={`${styles.bubble} ${styles.assistantBubble}`}>
+                                正在重新生成…
+                              </div>
                             ) : null
                           ) : (
                             <div className={`${styles.bubble} ${m.role === 'user' ? styles.userBubble : styles.assistantBubble}`}>
-                              {maskSecrets(m.content)}
+                              {m.role === 'assistant' && regeneratingId === m.id && !m.content
+                                ? '正在重新生成…'
+                                : maskSecrets(m.content)}
                             </div>
                           )}
                         </>

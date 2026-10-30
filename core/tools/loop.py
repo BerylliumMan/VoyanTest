@@ -17,9 +17,10 @@ from typing import Any, Callable, Optional
 
 from app.config import get_settings
 from core.chat.events import emit
+from core.chat.reminders import ReminderTracker, wrap
+from core.tools.feedback import tool_message_content
 from core.tools.registry import REGISTRY, ToolContext, ToolSpec
 from core.tools.result import (
-    TRUNCATION_GUIDANCE,
     ToolResult,
     error_result,
     result_bytes,
@@ -109,13 +110,6 @@ async def _audit_tool_call(ctx: ToolContext, name: str, args: dict, result: Tool
         )
     except Exception:
         logger.debug("tool audit failed name=%s", name, exc_info=True)
-
-
-def _tool_message_content(result: ToolResult) -> str:
-    text = json.dumps(result.to_dict(), ensure_ascii=False, default=str)
-    if result.truncated:
-        text += "\n" + TRUNCATION_GUIDANCE
-    return text
 
 
 async def _run_one_tool(*, ctx: ToolContext, conversation_id: int, call,
@@ -251,10 +245,10 @@ async def _default_llm(messages, *, tools, stream_callback=None, reasoning_callb
 
 
 def _compact_tool_messages(messages: list) -> None:
-    """工具循环内上下文压缩（ZCode 式：快满时压缩较早的工具结果）。
+    """工具循环内上下文压缩（044：microcompact + 字符预算兜底）。
 
     - 预算 = 运行时配置 context_max_chars（回退环境默认 24000 字符）；
-    - 保留 system 与最近 2 轮（≈4 条）不动；更早的 tool 结果截断为 800 字符 + 标记；
+    - 超预算时先清空较早的工具结果（保留最近 5 组），仍超则截断更早的内容；
     - 原地修改（调用方持有同一列表）；无超限时零开销。
     """
     try:
@@ -264,11 +258,34 @@ def _compact_tool_messages(messages: list) -> None:
     except Exception:
         budget = 24000
 
+    try:
+        from app.config import get_settings
+
+        if not getattr(get_settings(), "chat_compact_enabled", True):
+            return
+    except Exception:
+        pass
+
     def _total() -> int:
         return sum(len(str(m.get("content") or "")) for m in messages)
 
     if _total() <= budget:
         return
+
+    # 第一层：清空较早的工具结果（保留最近 5 组）
+    try:
+        from core.chat.compact import microcompact
+
+        compacted = microcompact(messages, keep_recent=5)
+        if compacted is not messages:
+            messages[:] = compacted
+    except Exception:
+        logger.debug("microcompact failed", exc_info=True)
+
+    if _total() <= budget:
+        return
+
+    # 第二层兜底：保留 system 与最近 4 条，更早的工具结果截到 800 字符
     keep_from = max(1, len(messages) - 4)
     for i in range(1, keep_from):
         m = messages[i]
@@ -302,6 +319,20 @@ def default_tool_filter(spec_or_name) -> bool:
             return bool(getattr(get_settings(), "api_ai_enabled", True))
         except Exception:
             return False
+    if name in {"enter_plan_mode", "exit_plan_mode"}:
+        try:
+            from app.config import get_settings
+
+            return bool(getattr(get_settings(), "chat_plan_mode_enabled", True))
+        except Exception:
+            return True
+    if name == "agent":
+        try:
+            from app.config import get_settings
+
+            return bool(getattr(get_settings(), "chat_subagent_enabled", True))
+        except Exception:
+            return True
     return True
 
 
@@ -331,14 +362,17 @@ async def run_tool_loop(
         raise ToolCallingUnsupported("无注册工具")
 
     tools_payload = reg.as_openai_tools(allow=default_tool_filter)
-    max_rounds = int(max_rounds or getattr(settings, "chat_tool_max_rounds", 8) or 8)
-    timeout_s = int(timeout_s or getattr(settings, "chat_tool_timeout_seconds", 180) or 180)
+    max_rounds = int(max_rounds or getattr(settings, "chat_tool_max_rounds", 100) or 100)
+    timeout_s = int(timeout_s or getattr(settings, "chat_tool_timeout_seconds", 300) or 300)
     deadline = time.monotonic() + timeout_s
 
     call_llm = llm or _default_llm
     conv_id = conversation.id
     outcome = LoopOutcome()
     call_counts: dict[str, int] = {}
+    reminder_tracker = ReminderTracker(
+        repeat_threshold=int(getattr(settings, "chat_reminder_repeat_threshold", 3) or 3)
+    )
 
     for round_no in range(1, max_rounds + 1):
         outcome.rounds = round_no
@@ -392,22 +426,18 @@ async def run_tool_loop(
 
         call_by_id = {c.id: c for c in norm_calls}
         stop_reason: Optional[str] = None
+        signatures: list[str] = []
         for call_id, result in pairs:
             call = call_by_id.get(call_id)
             name = getattr(call, "name", "") or ""
 
             # 防循环（T028）：同工具同参数计数 → ≥3 提示 / ≥5 终止
             sig = f"{name}::{_canonical_args(getattr(call, 'arguments', '') or '{}')}"
+            signatures.append(sig)
             call_counts[sig] = call_counts.get(sig, 0) + 1
             repeat_n = call_counts[sig]
-            reminder = ""
             if repeat_n >= 5:
                 stop_reason = f"重复调用（同工具同参数 ≥5 次：{name}），已终止"
-            elif repeat_n == 3:
-                reminder = (
-                    f"\n[治理提示] 相同调用（{name}，同参数）已重复 3 次，结果不会变化——"
-                    "请勿再重复调用；信息不足时请换用其他工具或直接给出结论。"
-                )
 
             # 提取大对象（卡片/任务 id）交编排层落库；不回喂模型
             if isinstance(result.data, dict) and ("card" in result.data or "task_id" in result.data):
@@ -425,7 +455,7 @@ async def run_tool_loop(
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": _tool_message_content(result) + reminder,
+                "content": tool_message_content(result, tool_name=name),
             })
             outcome.actions_log.append({
                 "type": "tool",
@@ -445,6 +475,18 @@ async def run_tool_loop(
         if stop_reason:
             outcome.notes.append(stop_reason)
             break
+
+        # 044 US3：system-reminder 调度（重复调用一次提醒 / todo 间隔提醒）
+        try:
+            reminders = reminder_tracker.on_tool_round(round_no, signatures)
+            if reminders:
+                tail = "\n".join(wrap(r) for r in reminders)
+                for m in reversed(messages):
+                    if isinstance(m, dict) and m.get("role") == "tool":
+                        m["content"] = str(m.get("content") or "") + "\n" + tail
+                        break
+        except Exception:
+            logger.debug("reminder scheduling failed", exc_info=True)
 
         # 上下文压缩（ZCode 式）：工具结果累积超预算时压缩较早的结果，
         # 防止单轮多工具调用把上下文撑爆（2026-10-19 用户反馈）

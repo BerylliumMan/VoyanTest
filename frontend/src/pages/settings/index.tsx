@@ -9,6 +9,7 @@ import CITokenManagement from './CITokenManagement';
 import HealingConfig from './HealingConfig';
 import ExecutionBackendConfig from './ExecutionBackendConfig';
 import ChatBrowseConfig from './ChatBrowseConfig';
+import MemoryPanel from './MemoryPanel';
 import styles from './index.module.less';
 
 const { TabPane } = Tabs;
@@ -48,6 +49,9 @@ function Settings() {
         </TabPane>
         <TabPane key="healing" title={<><IconSafe className={styles.tabIcon} />自愈配置</>}>
           <HealingConfig />
+        </TabPane>
+        <TabPane key="memory" title={<><IconSafe className={styles.tabIcon} />项目记忆</>}>
+          <MemoryPanel />
         </TabPane>
       </Tabs>
     </div>
