@@ -15,6 +15,7 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Table,
   Tag,
   Tooltip,
@@ -64,6 +65,8 @@ import EnvVariablesModal from './components/EnvVariablesModal';
 import RequestEditor from './components/RequestEditor';
 import ResponsePanel from './components/ResponsePanel';
 import HistoryDrawer from '../components/HistoryDrawer';
+import RepoBindingPanel from '../components/RepoBindingPanel';
+import ChangePlanList from '../components/ChangePlanList';
 import styles from './style/index.module.less';
 
 const { Title, Text } = Typography;
@@ -227,6 +230,8 @@ const ApiTestPage: React.FC = () => {
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   // 033（US11）：粘贴导入 cURL
   const [curlVisible, setCurlVisible] = useState(false);
+  const [repoVisible, setRepoVisible] = useState(false);
+  const [changePlanVisible, setChangePlanVisible] = useState(false);
   const [curlText, setCurlText] = useState('');
   const [curlLoading, setCurlLoading] = useState(false);
   const [historyVisible, setHistoryVisible] = useState(false);
@@ -419,6 +424,22 @@ const ApiTestPage: React.FC = () => {
         : prev
     );
   }, [datasets]);
+
+  // ---- 046：人工修正标记（标记后同步不覆盖） ----
+  const handleToggleManualOverride = async (checked: boolean) => {
+    if (!selectedDef) return;
+    try {
+      await apiPut(
+        `/api/api-test/definitions/${selectedDef.id}`,
+        { manual_override: checked },
+        checked ? '已标记人工修正，后续同步不会覆盖' : '已取消人工修正'
+      );
+      setSelectedDef({ ...selectedDef, manual_override: checked });
+      await loadDefinitions();
+    } catch {
+      /* apiRequest 已提示 */
+    }
+  };
 
   // ---- 点击定义 → 载入模板 ----
   const handleSelectDefinition = async (key: string) => {
@@ -661,6 +682,18 @@ const ApiTestPage: React.FC = () => {
               {d.method}
             </Tag>
             <span className={styles.treeDefPath}>{d.path}</span>
+            {d.manual_override ? (
+              <Tag size="small" color="blue">
+                人工修正
+              </Tag>
+            ) : null}
+            {d.confidence === 'low' ? (
+              <Tooltip content={d.confidence_reason || '自动提取可信度低，请人工确认路径与方式'}>
+                <Tag size="small" color="orange">
+                  低可信
+                </Tag>
+              </Tooltip>
+            ) : null}
           </span>
         </span>
         <span className={styles.treeDefActions}>
@@ -1174,6 +1207,21 @@ const ApiTestPage: React.FC = () => {
             cURL 导入
           </Button>
           <Button
+            icon={<IconStorage />}
+            data-testid="repo-binding-btn"
+            onClick={() => setRepoVisible(true)}
+            disabled={!projectId}
+          >
+            代码仓库
+          </Button>
+          <Button
+            icon={<IconHistory />}
+            onClick={() => setChangePlanVisible(true)}
+            disabled={!projectId}
+          >
+            变更计划
+          </Button>
+          <Button
             type="outline"
             icon={<IconThunderbolt />}
             onClick={() => setDrawerVisible(true)}
@@ -1273,6 +1321,67 @@ const ApiTestPage: React.FC = () => {
 
         {/* 中：请求编辑器 */}
         <Card className={styles.middlePanel} bodyStyle={{ padding: 12 }}>
+          {selectedDef ? (
+            <div
+              data-testid="definition-origin"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+                marginBottom: 8,
+                fontSize: 12,
+              }}
+            >
+              <Tag size="small">
+                {selectedDef.extractor === 'spring_source'
+                  ? 'Spring 源码'
+                  : selectedDef.extractor === 'openapi'
+                  ? 'OpenAPI'
+                  : '手工'}
+              </Tag>
+              {selectedDef.source_file ? (
+                <Text type="secondary">
+                  {selectedDef.source_file}
+                  {selectedDef.source_line ? `:${selectedDef.source_line}` : ''}
+                </Text>
+              ) : null}
+              {selectedDef.confidence ? (
+                <Tag
+                  size="small"
+                  color={
+                    selectedDef.confidence === 'high'
+                      ? 'green'
+                      : selectedDef.confidence === 'low'
+                      ? 'orange'
+                      : 'gray'
+                  }
+                >
+                  {selectedDef.confidence === 'high'
+                    ? '高可信'
+                    : selectedDef.confidence === 'low'
+                    ? '低可信'
+                    : '中可信'}
+                </Tag>
+              ) : null}
+              {selectedDef.confidence_reason ? (
+                <Text type="secondary">{selectedDef.confidence_reason}</Text>
+              ) : null}
+              {selectedDef.manual_override ? (
+                <Tag size="small" color="blue">
+                  已人工修正（同步不覆盖）
+                </Tag>
+              ) : null}
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Switch
+                  size="small"
+                  checked={Boolean(selectedDef.manual_override)}
+                  onChange={handleToggleManualOverride}
+                />
+                <Text type="secondary">人工修正（同步不覆盖）</Text>
+              </span>
+            </div>
+          ) : null}
           <RequestEditor
             spec={step}
             definitionName={selectedDef?.name}
@@ -1738,6 +1847,18 @@ const ApiTestPage: React.FC = () => {
           </FormItem>
         </Form>
       </Modal>
+      {/* 046：代码仓库绑定与变更计划 */}
+      <RepoBindingPanel
+        visible={repoVisible}
+        projectId={projectId}
+        onClose={() => setRepoVisible(false)}
+      />
+      <ChangePlanList
+        visible={changePlanVisible}
+        projectId={projectId}
+        onClose={() => setChangePlanVisible(false)}
+        onChanged={loadDefinitions}
+      />
     </div>
   );
 };

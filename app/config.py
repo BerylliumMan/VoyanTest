@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     chat_plan_mode_enabled: bool = True
     chat_subagent_enabled: bool = True
     chat_memory_enabled: bool = True
+    # - 045 探索元素固化：执行时优先使用固化定位（关闭=回到纯动态定位）
+    ui_locator_fixation_enabled: bool = True
+    # - 046 Java 接口自动提取与变更触发
+    api_extract_enabled: bool = True
+    # 定时同步间隔（分钟）
+    api_extract_sync_interval_minutes: int = 30
+    # 变更计划人工确认窗口（分钟）；超时自动执行
+    api_sync_confirm_window_minutes: int = 60
+    # 服务停机错过窗口的补跑宽限（分钟）；超过则标记跳过
+    api_sync_misfire_grace_minutes: int = 10
+    # 单项目同时待确认计划上限
+    api_change_plan_max_pending: int = 5
+    # 仓库拉取超时（秒）
+    api_repo_clone_timeout_seconds: int = 300
+    # 046 v2：单次扫描文件上限（大仓库保护；超限在同步记录中提示）
+    api_extract_max_scan_files: int = 20000
+    # 046 v2：每 N 次增量后做一次全量校准
+    api_extract_full_sync_every: int = 10
     # - 附件内容提取预算（docx/pdf/xlsx/md → 文本进对话上下文 / 文档驱动探索；超限截断）
     chat_attachment_max_chars: int = 6000
     # - 单对话并行执行上限（生成类同对话串行，不受此限）

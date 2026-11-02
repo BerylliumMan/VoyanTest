@@ -1079,6 +1079,7 @@ class AgentRunner:
                     self._run_steps, self._journal_covered, _cands,
                     max_steps=self._auto_unit_max(),
                     base_url=self.base_url or None,
+                    snapshot=str(observation.get("snapshot") or ""),
                 )
                 if _unit_actions:
                     logger.info(

@@ -48,6 +48,15 @@ class ApiDefinition(Base):
     source_ref = Column(String(500), nullable=True)
     version = Column(Integer, default=1, nullable=False)
     tags = Column(String(200), nullable=True)
+    # 046：自动提取来源与可信度
+    source_file = Column(String(500), nullable=True)      # 相对仓库路径
+    source_line = Column(Integer, nullable=True)
+    source_symbol = Column(String(300), nullable=True)    # 类名.方法名
+    extractor = Column(String(32), nullable=True)         # openapi / spring_source / manual
+    confidence = Column(String(16), nullable=True)        # high / medium / low
+    confidence_reason = Column(String(300), nullable=True)
+    status = Column(String(16), nullable=False, default="active")  # active / offline
+    manual_override = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 

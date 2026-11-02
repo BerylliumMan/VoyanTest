@@ -537,3 +537,77 @@ async def try_replay_plan_mcp(
         "plan_replay": True,
         "actions_log": actions_log,
     }
+
+
+def resolve_persisted_locator(
+    step: dict | None,
+    snapshot: str = "",
+    *,
+    candidates=None,
+    step_description: str = "",
+    enabled: bool = True,
+) -> Optional[dict]:
+    """按固化优先级解析当前可执行目标（045）。
+
+    顺序：learned_locator（v1 指纹 / v2 plan）→ structured_step.selector →
+    structured_step 的 target_role + target_name 在当前候选中唯一匹配。
+
+    返回 ``{"target", "kind": "ref"|"selector", "source"}`` 或 None。
+    只做「唯一命中」判定；歧义、失效、未固化一律返回 None，由调用方回退动态定位。
+    """
+    if not enabled or not isinstance(step, dict):
+        return None
+    # 用户显式标记为动态步骤：不读写定位记忆
+    if step.get("cacheable") is False:
+        return None
+
+    # 1) learned_locator
+    fp = step.get("learned_locator")
+    if isinstance(fp, dict) and fp:
+        plan = fp.get("plan")
+        if isinstance(plan, list) and plan:
+            # v2：plan 内每步合并 blob 级别的 URL 门，避免回放到其他页面
+            hint = fp.get("page_url_hint")
+            items = [
+                ({**p, "page_url_hint": hint} if hint else p)
+                for p in plan if isinstance(p, dict)
+            ]
+        else:
+            # v1：直接用原始指纹（保留 page_url_hint）
+            items = [fp]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ref = resolve_ref(snapshot, item, step_description=step_description)
+            if ref:
+                return {"target": ref, "kind": "ref", "source": "learned"}
+
+    structured = step.get("structured_step") or {}
+    if not isinstance(structured, dict):
+        structured = {}
+
+    # 2) 录制固化的 selector（拒绝临时 ref / 裸标签）
+    from core.step_intent import is_usable_solidified_selector
+
+    selector = structured.get("selector")
+    if is_usable_solidified_selector(selector):
+        return {"target": str(selector).strip(), "kind": "selector", "source": "structured_selector"}
+
+    # 3) 语义身份（role + name）在当前候选中唯一匹配
+    name = str(structured.get("target_name") or "").strip()
+    role = str(structured.get("target_role") or "").strip().lower()
+    if not name or not candidates:
+        return None
+    matched: list[str] = []
+    for cand in candidates or []:
+        c_role = str(getattr(cand, "role", "") or "").strip().lower()
+        c_name = str(getattr(cand, "name", "") or "").strip()
+        if role and c_role != role:
+            continue
+        if c_name == name:
+            ref = str(getattr(cand, "ref", "") or "").strip()
+            if ref:
+                matched.append(ref)
+    if len(matched) == 1:
+        return {"target": matched[0], "kind": "ref", "source": "structured"}
+    return None

@@ -277,11 +277,14 @@ async def list_runs(
     )
 
     items = []
-    for run, case_name in result["items"]:
+    for row in result["items"]:
+        run, case_name = row[0], row[1]
+        case_kind = row[2] if len(row) > 2 else None
         items.append({
             "run_id": run.id,
             "case_id": run.case_id,
             "case_name": case_name,
+            "case_kind": case_kind,
             "status": run.status,
             "start_time": run.start_time.isoformat() if run.start_time else None,
             "duration": run.duration

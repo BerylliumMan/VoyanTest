@@ -281,3 +281,44 @@ async def test_run_unit_probe_exception_does_not_crash():
 
     out = await run_unit(steps, _exec, probe=_probe)
     assert not out.success and out.error == "boom"
+
+
+# ── 045：固化定位优先（build_auto_unit） ──
+
+from types import SimpleNamespace
+
+from core.action_unit import build_auto_unit
+
+_SNAP = '- button "登录" [ref=e12]\n- button "保存" [ref=e13]'
+
+
+def _cands():
+    return [
+        SimpleNamespace(ref="e12", role="button", name="登录", text="", visible=True, enabled=True),
+        SimpleNamespace(ref="e13", role="button", name="保存", text="", visible=True, enabled=True),
+    ]
+
+
+def test_build_auto_unit_prefers_learned_locator():
+    steps = [
+        {"step_order": 1, "description": "点击【登录】按钮",
+         "learned_locator": {"action": "click", "role": "button", "name": "登录"},
+         "structured_step": {"action": "click", "target_name": "登录", "target_role": "button"}},
+        {"step_order": 2, "description": "点击【保存】按钮",
+         "structured_step": {"action": "click", "target_name": "保存", "target_role": "button"}},
+    ]
+    actions, notes = build_auto_unit(steps, set(), _cands(), snapshot=_SNAP)
+    assert actions is not None, notes
+    assert actions[0]["selector"] == "e12"
+    assert actions[0]["locator_source"] == "learned"
+    assert actions[1]["locator_source"] == "structured"
+
+
+def test_build_auto_unit_falls_back_when_no_fixation():
+    steps = [
+        {"step_order": 1, "description": "点击【登录】按钮"},
+        {"step_order": 2, "description": "点击【保存】按钮"},
+    ]
+    actions, notes = build_auto_unit(steps, set(), _cands())
+    assert actions is not None, notes
+    assert "locator_source" not in actions[0]

@@ -1026,6 +1026,8 @@ class AgentBridge:
                 cands,
                 max_steps=int(getattr(cfg, "action_unit_max", 6) or 6),
                 base_url=getattr(self, "_case_url", "") or None,
+                snapshot=snapshot or "",
+                fixation_enabled=bool(getattr(cfg, "ui_locator_fixation_enabled", True)),
             )
             if not actions:
                 if notes:

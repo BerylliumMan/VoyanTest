@@ -17,6 +17,8 @@ interface BatchItem {
   status: string; total_cases: number; passed: number; failed: number;
   created_at: string; started_at: string; finished_at: string;
   triggered_by?: string;
+  /** 该批次包含的用例类型：["ui"] / ["api"] / 两者=混合 */
+  case_kinds?: string[];
 }
 
 interface BatchDetail {
@@ -381,6 +383,19 @@ const Reports: React.FC = () => {
     { title: t['batch'], dataIndex: 'name', width: 200, ellipsis: true },
     { title: t['project'], dataIndex: 'project_name', width: 150, ellipsis: true },
     {
+      title: '类型', width: 100,
+      render: (_: unknown, r: BatchItem) => {
+        const kinds = r.case_kinds || [];
+        if (kinds.length === 0) return <span className={styles.resultMeta}>--</span>;
+        if (kinds.length > 1) return <Tag color="orange">混合</Tag>;
+        return kinds[0] === 'api'
+          ? <Tag color="purple">接口</Tag>
+          : kinds[0] === 'ui'
+            ? <Tag color="arcoblue">UI</Tag>
+            : <Tag color="gray">功能</Tag>;
+      },
+    },
+    {
       title: t['status'], width: 120,
       render: (_: unknown, r: BatchItem) => getBatchStatusTag(r.status, r.passed, r.total_cases, r.failed),
     },
@@ -535,6 +550,11 @@ const Reports: React.FC = () => {
                       >
                         {expanded ? <IconDown /> : <IconRight />}
                         <span className={styles['batch-name']}>{run.case_name}</span>
+                        {run.case_kind ? (
+                          <Tag color={run.case_kind === 'api' ? 'purple' : run.case_kind === 'ui' ? 'arcoblue' : 'gray'} size="small">
+                            {run.case_kind === 'api' ? '接口' : run.case_kind === 'ui' ? 'UI' : '功能'}
+                          </Tag>
+                        ) : null}
                         {run.dataset_group ? (
                           <Tag color="arcoblue" size="small">
                             {`第 ${run.dataset_group} 组`}

@@ -713,6 +713,120 @@ async def _run_startup_init():
             "CREATE INDEX IF NOT EXISTS ix_quality_requirement_links_case ON quality_requirement_links (case_id)",
             "quality_requirement_links case 索引",
         )
+        # 046：Java 接口自动提取与变更触发
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS code_repo_bindings (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                repo_url VARCHAR(500) NOT NULL,
+                branch VARCHAR(200) NOT NULL DEFAULT 'main',
+                auth_type VARCHAR(16) NOT NULL DEFAULT 'https_token',
+                auth_secret TEXT,
+                sync_mode VARCHAR(16) NOT NULL DEFAULT 'scheduled',
+                sync_interval_minutes INTEGER NOT NULL DEFAULT 30,
+                extractor VARCHAR(32) NOT NULL DEFAULT 'auto',
+                openapi_url VARCHAR(500),
+                source_root VARCHAR(300),
+                last_sync_at TIMESTAMPTZ,
+                last_commit VARCHAR(64),
+                last_error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "code_repo_bindings 表",
+        )
+        await _ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_code_repo_binding_project ON code_repo_bindings (project_id)",
+            "code_repo_bindings 项目唯一",
+        )
+        # 046 v2：项目级确认窗口与全量校准间隔
+        await _ddl(
+            "ALTER TABLE code_repo_bindings ADD COLUMN IF NOT EXISTS confirm_window_minutes INTEGER",
+            "code_repo_bindings.confirm_window_minutes",
+        )
+        await _ddl(
+            "ALTER TABLE code_repo_bindings ADD COLUMN IF NOT EXISTS full_sync_every INTEGER NOT NULL DEFAULT 10",
+            "code_repo_bindings.full_sync_every",
+        )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS api_sync_records (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                trigger VARCHAR(16) NOT NULL DEFAULT 'manual',
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ,
+                base_commit VARCHAR(64),
+                head_commit VARCHAR(64),
+                added INTEGER NOT NULL DEFAULT 0,
+                updated INTEGER NOT NULL DEFAULT 0,
+                removed INTEGER NOT NULL DEFAULT 0,
+                status VARCHAR(16) NOT NULL DEFAULT 'success',
+                error TEXT,
+                details JSONB DEFAULT '{}'::jsonb
+            )
+            """,
+            "api_sync_records 表",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_api_sync_records_project ON api_sync_records (project_id, started_at DESC)",
+            "api_sync_records 索引",
+        )
+        # 046 v2：同步取消标记
+        await _ddl(
+            "ALTER TABLE api_sync_records ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
+            "api_sync_records.cancel_requested",
+        )
+        await _ddl(
+            "ALTER TABLE api_sync_records ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ",
+            "api_sync_records.cancelled_at",
+        )
+        await _ddl(
+            """
+            CREATE TABLE IF NOT EXISTS api_change_triggers (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                from_commit VARCHAR(64),
+                to_commit VARCHAR(64),
+                plan_id INTEGER REFERENCES quality_regression_plans(id) ON DELETE SET NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                deadline_at TIMESTAMPTZ NOT NULL,
+                claimed_at TIMESTAMPTZ,
+                retry_at TIMESTAMPTZ,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                decided_at TIMESTAMPTZ,
+                decided_by INTEGER REFERENCES users(id),
+                decision VARCHAR(20),
+                reason TEXT,
+                case_count INTEGER NOT NULL DEFAULT 0,
+                batch_id INTEGER REFERENCES run_batches(id),
+                affected JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "api_change_triggers 表",
+        )
+        await _ddl(
+            "CREATE INDEX IF NOT EXISTS ix_api_change_triggers_status ON api_change_triggers (status, deadline_at)",
+            "api_change_triggers 状态索引",
+        )
+        for _col, _ddl_sql in (
+            ("source_file", "VARCHAR(500)"),
+            ("source_line", "INTEGER"),
+            ("source_symbol", "VARCHAR(300)"),
+            ("extractor", "VARCHAR(32)"),
+            ("confidence", "VARCHAR(16)"),
+            ("confidence_reason", "VARCHAR(300)"),
+            ("status", "VARCHAR(16) NOT NULL DEFAULT 'active'"),
+            ("manual_override", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ):
+            await _ddl(
+                f"ALTER TABLE api_definitions ADD COLUMN IF NOT EXISTS {_col} {_ddl_sql}",
+                f"api_definitions.{_col} 迁移",
+            )
         await _ddl(
             """
             CREATE TABLE IF NOT EXISTS schema_patches (
@@ -1250,7 +1364,33 @@ async def lifespan(app: FastAPI):
         logger.info("定时调度器已启动（executor 已接线）")
     except Exception as e:
         logger.warning("定时调度器启动失败: %s", e)
+
+    # ── 046：接口变更调度（计划到期扫描 30s / 仓库 HEAD 巡检 300s）──
+    api_extract_tasks: list[asyncio.Task] = []
+    try:
+        from app.config import get_settings as _get_settings
+
+        if _get_settings().api_extract_enabled:
+            from app.services.api_change_plans import (
+                change_plan_loop,
+                repository_watch_loop,
+            )
+
+            api_extract_tasks.append(asyncio.create_task(change_plan_loop(30)))
+            api_extract_tasks.append(asyncio.create_task(repository_watch_loop(300)))
+            logger.info("接口变更调度已启动（计划扫描 30s / 仓库巡检 300s）")
+    except Exception as e:
+        logger.warning("接口变更调度启动失败: %s", e)
     yield
+    for _task in api_extract_tasks:
+        _task.cancel()
+    for _task in api_extract_tasks:
+        try:
+            await _task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
     try:
         from app.routers.mcp import stop_mcp_session_manager
 

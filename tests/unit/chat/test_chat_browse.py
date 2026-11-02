@@ -604,3 +604,25 @@ async def test_click_text_fallback_rejects_text_not_in_snapshot(patch_candidates
     report = await run_exploration(_cfg(), llm=llm, browser=browser)
     assert any("text 不在当前页面快照中" in (s.get("error") or "") for s in report["steps"])
     assert all(a["action"] == "goto" for a in browser.executed)
+
+
+def test_report_materials_lists_fixable_elements():
+    """045：探索材料必须把操作过的元素交给生成（生成步骤据此固化）."""
+    from core.chat.browse import build_report_materials
+
+    report = {
+        "goal": "登录",
+        "started_url": "http://x/login",
+        "summary": "登录页",
+        "pages": [{"url": "http://x/login", "title": "登录页"}],
+        "features": ["登录功能"],
+        "steps": [
+            {"action": "fill", "ok": True, "element": {"role": "textbox", "name": "用户名"}},
+            {"action": "click", "ok": True, "element": {"role": "button", "name": "登录"}},
+            {"action": "click", "ok": False, "element": {"role": "button", "name": "不该出现"}},
+        ],
+    }
+    text = build_report_materials(report)
+    assert "可固化元素" in text
+    assert "用户名" in text and "登录" in text
+    assert "不该出现" not in text

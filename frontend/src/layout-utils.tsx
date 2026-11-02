@@ -82,8 +82,13 @@ export function getFlattenRoutes(routes: IRoute[]): IRoute[] {
       );
       if (route.key && (!route.children || !visibleChildren.length)) {
         try {
-          const loader = mod[`./pages/${route.key}/index.tsx`];
-          if (loader) {
+          const rawLoader = mod[`./pages/${route.key}/index.tsx`] as
+            | (() => Promise<{ default?: React.ComponentType<any> } & Record<string, any>>)
+            | undefined;
+          if (rawLoader) {
+            // 显式取出 default：让 Rollup 静态识别页面导出，避免页面 chunk 被摇空
+            const loader = () =>
+              rawLoader().then((mod) => ({ default: mod.default || mod }));
             route.component = lazyload(
               loader as () => Promise<unknown>
             ) as (React.ComponentType<any> & { preload(): Promise<void> });

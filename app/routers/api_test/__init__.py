@@ -26,6 +26,8 @@ from app.routers.api_test import (
     inspect as inspect_router,
     mocks,
     overview,
+    change_plans as change_plans_router,
+    repos as repos_router,
     scenarios,
     snippets as snippets_router,
 )
@@ -39,6 +41,8 @@ router.include_router(datasets.router)
 router.include_router(scenarios.router)
 router.include_router(overview.router)
 router.include_router(mocks.router)
+router.include_router(repos_router.router)
+router.include_router(change_plans_router.router)
 router.include_router(files.router)
 router.include_router(tokens_router.router)
 router.include_router(inspect_router.router)

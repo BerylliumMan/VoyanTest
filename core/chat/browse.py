@@ -310,9 +310,10 @@ class ClientBrowser:
         因此探索前必须先经 get_snapshot 完成冷启动（2026-10-10 实测修复）。
 
         044：客户端若残留上一次执行的 active run（浏览器已关），会把本次探索
-        误判为「运行中浏览器死亡」而永久 abort。这里在失败后补发 RUN_END
-        清理残留状态，再重试一次——无需升级客户端。
+        误判为「运行中浏览器死亡」而永久 abort。探索需要独占且干净的活动会话，
+        因此开始前先补发 RUN_END 清理残留状态（客户端不校验 run_id），再冷启动。
         """
+        await self._reset_client_run_state()
         res = await self._snapshot_start()
         if _looks_like_stale_client_session(res):
             logger.warning(
@@ -328,6 +329,16 @@ class ClientBrowser:
             res = await self._snapshot_start()
         if isinstance(res, dict) and res.get("success") is False:
             raise RuntimeError(f"客户端浏览器启动失败: {res.get('error') or '未知错误'}")
+
+    async def _reset_client_run_state(self) -> None:
+        """通知客户端结束可能残留的 active run（清理后浏览器会话才能被回收/重建）。"""
+        try:
+            await self._manager.send(
+                self._agent, {"type": "run_end", "run_id": f"{self._run_id}_reset"}
+            )
+            await asyncio.sleep(0.2)
+        except Exception:
+            logger.debug("reset client run state failed", exc_info=True)
 
     async def _snapshot_start(self) -> dict:
         try:
@@ -640,6 +651,22 @@ def _cand_label(ref: str | None, candidates) -> Optional[str]:
     return f"{cand.role}:{label}" if label else cand.role
 
 
+def _element_identity(selector: str | None, candidates) -> Optional[dict]:
+    """045：把临时 ref 还原成可固化的元素身份（role + 可访问名称 + 文本）。"""
+    ref = str(selector or "").strip()
+    if not ref:
+        return None
+    cand = next((c for c in candidates or [] if str(getattr(c, "ref", "")) == ref), None)
+    if cand is None:
+        return None
+    role = str(getattr(cand, "role", "") or "").strip()
+    name = str(getattr(cand, "name", "") or "").strip()
+    text = str(getattr(cand, "text", "") or "").strip()
+    if not role and not name and not text:
+        return None
+    return {"role": role, "name": name, "text": text[:120]}
+
+
 def _masked_value(action: dict, cfg: BrowseConfig) -> Optional[str]:
     value = action.get("value")
     if value is None:
@@ -848,6 +875,22 @@ def build_report_materials(report: dict) -> str:
         lines.append(f"## {module}")
         for text in _dedupe_seq(groups[module]):
             lines.append(f"- {text}")
+        lines.append("")
+    # 045：把探索时真正操作到的元素列出来，生成步骤时使用这里的原文名称，
+    # 便于导入后固化为可复用定位。
+    ops = [
+        s for s in (report.get("steps") or [])
+        if isinstance(s, dict) and s.get("ok") and isinstance(s.get("element"), dict)
+    ]
+    if ops:
+        lines.append("## 可固化元素（生成步骤时请使用下列元素原文名称）")
+        for idx, s in enumerate(ops[:40], 1):
+            el = s["element"]
+            label = str(el.get("name") or el.get("text") or "").strip()
+            if not label:
+                continue
+            role = str(el.get("role") or "").strip()
+            lines.append(f"- 操作{idx}：{s.get('action')}「{label}」" + (f"（role={role}）" if role else ""))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1481,6 +1524,8 @@ async def run_exploration(
                 "ok": ok,
                 "error": (str(res.get("error"))[:160] if not ok else None),
                 "note": note or None,
+                # 045：记录本次真正操作到的元素身份（role/name），供生成时固化
+                "element": _element_identity(action.get("selector"), obs["candidates"]),
             }
             journal.append(step)
 

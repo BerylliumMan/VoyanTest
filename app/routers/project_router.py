@@ -30,10 +30,14 @@ async def create_project(project: models.ProjectCreate, admin=Depends(require_ad
         logger.exception("创建项目失败")
         raise HTTPException(status_code=400, detail="Could not create project")
 
+@router.get("", response_model=List[models.Project], include_in_schema=False)
 @router.get("/", response_model=List[models.Project])
 async def get_all_projects(user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> list[models.Project]:
     """
     检索所有项目（非管理员仅返回授权项目）。
+
+    同时接受 ``/api/projects`` 与 ``/api/projects/``：部分客户端不带尾斜杠，
+    此前直接 404（重定向未生效），CI 令牌/记忆面板因此报错。
     """
     allowed_ids = get_user_project_filter(user)
     return await crud.list_projects_for_user(db, allowed_ids)

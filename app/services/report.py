@@ -283,6 +283,20 @@ class ReportService:
             for p in proj_result.scalars().all():
                 projects[p.id] = p
 
+        # 批量解析批次内用例类型（UI / 接口 / 混合），避免逐条查询
+        batch_kinds: dict[int, set[str]] = {}
+        batch_ids = [b.id for b in batch_items]
+        if batch_ids:
+            run_rows = await db.execute(
+                select(db_models.TestRun.batch_id, db_models.TestCase.case_kind)
+                .join(db_models.TestCase, db_models.TestCase.id == db_models.TestRun.case_id)
+                .where(db_models.TestRun.batch_id.in_(batch_ids))
+            )
+            for bid, kind in run_rows.all():
+                if bid is None:
+                    continue
+                batch_kinds.setdefault(int(bid), set()).add(str(kind or "ui"))
+
         items = []
         for batch in batch_items:
             project = projects.get(batch.project_id)
@@ -300,6 +314,8 @@ class ReportService:
                     "started_at": batch.started_at.isoformat() if batch.started_at else None,
                     "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
                     "triggered_by": batch.triggered_by,
+                    # 该批次包含的用例类型（["ui"] / ["api"] / 两者=混合）
+                    "case_kinds": sorted(batch_kinds.get(int(batch.id), set())),
                 }
             )
 

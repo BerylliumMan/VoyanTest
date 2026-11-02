@@ -352,16 +352,26 @@ async def run_test_case_via_agent(
     except Exception:
         logger.debug("视频证据启动跳过", exc_info=True)
 
+    # 045：把固化定位信息一并交给执行器（此前只传描述，服务端永远拿不到固化数据）
+    _steps_by_order = {
+        int(getattr(o, "step_order", 0) or 0): o for o in (steps or [])
+    }
+    _case_steps: list[dict] = []
+    for s in (rendered_steps or []):
+        _order = int(s.get("step_order", 0) or 0)
+        _orm = _steps_by_order.get(_order)
+        _case_steps.append({
+            "step_order": _order,
+            "description": s.get("description", "") or "",
+            "parsed_result": s.get("parsed_result") or "",
+            "structured_step": s.get("structured_step") or getattr(_orm, "structured_step", None),
+            "learned_locator": getattr(_orm, "learned_locator", None),
+            "cacheable": bool(getattr(_orm, "cacheable", True)),
+        })
+
     runner = AgentRunner(
         mcp_manager=mcp_manager,
-        case_steps=[
-            {
-                "step_order": int(s.get("step_order", 0) or 0),
-                "description": s.get("description", "") or "",
-                "parsed_result": s.get("parsed_result") or "",
-            }
-            for s in (rendered_steps or [])
-        ],
+        case_steps=_case_steps,
         goal=goal_text,
         llm_client=llm_client,
         model=model,

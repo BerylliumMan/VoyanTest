@@ -36,7 +36,7 @@ function MemoryPanel() {
   useEffect(() => {
     apiRequest<ProjectOption[] | { items: ProjectOption[] }>({
       method: 'get',
-      url: '/api/projects',
+      url: '/api/projects/',
     })
       .then((data) => {
         const list = Array.isArray(data) ? data : (data as { items?: ProjectOption[] }).items || [];

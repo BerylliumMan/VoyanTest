@@ -95,3 +95,8 @@ from app.models.quality import (  # noqa: F401
     QualityRegressionPlan, QualityFlakyState, QualityRequirement,
     QualityRequirementLink,
 )
+
+# 046 Java 接口自动提取与变更触发
+from app.models.api_extract import (  # noqa: F401
+    ApiChangeTrigger, ApiSyncRecord, CodeRepoBinding,
+)

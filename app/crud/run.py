@@ -546,14 +546,15 @@ async def list_runs_with_case(
     page: int = 1,
     size: int = 20,
 ) -> dict[str, Any]:
-    """分页获取执行记录列表（含用例名），按 start_time 倒序。
+    """分页获取执行记录列表（含用例名与用例类型），按 start_time 倒序。
 
-    返回 {"total": int, "items": [(TestRun, case_name), ...]}。
+    返回 {"total": int, "items": [(TestRun, case_name, case_kind), ...]}。
     """
     stmt = (
         select(
             db_models.TestRun,
             func.coalesce(db_models.TestCase.name, db_models.TestRun.display_name),
+            db_models.TestCase.case_kind,
         )
         .outerjoin(
             db_models.TestCase,

@@ -141,17 +141,35 @@ def build_auto_unit(
     max_steps: int = 6,
     min_steps: int = 2,
     base_url: str | None = None,
+    snapshot: str = "",
+    fixation_enabled: bool = True,
 ) -> tuple[list[dict[str, Any]] | None, list[str]]:
     """把"剩余**连续机械**步骤"组装成一个 unit（确定性，不依赖模型）。
 
     只做机械解析 + 候选匹配；遇到任何一步解析不了/候选里找不到（含歧义）就**停止成组**，
     把这段交给普通 OTA（LLM）。绝不猜意图、绝不猜目标。
+
+    045：若步骤带固化定位（learned_locator / structured_step），优先使用固化结果；
+    固化未命中时才回退到「描述 → 候选名称」匹配。
     """
     from core.script_precompile import parse_step_intent
 
     covered = {int(o) for o in (covered_orders or [])}
     actions: list[dict[str, Any]] = []
     notes: list[str] = []
+
+    def _fixed_locator(step: dict, description: str) -> dict | None:
+        if not fixation_enabled:
+            return None
+        try:
+            from core.locator_memory import resolve_persisted_locator
+
+            return resolve_persisted_locator(
+                step, snapshot, candidates=candidates, step_description=description,
+            )
+        except Exception:
+            logger.debug("resolve_persisted_locator failed", exc_info=True)
+            return None
 
     for s in steps or []:
         order = int(s.get("step_order") or 0)
@@ -190,6 +208,19 @@ def build_auto_unit(
             notes.append(f"step {order} 标题断言交给 LLM（停止成组）")
             break
         target = str(intent.get("target") or "")
+        # 045：固化定位优先（仅对能机械解析的步骤生效）
+        fixed = _fixed_locator(s, desc)
+        if fixed and kind in ("click", "check", "uncheck", "hover", "fill", "select", "scroll"):
+            act = {
+                "action": kind,
+                "selector": fixed["target"],
+                "element_desc": target or desc[:40],
+                "locator_source": fixed["source"],
+            }
+            if kind in ("fill", "select"):
+                act["value"] = intent.get("value")
+            actions.append(act)
+            continue
         if kind == "fill":
             cand = _best_candidate(candidates, target, roles=_FILL_ROLES)
         elif kind == "select":

@@ -39,6 +39,7 @@ COPY --from=frontend-builder /build/static/ app/static/
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    openssh-client \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \

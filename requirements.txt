@@ -53,3 +53,9 @@ pytest-xdist==3.6.1
 pytest-timeout==2.4.0
 passlib==1.7.4
 bcrypt==4.0.1
+
+# 046：Java 接口提取与变更触发
+dulwich==1.2.20
+paramiko==5.1.0
+tree-sitter==0.26.0
+tree-sitter-java==0.23.5

@@ -186,6 +186,9 @@ async def update_api_definition(
     # （早期实现统一跳过 None，导致 module_id:null 静默失效）
     if "module_id" in patch:
         setattr(obj, "module_id", patch["module_id"])
+    # 046：人工修正标记（显式布尔；开启后同步跳过该接口）
+    if "manual_override" in patch:
+        obj.manual_override = bool(patch["manual_override"])
     changed_contract = False
     if "method" in patch and patch["method"] and str(patch["method"]).upper() != (obj.method or ""):
         obj.method = str(patch["method"]).upper()

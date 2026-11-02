@@ -39,6 +39,15 @@ def _serialize(obj) -> dict:
         "tags": obj.tags,
         "operation_id": obj.operation_id,
         "source": obj.source,
+        # 046：自动提取来源与可信度
+        "source_file": getattr(obj, "source_file", None),
+        "source_line": getattr(obj, "source_line", None),
+        "source_symbol": getattr(obj, "source_symbol", None),
+        "extractor": getattr(obj, "extractor", None),
+        "confidence": getattr(obj, "confidence", None),
+        "confidence_reason": getattr(obj, "confidence_reason", None),
+        "status": getattr(obj, "status", "active"),
+        "manual_override": getattr(obj, "manual_override", False),
         "request_schema": obj.request_schema or {},
         "response_schema": obj.response_schema or {},
         "updated_at": obj.updated_at.isoformat() if obj.updated_at else None,
@@ -212,6 +221,9 @@ async def update_definition(
         for k in ("name", "summary", "tags", "module_id", "method", "path")
         if k in payload
     }
+    # 046：人工修正标记（显式布尔；true 后同步不覆盖、不下线）
+    if "manual_override" in payload:
+        patch["manual_override"] = bool(payload.get("manual_override"))
     if isinstance(payload.get("request_schema"), dict):
         incoming = payload["request_schema"]
         if "example" in incoming and set(incoming) <= {"example"}:

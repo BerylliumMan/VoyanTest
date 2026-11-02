@@ -212,6 +212,15 @@ export interface ApiDefinition {
   summary: string | null;
   tags: string | null;
   operation_id: string | null;
+  // 046：自动提取来源与可信度（手工创建的接口为空）
+  source_file?: string | null;
+  source_line?: number | null;
+  source_symbol?: string | null;
+  extractor?: string | null;
+  confidence?: 'high' | 'medium' | 'low' | null;
+  confidence_reason?: string | null;
+  status?: string | null;
+  manual_override?: boolean;
 }
 
 /** 接口定义详情（含 schema） */
