@@ -822,6 +822,7 @@ async def _run_startup_init():
             ("confidence_reason", "VARCHAR(300)"),
             ("status", "VARCHAR(16) NOT NULL DEFAULT 'active'"),
             ("manual_override", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("auto_case_generated_at", "TIMESTAMPTZ"),
         ):
             await _ddl(
                 f"ALTER TABLE api_definitions ADD COLUMN IF NOT EXISTS {_col} {_ddl_sql}",

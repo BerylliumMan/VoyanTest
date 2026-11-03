@@ -57,6 +57,8 @@ class ApiDefinition(Base):
     confidence_reason = Column(String(300), nullable=True)
     status = Column(String(16), nullable=False, default="active")  # active / offline
     manual_override = Column(Boolean, nullable=False, default=False)
+    # 047：上次自动补用例时间；非空表示已自动生成过（不重复生成）
+    auto_case_generated_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=tz_now)
     updated_at = Column(DateTime(timezone=True), default=tz_now, onupdate=tz_now)
 

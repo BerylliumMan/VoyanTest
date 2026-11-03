@@ -224,3 +224,52 @@ def test_change_plans_status_filter(client, admin_cookies, sample_project):
     )
     assert resp.status_code == 200
     assert resp.json()["items"] == []
+
+
+def test_sync_check_auto_generates_cases(client, admin_cookies, sample_project, tmp_path):
+    """047：手动「同步并检查变更」会给无用例的新接口自动补用例并建计划。"""
+    project_id = sample_project["id"]
+    repo = tmp_path / "origin"
+    _init_repo(repo)
+    _bind(client, admin_cookies, project_id, {"repo_url": str(repo), "branch": "", "auth_secret": None})
+
+    # 首次同步建立基线（首次克隆不算变更）
+    first = client.post(
+        f"/api/api-test/repos/{project_id}/sync?wait=true", cookies=admin_cookies
+    )
+    assert first.status_code == 200, first.text
+
+    # 源仓库新增一个接口（原接口无用例 → 应被自动补测）
+    from dulwich import porcelain
+
+    ctrl = repo / "src/main/java/com/demo/UserController.java"
+    ctrl.write_text(
+        ctrl.read_text().replace(
+            "  public Object get(@PathVariable(\"id\") Long id) { return null; }",
+            "  public Object get(@PathVariable(\"id\") Long id) { return null; }\n"
+            '  @PostMapping("/add")\n'
+            "  public Object add() { return null; }",
+        )
+    )
+    porcelain.add(repo=str(repo), paths=["src/main/java/com/demo/UserController.java"])
+    porcelain.commit(
+        repo=str(repo),
+        message=b"add endpoint",
+        author=b"tester <t@example.invalid>",
+        committer=b"tester <t@example.invalid>",
+    )
+
+    resp = client.post(
+        f"/api/api-test/repos/{project_id}/sync?wait=true&check=true",
+        cookies=admin_cookies,
+    )
+    assert resp.status_code == 200, resp.text
+
+    plans = client.get(
+        f"/api/api-test/change-plans?project_id={project_id}", cookies=admin_cookies
+    ).json()["items"]
+    assert plans, "应当生成变更计划"
+    plan = plans[0]
+    assert plan["case_count"] >= 1
+    affected = plan["affected"]
+    assert affected and affected[0]["case_ids"]

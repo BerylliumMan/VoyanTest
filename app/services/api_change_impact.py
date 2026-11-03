@@ -78,6 +78,7 @@ async def compute_impact(
     *,
     project_id: int,
     changed_files: list[str],
+    include_without_cases: bool = False,
 ) -> list[AffectedApi]:
     """计算受影响的接口及其关联用例；没有关联用例的接口不返回。"""
     if not changed_files:
@@ -124,4 +125,7 @@ async def compute_impact(
 
     for item in affected.values():
         item.case_ids = sorted(set(item.case_ids))
-    return [a for a in affected.values() if a.case_ids]
+    items = list(affected.values())
+    if include_without_cases:
+        return items
+    return [a for a in items if a.case_ids]

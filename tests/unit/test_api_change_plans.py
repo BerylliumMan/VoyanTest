@@ -536,3 +536,79 @@ async def test_project_window_inherits_global_when_unset(db, project_id):
     trigger = (await _triggers(db))[0]
     delta = trigger.deadline_at.replace(tzinfo=None) - now.replace(tzinfo=None)
     assert 59 <= delta.total_seconds() / 60 <= 61
+
+
+@pytest.mark.asyncio
+async def test_plan_after_sync_auto_fills_missing_cases(db, project_id):
+    """047：受影响但无用例的接口自动补用例并进入计划。"""
+    from sqlalchemy import select as _select
+
+    from app.models.api_extract import CodeRepoBinding
+    from app.models.api_test import ApiDefinition
+    from app.models.testcase import TestCase
+    from app.services.api_change_plans import plan_after_sync
+    from app.services.api_sync import SyncOutcome
+
+    binding = CodeRepoBinding(
+        project_id=project_id, repo_url="/tmp/x", branch="", extractor="auto"
+    )
+    db.add(binding)
+    definition = ApiDefinition(
+        project_id=project_id,
+        name="POST /orders",
+        method="POST",
+        path="/orders",
+        source="spring",
+        source_file="src/OrderController.java",
+        extractor="spring_source",
+        status="active",
+        request_schema={
+            "params": [],
+            "body": {
+                "content_type": "application/json",
+                "schema": {"type": "object", "properties": {"qty": {"type": "integer"}}},
+                "example": {"qty": 1},
+            },
+        },
+    )
+    db.add(definition)
+    await db.commit()
+    await db.refresh(binding)
+    await db.refresh(definition)
+
+    outcome = SyncOutcome(
+        status="success",
+        base_commit="base",
+        head_commit="head",
+        changed_files=["src/OrderController.java"],
+    )
+    result = await plan_after_sync(db, binding, outcome)
+
+    assert result["status"] == "planned"
+    assert result["auto_cases"]["generated_cases"] >= 1
+    assert result["affected"] == 1
+
+    trigger = (await _triggers(db))[0]
+    plan = await db.get(QualityRegressionPlan, trigger.plan_id)
+    case_ids = [item["case_id"] for item in plan.items]
+    assert case_ids
+    cases = (
+        await db.execute(_select(TestCase).where(TestCase.id.in_(case_ids)))
+    ).scalars().all()
+    assert all(c.name.startswith("[自动]") for c in cases)
+    assert all(c.api_definition_id == definition.id for c in cases)
+
+    # 再次检查同一变更：不重复生成
+    before = len(
+        (
+            await db.execute(_select(TestCase).where(TestCase.project_id == project_id))
+        ).scalars().all()
+    )
+    result2 = await plan_after_sync(db, binding, outcome)
+    after = len(
+        (
+            await db.execute(_select(TestCase).where(TestCase.project_id == project_id))
+        ).scalars().all()
+    )
+    assert result2["status"] == "planned"
+    assert after == before

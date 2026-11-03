@@ -583,11 +583,40 @@ async def plan_after_sync(db, binding, outcome) -> dict:
     if not changed:
         return {"status": "no_change"}
 
-    affected = await compute_impact(
-        db, project_id=binding.project_id, changed_files=changed
+    matched = await compute_impact(
+        db,
+        project_id=binding.project_id,
+        changed_files=changed,
+        include_without_cases=True,
     )
+    # 047：对命中但没有用例的接口自动补基础用例，再重新映射
+    auto_stats = None
+    missing = [item.definition_id for item in matched if not item.case_ids]
+    if missing:
+        from app.services.api_auto_cases import auto_generate_missing_cases
+
+        auto_stats = await auto_generate_missing_cases(
+            db,
+            project_id=binding.project_id,
+            definition_ids=missing,
+        )
+        await db.commit()
+        if auto_stats.generated_cases:
+            matched = await compute_impact(
+                db,
+                project_id=binding.project_id,
+                changed_files=changed,
+                include_without_cases=True,
+            )
+
+    affected = [item for item in matched if item.case_ids]
+    auto_summary = auto_stats.as_dict() if auto_stats else None
     if not affected:
-        return {"status": "no_affected", "changed_files": len(changed)}
+        return {
+            "status": "no_affected",
+            "changed_files": len(changed),
+            "auto_cases": auto_summary,
+        }
 
     result = await create_change_plan(
         db,
@@ -600,8 +629,28 @@ async def plan_after_sync(db, binding, outcome) -> dict:
     await db.commit()
     if result.trigger_id:
         await _notify_plan_created(
-            db, binding.project_id, result.trigger_id, created=result.created
+            db,
+            binding.project_id,
+            result.trigger_id,
+            created=result.created,
+            auto_cases=(auto_stats.generated_cases if auto_stats else 0),
         )
+        if auto_stats and auto_stats.generated_cases:
+            try:
+                from app.auth import log_audit
+
+                await log_audit(
+                    db,
+                    None,
+                    "api_change.auto_cases",
+                    {
+                        "project_id": int(binding.project_id),
+                        "trigger_id": result.trigger_id,
+                        **auto_stats.as_dict(),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("自动补用例审计写入失败", exc_info=True)
     return {
         "status": "planned",
         "changed_files": len(changed),
@@ -609,6 +658,7 @@ async def plan_after_sync(db, binding, outcome) -> dict:
         "created": result.created,
         "merged": result.merged,
         "trigger_id": result.trigger_id,
+        "auto_cases": auto_summary,
     }
 
 
@@ -622,7 +672,7 @@ async def _admin_user_ids(db) -> list[int]:
 
 
 async def _notify_plan_created(
-    db, project_id: int, trigger_id: int, *, created: bool
+    db, project_id: int, trigger_id: int, *, created: bool, auto_cases: int = 0
 ) -> None:
     """计划生成/合并时通知管理员。"""
     try:
@@ -642,6 +692,7 @@ async def _notify_plan_created(
                     message=(
                         f"项目 #{project_id} 的变更计划 #{trigger_id} 等待确认；"
                         "确认窗口到期后将自动执行"
+                        + (f"（已自动补 {auto_cases} 条用例）" if auto_cases else "")
                     ),
                 )
             )

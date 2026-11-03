@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     api_extract_max_scan_files: int = 20000
     # 046 v2：每 N 次增量后做一次全量校准
     api_extract_full_sync_every: int = 10
+    # 047：变更即补用例（受影响但无用例的接口自动补基础用例）
+    api_auto_case_enabled: bool = True
+    # 单次变更最多补几个接口
+    api_auto_case_max_definitions: int = 5
+    # 单接口最多生成几条用例
+    api_auto_case_max_each: int = 3
+    # 单项目每日自动生成上限
+    api_auto_case_daily_limit: int = 50
     # - 附件内容提取预算（docx/pdf/xlsx/md → 文本进对话上下文 / 文档驱动探索；超限截断）
     chat_attachment_max_chars: int = 6000
     # - 单对话并行执行上限（生成类同对话串行，不受此限）
