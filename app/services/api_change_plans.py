@@ -502,13 +502,24 @@ async def execute_claimed_trigger(trigger_id: int) -> int | None:
         )
         batch_id = int(batch.id)
         trigger.batch_id = batch_id
+        # 变更计划执行需要环境来解析 {{baseUrl}}：优先计划绑定，其次项目第一个环境
+        environment_id = (
+            int(plan.environment_id)
+            if plan is not None and plan.environment_id
+            else await _default_environment_id(db, project_id)
+        )
         await db.commit()
 
     error: str | None = None
     try:
         from core.runner import run_batch_test_cases
 
-        await run_batch_test_cases(case_ids, project_id, batch_id=batch_id)
+        await run_batch_test_cases(
+            case_ids,
+            project_id,
+            batch_id=batch_id,
+            environment_id=environment_id,
+        )
     except Exception as exc:  # noqa: BLE001 - 失败按退避重试
         logger.warning("变更计划执行失败 trigger=%s: %s", trigger_id, exc, exc_info=True)
         error = str(exc)
@@ -660,6 +671,21 @@ async def plan_after_sync(db, binding, outcome) -> dict:
         "trigger_id": result.trigger_id,
         "auto_cases": auto_summary,
     }
+
+
+async def _default_environment_id(db, project_id: int) -> int | None:
+    """项目第一个环境；用于变更计划执行时解析 {{baseUrl}}。"""
+    from app.models.project import Environment
+
+    row = (
+        await db.execute(
+            select(Environment.id)
+            .where(Environment.project_id == project_id)
+            .order_by(Environment.id.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return int(row) if row is not None else None
 
 
 async def _admin_user_ids(db) -> list[int]:
