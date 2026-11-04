@@ -66,51 +66,11 @@ def _is_multipart_definition(definition: dict) -> bool:
     return str(body.get("content_type") or "").lower().startswith("multipart/form-data")
 
 
-def _needs_auth(definition: dict) -> bool:
-    """definition 是否声明了鉴权要求（解析器写入的 request_schema.security）。"""
-    security = (definition.get("request_schema") or {}).get("security")
-    return bool(security)
-
-
-def _login_candidate(row) -> dict | None:
-    """把 api_definitions 行转成生成器需要的 login 定义（非 POST 或带鉴权的不算）。"""
-    if str(row.method or "").upper() != "POST":
-        return None
-    if _needs_auth({"request_schema": row.request_schema or {}}):
-        return None  # 登录接口自己不该要求鉴权
-    body_text = json.dumps(row.request_schema or {}, ensure_ascii=False).lower()
-    path = str(row.path or "").lower()
-    looks_like_login = (
-        "password" in body_text
-        or path.endswith(("login", "signin", "token", "auth"))
-        or "/login" in path
-    )
-    if not looks_like_login:
-        return None
-    return {
-        "id": row.id,
-        "name": row.name,
-        "method": row.method,
-        "path": row.path,
-        "request_schema": row.request_schema or {},
-    }
-
-
-async def _find_login_definition(
-    db: AsyncSession, project_id: int, definitions: list
-) -> dict | None:
-    """在项目里找登录接口定义（优先后端字段含 password 的 POST）。"""
-    for row in await crud_api_def.list_api_definitions(db, project_id, limit=500):
-        candidate = _login_candidate(row)
-        if candidate and "password" in json.dumps(
-            candidate["request_schema"], ensure_ascii=False
-        ).lower():
-            return candidate
-    for row in definitions:  # 兜底：目标定义里就有登录接口
-        candidate = _login_candidate(row)
-        if candidate:
-            return candidate
-    return None
+# 048：登录接口查找统一走服务层（自动补用例共用）
+from app.services.api_case_auth import (  # noqa: E402
+    find_login_definition as _find_login_definition,
+    needs_auth as _needs_auth,
+)
 
 
 async def _persist_drafts(

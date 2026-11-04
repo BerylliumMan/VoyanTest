@@ -391,3 +391,53 @@ async def test_incremental_sync_only_parses_changed_files(db, project_id, tmp_pa
         await db.execute(select(ApiSyncRecord).order_by(ApiSyncRecord.id.desc()).limit(1))
     ).scalar_one()
     assert record.details["incremental"] is True
+
+
+@pytest.mark.asyncio
+async def test_incremental_sync_reparses_changed_openapi_doc(db, project_id, tmp_path):
+    """OpenAPI 文档变更时，增量同步也必须重新解析（不能只追踪 .java）。"""
+    from dulwich import porcelain
+
+    from app.models.api_extract import CodeRepoBinding
+    from app.services.api_sync import sync_binding
+
+    src = tmp_path / "origin"
+    src.mkdir()
+    porcelain.init(str(src))
+    _commit_file(
+        src,
+        "src/main/java/com/demo/C.java",
+        '@RestController\n@RequestMapping("/c")\nclass C { @GetMapping("/x") public Object x() { return null; } }\n',
+        "init java",
+    )
+    _commit_file(
+        src,
+        "src/main/resources/openapi.yaml",
+        'openapi: 3.0.1\ninfo: {title: t, version: "1"}\npaths:\n  /one:\n    get:\n      summary: one\n',
+        "init doc",
+    )
+    work = tmp_path / "work"
+    binding = CodeRepoBinding(
+        project_id=project_id, repo_url=str(src), branch="", extractor="auto"
+    )
+    db.add(binding)
+    await db.commit()
+    await db.refresh(binding)
+
+    first = await sync_binding(db, binding, repo_dir=str(work))
+    assert first.status == "success"
+    rows = await _all(db, project_id)
+    assert ("GET", "/one") in rows
+
+    _commit_file(
+        src,
+        "src/main/resources/openapi.yaml",
+        'openapi: 3.0.1\ninfo: {title: t, version: "2"}\npaths:\n  /one:\n    get:\n      summary: one\n  /two:\n    get:\n      summary: two\n',
+        "add path",
+    )
+    second = await sync_binding(db, binding, repo_dir=str(work))
+    assert second.status == "success"
+    assert second.incremental is True
+    rows = await _all(db, project_id)
+    assert ("GET", "/two") in rows
+    assert rows[("GET", "/two")].extractor == "openapi"

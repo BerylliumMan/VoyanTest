@@ -281,13 +281,19 @@ def _extract_all(
         if extractor.name == "openapi":
             ctx.openapi_doc = openapi_doc
             ctx.openapi_url = binding.openapi_url
-            if (
-                ctx.openapi_doc is None
-                and not ctx.openapi_url
-                and stack.openapi_paths
-                and not changed_files
-            ):
-                ctx.openapi_doc = _load_repo_openapi(repo_dir, stack.openapi_paths[0], errors)
+            if ctx.openapi_doc is None and not ctx.openapi_url and stack.openapi_paths:
+                # 全量，或增量中本次变更包含 OpenAPI 文档时，才重新解析
+                changed_set = {
+                    str(x).replace("\\", "/").lstrip("./") for x in (changed_files or [])
+                }
+                doc_paths = {
+                    str(x).replace("\\", "/").lstrip("./") for x in stack.openapi_paths
+                }
+                doc_changed = not changed_files or bool(changed_set & doc_paths)
+                if doc_changed:
+                    ctx.openapi_doc = _load_repo_openapi(
+                        repo_dir, stack.openapi_paths[0], errors
+                    )
             if ctx.openapi_doc is None and not ctx.openapi_url:
                 # 增量模式且文档未变更：不重复解析，保留既有接口
                 continue

@@ -90,6 +90,17 @@ def _first_2xx_example(response_schema: Any) -> Any:
     return None
 
 
+def _first_2xx_schema(response_schema: Any) -> dict | None:
+    """statuses 里第一个 2xx 的响应 schema（用于整 body 校验）。"""
+    statuses = (response_schema or {}).get("statuses") or {}
+    for code, info in statuses.items():
+        if str(code).startswith("2") and isinstance(info, dict):
+            schema = info.get("schema")
+            if isinstance(schema, dict) and schema:
+                return schema
+    return None
+
+
 def _jsonpath_expression(example: Any) -> str | None:
     """example 是对象 → 断言第一个字段存在（$.<key>）。"""
     if isinstance(example, dict) and example:
@@ -122,17 +133,36 @@ def _build_assertions(
                 "name": "状态码 < 500",
             },
         ]
-    status = _expected_status(definition.get("response_schema"))
     asserts: list[dict] = [
         {
             "enable": True,
             "type": "status_code",
-            "condition": "equals",
-            "expected": status,
-            "name": f"状态码 {status}",
-        }
+            "condition": "gte",
+            "expected": "200",
+            "name": "状态码 2xx（>=200）",
+        },
+        {
+            "enable": True,
+            "type": "status_code",
+            "condition": "lt",
+            "expected": "300",
+            "name": "状态码 2xx（<300）",
+        },
     ]
-    if with_jsonpath:
+    # 048：有响应 schema 时校验整个 body（字段/类型/必填），替代只看状态码
+    schema = _first_2xx_schema(definition.get("response_schema"))
+    if schema:
+        asserts.append(
+            {
+                "enable": True,
+                "type": "jsonschema",
+                "expression": json.dumps(schema, ensure_ascii=False),
+                "condition": "equals",
+                "expected": "",
+                "name": "响应符合 JSON Schema",
+            }
+        )
+    elif with_jsonpath:
         expr = _jsonpath_expression(_first_2xx_example(definition.get("response_schema")))
         if expr:
             asserts.append(

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.api_test import ApiDefinition
 from app.models.testcase import TestCase
+from app.services.api_case_auth import find_login_definition, needs_auth
 from app.tz import now as tz_now
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ async def auto_generate_missing_cases(
 
     processed = 0
     seen: set[int] = set()
+    login_definition = None
+    login_checked = False
     for raw_id in definition_ids:
         try:
             definition_id = int(raw_id)
@@ -84,7 +87,15 @@ async def auto_generate_missing_cases(
             stats.skipped_definition_ids.append(definition_id)
             continue
 
-        drafts = _generate_drafts(definition, max_each, stats)
+        auth_definition = None
+        if needs_auth({"request_schema": definition.request_schema or {}}):
+            if not login_checked:
+                login_definition = await find_login_definition(db, int(project_id))
+                login_checked = True
+            auth_definition = login_definition
+        drafts = _generate_drafts(
+            definition, max_each, stats, auth_definition=auth_definition
+        )
         if not drafts:
             stats.skipped_definition_ids.append(definition_id)
             continue
@@ -114,7 +125,11 @@ async def auto_generate_missing_cases(
 
 
 def _generate_drafts(
-    definition: ApiDefinition, max_each: int, stats: AutoCaseStats
+    definition: ApiDefinition,
+    max_each: int,
+    stats: AutoCaseStats,
+    *,
+    auth_definition: dict | None = None,
 ) -> list[dict]:
     """调用规则生成器；异常记录到 stats 并返回空列表。"""
     try:
@@ -139,6 +154,7 @@ def _generate_drafts(
                     "max_cases_per_operation": max_each,
                     "skip_multipart": True,
                 },
+                auth_definition=auth_definition,
             )
         )
     except Exception as exc:  # noqa: BLE001 - 生成失败不阻塞计划

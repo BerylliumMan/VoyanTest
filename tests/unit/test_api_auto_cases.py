@@ -1,5 +1,7 @@
 """047：变更即补用例（自动生成缺失用例）。"""
 
+import json
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -64,6 +66,7 @@ def _patch_settings(monkeypatch, **overrides):
 
 
 async def _add_definition(db, project_id, path="/users", method="POST", **kw):
+    request_schema = kw.pop("request_schema", REQUEST_SCHEMA)
     row = ApiDefinition(
         project_id=project_id,
         name=f"{method} {path}",
@@ -73,7 +76,7 @@ async def _add_definition(db, project_id, path="/users", method="POST", **kw):
         source_file="src/UserController.java",
         extractor="spring_source",
         status="active",
-        request_schema=REQUEST_SCHEMA,
+        request_schema=request_schema,
         **kw,
     )
     db.add(row)
@@ -235,3 +238,85 @@ async def test_manual_cases_untouched(db, project_id):
     await db.refresh(manual)
     assert manual.name == "人工用例"
     assert manual.status == "active"
+
+
+AUTH_SCHEMA = {
+    "params": [],
+    "security": [{"type": "http", "scheme": "bearer"}],
+    "body": {
+        "content_type": "application/json",
+        "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+        "example": {"name": "demo"},
+    },
+}
+
+
+async def _add_login_definition(db, project_id):
+    row = ApiDefinition(
+        project_id=project_id,
+        name="登录",
+        method="POST",
+        path="/api/auth/login",
+        source="openapi",
+        extractor="openapi",
+        status="active",
+        request_schema={
+            "body": {
+                "content_type": "application/json",
+                "schema": {"type": "object", "properties": {
+                    "username": {"type": "string"}, "password": {"type": "string"}}},
+                "example": {"username": "u", "password": "p"},
+            }
+        },
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_auth_interface_gets_login_step(db, project_id):
+    await _add_login_definition(db, project_id)
+    definition = await _add_definition(
+        db, project_id, path="/orders", method="GET", request_schema=AUTH_SCHEMA
+    )
+
+    stats = await auto_generate_missing_cases(
+        db, project_id=project_id, definition_ids=[definition.id]
+    )
+    await db.commit()
+
+    assert stats.generated_cases >= 1
+    cases = await _cases(db, project_id)
+    case = cases[0]
+    steps = case.api_spec["steps"]
+    assert len(steps) == 2
+    assert steps[0]["order"] == 1
+    assert steps[0]["request"]["url"].endswith("/api/auth/login")
+    assert steps[0].get("extractors")
+    auth_header = next(
+        (h for h in steps[1]["request"].get("headers") or []
+         if h.get("key", "").lower() == "authorization"),
+        None,
+    )
+    assert auth_header and "{{token}}" in auth_header["value"]
+
+
+@pytest.mark.asyncio
+async def test_auth_interface_without_login_definition_has_note(db, project_id):
+    definition = await _add_definition(
+        db, project_id, path="/orders", method="GET", request_schema=AUTH_SCHEMA
+    )
+
+    stats = await auto_generate_missing_cases(
+        db, project_id=project_id, definition_ids=[definition.id]
+    )
+    await db.commit()
+
+    cases = await _cases(db, project_id)
+    assert len(cases) == 1
+    assert len(cases[0].api_spec["steps"]) == 1
+    assert "token" in (cases[0].description or "").lower() or "token" in json.dumps(
+        cases[0].api_spec, ensure_ascii=False
+    ).lower()
