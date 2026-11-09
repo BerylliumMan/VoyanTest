@@ -86,8 +86,12 @@ async def create_run_log(db: AsyncSession, run_id: int, level: str, message: str
 # 运行批次 CRUD
 # ----------------------------
 
-async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0, triggered_by: str | None = None, source: str | None = None, source_id: int | None = None) -> db_models.RunBatch:
-    """创建运行批次"""
+async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", total_cases: int = 0, triggered_by: str | None = None, source: str | None = None, source_id: int | None = None, parent_batch_id: int | None = None, auto_retry: bool = False) -> db_models.RunBatch:
+    """创建运行批次。
+
+    ``parent_batch_id`` / ``auto_retry`` 与批次行在同一次插入里写入，
+    避免自动重试唯一索引冲突时残留无归属的孤儿批次（049）。
+    """
     if source is None:
         override = _BATCH_SOURCE_OVERRIDE.get()
         if override:
@@ -103,6 +107,8 @@ async def create_run_batch(db: AsyncSession, project_id: int, name: str = "", to
         triggered_by=triggered_by,
         source=source,
         source_id=source_id,
+        parent_batch_id=parent_batch_id,
+        auto_retry=auto_retry,
     )
     db.add(batch)
     await db.commit()

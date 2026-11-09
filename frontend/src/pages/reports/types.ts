@@ -77,4 +77,7 @@ export interface RunItem {
   /** 039：数据组序号与数据（行） */
   dataset_group?: number | null;
   dataset_row?: Record<string, unknown> | null;
+  /** 049：失败分类与简短原因（历史数据为空，前端显示「未知」） */
+  failure_kind?: string | null;
+  failure_reason?: string | null;
 }

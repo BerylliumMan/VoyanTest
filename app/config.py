@@ -247,6 +247,13 @@ class Settings(BaseSettings):
     cors_allow_methods: str = "GET,POST,PUT,DELETE,PATCH,OPTIONS"
     cors_allow_headers: str = "Content-Type,Authorization,X-Requested-With,Accept"
 
+    # 049 失败分类与自愈：分类只读、重试有上限、通知可降噪。
+    failure_triage_enabled: bool = True
+    failure_auto_retry_enabled: bool = True
+    failure_auto_retry_kinds: list[str] = ["env"]
+    failure_auto_retry_max_cases: int = 20
+    failure_notify_real_only: bool = True
+
     # CSRF 保护 — 当前依赖 SameSite=Lax Cookie 的浏览器自动保护机制。
     # 未实现 CSRF token 中间件。如需额外保护，请实现 Origin/Referer 校验。
     csrf_enabled: bool = False

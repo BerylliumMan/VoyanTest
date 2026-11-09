@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space, Select, Input,
+  Card, Table, Tag, Spin, Button, Modal, Descriptions, Message, Space, Select, Input, Tooltip, Empty,
 } from '@arco-design/web-react';
 import { IconEye, IconDown, IconRight, IconLoading, IconDownload, IconDelete, IconMessage } from '@arco-design/web-react/icon';
 import axios from 'axios';
@@ -30,6 +30,13 @@ interface BatchDetail {
   parent_batch_name?: string | null;
   /** 042：因 Flaky 隔离而跳过的用例数 */
   quarantined_count?: number;
+  /** 049：本批次是否由自动重试创建 */
+  auto_retry?: boolean;
+  /** 049：收尾时缓存的失败分类计数 */
+  failure_summary?: {
+    total?: number; passed?: number; failed?: number;
+    kinds?: Record<string, number>; real_defects?: number;
+  } | null;
   runs: RunItem[];
 }
 
@@ -51,6 +58,17 @@ const Reports: React.FC = () => {
     cancelled: t['cancelled'],
     skipped: t['skipped'],
     info: t['info'],
+  };
+
+  // 049：失败类别展示口径（与后端 failure_triage.FAILURE_KINDS 对齐）
+  const FAILURE_KIND_META: Record<string, { label: string; color: string }> = {
+    env: { label: '环境', color: 'orange' },
+    auth: { label: '鉴权', color: 'gold' },
+    data: { label: '数据', color: 'cyan' },
+    assertion: { label: '断言', color: 'red' },
+    locator: { label: '定位', color: 'magenta' },
+    script: { label: '脚本', color: 'purple' },
+    unknown: { label: '未知', color: 'gray' },
   };
 
   const getStatusTag = (s: string, animated?: boolean) => (
@@ -91,6 +109,15 @@ const Reports: React.FC = () => {
   // 031（US5）：仅失败重跑进行中
   const [rerunning, setRerunning] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  // 049：批次失败分类汇总（含自动重试批次）与详情内筛选
+  const [detailSummary, setDetailSummary] = useState<{
+    kinds?: Record<string, number>;
+    real_defects?: number;
+    retry_batch_id?: number | null;
+    retry_batch_status?: string | null;
+    auto_retry?: boolean;
+  } | null>(null);
+  const [kindFilter, setKindFilter] = useState('');
   const [selectedRun, setSelectedRun] = useState<RunItem | null>(null);
   const [runVisible, setRunVisible] = useState(false);
   const [expandedRuns, setExpandedRuns] = useState<Set<number>>(new Set());
@@ -133,6 +160,12 @@ const Reports: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
+  const loadFailureSummary = (batchId: number) => {
+    axios.get(`/api/reports/batches/${batchId}/failure-summary`)
+      .then((res) => setDetailSummary(res.data))
+      .catch(() => setDetailSummary(null));
+  };
+
   const refreshBatchDetail = async (batchId: number) => {
     try {
       const updated = await apiRequest<BatchDetail>(
@@ -140,9 +173,10 @@ const Reports: React.FC = () => {
         { showSuccess: false, showError: false }
       );
       setDetail(updated);
-      // 暂停时仍轮询；终态才停
+      // 暂停时仍轮询；终态才停，摘要只需在终态请求一次（运行中由本地 runs 现算）
       if (!['running', 'paused'].includes(updated.status)) {
         setPollingBatchId(null);
+        loadFailureSummary(batchId);
       }
     } catch {
       setPollingBatchId(null);
@@ -236,6 +270,8 @@ const Reports: React.FC = () => {
     try {
       const res = await axios.get(`/api/reports/batches/${batchId}`);
       setDetail(res.data);
+      setKindFilter('');
+      loadFailureSummary(batchId);
       if (res.data.status === 'running') {
         setPollingBatchId(batchId);
       }
@@ -287,6 +323,8 @@ const Reports: React.FC = () => {
     setDetailVisible(false);
     setPollingBatchId(null);
     setDetail(null);
+    setDetailSummary(null);
+    setKindFilter('');
   };
 
   const viewRun = (run: RunItem) => {
@@ -527,10 +565,60 @@ const Reports: React.FC = () => {
                 className={styles.descriptionsMargin}
               />
 
+              {(() => {
+                const localCounts: Record<string, number> = {};
+                (detail.runs || []).forEach((r) => {
+                  if (r.status !== 'failed') return;
+                  const k = r.failure_kind || 'unknown';
+                  localCounts[k] = (localCounts[k] || 0) + 1;
+                });
+                const remoteKinds = detailSummary?.kinds;
+                const counts = remoteKinds && Object.keys(remoteKinds).length
+                  ? remoteKinds
+                  : localCounts;
+                const entries = Object.entries(counts).filter(([, n]) => Number(n) > 0);
+                const retryId = detailSummary?.retry_batch_id || null;
+                if (!entries.length && !detail.auto_retry && !retryId) return null;
+                return (
+                  <div style={{ margin: '0 0 12px', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                    <span className={styles.resultMeta}>失败分类：</span>
+                    {entries.map(([kind, count]) => (
+                      <Tag key={kind} size="small" color={FAILURE_KIND_META[kind]?.color || 'gray'}>
+                        {`${FAILURE_KIND_META[kind]?.label || kind} ${count}`}
+                      </Tag>
+                    ))}
+                    {detailSummary?.real_defects ? (
+                      <Tag size="small" color="red">{`真实缺陷 ${detailSummary.real_defects}`}</Tag>
+                    ) : null}
+                    {detail.auto_retry ? <Tag size="small" color="green">环境重试批次</Tag> : null}
+                    {retryId ? (
+                      <a onClick={() => openBatchDetail(Number(retryId))}>{`查看重试批次 #${retryId}`}</a>
+                    ) : null}
+                  </div>
+                );
+              })()}
+
               {detail.runs && detail.runs.length > 0 ? (
                 <div>
-                  <h4 className={styles['run-section-title']}>{t['case.steps']}</h4>
-                  {detail.runs.map((run) => {
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h4 className={styles['run-section-title']}>{t['case.steps']}</h4>
+                    <Select
+                      allowClear
+                      size="small"
+                      placeholder="按失败类别筛选"
+                      style={{ width: 160 }}
+                      value={kindFilter || undefined}
+                      onChange={(v) => setKindFilter(String(v || ''))}
+                      options={Object.entries(FAILURE_KIND_META).map(([value, meta]) => ({ value, label: meta.label }))}
+                    />
+                  </div>
+                  {kindFilter && detail.runs.filter((r) => (r.failure_kind || 'unknown') === kindFilter).length === 0 ? (
+                    <Empty description="没有该失败类别的用例" />
+                  ) : null}
+                  {(kindFilter
+                    ? detail.runs.filter((r) => (r.failure_kind || 'unknown') === kindFilter)
+                    : detail.runs
+                  ).map((run) => {
                     const expanded = expandedRuns.has(run.run_id);
                     const isRunning = run.status === 'running';
                     return (
@@ -559,6 +647,13 @@ const Reports: React.FC = () => {
                           <Tag color="arcoblue" size="small">
                             {`第 ${run.dataset_group} 组`}
                           </Tag>
+                        ) : null}
+                        {run.failure_kind ? (
+                          <Tooltip content={run.failure_reason || `失败类别：${FAILURE_KIND_META[run.failure_kind]?.label || run.failure_kind}`}>
+                            <Tag color={FAILURE_KIND_META[run.failure_kind]?.color || 'gray'} size="small">
+                              {FAILURE_KIND_META[run.failure_kind]?.label || run.failure_kind}
+                            </Tag>
+                          </Tooltip>
                         ) : null}
                         {getStatusTag(run.status, isRunning)}
                         <span className={styles['batch-time']}>

@@ -301,6 +301,18 @@ async def _run_startup_init():
             "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS triggered_by VARCHAR(255)",
             "run_batches.triggered_by 迁移",
         )
+        for _col_sql in (
+            "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS failure_kind VARCHAR(16)",
+            "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS failure_reason TEXT",
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS auto_retry BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE run_batches ADD COLUMN IF NOT EXISTS failure_summary JSON",
+            "CREATE INDEX IF NOT EXISTS ix_test_runs_batch_kind ON test_runs (batch_id, failure_kind)",
+            # 049：同一批次最多一个自动重试子批次（并发收尾的幂等兜底）。
+            # 部分索引只在 auto_retry 为真时生效，手动重跑不受约束。
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_run_batches_auto_retry_parent "
+            "ON run_batches (parent_batch_id) WHERE auto_retry",
+        ):
+            await _ddl(_col_sql, "049 失败分类字段迁移")
         await _ddl(
             "ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT",
             "recording_sessions.events_data 迁移",

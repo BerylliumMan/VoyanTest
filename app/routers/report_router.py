@@ -317,7 +317,7 @@ async def list_batches(
 
 
 @router.get("/batches/{batch_id}")
-async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
+async def get_batch_detail(batch_id: int, dataset_group: int | None = None, failure_kind: str | None = None, user=Depends(get_current_user), db: AsyncSession = Depends(get_async_db)) -> dict:
     """获取批次详情，包含所有用例运行结果"""
     batch = await crud.get_run_batch(db, batch_id)
     if not batch:
@@ -346,6 +346,12 @@ async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user
     cases = related["cases"]
     if dataset_group is not None:
         runs = [r for r in runs if getattr(r, "dataset_group", None) == dataset_group]
+    if failure_kind:
+        _wanted = str(failure_kind).strip()
+        runs = [
+            r for r in runs
+            if (getattr(r, "failure_kind", None) or "unknown") == _wanted
+        ]
 
     # 032-fix：历史批次 started_at 可能为空（旧版客户端链路未写入）——
     # 回退到最早一条用例的 start_time，保证报告「开始时间」恒有值
@@ -372,6 +378,9 @@ async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user
             "finished_at": run.end_time.isoformat() if run.end_time else None,
             "dataset_group": getattr(run, "dataset_group", None),
             "dataset_row": getattr(run, "dataset_row", None),
+            # 049：失败分类（历史数据为 None，前端展示「未知」）
+            "failure_kind": getattr(run, "failure_kind", None),
+            "failure_reason": getattr(run, "failure_reason", None),
             "steps": [],
         }
 
@@ -411,7 +420,58 @@ async def get_batch_detail(batch_id: int, dataset_group: int | None = None, user
         # 031（US5）：仅失败重跑来源批次（报告页互跳）
         "parent_batch_id": getattr(batch, "parent_batch_id", None),
         "parent_batch_name": parent_batch_name,
+        # 049：自动重试标记与分类摘要
+        "auto_retry": bool(getattr(batch, "auto_retry", False)),
+        "failure_summary": getattr(batch, "failure_summary", None),
         "runs": runs_data,
+    }
+
+
+@router.get("/batches/{batch_id}/failure-summary")
+async def get_batch_failure_summary(
+    batch_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+) -> dict:
+    """049：批次失败分类汇总 + 自动重试批次信息。
+
+    历史批次（无 failure_kind）按 unknown 统计，不报错。
+    """
+    from sqlalchemy import select
+
+    from app import db_models as _models
+    from app.services.failure_triage import summarize_runs
+
+    batch = await _get_batch_for_user(batch_id, user, db)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+
+    rows = (
+        await db.execute(
+            select(_models.TestRun).where(_models.TestRun.batch_id == batch_id)
+        )
+    ).scalars().all()
+    summary = summarize_runs(rows)
+
+    retry = (
+        await db.execute(
+            select(_models.RunBatch)
+            .where(
+                _models.RunBatch.parent_batch_id == batch_id,
+                _models.RunBatch.auto_retry.is_(True),
+            )
+            .order_by(_models.RunBatch.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    return {
+        "batch_id": batch_id,
+        **summary,
+        "auto_retry": bool(getattr(batch, "auto_retry", False)),
+        "retry_batch_id": retry.id if retry is not None else None,
+        "retry_batch_status": retry.status if retry is not None else None,
+        "retry_batch_name": retry.name if retry is not None else None,
     }
 
 
@@ -655,19 +715,15 @@ async def compare_batches(
 @router.post("/batches/{batch_id}/rerun-failed")
 async def rerun_failed_batch(
     batch_id: int,
+    kinds: str | None = None,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ) -> dict:
-    """031（US5）：仅失败重跑 —— 用原批次的失败用例创建新批次（parent_batch_id 关联）。
+    """031（US5）+ 049：用失败用例创建新批次（parent_batch_id 关联）。
 
-    语义（contracts §1.3）：
-      · 批次不存在/无权限 → 404；批次仍在运行 → 409；没有失败用例 → 409
-      · 新批次命名「<原名> · 仅失败重跑」，携带 parent_batch_id，报告页可互跳
+    - ``kinds`` 可选，逗号分隔的失败类别（如 ``env``），仅重跑这些类别；
+    - 实现下沉到 ``app.services.batch_rerun``，自动重试复用同一条链路。
     """
-    from sqlalchemy import select
-
-    from app import db_models
-
     batch = await _get_batch_for_user(batch_id, user, db)
     if batch is None:
         raise HTTPException(status_code=404, detail="批次不存在")
@@ -675,80 +731,30 @@ async def rerun_failed_batch(
     if str(batch.status or "") in ("running", "pending"):
         raise HTTPException(status_code=409, detail="批次仍在运行，请等结束后再重跑失败用例")
 
-    rows = list(
-        (
-            await db.execute(
-                select(db_models.TestRun).where(db_models.TestRun.batch_id == batch_id)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    failed_case_ids: list[int] = []
-    failed_groups: dict[int, list[int]] = {}
-    for run in rows:
-        if str(run.status or "") != "failed" or not run.case_id:
-            continue
-        if run.case_id not in failed_case_ids:
-            failed_case_ids.append(run.case_id)
-        group = getattr(run, "dataset_group", None)
-        if group is not None:
-            failed_groups.setdefault(int(run.case_id), []).append(int(group))
-    if not failed_case_ids:
-        raise HTTPException(status_code=409, detail="该批次没有失败用例，无需重跑")
+    kind_set = {k.strip() for k in str(kinds or "").split(",") if k.strip()} or None
 
-    from app.crud import run as crud_run
-    from core.runner._persistence import build_batch_execution_queue, build_dataset_execution_queue
+    from app.services.batch_rerun import create_rerun_batch
 
-    if failed_groups:
-        # 039：仅失败的 (case_id, group) 重跑；未带组的用例按整案
-        _groups_map = {cid: list(dict.fromkeys(groups)) for cid, groups in failed_groups.items()}
-        total = len(
-            build_dataset_execution_queue(
-                failed_case_ids, [], "before_each",
-                {cid: [{} for _ in groups] for cid, groups in _groups_map.items()},
-            )
-        )
-    else:
-        _groups_map = None
-        total = len(build_batch_execution_queue(failed_case_ids, [], "before_each"))
-    name = f"{(batch.name or f'批次 #{batch_id}')} · 仅失败重跑"
-    new_batch = await crud_run.create_run_batch(
+    result = await create_rerun_batch(
         db,
-        project_id=batch.project_id,
-        name=name,
-        total_cases=total,
+        batch,
+        kinds=kind_set,
         triggered_by=getattr(user, "username", None),
+        user_id=getattr(user, "id", None),
     )
-    # parent_batch_id 建立来源关联（报告页互跳）
-    new_batch.parent_batch_id = batch_id
-    await db.commit()
-    await db.refresh(new_batch)
+    if result["batch"] is None:
+        detail = (
+            "该批次没有指定类别的失败用例" if kind_set
+            else "该批次没有失败用例，无需重跑"
+        )
+        raise HTTPException(status_code=409, detail=detail)
 
-    from app.routers.testcase import execution as _exec
-
-    async def _run() -> None:
-        try:
-            await _exec.run_batch_test_cases(
-                failed_case_ids,
-                batch.project_id,
-                batch_id=new_batch.id,
-                dataset_group_filter=_groups_map,
-            )
-        finally:
-            user_id = getattr(user, "id", None)
-            if user_id:
-                try:
-                    from app.services.notifications import notify_batch_completed
-
-                    await notify_batch_completed(new_batch.id, user_id)
-                except Exception:  # noqa: BLE001 - 通知失败不影响批次
-                    logger.warning("重跑批次通知失败 batch=%s", new_batch.id, exc_info=True)
-
-    asyncio.create_task(_run())
-    return {
-        "batch_id": new_batch.id,
-        "total": total,
+    payload = {
+        "batch_id": result["batch"].id,
+        "total": result["total"],
         "parent_batch_id": batch_id,
         "status": "running",
     }
+    if kind_set:
+        payload["kinds"] = sorted(kind_set)
+    return payload

@@ -15,6 +15,7 @@ save_run_results 是公共 API 入口，调用方不一定持有 db session（�
 接收外部传入的 db session，由调用方负责 commit / rollback / close，
 避免重复打开连接。
 """
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional
@@ -38,6 +39,28 @@ def effective_run_status(existing: str | None, incoming: str) -> str:
     if existing == "cancelled" and incoming != "cancelled":
         return "cancelled"
     return incoming
+
+
+async def _apply_failure_triage(db_run, status: str, report_path, logs) -> None:
+    """049：为失败运行写入分类与原因；非失败保持为空。
+
+    报告 JSON 可能较大，解析放在线程池里，避免拖慢批次落库的事件循环。
+    """
+    if str(status or "") != "failed":
+        db_run.failure_kind = None
+        db_run.failure_reason = None
+        return
+    try:
+        from app.services.failure_triage import classify_run
+
+        triaged = await asyncio.to_thread(
+            classify_run, status="failed", report_path=report_path, logs=logs
+        )
+    except Exception:  # noqa: BLE001 - 分类失败不应影响执行结果落库
+        logger.warning("失败分类计算失败，按 unknown 记录", exc_info=True)
+        triaged = ("unknown", "")
+    if triaged:
+        db_run.failure_kind, db_run.failure_reason = triaged
 
 
 async def save_run_results(
@@ -74,6 +97,7 @@ async def save_run_results(
                     db_run.duration = duration
                     db_run.report_path = report_path
                     db_run.log_path = log_path
+                    await _apply_failure_triage(db_run, status, report_path, logs)
                 else:
                     run_id = None
 
@@ -103,6 +127,7 @@ async def save_run_results(
                         db_run.dataset_group = dataset_group
                     if dataset_row is not None:
                         db_run.dataset_row = dataset_row
+                    await _apply_failure_triage(db_run, status, report_path, logs)
 
             if not run_id:
                 db_run = db_models.TestRun(
@@ -119,6 +144,7 @@ async def save_run_results(
                     dataset_group=dataset_group,
                     dataset_row=dataset_row,
                 )
+                await _apply_failure_triage(db_run, status, report_path, logs)
                 db.add(db_run)
                 await db.commit()
                 await db.refresh(db_run)
@@ -184,6 +210,14 @@ async def mark_run_failed(
     from app import db_models
     from app.tz import now as tz_now
 
+    try:
+        from app.services.failure_triage import classify_failure
+
+        _kind, _reason = classify_failure(error_text=str(message or ""))
+    except Exception:  # noqa: BLE001 - 分类失败不阻塞失败状态写入
+        logger.warning("mark_run_failed 分类失败", exc_info=True)
+        _kind, _reason = "unknown", None
+
     async def _apply() -> None:
         _now = end_time or tz_now()
         _start = start_time or _now
@@ -195,6 +229,8 @@ async def mark_run_failed(
                 start_time=_start,
                 end_time=_now,
                 duration=(_now - _start).total_seconds() if _start and _now else 0.0,
+                failure_kind=_kind,
+                failure_reason=_reason,
             )
         )
         await db.execute(stmt)

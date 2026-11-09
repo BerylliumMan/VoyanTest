@@ -31,6 +31,10 @@ class RunBatch(Base):
     dataset_total = Column(Integer, nullable=True)
     # 042：本批次因 Flaky 隔离而跳过的用例数（不进入 total_cases）
     quarantined_count = Column(Integer, nullable=False, default=0)
+    # 049：本批次是否由自动重试创建；为真时不再派生新的重试批次
+    auto_retry = Column(Boolean, nullable=False, default=False)
+    # 049：收尾时缓存的失败分类计数 {"env": 2, "assertion": 1}
+    failure_summary = Column(JSON, nullable=True)
 
     runs = relationship("TestRun", backref="batch")
 
@@ -44,6 +48,9 @@ class TestRun(Base):
     display_name = Column(String(255), nullable=True)
     batch_id = Column(Integer, ForeignKey("run_batches.id"), nullable=True, index=True)
     status = Column(String, nullable=False)
+    # 049：失败分类（仅 status=failed 时写入；历史数据为空，前端显示「未知」）
+    failure_kind = Column(String(16), nullable=True)
+    failure_reason = Column(Text, nullable=True)
     # nullable: 预创建 pending 行留空，避开 _compute_batch_status 卡死检查误判
     start_time = Column(DateTime(timezone=True), nullable=True)
     end_time = Column(DateTime(timezone=True), nullable=True)
