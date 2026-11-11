@@ -23,6 +23,16 @@ export function getIconFromKey(key: string): JSX.Element {
   switch (key) {
     case 'dashboard':
       return <IconDashboard className={styles.icon} />;
+    case 'test-assets':
+      return <IconBook className={styles.icon} />;
+    case 'test-management':
+      return <IconList className={styles.icon} />;
+    case 'ai':
+      return <IconThunderbolt className={styles.icon} />;
+    case 'nodes':
+      return <IconRobot className={styles.icon} />;
+    case 'system':
+      return <IconSettings className={styles.icon} />;
     case 'projects':
       return <IconApps className={styles.icon} />;
     case 'testcases':

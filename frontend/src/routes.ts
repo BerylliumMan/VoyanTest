@@ -32,16 +32,129 @@ export const routes: IRoute[] = [
     key: 'projects',
   },
   {
-    name: 'menu.gen',
-    key: 'gen',
+    name: 'menu.test_assets',
+    key: 'test-assets',
     children: [
       {
-        name: 'menu.gen.analysis',
-        key: 'gen',
+        name: 'menu.testcases',
+        key: 'testcases',
+        children: [
+          {
+            name: 'menu.testcases.functional',
+            key: 'testcases/functional',
+          },
+          {
+            name: 'menu.testcases.ui',
+            key: 'testcases/ui',
+          },
+          {
+            name: 'menu.testcases.suites',
+            key: 'testcases/suites',
+          },
+        ],
       },
       {
-        name: 'menu.gen.history',
-        key: 'gen-history',
+        name: 'menu.api_test',
+        key: 'api_test',
+        children: [
+          {
+            name: 'menu.api_test.overview',
+            key: 'api_test/overview',
+          },
+          {
+            name: 'menu.api_test.definitions',
+            key: 'api_test/definitions',
+          },
+          {
+            name: 'menu.api_test_cases',
+            key: 'api_test/cases',
+          },
+          {
+            name: 'menu.api_test.scenarios',
+            key: 'api_test/scenarios',
+          },
+        ],
+      },
+      {
+        name: 'menu.recordings',
+        key: 'recordings',
+      },
+    ],
+  },
+  {
+    name: 'menu.test_management',
+    key: 'test-management',
+    children: [
+      {
+        name: 'menu.plans',
+        key: 'plans',
+      },
+      {
+        name: 'menu.my_tasks',
+        key: 'my_tasks',
+      },
+      {
+        name: 'menu.reports',
+        key: 'reports',
+      },
+      {
+        name: 'menu.quality',
+        key: 'quality',
+      },
+    ],
+  },
+  {
+    name: 'menu.ai',
+    key: 'ai',
+    children: [
+      {
+        name: 'menu.gen',
+        key: 'gen',
+        children: [
+          {
+            name: 'menu.gen.analysis',
+            key: 'gen',
+          },
+          {
+            name: 'menu.gen.history',
+            key: 'gen-history',
+          },
+        ],
+      },
+      {
+        name: 'menu.agent_definitions',
+        key: 'agent_definitions',
+      },
+    ],
+  },
+  {
+    name: 'menu.nodes',
+    key: 'nodes',
+    children: [
+      {
+        name: 'menu.agents',
+        key: 'agents',
+      },
+      {
+        name: 'menu.agent_runs',
+        key: 'agent-runs',
+        exact: true,
+      },
+    ],
+  },
+  {
+    name: 'menu.system',
+    key: 'system',
+    children: [
+      {
+        name: 'menu.settings',
+        key: 'settings',
+        requiredPermissions: [{ resource: 'menu.settings', actions: ['admin'] }],
+      },
+      {
+        name: 'menu.audit_logs',
+        key: 'audit-logs',
+        requiredPermissions: [{ resource: 'menu.audit_logs', actions: ['admin'] }],
       },
     ],
   },
@@ -64,24 +177,6 @@ export const routes: IRoute[] = [
     ignore: true,
   },
   {
-    name: 'menu.testcases',
-    key: 'testcases',
-    children: [
-      {
-        name: 'menu.testcases.functional',
-        key: 'testcases/functional',
-      },
-      {
-        name: 'menu.testcases.ui',
-        key: 'testcases/ui',
-      },
-      {
-        name: 'menu.testcases.suites',
-        key: 'testcases/suites',
-      },
-    ],
-  },
-  {
     name: '测试用例重定向',
     key: 'testcases-redirect',
     path: '/testcases',
@@ -94,28 +189,6 @@ export const routes: IRoute[] = [
     ignore: true,
   },
   {
-    name: 'menu.api_test',
-    key: 'api_test',
-    children: [
-      {
-        name: 'menu.api_test.overview',
-        key: 'api_test/overview',
-      },
-      {
-        name: 'menu.api_test.definitions',
-        key: 'api_test/definitions',
-      },
-      {
-        name: 'menu.api_test_cases',
-        key: 'api_test/cases',
-      },
-      {
-        name: 'menu.api_test.scenarios',
-        key: 'api_test/scenarios',
-      },
-    ],
-  },
-  {
     name: '接口测试重定向',
     key: 'api_test-redirect',
     // 031（US11）：必须 exact —— 否则 `/api_test` 前缀会抢匹配 `/api_test/overview`，
@@ -125,59 +198,16 @@ export const routes: IRoute[] = [
     ignore: true,
   },
   {
-    name: 'menu.reports',
-    key: 'reports',
-  },
-  {
-    name: 'menu.plans',
-    key: 'plans',
-  },
-  {
-    name: 'menu.my_tasks',
-    key: 'my_tasks',
-  },
-  {
-    name: 'menu.quality',
-    key: 'quality',
-  },
-  {
-    name: 'menu.agents',
-    key: 'agents',
-  },
-  {
     name: '客户端详情',
     key: 'agent-detail',
     path: '/agents/:id',
     ignore: true,
   },
   {
-    name: 'menu.agent_definitions',
-    key: 'agent_definitions',
-  },
-  {
-    name: 'menu.audit_logs',
-    key: 'audit-logs',
-    requiredPermissions: [{ resource: 'menu.audit_logs', actions: ['admin'] }],
-  },
-  {
-    name: 'menu.recordings',
-    key: 'recordings',
-  },
-  {
-    name: 'menu.agent_runs',
-    key: 'agent-runs',
-    exact: true,
-  },
-  {
     name: 'Agent 运行详情',
     key: 'agent-run-detail',
     path: '/agent-runs/:runId',
     ignore: true,
-  },
-  {
-    name: 'menu.settings',
-    key: 'settings',
-    requiredPermissions: [{ resource: 'menu.settings', actions: ['admin'] }],
   },
 ];
 
