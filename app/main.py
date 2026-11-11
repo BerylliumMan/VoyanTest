@@ -27,6 +27,7 @@ from .routers import auth_router, user_router, audit_router, agent_router as mgm
 from .routers import api_test as api_test_router
 from .routers import chat as chat_router
 from .routers import quality as quality_router
+from .routers import plan_router, comment_router, case_review_router
 from app.config import get_settings
 from app.websocket import websocket_logs
 
@@ -313,6 +314,19 @@ async def _run_startup_init():
             "ON run_batches (parent_batch_id) WHERE auto_retry",
         ):
             await _ddl(_col_sql, "049 失败分类字段迁移")
+        for _col_sql in (
+            "CREATE INDEX IF NOT EXISTS ix_test_plans_project ON test_plans (project_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_test_plan_items_plan_status ON test_plan_items (plan_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_test_plan_items_assignee ON test_plan_items (assignee_id, due_date)",
+            "CREATE INDEX IF NOT EXISTS ix_test_cycles_plan ON test_cycles (plan_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_test_cycle_items_cycle ON test_cycle_items (cycle_id, sort_order)",
+            "CREATE INDEX IF NOT EXISTS ix_comments_entity ON comments (entity_type, entity_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_case_reviews_reviewer_status ON case_reviews (reviewer_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_case_reviews_case_status ON case_reviews (case_id, status)",
+            # changes_requested 长度 17：SQLite 不校验，PostgreSQL 必须放宽。
+            "ALTER TABLE case_reviews ALTER COLUMN status TYPE VARCHAR(32)",
+        ):
+            await _ddl(_col_sql, "050 测试管理索引")
         await _ddl(
             "ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS events_data TEXT",
             "recording_sessions.events_data 迁移",
@@ -1577,6 +1591,9 @@ app.include_router(agent_run_router.router)
 app.include_router(api_test_router.router)
 app.include_router(chat_router.router)
 app.include_router(quality_router.router)
+app.include_router(plan_router.router)
+app.include_router(comment_router.router)
+app.include_router(case_review_router.router)
 from app.routers.api_test.mocks import public_router as api_mock_public_router
 app.include_router(api_mock_public_router)
 

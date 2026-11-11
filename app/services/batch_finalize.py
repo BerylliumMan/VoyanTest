@@ -62,6 +62,13 @@ async def finalize_batch(
         if settings.failure_triage_enabled:
             batch_row.failure_summary = summary
             await db.commit()
+        # 1.5) 050：若批次属于测试轮次，回填轮次/计划项状态
+        try:
+            from app.services.test_cycle import sync_cycle_from_batch
+
+            await sync_cycle_from_batch(db, batch_row)
+        except Exception:  # noqa: BLE001 - 回填失败不应影响通知与重试
+            logger.warning("批次 %s 轮次回填失败", batch_id, exc_info=True)
 
     # 2) 环境类失败自动重试（内部幂等）
     retry_info: dict[str, Any] | None = None

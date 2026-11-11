@@ -50,3 +50,9 @@ from . import batch  # noqa: F401
 from . import config  # noqa: F401
 from . import agent  # noqa: F401
 from . import gen  # noqa: F401
+from . import notification  # noqa: F401
+from . import quality  # noqa: F401
+from . import test_plan  # noqa: F401
+from . import test_cycle  # noqa: F401
+from . import comment  # noqa: F401
+from . import case_review  # noqa: F401

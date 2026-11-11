@@ -41,6 +41,9 @@ async def create_rerun_batch(
     auto_retry: bool = False,
     triggered_by: str | None = None,
     user_id: int | None = None,
+    environment_id: int | None = None,
+    source: str | None = None,
+    source_id: int | None = None,
 ) -> dict[str, Any]:
     """按原批次的失败用例创建子批次并异步执行。
 
@@ -94,6 +97,8 @@ async def create_rerun_batch(
         triggered_by=triggered_by,
         parent_batch_id=batch.id,
         auto_retry=auto_retry,
+        source=source if source is not None else getattr(batch, "source", None),
+        source_id=source_id if source_id is not None else getattr(batch, "source_id", None),
     )
 
     async def _run() -> None:
@@ -105,6 +110,7 @@ async def create_rerun_batch(
                 batch.project_id,
                 batch_id=new_batch.id,
                 dataset_group_filter=groups_map,
+                environment_id=environment_id,
             )
         except Exception:  # noqa: BLE001 - 重跑失败不应影响已创建批次
             logger.exception("重跑批次执行失败 batch=%s", new_batch.id)

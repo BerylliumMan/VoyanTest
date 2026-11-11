@@ -129,6 +129,14 @@ export const routes: IRoute[] = [
     key: 'reports',
   },
   {
+    name: 'menu.plans',
+    key: 'plans',
+  },
+  {
+    name: 'menu.my_tasks',
+    key: 'my_tasks',
+  },
+  {
     name: 'menu.quality',
     key: 'quality',
   },

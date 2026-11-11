@@ -100,3 +100,8 @@ from app.models.quality import (  # noqa: F401
 from app.models.api_extract import (  # noqa: F401
     ApiChangeTrigger, ApiSyncRecord, CodeRepoBinding,
 )
+# 050 测试管理闭环
+from app.models.test_plan import TestPlan, TestPlanItem  # noqa: F401
+from app.models.test_cycle import TestCycle, TestCycleItem  # noqa: F401
+from app.models.comment import Comment  # noqa: F401
+from app.models.case_review import CaseReview  # noqa: F401
